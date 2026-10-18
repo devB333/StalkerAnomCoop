@@ -1,69 +1,72 @@
-# Session handoff — S02-T03a–c and S02-T04a complete; level work next
+# Session handoff — S02-T05a/b complete; next S02-T05d (level load, spawn, first tick)
 
-G02 is In Progress. No headless gameplay, level, ALife tick or physics step has run.
-S02-T03 and S02-T04 were split into suffix tasks on 2026-10-18 (see `plan.md`):
+G02 is In Progress. No headless gameplay, level geometry, physics step or
+simulation tick has run yet. Stage 2 status (details in `plan.md`):
 
 | Task | Status | Evidence |
 |---|---|---|
-| S02-T03a materials without pair media | Completed | [S02-T03a](validation/S02-T03a.md), patch 0004 |
-| S02-T03b CPU-only model pool, real model load | Completed | [S02-T03b](validation/S02-T03b.md), patch 0005 |
-| S02-T03c bone evaluation against a client capture | Completed | [S02-T03c](validation/S02-T03c.md), patch 0007 |
-| S02-T03d skeleton collision, hit picking, physics shell | Not Started | needs a physics world, which needs a level |
+| S02-T03a materials without media | Completed | [S02-T03a](validation/S02-T03a.md), patch 0004 |
+| S02-T03b CPU-only model pool | Completed | [S02-T03b](validation/S02-T03b.md), patch 0005 |
+| S02-T03c bones match the client | Completed | [S02-T03c](validation/S02-T03c.md), patch 0007 |
 | S02-T04a server clock and frame driver | Completed | [S02-T04a](validation/S02-T04a.md), patch 0006 |
-| S02-T04b physics stepping, falling-body collision | Not Started | needs a level `CObjectSpace` |
-| S02-T04c objects/AI/ALife and activity policy | Not Started | needs a level and ALife |
+| S02-T05a persistent object with no device | Completed | [S02-T05a](validation/S02-T05a.md), patch 0008 |
+| S02-T05b level object, server and ALife from the save | Completed | [S02-T05b](validation/S02-T05b.md), patch 0009 |
+| S02-T05c CPU particles and sound stimuli | In Progress | particles done (patch 0009); sound is the engine's `-nosound` stand-in, AI hearing not modelled |
+| S02-T05d renderer-free level load, spawn, first tick | Not Started | next |
+| S02-T03d, S02-T04b, S02-T04c | Not Started | follow T05d's level load |
 
 Start with the [internal context definition](campaign-server-context.md), which
-gives the service order and the remaining blockers. The services start in this
-order, and teardown runs in reverse:
-1. `cpu-models`
-2. `spatial-db`
-3. `materials`
-4. `script-engine`
-5. `campaign-registries`
-6. `frame-driver`
+lists the service order, the resolved blockers and what remains. Services start
+in this order and stop in reverse: `sound` (interim), `cpu-models`, `spatial-db`,
+`materials`, `script-engine`, `campaign-registries`, `application`, `persistent`,
+`frame-driver`.
 
-## What runs today (final binaries)
+## What the server does today (campaign-27, exe `f695b6af…`)
 
-- **Builds.** `campaign-18` (exe `f14ccc26…`) and `client-11` (exe `def70d56…`),
-  0 errors.
-- **`smoke-35 -Scope Services` passes:**
-  - all six services start
-  - the model fixture loads the HUD arms and two stalkers on the CPU
-  - the 300-tick frame-driver fixture runs, with a stall and a pause
-  - the bone capture runs
-  - graphics, window and input stay absent
-- **Client match.** `capture-02` is the client's bone capture. It is
-  bit-identical to the server's (`builds/logs/S02-T03c/compare-02.json`).
-- **GameState** still stops at `persistent-context-required` (exit 3, not a pass).
-- **Patches.** 0001–0007 rebuild all 28 changed files byte for byte. Use
-  `python3 tools/export-engine-patch.py <name> <n>` for the next patch.
+`smoke-44 -Scope GameState` (exit 3, as expected, not a pass):
+- all nine services start with no graphics device, window, input or sound device
+- fixtures: CPU models, persistent/environment, 300-tick frame driver, bone capture
+- the native start sequence for the fixture save `player - autosave`, then the
+  server loading stages in 2.9 s: `xrServer`, `game_sv_Single`, ALife loads the
+  save, picks level **`k00_marsh`** from the saved actor (ID 0, graph vertex 223),
+  loads the level AI graph (532,432 vertices), and switches 1,074 entities online
+- planned stop `level-context-required`, then native `net_Stop`, level deletion,
+  persistent disconnect, and every service stopped in reverse
 
-## Open dependency question
+Patches 0001–0009 rebuild all 44 changed files byte for byte. Use
+`python3 tools/export-engine-patch.py <name> <n>` for the next one.
 
-Every remaining Stage 2 item needs a loaded level: T03d, T04b, T04c, T05 and T06.
-But `plan.md` lists S02-T03 and S02-T04 (the parents) as prerequisites of S02-T05.
-Until that is resolved, start nothing that needs a level. The proposed fix is in
-the session summary.
+## Findings that shape S02-T05d
+
+- **Scripts create particles and sounds while Lua initialises.** The ALife
+  constructor re-initialises the script engine; installed scripts construct
+  `particles_object`s and `sound_object`s then. Particle definitions now load on
+  the CPU with the model pool. Sound uses `-nosound` for now (the launcher passes
+  it); no sound has feedback, so AI hearing needs the CPU stimulus layer (B18).
+- **The client stages are the next blockers** (see the boundary doc's corrections
+  section): `IGame_Level::Load` creates the HUD (`CHitMarker` shaders), calls
+  `Render->level_Load` (all presentation), sets sound geometry; `net_start_client5`
+  uploads textures; `client6` creates the game UI and precaches; spawned objects
+  create blood wallmarks, lights with textures and map spots. Keep CFORM, AI data,
+  the physics world, the level script process and `level.som` real.
+- **View entity.** Native spawn makes the saved actor the view entity client-side;
+  decide this in T05d, when spawns are processed.
+- **Loading pump.** The server pumps `g_loading_events` itself with a deadline;
+  the native idle loop never pumps while the device is not ready.
 
 ## Tools and runs
 
-- **Last run names:** `campaign-18`, `client-11`, `smoke-35`, `capture-02`.
+- **Last run names:** `campaign-27`, `client-13`, `smoke-47`, `capture-02`.
   `smoke-20` was suggested to the user for a manual run, so skip it.
-  `client-10` was interrupted; see its `INTERRUPTED.txt`.
-- **Smoke:** `python3 tools/prepare-stage2-smoke.py <run>`, then
-  `Run-Stage2Smoke.ps1 -Run <run> -Scope Core|Services|GameState`.
+- **Smoke:** `python3 tools/prepare-stage2-smoke.py <run>` (now also copies the
+  fixture save pair), then `Run-Stage2Smoke.ps1 -Run <run> -Scope Core|Services|GameState`.
   Options: `-InjectFailure <service>`, `-Models a,b`, `-ExpectModelFailure`.
-- **Client capture:** `python3 tools/prepare-stage2-smoke.py <run> S02-T03c`, then
-  `Run-ClientBoneCapture.ps1 -Run <run>`. It opens a client window briefly.
-- **Smart App Control** is off (the user turned it off on 2026-10-17). Newly built
-  unsigned executables are blocked when it is on.
+  GameState has a 420 s timeout.
+- **Client capture:** `prepare-stage2-smoke.py <run> S02-T03c`, then
+  `Run-ClientBoneCapture.ps1 -Run <run>` (opens a client window briefly).
+- **Smart App Control** is off (user, 2026-10-17); newly built unsigned
+  executables are blocked when it is on.
 
-Preserve:
-- the original installation
-- the reference checkout
-- the accepted source-client runtime
-- the saved-game fixture
-
-The two G01 waivers are unchanged.
-Previous handoff: [before S02-T05](session-handoff-before-S02-T05.md).
+Preserve the original installation, the reference checkout, the accepted
+source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
+Previous handoff: [before S02-T05d](session-handoff-before-S02-T05d.md).

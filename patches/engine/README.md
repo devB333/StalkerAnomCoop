@@ -27,6 +27,11 @@ persistent object with no device: shader/texture creation and resource
 destructors are skipped in CPU-only mode, environment ambience sounds are
 skipped without a sound manager, and the campaign branch of CGamePersistent
 skips UI, menu, fonts and prefetch.
+`0009-campaign-level-start.patch` (S02-T05b/c) constructs CApplication, CLevel,
+xrServer, game_sv_Single and ALife from the fixture save with no device: loading
+stages are pumped explicitly, the particle library loads on the CPU, the engine's
+-nosound manager stands in for sound, and the presentation calls on that path are
+guarded (render-resource dump, camera reset, input release, logo, wallmarks).
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

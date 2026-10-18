@@ -1,0 +1,539 @@
+diff --git a/src/Layers/xrRenderPC_R4/r4.cpp b/src/Layers/xrRenderPC_R4/r4.cpp
+index fd1bb4b..0c76765 100644
+--- a/src/Layers/xrRenderPC_R4/r4.cpp
++++ b/src/Layers/xrRenderPC_R4/r4.cpp
+@@ -712,12 +712,24 @@ bool CRender::cpu_models_create(void (*registrar)(IRenderVisual*))
+ 	CpuOnlyResources::SkippedTextures() = 0;
+ 	Models = xr_new<CModelPool>();
+ 	Models->m_registrar = registrar;
+-	return true;
++	// Particle definitions are gameplay data too (zone, explosion and script
++	// effects with real lifetimes); their shaders are skipped like any other.
++	// Same order as CRender::create.
++	PSLibrary.OnCreate();
++	u32 effects = 0, groups = 0;
++	for (PS::PEDIt it = PSLibrary.FirstPED(); it != PSLibrary.LastPED(); ++it)
++		++effects;
++	for (PS::PGDIt it = PSLibrary.FirstPGD(); it != PSLibrary.LastPGD(); ++it)
++		++groups;
++	Msg("S02-T05c cpu-models particle_effects=%u particle_groups=%u", effects, groups);
++	return effects != 0 && groups != 0;
+ }
+ 
+ void CRender::cpu_models_destroy()
+ {
++	// Same order as CRender::~CRender/destroy.
+ 	xr_delete(Models);
++	PSLibrary.OnDestroy();
+ 	CpuOnlyResources::Enabled() = false;
+ }
+ 
+@@ -905,7 +917,9 @@ void CRender::add_StaticWallmark(const wm_shader& S, const Fvector& P, float s,
+ 
+ void CRender::clear_static_wallmarks()
+ {
+-	Wallmarks->clear();
++	// The wallmark engine exists only after a rendered level load.
++	if (Wallmarks)
++		Wallmarks->clear();
+ }
+ 
+ void CRender::add_SkeletonWallmark(intrusive_ptr<CSkeletonWallmark> wm)
+diff --git a/src/xrEngine/CameraManager.cpp b/src/xrEngine/CameraManager.cpp
+index cfc747d..a46c89a 100644
+--- a/src/xrEngine/CameraManager.cpp
++++ b/src/xrEngine/CameraManager.cpp
+@@ -536,6 +536,9 @@ void CCameraManager::ApplyDevice(float _viewport_near)
+ void CCameraManager::ResetPP()
+ {
+ 	IRender_Target* T = ::Render->getTarget();
++	// No render target exists before the renderer is created (campaign server).
++	if (!T)
++		return;
+ 	T->set_duality_h(pp_identity.duality.h);
+ 	T->set_duality_v(pp_identity.duality.v);
+ 	T->set_blur(pp_identity.blur);
+diff --git a/src/xrEngine/IGame_Level.cpp b/src/xrEngine/IGame_Level.cpp
+index f77c219..0fab0ef 100644
+--- a/src/xrEngine/IGame_Level.cpp
++++ b/src/xrEngine/IGame_Level.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "xr_input.h"
+ #include "igame_level.h"
+ #include "igame_persistent.h"
+ 
+@@ -49,8 +50,11 @@ IGame_Level::~IGame_Level()
+ 	Device.seqFrame.Remove(this);
+ 	CCameraManager::ResetPP();
+ 	///////////////////////////////////////////
+-	Sound->set_geometry_occ(NULL);
+-	Sound->set_handler(NULL);
++	if (Sound)
++	{
++		Sound->set_geometry_occ(NULL);
++		Sound->set_handler(NULL);
++	}
+ 	Device.DumpResourcesMemoryUsage();
+ 
+ 	u32 m_base = 0, c_base = 0, m_lmaps = 0, c_lmaps = 0;
+@@ -66,7 +70,8 @@ void IGame_Level::net_Stop()
+ 		Objects.Update(false);
+ 	// Destroy all objects
+ 	Objects.Unload();
+-	IR_Release();
++	if (pInput)
++		IR_Release();
+ 
+ 	bReady = false;
+ }
+diff --git a/src/xrEngine/IGame_Persistent.cpp b/src/xrEngine/IGame_Persistent.cpp
+index d8dcc4b..9169897 100644
+--- a/src/xrEngine/IGame_Persistent.cpp
++++ b/src/xrEngine/IGame_Persistent.cpp
+@@ -343,7 +343,8 @@ void IGame_Persistent::destroy_particles(const bool& all_particles)
+ void IGame_Persistent::OnAssetsChanged()
+ {
+ #ifndef _EDITOR
+-	Device.m_pRender->OnAssetsChanged(); //Resources->m_textures_description.Load();
++	if (Device.m_pRender)
++		Device.m_pRender->OnAssetsChanged(); //Resources->m_textures_description.Load();
+ #endif
+ }
+ 
+diff --git a/src/xrEngine/device.h b/src/xrEngine/device.h
+index d307f50..f974ea2 100644
+--- a/src/xrEngine/device.h
++++ b/src/xrEngine/device.h
+@@ -207,7 +207,11 @@ public:
+ 		//RCache.set_xform_project (mProject);
+ 	}
+ 
+-	void DumpResourcesMemoryUsage() { m_pRender->ResourcesDumpMemoryUsage(); }
++	void DumpResourcesMemoryUsage()
++	{
++		if (m_pRender)
++			m_pRender->ResourcesDumpMemoryUsage();
++	}
+ public:
+ 	// Registrators
+ 	//CRegistrator <pureRender > seqRender;
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index f78e07d..dba52ce 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -977,6 +977,10 @@ extern "C" void __cdecl xrCampaignScriptEngine_Destroy();
+ extern "C" void __cdecl xrCampaignGameGlobals_Destroy();
+ extern "C" void __cdecl xrCampaignRegisterModel(IRenderVisual* V);
+ extern "C" u32 __cdecl xrCampaignRegisteredModels();
++extern "C" bool __cdecl xrCampaignLevel_Start(LPCSTR op_server, LPCSTR op_client);
++extern "C" int __cdecl xrCampaignLevel_PumpServerStages(u32 deadline_ms);
++extern "C" bool __cdecl xrCampaignLevel_Report();
++extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+ {
+@@ -1134,6 +1138,36 @@ bool RunCampaignModelFixture(LPCSTR command_line)
+         stats.skipped_geometry != 0 && stats.skipped_buffers != 0;
+ }
+ 
++// S02-T05c (interim): the engine's own sound manager in -nosound mode, so
++// scripts and objects can create sounds. Nothing plays and no sound has
++// feedback, so AI hearing is not modelled yet; the CPU stimulus layer replaces
++// this. The launcher passes -nosound; the service refuses to run without it.
++bool StartCampaignSound()
++{
++    if (!strstr(Core.Params, "-nosound"))
++    {
++        Msg("! S02-T05c the campaign server has no sound device; run it with -nosound");
++        return false;
++    }
++    InitSound1();
++    InitSound2();
++    return ::Sound != nullptr;
++}
++
++void StopCampaignSound() { destroySound(); }
++
++// S02-T05b: the application object owns the level list and the $level$ alias,
++// the loading refcount and the engine event frame. Its loading screen, font and
++// logo are skipped in the campaign server.
++bool StartCampaignApplication()
++{
++    pApp = xr_new<CApplication>();
++    Msg("S02-T05b application levels=%u", u32(pApp->Levels.size()));
++    return !pApp->Levels.empty();
++}
++
++void StopCampaignApplication() { xr_delete(pApp); }
++
+ // S02-T05a: the real game persistent object. LALib comes first, as in the
+ // native Startup; the persistent object's own frame is presentation work and
+ // is never registered, because the frame driver owns its slot. Its app start
+@@ -1538,6 +1572,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         // Native order: the renderer's model pool exists before persistent
+         // construction (Device.Create), which precedes the spatial databases.
+         const bool services_ready =
++            start("sound", &StartCampaignSound, {"sound-stopped", &StopCampaignSound}) &&
+             start("cpu-models", &StartCampaignCpuModels, {"cpu-models-stopped", &StopCampaignCpuModels}) &&
+             start("spatial-db",
+                 []()
+@@ -1559,6 +1594,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     return true;
+                 },
+                 {"campaign-registries-stopped", &xrCampaignGameGlobals_Destroy}) &&
++            start("application", &StartCampaignApplication, {"application-stopped", &StopCampaignApplication}) &&
+             start("persistent", &StartCampaignPersistent, {"persistent-stopped", &StopCampaignPersistent}) &&
+             start("frame-driver", &StartCampaignFrameDriver, {"frame-driver-stopped", &StopCampaignFrameDriver});
+ 
+@@ -1600,30 +1636,35 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+ 
+         if (fixture_ready && scope == CampaignSmokeScope::GameState)
+         {
+-            // Native game_sv_Single/ALife read persistent game parameters, and
+-            // ALife restart_all() uses the persistent main menu. Persistent
+-            // construction needs the renderer factory (CEnvironment), and
+-            // CLevel construction loads player HUD models through Render.
+-            if (!g_pGamePersistent)
++            // Native start sequence (KERNEL:start) for the fixture save, then the
++            // server loading stages: xrServer, game_sv_Single and ALife, which
++            // chooses and loads the level's AI graph. Loading is not simulation
++            // time, so the clock pauses. The client stages, which load the level
++            // geometry and spawn objects, are S02-T05d.
++            g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++            const bool created = xrCampaignLevel_Start("player - autosave/single/alife/load", "localhost");
++            stage(created ? "campaign-level-created" : "campaign-level-failed");
++            if (!created)
++                result = 10;
++            else
+             {
+-                stage("persistent-context-required");
+-                result = 3;
++                const int pumped = xrCampaignLevel_PumpServerStages(300000);
++                if (pumped == 0 && xrCampaignLevel_Report())
++                    stage("campaign-server-ready");
++                else
++                {
++                    stage(pumped == 1 ? "campaign-server-timeout" : "campaign-server-failed");
++                    result = 10;
++                }
+             }
+-            else if (!g_pGameLevel)
++            if (result == 0)
+             {
+-                // Next: CLevel (IGame_Level's constructor dumps render resource
+-                // usage through Device.m_pRender), then xrServer and ALife (S02-T05b).
+-                Msg("S02-T05 blocker=level: CLevel, xrServer and ALife are S02-T05b");
++                Msg("S02-T05 blocker=level-load: the client stages (level geometry, physics, spawn) are S02-T05d");
+                 stage("level-context-required");
+                 result = 3;
+             }
+-            else
+-            {
+-                DLL_Pure* game = Engine.External.pCreate(CLSID_CL_GAME_SINGLE);
+-                R_ASSERT2(game, "Campaign game_cl_Single factory is unavailable");
+-                Engine.External.pDestroy(game);
+-                stage("campaign-client-state-ready");
+-            }
++            xrCampaignLevel_Stop();
++            stage("campaign-stopped");
+         }
+     }
+ 
+@@ -2067,8 +2108,13 @@ CApplication::CApplication()
+ 	// Register us
+ 	Device.seqFrame.Add(this, REG_PRIORITY_HIGH + 1000);
+ 
+-	if (psDeviceFlags.test(mtSound)) Device.seqFrameMT.Add(&SoundProcessor);
+-	else Device.seqFrame.Add(&SoundProcessor);
++	// The sound processor needs a sound manager, which the campaign server
++	// does not create (S02-T05b).
++	if (::Sound)
++	{
++		if (psDeviceFlags.test(mtSound)) Device.seqFrameMT.Add(&SoundProcessor);
++		else Device.seqFrame.Add(&SoundProcessor);
++	}
+ 
+ 	Console->Show();
+ 
+@@ -2229,9 +2275,12 @@ void CApplication::LoadBegin()
+ 		//-AVO
+ 
+ #ifndef DEDICATED_SERVER
+-		_InitializeFont(pFontSystem, "ui_font_letterica18_russian", 0);
++		if (!g_campaign_server)
++		{
++			_InitializeFont(pFontSystem, "ui_font_letterica18_russian", 0);
+ 
+-		m_pRender->LoadBegin();
++			m_pRender->LoadBegin();
++		}
+ #endif
+ 		phase_timer.Start();
+ 		load_stage = 0;
+@@ -2253,7 +2302,8 @@ void CApplication::LoadEnd()
+ 
+ void CApplication::destroy_loading_shaders()
+ {
+-	m_pRender->destroy_loading_shaders();
++	if (!g_campaign_server)
++		m_pRender->destroy_loading_shaders();
+ 
+ 	//AVO:
+ 	g_bootComplete = TRUE;
+@@ -2271,6 +2321,10 @@ PROTECT_API void CApplication::LoadDraw()
+ 	PROF_EVENT();
+ 
+ 	if (g_appLoaded) return;
++	// The campaign server has no loading screen; stage progress is in the log
++	// (LoadStage) and its clock owns the frame counter.
++	if (g_campaign_server)
++		return;
+ 	Device.dwFrame += 1;
+ 
+ 
+@@ -2421,7 +2475,7 @@ void CApplication::Level_Set(u32 L)
+ 		}
+ 	}
+ 
+-	if (path[0])
++	if (path[0] && !g_campaign_server)
+ 		m_pRender->setLevelLogo(path);
+ 
+ 	//SECUROM_MARKER_PERFORMANCE_OFF(9)
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+new file mode 100644
+index 0000000..4825296
+--- /dev/null
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -0,0 +1,114 @@
++#include "pch_script.h"
++
++// S02-T05b: campaign server level start. These mirror CApplication::OnEvent
++// (KERNEL:start / KERNEL:disconnect) without the main-menu console commands,
++// and run the queued loading stages explicitly instead of from the render idle
++// loop. Only the server stages run here (xrServer, game_sv_Single, ALife from
++// the saved game); the client stages that load the level are S02-T05d.
++
++#include "Level.h"
++#include "xrServer.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "alife_graph_registry.h"
++#include "alife_level_registry.h"
++#include "alife_time_manager.h"
++#include "game_graph.h"
++#include "level_graph.h"
++#include "xrServer_Objects_ALife_Monsters.h"
++#include "../xrEngine/x_ray.h"
++#include "../xrEngine/IGame_Persistent.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/std_classes.h"
++#include "../xrServerEntities/clsid_game.h"
++
++extern "C" bool __cdecl xrCampaignLevel_Start(LPCSTR op_server, LPCSTR op_client)
++{
++	R_ASSERT2(!g_pGameLevel, "A level already exists");
++	R_ASSERT2(g_pGamePersistent && pApp, "Campaign level start needs the persistent object and the application");
++
++	g_pGamePersistent->PreStart(op_server);
++	g_pGameLevel = (IGame_Level*)NEW_INSTANCE(CLSID_GAME_LEVEL);
++	if (!g_pGameLevel)
++		return false;
++	pApp->LoadBegin();
++	g_pGamePersistent->Start(op_server);
++	const bool queued = g_pGameLevel->net_Start(op_server, op_client);
++	pApp->LoadEnd();
++	Msg("S02-T05b level created; %u loading stages queued", u32(g_loading_events.size()));
++	return queued;
++}
++
++// Runs the queued server stages (net_start1..3). net_start4 replaces itself
++// with the client stages, so pumping stops when three stages remain.
++// Returns 0 when the server and ALife exist, 1 on deadline, 2 when a stage failed.
++extern "C" int __cdecl xrCampaignLevel_PumpServerStages(u32 deadline_ms)
++{
++	CTimer timer;
++	timer.Start();
++	while (g_loading_events.size() > 3)
++	{
++		if (timer.GetElapsed_ms() > deadline_ms)
++			return 1;
++		if (g_loading_events.front()())
++			g_loading_events.pop_front();
++	}
++	Msg("S02-T05b server stages finished in %u ms", timer.GetElapsed_ms());
++	return (Level().Server && ai().get_alife()) ? 0 : 2;
++}
++
++// Logs what the saved game produced and checks it is a real campaign context:
++// a server with entities, ALife with its actor on the loaded level, and the
++// level's AI graph.
++extern "C" bool __cdecl xrCampaignLevel_Report()
++{
++	CLevel& level = Level();
++	if (!level.Server || !ai().get_alife())
++	{
++		Msg("! S02-T05b server=%d alife=%d", level.Server ? 1 : 0, ai().get_alife() ? 1 : 0);
++		return false;
++	}
++	// The const accessors are the public ones.
++	const CALifeSimulator& alife = *ai().get_alife();
++	const CSE_ALifeCreatureActor* actor = alife.graph().actor();
++	const GameGraph::_LEVEL_ID level_id = alife.graph().level().level_id();
++	LPCSTR graph_level = ai().game_graph().header().level(level_id).name().c_str();
++	string_path level_path;
++	FS.update_path(level_path, "$level$", "");
++	const bool level_graph = ai().get_level_graph() != nullptr;
++	const u32 level_vertices = level_graph ? ai().level_graph().header().vertex_count() : 0;
++	const u32 game_vertices = ai().game_graph().header().vertex_count();
++	const u32 objects = u32(alife.objects().objects().size());
++	const u32 level_objects = u32(alife.graph().level().objects().size());
++	const u32 entities = level.Server->GetEntitiesNum();
++	const bool actor_on_level =
++		actor && ai().game_graph().vertex(actor->m_tGraphID)->level_id() == level_id;
++
++	Msg("S02-T05b campaign level=%s graph_level=%s level_id=%u level_path=%s", level.name().c_str(), graph_level,
++		u32(level_id), level_path);
++	if (actor)
++		Msg("S02-T05b actor id=%u name=%s pos=[%.2f,%.2f,%.2f] graph_vertex=%u level_vertex=%u on_level=%d",
++			u32(actor->ID), actor->name_replace(), VPUSH(actor->o_Position), u32(actor->m_tGraphID),
++			actor->m_tNodeID, actor_on_level ? 1 : 0);
++	else
++		Msg("! S02-T05b ALife has no actor");
++	Msg("S02-T05b alife_objects=%u level_objects=%u server_entities=%u level_graph_vertices=%u "
++		"game_graph_vertices=%u game_time_ms=%I64u",
++		objects, level_objects, entities, level_vertices, game_vertices, alife.time_manager().game_time());
++
++	return actor_on_level && level.name().size() && level_graph && level_vertices != 0 && entities != 0 &&
++		objects != 0;
++}
++
++// Mirrors KERNEL:disconnect: native level stop, level deletion, persistent disconnect.
++extern "C" void __cdecl xrCampaignLevel_Stop()
++{
++	g_loading_events.clear();
++	if (g_pGameLevel)
++	{
++		g_pGameLevel->net_Stop();
++		DEL_INSTANCE(g_pGameLevel);
++	}
++	g_pGamePersistent->Disconnect();
++}
+diff --git a/src/xrGame/Level.cpp b/src/xrGame/Level.cpp
+index 267c074..ba5a93c 100644
+--- a/src/xrGame/Level.cpp
++++ b/src/xrGame/Level.cpp
+@@ -71,6 +71,7 @@
+ #endif
+ extern ENGINE_API bool g_dedicated_server;
+ extern ENGINE_API BOOL	g_bootComplete;
++extern ENGINE_API bool g_campaign_server;
+ extern CUISequencer* g_tutorial;
+ extern CUISequencer* g_tutorial2;
+ 
+@@ -272,10 +273,15 @@ CLevel::CLevel() :
+     spawn_events_data = xr_new<spawn_events_data_map>();
+     prefetch_events = xr_new<prefetch_event_queue>();
+     prefetched_models = xr_new<models_set>();
+-    auto events = new spawn_and_prefetch_events({ spawn_events, spawn_events_data, prefetch_events, prefetched_models, &closeSignal, &prefetch_lock });
+-    createPrefetchThreadSignal();
+-    thread_spawn(ProcessPrefetchEvents, "Pre-Spawn Prefetcher Thread", 0, events);
+-    Msg("CLevel::CLevel() Spawn Antifreeze initialized");
++    // The campaign server has no render prefetch, so it never starts the
++    // prefetch thread; its spawns are processed inline (S02-T05b).
++    if (!g_campaign_server)
++    {
++        auto events = new spawn_and_prefetch_events({ spawn_events, spawn_events_data, prefetch_events, prefetched_models, &closeSignal, &prefetch_lock });
++        createPrefetchThreadSignal();
++        thread_spawn(ProcessPrefetchEvents, "Pre-Spawn Prefetcher Thread", 0, events);
++        Msg("CLevel::CLevel() Spawn Antifreeze initialized");
++    }
+ #endif
+ 
+     Msg("%s", Core.Params);
+@@ -333,8 +339,11 @@ CLevel::~CLevel()
+     xr_delete(spawn_events_data);
+     xr_delete(prefetch_events);
+     xr_delete(prefetched_models);
+-    closeSignal = true; // signal ProcessPrefetchEvents thread to exit
+-    unpausePrefetchThreadSignal();
++    if (!g_campaign_server)
++    {
++        closeSignal = true; // signal ProcessPrefetchEvents thread to exit
++        unpausePrefetchThreadSignal();
++    }
+ #endif
+ 
+     xr_delete(m_pBulletManager);
+@@ -928,7 +937,9 @@ void CLevel::ProcessGameEvents()
+ 	}
+ #endif
+ 
+-	if (OnServer() && GameID() != eGameIDSingle)
++	// The client game state does not exist before the client stages run
++	// (campaign server shutting down after the server stages only).
++	if (game && OnServer() && GameID() != eGameIDSingle)
+ 		Game().m_WeaponUsageStatistic->Send_Check_Respond();
+ }
+ 
+diff --git a/src/xrGame/alife_simulator.cpp b/src/xrGame/alife_simulator.cpp
+index 935a0d4..26685d0 100644
+--- a/src/xrGame/alife_simulator.cpp
++++ b/src/xrGame/alife_simulator.cpp
+@@ -31,7 +31,10 @@ void restart_all()
+ 		return;
+ 
+ 	destroy_lua_wpn_params();
+-	MainMenu()->DestroyInternal(true);
++	// A never-activated menu has nothing to destroy; the campaign server has
++	// no menu at all.
++	if (MainMenu())
++		MainMenu()->DestroyInternal(true);
+ 	xr_delete(g_object_factory);
+ 	ai().script_engine().init();
+ 
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 4dd1f8d..1c5bfcf 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -4328,6 +4328,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignServerStart.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+diff --git a/src/xrSound/Sound.h b/src/xrSound/Sound.h
+index 40fddd4..458a742 100644
+--- a/src/xrSound/Sound.h
++++ b/src/xrSound/Sound.h
+@@ -508,8 +508,8 @@ IC void ref_sound::play_no_feedback(CObject* O, u32 flags, float d, Fvector* pos
+ IC void ref_sound::set_position(const Fvector& pos)
+ {
+ 	VERIFY(!::Sound->i_locked());
+-	VERIFY(_feedback());
+-	_feedback()->set_position(pos);
++	// No feedback exists when the sound manager has no device (-nosound).
++	if (_feedback()) _feedback()->set_position(pos);
+ }
+ 
+ IC void ref_sound::set_frequency(float freq)
+diff --git a/src/xrSound/SoundRender_CoreA.cpp b/src/xrSound/SoundRender_CoreA.cpp
+index 538f44d..b571ca9 100644
+--- a/src/xrSound/SoundRender_CoreA.cpp
++++ b/src/xrSound/SoundRender_CoreA.cpp
+@@ -62,6 +62,8 @@ CSoundRender_CoreA::CSoundRender_CoreA() : CSoundRender_Core()
+ 	pDevice = nullptr;
+ 	pDeviceList = nullptr;
+ 	pContext = nullptr;
++	// Set by LoadEffect, which only runs with a device; the destructor reads it.
++	m_is_supported = false;
+ }
+ 
+ CSoundRender_CoreA::~CSoundRender_CoreA()

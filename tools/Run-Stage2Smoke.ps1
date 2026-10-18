@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
     [Parameter(Mandatory = $true)][ValidateSet('Core', 'Services', 'GameState')][string]$Scope,
     # Test-only: report this service as failed before it starts, to check the partial-start unwind.
-    [ValidateSet('', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'persistent', 'frame-driver')][string]$InjectFailure = '',
+    [ValidateSet('', 'sound', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'application', 'persistent', 'frame-driver')][string]$InjectFailure = '',
     # Optional comma-separated model list for the CPU model fixture (no spaces).
     [ValidatePattern('^[A-Za-z0-9_\\,.]*$')][string]$Models = '',
     # Test-only: the model list contains a missing model, so the fixture must fail (exit 5).
@@ -34,7 +34,8 @@ New-Item -ItemType Directory $logDir -Force | Out-Null
 $env:TEMP = Join-Path $runtime 'tmp'
 $env:TMP = $env:TEMP
 $mode = switch ($Scope) { 'Core' { '-campaign-core-smoke' } 'Services' { '-campaign-services-smoke' } default { '-campaign-smoke' } }
-$arguments = $mode + ' -fsltx ' + $config
+# No sound device: the engine's -nosound manager stands in until the CPU stimulus layer (S02-T05c).
+$arguments = $mode + ' -nosound -fsltx ' + $config
 if ($InjectFailure) { $arguments += ' -campaign-fail-at ' + $InjectFailure }
 if ($Models) { $arguments += ' -campaign-models ' + $Models }
 $result = [ordered]@{
@@ -58,7 +59,9 @@ $start.CreateNoWindow = $true
 $process = New-Object System.Diagnostics.Process
 $process.StartInfo = $start
 if (-not $process.Start()) { throw 'Smoke process did not start.' }
-if (-not $process.WaitForExit(120000)) {
+# GameState loads a saved game (300 s startup watchdog inside the process).
+$timeoutMs = if ($Scope -eq 'GameState') { 420000 } else { 120000 }
+if (-not $process.WaitForExit($timeoutMs)) {
     $process.Kill()
     $process.WaitForExit()
     $result.timed_out = $true
@@ -76,7 +79,7 @@ $expectedExit = 0
 if ($Scope -ne 'Core') {
     # Services start in native order and stop in reverse; a failed start unwinds only started services.
     $started = @()
-    foreach ($service in @('cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'persistent', 'frame-driver')) {
+    foreach ($service in @('sound', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'application', 'persistent', 'frame-driver')) {
         if ($service -eq $InjectFailure) { $expectedStages += "$service-failed"; $expectedExit = 4; break }
         $expectedStages += "$service-ready"
         $started += $service
@@ -84,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += 'level-context-required'; $expectedExit = 3 }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'level-context-required', 'campaign-stopped'); $expectedExit = 3 }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }

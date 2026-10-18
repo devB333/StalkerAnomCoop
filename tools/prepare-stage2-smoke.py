@@ -4,11 +4,10 @@ import hashlib
 import json
 import ntpath
 import re
-from pathlib import Path
 import shutil
 import subprocess
 import sys
-
+from pathlib import Path
 
 workspace = Path(__file__).resolve().parents[1]
 baseline = workspace / "builds/build_2/test-install/source-client"
@@ -33,7 +32,8 @@ def winpath(path):
 
 source = baseline / "fsgame.ltx"
 source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-expected_hash = json.loads((workspace / "docs/accepted-baseline.json").read_text())["runtime"]["filesystem_config"]["sha256"]
+accepted = json.loads((workspace / "docs/accepted-baseline.json").read_text())
+expected_hash = accepted["runtime"]["filesystem_config"]["sha256"]
 if source_hash != expected_hash:
     raise SystemExit("Accepted filesystem configuration changed")
 
@@ -93,6 +93,22 @@ for original in sorted((baseline / "gamedata").rglob("*")):
             raise SystemExit(f"Loose overlay copy differs: {relative}")
         overlay.append({"path": str(relative), "sha256": digest})
 
+# The fixture save pair, hash-checked against the headless fixture specification.
+fixture_spec = json.loads((workspace / "docs/headless-fixture.json").read_text())
+saved_games = []
+for item in fixture_spec["inputs"]:
+    source_file = workspace / item["path"]
+    if source_file.suffix not in (".scop", ".scoc"):
+        continue
+    digest = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    if digest != item["sha256"]:
+        raise SystemExit(f"Fixture save changed: {item['path']}")
+    dest = runtime / "appdata/savedgames" / source_file.name
+    shutil.copyfile(source_file, dest)
+    if hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
+        raise SystemExit(f"Save copy differs: {dest}")
+    saved_games.append({"path": str(dest.relative_to(workspace)), "sha256": digest})
+
 config = runtime / "fsgame.ltx"
 config.write_text("\n".join(lines) + "\n")
 manifest = {
@@ -102,6 +118,7 @@ manifest = {
     "content_root": str(baseline.relative_to(workspace)),
     "aliases": aliases,
     "loose_overlay": overlay,
+    "saved_games": saved_games,
     "expected_mode": "S02-T02 startup smoke only",
 }
 (runtime / "fixture.json").write_text(json.dumps(manifest, indent=2) + "\n")

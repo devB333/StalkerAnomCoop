@@ -42,14 +42,16 @@ A service that fails to start logs `<service>-failed` and the process returns 4.
 |---|---|---|---|
 | 1 | Core, filesystem, log, settings | `WinMain_impl`, `InitSettings` | Implemented (Core) |
 | 2 | Engine events/scheduler, command-only console, game factory | `Engine.Initialize`, `CConsole`, `CEngineAPI::Initialize` | Implemented (Core) |
-| 2a | `cpu-models`: R4 module attached with no device; model pool only; GPU resource creation skipped and counted ([S02-T03b](validation/S02-T03b.md)) | `CRender::create` → `Models` (`Layers/xrRenderPC_R4/r4.cpp:535`) | Implemented (Services) |
+| 2a | `sound` (interim): the engine's sound manager in `-nosound` mode, so sounds can be created; nothing plays and no sound has feedback ([S02-T05b](validation/S02-T05b.md)) | `InitSound1/2` (`xrEngine/x_ray.cpp`, `Startup`) | Implemented, interim (Services) |
+| 2b | `cpu-models`: R4 module attached with no device; model pool and particle definitions only; GPU resource creation skipped and counted ([S02-T03b](validation/S02-T03b.md), [S02-T05b](validation/S02-T05b.md)) | `CRender::create` → `Models`, `PSLibrary.OnCreate` (`Layers/xrRenderPC_R4/r4.cpp:535-537`) | Implemented (Services) |
 | 3 | `spatial-db`: `g_SpatialSpace`, `g_SpatialSpacePhysic` | `xrEngine/x_ray.cpp:643-644`, `Startup` | Implemented (Services) |
 | 4 | `materials`: `GMLib.Load` with pair media names but no pair sounds/wallmarks ([S02-T03a](validation/S02-T03a.md)) | `xrGame/GamePersistent.cpp:156-160`, `OnAppStart` | Implemented (Services) |
 | 5 | `script-engine`: `CAI_Space::init` with installed `_G` and common scripts; ALife `start_game_callback` must resolve but is not called | `xrGame/ai_space_inline.h:86-94`, `xrServerEntities/script_engine.cpp:371-434` | Implemented (Services) |
 | 6 | `campaign-registries`: dialogs, character info, specific characters, communities, ranks, reputations, monster communities | CPU subset of `init_game_globals` (`xrGame/xrgame_dll_detach.cpp:48-65`) | Implemented (Services) |
-| 7 | Persistent campaign state (game parameters, environment data) | `IGame_Persistent` / `CGamePersistent` constructor | **Blocked** |
-| 8 | `CLevel`, `xrServer`, `game_sv_Single`, ALife from the fixture save | `xrGame/Level_start.cpp:107-125`, `game_sv_single.cpp:26-35` | **Blocked** |
-| 9 | `game_cl_Single` and level-dependent initialization | `Level_start.cpp:340-363`, `game_base.cpp:205` | **Blocked** |
+| 6a | `application`: `CApplication` with its loading screen, font and level logo skipped; owns the level list, the `$level$` alias and the engine event frame ([S02-T05b](validation/S02-T05b.md)) | `xrEngine/x_ray.cpp`, `Startup` (`pApp`) | Implemented (Services) |
+| 7 | `persistent`: game parameters and environment data; UI, menu, fonts and prefetch skipped ([S02-T05a](validation/S02-T05a.md)) | `IGame_Persistent` / `CGamePersistent` constructor and `OnAppStart` | Implemented (Services) |
+| 8 | `CLevel`, `xrServer`, `game_sv_Single`, ALife from the fixture save: the native start sequence and the server loading stages `net_start1..3`, pumped explicitly with a deadline ([S02-T05b](validation/S02-T05b.md)) | `xrGame/Level_start.cpp:107-230`, `game_sv_single.cpp:26-35`, `alife_simulator.cpp:43-77` | Implemented (GameState) |
+| 9 | Client stages `net_start_client1..6` and `net_start5..6`: level geometry (CFORM), physics world, spawn processing, `game_cl_Single` | `Level_network_start_client.cpp`, `Level_start.cpp:233-363`, `IGame_Level.cpp:86-149` | **Next: S02-T05d** |
 
 Stage 5 runs before stage 6 because of a real dependency. Every `CXml::Load` calls
 `XMLLuaCallback` (`xrXMLParser/xrXMLParser.cpp:143`). That calls Lua
@@ -77,7 +79,7 @@ Teardown runs these steps in reverse order:
 `clean_game_globals` deletes the AI space before the registries. Either order is
 safe, because registry teardown only frees data.
 
-## Blockers on stages 7–9 (and the resolved stage 4)
+## Blockers, resolved and remaining
 
 Each is a renderer or presentation dependency on the native path. Removing one
 belongs to a later task. None may be bypassed with a placeholder.
@@ -94,7 +96,7 @@ belongs to a later task. None may be bypassed with a placeholder.
    `CollideParticlesStr`, `CollideMarksStr`) are already stored, so no data has to
    be invented. `GMLib.Load` also only logs and returns when the material file is
    missing (`GameMtlLib.cpp:73-77`). The split must turn that into a failure.
-2. **Persistent state creates GPU resources.** The `IGame_Persistent` constructor
+2. **Persistent state creates GPU resources** (resolved by S02-T05a). The `IGame_Persistent` constructor
    creates `CEnvironment` (`xrEngine/IGame_Persistent.cpp:51`). Its constructor
    calls `OnDeviceCreate` (`xrEngine/Environment.cpp:59-72`, `Environment_render.cpp:216-219`).
    That reaches `dxEnvironmentRender::OnDeviceCreate`, which creates the sky and
@@ -106,18 +108,18 @@ belongs to a later task. None may be bypassed with a placeholder.
    constructor both read `g_pGamePersistent->m_game_params`
    (`Level_start.cpp:115`, `alife_simulator.cpp:54-55`). The environment data and
    render split is S02-T04/T05 (S02-T01 B03, B09, B10).
-3. **ALife start uses the persistent main menu.** `restart_all` calls
+3. **ALife start uses the persistent main menu** (resolved by S02-T05b: the call is a no-op on a never-activated menu, so a null guard preserves behaviour). `restart_all` calls
    `MainMenu()->DestroyInternal(true)` (`xrGame/alife_simulator.cpp:28-36`) before
    the script engine is re-initialized. It needs a presentation adapter or a
    separated reset path (S02-T05).
-4. **`CLevel` loads player HUD models through the renderer.** The constructor calls
+4. **`CLevel` loads player HUD models through the renderer** (resolved by S02-T03b/T05b: the HUD arms load in the CPU model pool; the first crash in practice was `IGame_Level`'s render-resource dump, now guarded). The constructor calls
    `g_player_hud->load_default()` (`xrGame/Level.cpp:268`). That reaches
    `::Render->model_Create` (`xrGame/player_hud.cpp:820-842`). Since S02-T03b,
    that HUD arms model (`actor_hud_05` visual) loads in the CPU-only model pool.
    The rest of the `CLevel` constructor hasn't been tried: `CDebugRenderer`, the
    spawn-prefetch thread and the HUD/UI members. Separating the HUD is still
    S02-T05 (B04).
-5. **Game state needs `CLevel`.** `game_GameState` reads
+5. **Game state needs `CLevel`** (remaining: `game_cl_Single` is constructed in the client stages, S02-T05d). `game_GameState` reads
    `Level().timeServer_Async()` in its constructor (`xrGame/game_base.cpp:205`).
    So `game_cl_Single` comes after stage 8, as in native order.
 
@@ -127,6 +129,16 @@ This construction is owned by S02-T05/T06 under the 2026-10-18 scope decision
 The `GameState` smoke scope runs stages 1–3, 5 and 6. It then reports
 `persistent-context-required` and exits 3. That is the first unmet prerequisite,
 not a pass.
+
+6. **Scripts create particles and sounds while Lua initialises** (found at
+   runtime in S02-T05b). The ALife constructor re-initialises the script engine
+   (`xrGame/alife_simulator.cpp:28-36`), and installed scripts construct a
+   `particles_object` (`anomaly2\teleport_out_00`) and `sound_object`s during that
+   auto-load. The particle library now loads on the CPU with the model pool
+   (`Layers/xrRenderPC_R4/r4.cpp`, `cpu_models_create`); its per-definition
+   shader creation is skipped like any other. Sound uses the engine's `-nosound`
+   manager for now: `create` returns early (`xrSound/SoundRender_Core.cpp:294`),
+   so no sound has feedback and AI hearing is not modelled (B18, S02-T05c).
 
 ## Limits
 

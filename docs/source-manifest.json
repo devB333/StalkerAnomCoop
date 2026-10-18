@@ -41,6 +41,10 @@
     {
       "path": "patches/engine/0008-persistent-without-device.patch",
       "sha256": "a6f3bc362e83644a034a8ced6ff53e9e44422f70f35689adc54ee9dedc246082"
+    },
+    {
+      "path": "patches/engine/0009-campaign-level-start.patch",
+      "sha256": "17f391f4cd5a64108a1818d56f015213223d57a6a426419a61bf4298744673f0"
     }
   ],
   "submodules": [

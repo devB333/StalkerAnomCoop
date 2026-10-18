@@ -191,3 +191,36 @@ separation, and runtime scheduling/teardown behavior. They are bounded follow-up
 work, not evidence of an impossible architecture. No binary mismatch required
 reopening Ghidra. Quest/reward persistence and original-client equivalence remain
 the two explicit G01 waivers; this mapping does not resolve them.
+
+## Corrections from implementation (2026-10-18)
+
+Source tracing during S02-T05a/b corrected several rows above; the originals are
+kept as the pre-implementation map.
+
+- **B03/B04.** Constructing the persistent object crashes before `OnDeviceCreate`:
+  the `dxEnvironmentRender` constructor itself creates two textures
+  (`Layers/xrRender/dxEnvironmentRender.cpp:207-211`). The first `CLevel`
+  crash is `IGame_Level`'s constructor calling `Device.DumpResourcesMemoryUsage`
+  (`xrEngine/IGame_Level.cpp:31`), not `player_hud`. `CDebugRenderer` is trivial.
+  The spawn-prefetch thread always starts natively but stays idle until
+  `g_bootComplete`; the campaign server does not start it.
+- **B05.** The level's AI graph loads inside `Server->Connect` (`net_start2`),
+  through `CALifeGraphRegistry::setup_current_level` → `pApp->Level_ID` →
+  `ai().load` (`xrGame/alife_graph_registry.cpp:66-96`). `SLS_Default` switches
+  ALife objects online immediately. `restart_all` re-initialises the script
+  engine, and installed scripts create particles and sounds during that load.
+- **B06.** Creating the HUD alone crashes with no device (`CHitMarker` shaders).
+  `Render->level_Load` is entirely presentation (shaders, sectors, lights,
+  details, HOM); gameplay needs none of it. Hearing occlusion is `level.som`,
+  loaded in `Load_GameSpecific_After`, not the CFORM.
+- **B07.** The after-load hook runs inside `net_start_client6`'s synchronisation
+  pump, when the server's configuration message arrives.
+- **B08.** `M_CLIENTREADY` is a no-op on `game_sv_Single`. Spawn messages are
+  processed on the first `CLevel::OnFrame`, and `M_SPAWN` received before
+  `bReady` is dropped.
+- **B09.** The native idle loop never pumps loading events while the device is
+  not ready (`xrEngine/device.cpp:405-409`); the campaign server pumps
+  `g_loading_events` itself with a deadline.
+- **B10.** `CGamePersistent::OnFrame` skips the scheduler until the level is ready
+  and while paused; the campaign clock runs the scheduler every tick in the
+  persistent slot instead and never registers the persistent frame.

@@ -2,8 +2,13 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
     [Parameter(Mandatory = $true)][ValidateSet('Core', 'Services', 'GameState')][string]$Scope,
     # Test-only: report this service as failed before it starts, to check the partial-start unwind.
-    [ValidateSet('', 'spatial-db', 'materials', 'script-engine', 'campaign-registries')][string]$InjectFailure = ''
+    [ValidateSet('', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries')][string]$InjectFailure = '',
+    # Optional comma-separated model list for the CPU model fixture (no spaces).
+    [ValidatePattern('^[A-Za-z0-9_\\,.]*$')][string]$Models = '',
+    # Test-only: the model list contains a missing model, so the fixture must fail (exit 5).
+    [switch]$ExpectModelFailure
 )
+if ($ExpectModelFailure -and (-not $Models -or $Scope -ne 'Services')) { throw '-ExpectModelFailure requires -Models and -Scope Services.' }
 if ($InjectFailure -and $Scope -ne 'Services') { throw '-InjectFailure requires -Scope Services.' }
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
@@ -31,6 +36,7 @@ $env:TMP = $env:TEMP
 $mode = switch ($Scope) { 'Core' { '-campaign-core-smoke' } 'Services' { '-campaign-services-smoke' } default { '-campaign-smoke' } }
 $arguments = $mode + ' -fsltx ' + $config
 if ($InjectFailure) { $arguments += ' -campaign-fail-at ' + $InjectFailure }
+if ($Models) { $arguments += ' -campaign-models ' + $Models }
 $result = [ordered]@{
     started_utc = [DateTime]::UtcNow.ToString('o')
     command = '"' + $exe + '" ' + $arguments
@@ -39,6 +45,8 @@ $result = [ordered]@{
     runtime = $runtime
     scope = $Scope
     injected_failure = $InjectFailure
+    models = $Models
+    expect_model_failure = [bool]$ExpectModelFailure
     level_loaded = $false
 }
 $start = New-Object System.Diagnostics.ProcessStartInfo
@@ -68,13 +76,14 @@ $expectedExit = 0
 if ($Scope -ne 'Core') {
     # Services start in native order and stop in reverse; a failed start unwinds only started services.
     $started = @()
-    foreach ($service in @('spatial-db', 'materials', 'script-engine', 'campaign-registries')) {
+    foreach ($service in @('cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries')) {
         if ($service -eq $InjectFailure) { $expectedStages += "$service-failed"; $expectedExit = 4; break }
         $expectedStages += "$service-ready"
         $started += $service
     }
-    if (-not $InjectFailure) {
-        $expectedStages += 'services-graphics-window-input-absent'
+    if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
+    elseif (-not $InjectFailure) {
+        $expectedStages += @('cpu-model-fixture-passed', 'services-graphics-window-input-absent')
         if ($Scope -eq 'GameState') { $expectedStages += 'persistent-context-required'; $expectedExit = 3 }
     }
     [array]::Reverse($started)

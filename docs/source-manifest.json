@@ -25,6 +25,10 @@
     {
       "path": "patches/engine/0004-materials-without-media.patch",
       "sha256": "8f04c72238bdae564bfe765d8249457bef2a6832a02f0a467be80e2e710d5244"
+    },
+    {
+      "path": "patches/engine/0005-cpu-only-models.patch",
+      "sha256": "1a31b456a46ff76899745dbc1e779d384b073c275e341705a18b4a35b848d480"
     }
   ],
   "submodules": [

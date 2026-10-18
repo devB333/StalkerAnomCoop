@@ -14,6 +14,9 @@ Its xrGame functions are additive; the client's game-globals functions are uncha
 `0004-materials-without-media.patch` (S02-T03a) adds a material-library switch
 that keeps pair media names but creates no pair sounds or wallmarks; it defaults
 on, so the client is unchanged. The campaign server loads materials with it off.
+`0005-cpu-only-models.patch` (S02-T03b) attaches the renderer module with no
+device, creates only its model pool, skips and counts shader, geometry and GPU
+buffer creation, and registers bone materials without the persistent object.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

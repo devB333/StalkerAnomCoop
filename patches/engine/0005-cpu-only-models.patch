@@ -1,0 +1,556 @@
+diff --git a/src/Layers/xrRender/CpuOnlyResources.h b/src/Layers/xrRender/CpuOnlyResources.h
+new file mode 100644
+index 0000000..39238b2
+--- /dev/null
++++ b/src/Layers/xrRender/CpuOnlyResources.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++// The campaign server loads models with no graphics device (S02-T03). In this
++// mode shader, geometry and GPU buffer creation are skipped and counted; all
++// CPU model data (bones, motions, CPU vertex/index copies) is still loaded.
++struct CpuOnlyResources
++{
++	static bool& Enabled()
++	{
++		static bool enabled = false;
++		return enabled;
++	}
++	static u32& SkippedShaders()
++	{
++		static u32 count = 0;
++		return count;
++	}
++	static u32& SkippedGeometry()
++	{
++		static u32 count = 0;
++		return count;
++	}
++	static u32& SkippedBuffers()
++	{
++		static u32 count = 0;
++		return count;
++	}
++};
+diff --git a/src/Layers/xrRender/FBasicVisual.cpp b/src/Layers/xrRender/FBasicVisual.cpp
+index 0df6604..3970a6a 100644
+--- a/src/Layers/xrRender/FBasicVisual.cpp
++++ b/src/Layers/xrRender/FBasicVisual.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include "fbasicvisual.h"
+ #include "../../xrEngine/fmesh.h"
++#include "CpuOnlyResources.h"
+ #include "dxRenderDeviceRender.h"
+ 
+ //////////////////////////////////////////////////////////////////////
+@@ -55,7 +56,12 @@ void dxRender_Visual::Load(const char* N, IReader* data, u32)
+ 		R_ASSERT2(hdr.format_version==xrOGF_FormatVersion, "Invalid visual version");
+ 		Type = hdr.type;
+ 		//if (hdr.shader_id)	shader	= ::Render->getShader	(hdr.shader_id);
+-		if (hdr.shader_id) shader = ::RImplementation.getShader(hdr.shader_id);
++		if (hdr.shader_id)
++		{
++			// Level shader tables exist only after a rendered level load.
++			R_ASSERT3(!CpuOnlyResources::Enabled(), "CPU-only model has a level shader id", N);
++			shader = ::RImplementation.getShader(hdr.shader_id);
++		}
+ 		vis.box.set(hdr.bb.min, hdr.bb.max);
+ 		vis.sphere.set(hdr.bs.c, hdr.bs.r);
+ 	}
+@@ -148,7 +154,10 @@ void dxRender_Visual::SetShaderTexture(LPCSTR s_shader, LPCSTR s_texture)
+ 	::Render->m_skinning = skinning;
+     bool prev_hud = ::Render->hud_loading;
+     ::Render->hud_loading = hud;
+-    shader.create(*dbg_shader, *dbg_texture);
++    if (CpuOnlyResources::Enabled())
++        ++CpuOnlyResources::SkippedShaders();
++    else
++        shader.create(*dbg_shader, *dbg_texture);
+     ::Render->hud_loading = prev_hud;
+ }
+ 
+diff --git a/src/Layers/xrRender/ModelPool.cpp b/src/Layers/xrRender/ModelPool.cpp
+index 5fb3be4..d2a56d2 100644
+--- a/src/Layers/xrRender/ModelPool.cpp
++++ b/src/Layers/xrRender/ModelPool.cpp
+@@ -140,7 +140,13 @@ dxRender_Visual* CModelPool::Instance_Load(const char* N, BOOL allow_register, b
+ 	V = Instance_Create(H.type);
+ 	V->Load(N, data, 0);
+ 	FS.r_close(data);
+-	g_pGamePersistent->RegisterModel(V);
++	if (g_pGamePersistent)
++		g_pGamePersistent->RegisterModel(V);
++	else
++	{
++		R_ASSERT3(m_registrar, "Model loaded with no game persistent or CPU model registrar", N);
++		m_registrar(V);
++	}
+ 
+ 	// Registration
+ 	if (allow_register) Instance_Register(N, V);
+@@ -208,6 +214,7 @@ CModelPool::CModelPool()
+ 	bLogging = TRUE;
+ 	bForceDiscard = FALSE;
+ 	bAllowChildrenDuplicate = TRUE;
++	m_registrar = nullptr;
+ 	g_pMotionsContainer = xr_new<motions_container>();
+ }
+ 
+diff --git a/src/Layers/xrRender/ModelPool.h b/src/Layers/xrRender/ModelPool.h
+index eab7561..77019db 100644
+--- a/src/Layers/xrRender/ModelPool.h
++++ b/src/Layers/xrRender/ModelPool.h
+@@ -6,6 +6,7 @@
+ 
+ // refs
+ class dxRender_Visual;
++class IRenderVisual;
+ 
+ namespace PS
+ {
+@@ -51,6 +52,9 @@ private:
+ 	BOOL bLogging;
+ 	BOOL bForceDiscard;
+ 	BOOL bAllowChildrenDuplicate;
++	// Assigns bone game materials when there is no game persistent object
++	// (campaign server). Registration is never skipped.
++	void (*m_registrar)(IRenderVisual*);
+ 
+ 	void Destroy();
+ public:
+diff --git a/src/Layers/xrRender/Shader.cpp b/src/Layers/xrRender/Shader.cpp
+index 0d33fe0..786809b 100644
+--- a/src/Layers/xrRender/Shader.cpp
++++ b/src/Layers/xrRender/Shader.cpp
+@@ -9,6 +9,7 @@
+ #include "ResourceManager.h"
+ 
+ #include "dxRenderDeviceRender.h"
++#include "CpuOnlyResources.h"
+ 
+ 
+ //
+@@ -71,11 +72,21 @@ void resptrcode_shader::create(IBlender* B, LPCSTR s_shader, LPCSTR s_textures,
+ //////////////////////////////////////////////////////////////////////////
+ void resptrcode_geom::create(u32 FVF, ID3DVertexBuffer* vb, ID3DIndexBuffer* ib)
+ {
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedGeometry();
++		return;
++	}
+ 	_set(DEV->CreateGeom(FVF, vb, ib));
+ }
+ 
+ void resptrcode_geom::create(D3DVERTEXELEMENT9* decl, ID3DVertexBuffer* vb, ID3DIndexBuffer* ib)
+ {
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedGeometry();
++		return;
++	}
+ 	_set(DEV->CreateGeom(decl, vb, ib));
+ }
+ 
+diff --git a/src/Layers/xrRender/stats_manager.cpp b/src/Layers/xrRender/stats_manager.cpp
+index d26930d..6d59480 100644
+--- a/src/Layers/xrRender/stats_manager.cpp
++++ b/src/Layers/xrRender/stats_manager.cpp
+@@ -63,7 +63,7 @@ void stats_manager::increment_stats_rtarget(ID3DTexture2D* buff)
+ 
+ void stats_manager::increment_stats_vb(ID3DVertexBuffer* buff)
+ {
+-	if (g_dedicated_server)
++	if (g_dedicated_server || !buff)
+ 		return;
+ 
+ #if defined(USE_DX10) || defined(USE_DX11)
+@@ -79,7 +79,7 @@ void stats_manager::increment_stats_vb(ID3DVertexBuffer* buff)
+ 
+ void stats_manager::increment_stats_ib(ID3DIndexBuffer* buff)
+ {
+-	if (g_dedicated_server)
++	if (g_dedicated_server || !buff)
+ 		return;
+ 
+ #if defined(USE_DX10) || defined(USE_DX11)
+diff --git a/src/Layers/xrRenderDX10/dx10BufferUtils.cpp b/src/Layers/xrRenderDX10/dx10BufferUtils.cpp
+index 6e78939..cec844a 100644
+--- a/src/Layers/xrRenderDX10/dx10BufferUtils.cpp
++++ b/src/Layers/xrRenderDX10/dx10BufferUtils.cpp
+@@ -1,10 +1,18 @@
+ #include "stdafx.h"
+ #include "dx10BufferUtils.h"
++#include "../xrRender/CpuOnlyResources.h"
+ 
+ namespace dx10BufferUtils
+ {
+ 	HRESULT IC CreateBuffer(ID3DBuffer** ppBuffer, const void* pData, UINT DataSize, bool bImmutable, bool bIndexBuffer)
+ 	{
++		if (CpuOnlyResources::Enabled())
++		{
++			// The caller keeps its CPU copy; there is no device to upload to.
++			*ppBuffer = nullptr;
++			++CpuOnlyResources::SkippedBuffers();
++			return S_OK;
++		}
+ 		D3D_BUFFER_DESC desc;
+ 		desc.ByteWidth = DataSize;
+ 		//desc.Usage = bImmutable ? D3D_USAGE_IMMUTABLE : D3D_USAGE_DEFAULT;
+diff --git a/src/Layers/xrRenderPC_R4/r4.cpp b/src/Layers/xrRenderPC_R4/r4.cpp
+index 9044487..0cd6050 100644
+--- a/src/Layers/xrRenderPC_R4/r4.cpp
++++ b/src/Layers/xrRenderPC_R4/r4.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "../xrRender/CpuOnlyResources.h"
+ #include "r4.h"
+ #include "../xrRender/fbasicvisual.h"
+ #include "../../xrEngine/xr_object.h"
+@@ -699,6 +700,35 @@ void CRender::ImportParticles()
+ // Implementation
+ IRender_ObjectSpecific* CRender::ros_create(IRenderable* parent) { return xr_new<CROS_impl>(); }
+ void CRender::ros_destroy(IRender_ObjectSpecific* & p) { xr_delete(p); }
++// Campaign server: a model pool with no device, render target or level.
++bool CRender::cpu_models_create(void (*registrar)(IRenderVisual*))
++{
++	R_ASSERT2(!HW.pDevice && !Models, "CPU-only models need a renderer with no device or model pool");
++	R_ASSERT2(registrar, "CPU-only models need a bone-material registrar");
++	CpuOnlyResources::Enabled() = true;
++	CpuOnlyResources::SkippedShaders() = 0;
++	CpuOnlyResources::SkippedGeometry() = 0;
++	CpuOnlyResources::SkippedBuffers() = 0;
++	Models = xr_new<CModelPool>();
++	Models->m_registrar = registrar;
++	return true;
++}
++
++void CRender::cpu_models_destroy()
++{
++	xr_delete(Models);
++	CpuOnlyResources::Enabled() = false;
++}
++
++bool CRender::cpu_models_stats(CpuModelStats& stats)
++{
++	stats.device_absent = !HW.pDevice;
++	stats.skipped_shaders = CpuOnlyResources::SkippedShaders();
++	stats.skipped_geometry = CpuOnlyResources::SkippedGeometry();
++	stats.skipped_buffers = CpuOnlyResources::SkippedBuffers();
++	return CpuOnlyResources::Enabled();
++}
++
+ IRenderVisual* CRender::model_Create(LPCSTR name, IReader* data) { return Models->Create(name, data); }
+ IRenderVisual* CRender::model_CreateChild(LPCSTR name, IReader* data) { return Models->CreateChild(name, data); }
+ IRenderVisual* CRender::model_Duplicate(IRenderVisual* V) { return Models->Instance_Duplicate((dxRender_Visual*)V); }
+diff --git a/src/Layers/xrRenderPC_R4/r4.h b/src/Layers/xrRenderPC_R4/r4.h
+index fe7ecfa..9fd087e 100644
+--- a/src/Layers/xrRenderPC_R4/r4.h
++++ b/src/Layers/xrRenderPC_R4/r4.h
+@@ -310,6 +310,9 @@ public:
+ 
+ 	// Loading / Unloading
+ 	virtual void create();
++	virtual bool cpu_models_create(void (*registrar)(IRenderVisual*));
++	virtual void cpu_models_destroy();
++	virtual bool cpu_models_stats(CpuModelStats& stats);
+ 	virtual void destroy();
+ 	virtual void reset_begin();
+ 	virtual void reset_end();
+diff --git a/src/xrEngine/EngineAPI.cpp b/src/xrEngine/EngineAPI.cpp
+index a9525b0..b1c8932 100644
+--- a/src/xrEngine/EngineAPI.cpp
++++ b/src/xrEngine/EngineAPI.cpp
+@@ -285,6 +285,13 @@ void CEngineAPI::InitializeGameFactory()
+ 
+ }
+ 
++void CEngineAPI::AttachRendererWithoutDevice()
++{
++	R_ASSERT2(!renderer_attached, "Renderer module already attached");
++	DLL_MAIN_RENDERER(NULL, DLL_PROCESS_ATTACH, NULL);
++	renderer_attached = true;
++}
++
+ void CEngineAPI::Destroy(void)
+ {
+ 	//if (hGame) { FreeLibrary(hGame); hGame = 0; }
+diff --git a/src/xrEngine/EngineAPI.h b/src/xrEngine/EngineAPI.h
+index a709e47..ae7764b 100644
+--- a/src/xrEngine/EngineAPI.h
++++ b/src/xrEngine/EngineAPI.h
+@@ -51,6 +51,9 @@ public:
+ 	VTResume* tune_resume;
+ 	void Initialize();
+ 	void InitializeGameFactory();
++	// Campaign server: attach the static renderer module (pointers and
++	// console commands only); no device is connected or created.
++	void AttachRendererWithoutDevice();
+ 
+ #ifndef DEDICATED_SERVER
+ 	void InitializeNotDedicated();
+diff --git a/src/xrEngine/Render.h b/src/xrEngine/Render.h
+index 530bdbd..ead1400 100644
+--- a/src/xrEngine/Render.h
++++ b/src/xrEngine/Render.h
+@@ -240,6 +240,19 @@ public:
+ 
+ 	// Loading / Unloading
+ 	virtual void create() = 0;
++
++	// Campaign server (S02-T03): models are loaded with no graphics device.
++	// A renderer without this mode returns false.
++	struct CpuModelStats
++	{
++		bool device_absent;
++		u32 skipped_shaders;
++		u32 skipped_geometry;
++		u32 skipped_buffers;
++	};
++	virtual bool cpu_models_create(void (*registrar)(IRenderVisual*)) { return false; }
++	virtual void cpu_models_destroy() {}
++	virtual bool cpu_models_stats(CpuModelStats& stats) { return false; }
+ 	virtual void destroy() = 0;
+ 	virtual void reset_begin() = 0;
+ 	virtual void reset_end() = 0;
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 81340cf..8c13e4a 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -959,11 +959,18 @@ ENGINE_API bool g_campaign_server = false;
+ #endif
+ 
+ #include "GameMtlLib.h"
++#include "Render.h"
++#include "EnnumerateVertices.h"
++#include "../Include/xrRender/Kinematics.h"
++#include "../Include/xrRender/KinematicsAnimated.h"
++#include "../Include/xrRender/RenderVisual.h"
+ 
+ extern "C" void __cdecl xrCampaignGameGlobals_Initialize();
+ extern "C" bool __cdecl xrCampaignScriptEngine_Initialize();
+ extern "C" void __cdecl xrCampaignScriptEngine_Destroy();
+ extern "C" void __cdecl xrCampaignGameGlobals_Destroy();
++extern "C" void __cdecl xrCampaignRegisterModel(IRenderVisual* V);
++extern "C" u32 __cdecl xrCampaignRegisteredModels();
+ 
+ namespace
+ {
+@@ -1016,6 +1023,111 @@ void StopCampaignMaterials()
+     GMLib.SetPresentationMedia(true);
+ }
+ 
++// The static renderer module is attached for its model code only: no device
++// is connected or created, and GPU resource creation is skipped and counted.
++bool StartCampaignCpuModels()
++{
++    Engine.External.AttachRendererWithoutDevice();
++    if (!::Render->cpu_models_create(&xrCampaignRegisterModel))
++    {
++        Msg("! S02-T03 renderer has no CPU-only model mode");
++        return false;
++    }
++    return true;
++}
++
++void StopCampaignCpuModels() { ::Render->cpu_models_destroy(); }
++
++struct CountVertices : SEnumVerticesCallback
++{
++    u32 count = 0;
++    void operator()(const Fvector&) override { ++count; }
++};
++
++// Loads one real model through the CPU model pool and checks the data that
++// hits, collision and physics shells need. Missing files fail explicitly.
++bool CheckCampaignModel(LPCSTR name)
++{
++    string_path file, path;
++    xr_strcpy(file, name);
++    if (!strext(file))
++        xr_strcat(file, ".ogf");
++    if (!FS.exist(path, "$game_meshes$", file))
++    {
++        Msg("! S02-T03 model missing: %s", name);
++        return false;
++    }
++
++    const u32 registered_before = xrCampaignRegisteredModels();
++    IRenderVisual* visual = ::Render->model_Create(name);
++    IKinematics* kinematics = visual ? visual->dcast_PKinematics() : nullptr;
++    IKinematicsAnimated* animated = visual ? visual->dcast_PKinematicsAnimated() : nullptr;
++    bool ok = kinematics && animated;
++    u32 bones = 0, materials = 0, faces = 0, motion_slots = 0;
++    CountVertices vertices;
++    LPCSTR root_name = "-";
++    if (ok)
++    {
++        bones = kinematics->LL_BoneCount();
++        root_name = kinematics->LL_BoneName_dbg(kinematics->LL_GetBoneRoot());
++        for (u16 bone = 0; bone < bones; ++bone)
++        {
++            CBoneData& data = kinematics->LL_GetData(bone);
++            if (data.game_mtl_idx < GMLib.CountMaterial())
++                ++materials;
++            for (const auto& child : data.child_faces)
++                faces += u32(child.size());
++            kinematics->EnumBoneVertices(vertices, bone);
++        }
++        motion_slots = animated->LL_MotionsSlotCount();
++    }
++    const u32 registered = xrCampaignRegisteredModels() - registered_before;
++    Msg("S02-T03 model=%s bones=%u root=%s bone_materials=%u bone_faces=%u bone_vertices=%u "
++        "motion_slots=%u registered=%u",
++        name, bones, root_name, materials, faces, vertices.count, motion_slots, registered);
++    ok = ok && bones != 0 && materials == bones && faces != 0 && vertices.count != 0 &&
++        motion_slots != 0 && registered != 0;
++    if (visual)
++        ::Render->model_Delete(visual);
++    return ok;
++}
++
++// Real actor and NPC models plus the player HUD arms that CLevel loads.
++bool RunCampaignModelFixture(LPCSTR command_line)
++{
++    xr_vector<xr_string> names;
++    if (LPCSTR option = strstr(command_line, "-campaign-models "))
++    {
++        string1024 list = {};
++        sscanf_s(option + 17, "%1023s", list, static_cast<unsigned>(_countof(list)));
++        string_path item;
++        for (int i = 0, n = _GetItemCount(list); i < n; ++i)
++            names.push_back(_GetItem(list, i, item));
++    }
++    else
++    {
++        names.push_back(pSettings->r_string("actor_hud_05", "visual"));
++        names.push_back("actors\\stalker_neutral\\stalker_neutral_1");
++        names.push_back("actors\\stalker_bandit\\stalker_bandit_1");
++    }
++
++    bool ok = !names.empty();
++    for (const xr_string& name : names)
++        ok = CheckCampaignModel(name.c_str()) && ok;
++
++    // A missing model must be reported, not replaced.
++    string_path missing;
++    const bool missing_reported = !FS.exist(missing, "$game_meshes$", "actors\\s02_t03_missing_model.ogf");
++    Msg("S02-T03 missing-model reported=%d", missing_reported ? 1 : 0);
++
++    IRender_interface::CpuModelStats stats = {};
++    const bool cpu_mode = ::Render->cpu_models_stats(stats);
++    Msg("S02-T03 cpu-models device_absent=%d skipped_shaders=%u skipped_geometry=%u skipped_buffers=%u",
++        stats.device_absent ? 1 : 0, stats.skipped_shaders, stats.skipped_geometry, stats.skipped_buffers);
++    return ok && missing_reported && cpu_mode && stats.device_absent && stats.skipped_shaders != 0 &&
++        stats.skipped_geometry != 0 && stats.skipped_buffers != 0;
++}
++
+ // A failed check after loading still owns the loaded library.
+ bool StartCampaignMaterialsOrUnload()
+ {
+@@ -1090,9 +1202,17 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         Msg("S02-T02 stage=%s", name);
+         FlushLog();
+     };
++    // The renderer module may be attached for CPU models, but no window,
++    // render device, input or graphics device may exist.
+     auto graphics_absent = []()
+     {
+-        return !Device.m_hWnd && !Device.m_pRender && !Device.b_is_Ready && !Render && !pInput;
++        if (Device.m_hWnd || Device.m_pRender || Device.b_is_Ready || pInput)
++            return false;
++        if (!Render)
++            return true;
++        IRender_interface::CpuModelStats stats = {};
++        Render->cpu_models_stats(stats);
++        return stats.device_absent;
+     };
+     stage("core-ready");
+     InitSettings();
+@@ -1131,7 +1251,10 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+     {
+         // Native order: spatial databases follow persistent construction;
+         // persistent app start then loads materials before game globals.
++        // Native order: the renderer's model pool exists before persistent
++        // construction (Device.Create), which precedes the spatial databases.
+         const bool services_ready =
++            start("cpu-models", &StartCampaignCpuModels, {"cpu-models-stopped", &StopCampaignCpuModels}) &&
+             start("spatial-db",
+                 []()
+                 {
+@@ -1153,13 +1276,22 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 },
+                 {"campaign-registries-stopped", &xrCampaignGameGlobals_Destroy});
+ 
++        bool fixture_ready = services_ready;
+         if (services_ready)
++        {
++            fixture_ready = RunCampaignModelFixture(command_line);
++            stage(fixture_ready ? "cpu-model-fixture-passed" : "cpu-model-fixture-failed");
++            if (!fixture_ready)
++                result = 5;
++        }
++
++        if (fixture_ready)
+         {
+             R_ASSERT2(graphics_absent(), "Campaign services unexpectedly initialized graphics, a window or input");
+             stage("services-graphics-window-input-absent");
+         }
+ 
+-        if (services_ready && scope == CampaignSmokeScope::GameState)
++        if (fixture_ready && scope == CampaignSmokeScope::GameState)
+         {
+             // Native game_sv_Single/ALife read persistent game parameters, and
+             // ALife restart_all() uses the persistent main menu. Persistent
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index af01a8c..3f263c2 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -117,7 +117,9 @@ CGamePersistent::~CGamePersistent(void)
+ 	Engine.Event.Handler_Detach(eQuickLoad, this);
+ }
+ 
+-void CGamePersistent::RegisterModel(IRenderVisual* V)
++// Assigns bone game materials. Also used by the campaign server's CPU model
++// pool, which has no game persistent object.
++void RegisterModelMaterials(IRenderVisual* V)
+ {
+ 	// Check types
+ 	switch (V->getType())
+@@ -150,6 +152,11 @@ void CGamePersistent::RegisterModel(IRenderVisual* V)
+ 	}
+ }
+ 
++void CGamePersistent::RegisterModel(IRenderVisual* V)
++{
++	RegisterModelMaterials(V);
++}
++
+ extern void clean_game_globals();
+ extern void init_game_globals();
+ 
+diff --git a/src/xrGame/xrgame_dll_detach.cpp b/src/xrGame/xrgame_dll_detach.cpp
+index 8959c2a..e0644dc 100644
+--- a/src/xrGame/xrgame_dll_detach.cpp
++++ b/src/xrGame/xrgame_dll_detach.cpp
+@@ -142,6 +142,19 @@ void clean_game_globals()
+ // wallmarks and UI window lists stay with the client. The normal client
+ // keeps calling the two functions above unchanged.
+ extern LPCSTR alife_section;
++class IRenderVisual;
++extern void RegisterModelMaterials(IRenderVisual* V);
++
++// S02-T03: bone-material registrar for the campaign server's CPU model pool.
++static u32 g_campaign_registered_models = 0;
++
++extern "C" void __cdecl xrCampaignRegisterModel(IRenderVisual* V)
++{
++	RegisterModelMaterials(V);
++	++g_campaign_registered_models;
++}
++
++extern "C" u32 __cdecl xrCampaignRegisteredModels() { return g_campaign_registered_models; }
+ 
+ extern "C" void __cdecl xrCampaignGameGlobals_Initialize()
+ {

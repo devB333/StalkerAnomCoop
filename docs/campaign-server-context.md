@@ -42,8 +42,9 @@ A service that fails to start logs `<service>-failed` and the process returns 4.
 |---|---|---|---|
 | 1 | Core, filesystem, log, settings | `WinMain_impl`, `InitSettings` | Implemented (Core) |
 | 2 | Engine events/scheduler, command-only console, game factory | `Engine.Initialize`, `CConsole`, `CEngineAPI::Initialize` | Implemented (Core) |
+| 2a | `cpu-models`: R4 module attached with no device; model pool only; GPU resource creation skipped and counted ([S02-T03b](validation/S02-T03b.md)) | `CRender::create` → `Models` (`Layers/xrRenderPC_R4/r4.cpp:535`) | Implemented (Services) |
 | 3 | `spatial-db`: `g_SpatialSpace`, `g_SpatialSpacePhysic` | `xrEngine/x_ray.cpp:643-644`, `Startup` | Implemented (Services) |
-| 4 | Material library `GMLib.Load` | `xrGame/GamePersistent.cpp:156-160`, `OnAppStart` | **Blocked** (see below) |
+| 4 | `materials`: `GMLib.Load` with pair media names but no pair sounds/wallmarks ([S02-T03a](validation/S02-T03a.md)) | `xrGame/GamePersistent.cpp:156-160`, `OnAppStart` | Implemented (Services) |
 | 5 | `script-engine`: `CAI_Space::init` with installed `_G` and common scripts; ALife `start_game_callback` must resolve but is not called | `xrGame/ai_space_inline.h:86-94`, `xrServerEntities/script_engine.cpp:371-434` | Implemented (Services) |
 | 6 | `campaign-registries`: dialogs, character info, specific characters, communities, ranks, reputations, monster communities | CPU subset of `init_game_globals` (`xrGame/xrgame_dll_detach.cpp:48-65`) | Implemented (Services) |
 | 7 | Persistent campaign state (game parameters, environment data) | `IGame_Persistent` / `CGamePersistent` constructor | **Blocked** |
@@ -76,12 +77,12 @@ Teardown runs these steps in reverse order:
 `clean_game_globals` deletes the AI space before the registries. Either order is
 safe, because registry teardown only frees data.
 
-## Blockers on stages 4 and 7–9
+## Blockers on stages 7–9 (and the resolved stage 4)
 
 Each is a renderer or presentation dependency on the native path. Removing one
 belongs to a later task. None may be bypassed with a placeholder.
 
-1. **Material pairs own sound and render media.** `CGameMtlLibrary::Load` loads
+1. **Material pairs own sound and render media** (resolved by S02-T03a). `CGameMtlLibrary::Load` loads
    each `SGameMtlPair` (`xrEngine/GameMtlLib.cpp:222-231`). `SGameMtlPair::Load`
    creates `ref_sound` objects for breaking, step and collide sounds through the
    sound manager (`xrEngine/GameMtlLib_Engine.cpp:27-60`, `107-139`). Each pair
@@ -111,8 +112,11 @@ belongs to a later task. None may be bypassed with a placeholder.
    separated reset path (S02-T05).
 4. **`CLevel` loads player HUD models through the renderer.** The constructor calls
    `g_player_hud->load_default()` (`xrGame/Level.cpp:268`). That reaches
-   `::Render->model_Create` (`xrGame/player_hud.cpp:820-842`). CPU model services
-   are S02-T03; separating the HUD is S02-T05 (B04, B14).
+   `::Render->model_Create` (`xrGame/player_hud.cpp:820-842`). Since S02-T03b,
+   that HUD arms model (`actor_hud_05` visual) loads in the CPU-only model pool.
+   The rest of the `CLevel` constructor hasn't been tried: `CDebugRenderer`, the
+   spawn-prefetch thread and the HUD/UI members. Separating the HUD is still
+   S02-T05 (B04).
 5. **Game state needs `CLevel`.** `game_GameState` reads
    `Level().timeServer_Async()` in its constructor (`xrGame/game_base.cpp:205`).
    So `game_cl_Single` comes after stage 8, as in native order.

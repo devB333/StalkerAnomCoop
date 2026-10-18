@@ -216,7 +216,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 - **Suffix tasks (split 2026-10-18; the parent completes when all four do):**
   - **S02-T03a — Material library without presentation media: Completed.** [Validation](docs/validation/S02-T03a.md). Patch 0004.
   - **S02-T03b — CPU-only model pool and real model load: Completed.** [Validation](docs/validation/S02-T03b.md). Patch 0005. The renderer module is attached with no device, and only the model pool exists. Shader, geometry and GPU buffer creation are skipped and counted. Bone materials are registered without the persistent object. Real actor, NPC and HUD models load with their bones, motions and CPU skin data, and a missing model fails explicitly. Prerequisite: S02-T03a.
-  - **S02-T03c — Bone and animation evaluation against a matched client capture: Not Started.** Evaluating bones needs an advancing device clock (`CalculateBones` returns early while `dwTimeGlobal` equals `UCalc_Time`), and camera throttling must be removed. Prerequisites: S02-T03b and the S02-T04 clock.
+  - **S02-T03c — Bone and animation evaluation against a matched client capture: Not Started.** Evaluating bones needs an advancing device clock (`CalculateBones` returns early while `dwTimeGlobal` equals `UCalc_Time`), and camera throttling must be removed. Prerequisites: S02-T03b and S02-T04a (available).
   - **S02-T03d — Skeleton collision, hit picking and physics shell: Not Started.** Prerequisites: S02-T03c and a physics world.
 - **Purpose:** Keep gameplay fidelity while removing GPU model requirements.
 - **Prerequisites:** S02-T02.
@@ -229,7 +229,16 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S02-T04 — Drive time, scheduling and physics explicitly
 
-- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- [ ] **Status: In Progress** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Suffix tasks (split 2026-10-18; the parent completes when all three do):**
+  - **S02-T04a — Server clock and serial frame driver: Completed.** [Validation](docs/validation/S02-T04a.md). Patch 0006.
+    - Tick-based Device clocks; the integer, float and frame clocks always agree.
+    - Native callback priority order; the scheduler runs in the persistent slot.
+    - Parallel jobs and `seqFrameMT` run serially, exactly once per tick.
+    - Explicit pause; loading counts as paused time.
+    - Catch-up is bounded, and any dropped time is reported.
+  - **S02-T04b — Native physics stepping and falling-body collision: Not Started.** A physics world needs a level `CObjectSpace` and object list (`xrPhysics/PHWorld.cpp:185-200`). Prerequisites: S02-T04a and a loaded level (S02-T05).
+  - **S02-T04c — Objects, AI, ALife and server activity policy: Not Started.** Prerequisites: S02-T04a/b and real level and ALife context (S02-T05/T06).
 - **Purpose:** Make server progression independent of rendering.
 - **Prerequisites:** S02-T02.
 - **Relevant files/subsystems:** E06; E08; Device time; GamePersistent; PHWorld; scheduler.
@@ -931,6 +940,7 @@ Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Comple
 | G00 / G01 | Completed | [Readiness](docs/validation/G00.md); [scoped development baseline acceptance](docs/validation/G01.md). G02 In Progress; G03–G11 Not Started. |
 | S02-T01 | Completed | [Source map and pinned fixture specification](docs/validation/S02-T01.md); static verification passed, no engine changes or runtime test. |
 | S02-T02 | Completed | [Context and services validation](docs/validation/S02-T02-context.md): Core/Services pass, unwind checked; H02 construction moved to S02-T05/T06 by user decision. |
-| S02-T03 | In Progress | Split into T03a–d. [T03a materials](docs/validation/S02-T03a.md) and [T03b CPU models](docs/validation/S02-T03b.md) Completed; T03c needs the S02-T04 clock. |
+| S02-T03 | In Progress | Split into T03a–d. [T03a materials](docs/validation/S02-T03a.md) and [T03b CPU models](docs/validation/S02-T03b.md) Completed; T03c next (clock now available). |
+| S02-T04 | In Progress | Split into T04a–c. [T04a clock/frame driver](docs/validation/S02-T04a.md) Completed; T04b/c need a level. |
 
 As work progresses, replace the aggregate engineering/gate rows with compact current-stage status plus completed-gate links; detailed results remain in task reports. Keep the stage summary at the top synchronized. The next engineering objectives are S02-T03 (CPU models, including the material library's CPU/media split) and S02-T04 (explicit clock and frame driver); S02-T05/T06 own real persistent, `CLevel`, ALife and game-state construction. The Services smoke pass does not satisfy any gameplay requirement. G02 requires S02-T02–T06 and their behavioral evidence.

@@ -29,6 +29,10 @@
     {
       "path": "patches/engine/0005-cpu-only-models.patch",
       "sha256": "1a31b456a46ff76899745dbc1e779d384b073c275e341705a18b4a35b848d480"
+    },
+    {
+      "path": "patches/engine/0006-campaign-frame-driver.patch",
+      "sha256": "1d00b66f56852445a1d277af967dd3320c0c886d9953bf4a69eae5e4cba2fb48"
     }
   ],
   "submodules": [

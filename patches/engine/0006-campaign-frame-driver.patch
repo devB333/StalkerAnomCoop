@@ -1,0 +1,491 @@
+diff --git a/src/xrEngine/CampaignServerClock.cpp b/src/xrEngine/CampaignServerClock.cpp
+new file mode 100644
+index 0000000..1aa073c
+--- /dev/null
++++ b/src/xrEngine/CampaignServerClock.cpp
+@@ -0,0 +1,145 @@
++#include "stdafx.h"
++#include "CampaignServerClock.h"
++
++#include "IGame_Persistent.h"
++#include "Stats.h"
++
++CCampaignServerClock::CCampaignServerClock(u32 tick_ms_, u32 max_catchup_ticks_)
++	: tick_ms(tick_ms_), max_catchup_ticks(max_catchup_ticks_), running(false), paused(false),
++	  owns_statistic(false), owns_scheduler_slot(false), wall_base(0), ticks_since_base(0),
++	  pause_started(0)
++{
++	R_ASSERT2(tick_ms != 0, "Campaign clock needs a nonzero tick");
++	ZeroMemory(&counters, sizeof(counters));
++	scheduler_slot.owner = this;
++}
++
++CCampaignServerClock::~CCampaignServerClock()
++{
++	if (running)
++		Stop();
++}
++
++void CCampaignServerClock::Start(u32 wall_ms)
++{
++	R_ASSERT2(!running, "Campaign clock already running");
++	Device.dwFrame = 0;
++	Core.dwFrame = 0;
++	Device.dwTimeGlobal = 0;
++	Device.dwTimeDelta = 0;
++	Device.dwTimeContinual = 0;
++	Device.fTimeGlobal = 0.f;
++	Device.fTimeDelta = 0.f;
++
++	// The scheduler reports its timing through Device.Statistic, which the
++	// native client creates in Device.Create. CStats holds only counters here;
++	// its render registration is never processed by the server.
++	if (!Device.Statistic)
++	{
++		Device.Statistic = xr_new<CStats>();
++		owns_statistic = true;
++	}
++
++	// Natively CGamePersistent::OnFrame (priority HIGH+1) runs the scheduler.
++	// Without that object the driver takes the same slot, so it still runs
++	// exactly once per tick in the same order.
++	if (!g_pGamePersistent)
++	{
++		Device.seqFrame.Add(&scheduler_slot, REG_PRIORITY_HIGH + 1);
++		owns_scheduler_slot = true;
++	}
++
++	wall_base = wall_ms;
++	ticks_since_base = 0;
++	paused = false;
++	running = true;
++}
++
++void CCampaignServerClock::Stop()
++{
++	R_ASSERT2(running, "Campaign clock is not running");
++	if (owns_scheduler_slot)
++		Device.seqFrame.Remove(&scheduler_slot);
++	owns_scheduler_slot = false;
++	if (owns_statistic)
++		xr_delete(Device.Statistic);
++	owns_statistic = false;
++	running = false;
++	paused = false;
++}
++
++u32 CCampaignServerClock::Advance(u32 wall_ms)
++{
++	if (!running || paused)
++		return 0;
++
++	const u64 due_total = u64(wall_ms - wall_base) / tick_ms;
++	if (due_total <= ticks_since_base)
++		return 0;
++	const u64 due = due_total - ticks_since_base;
++	const u32 debt_ms = u32((due - 1) * tick_ms);
++	if (debt_ms > counters.max_debt_ms)
++		counters.max_debt_ms = debt_ms;
++
++	const u64 run = _min(due, u64(max_catchup_ticks) + 1);
++	for (u64 i = 0; i < run; ++i)
++		Tick();
++	counters.catchup_ticks += run - 1;
++	ticks_since_base += run;
++
++	if (due > run)
++	{
++		// Beyond the catch-up bound: simulation time does not advance for the
++		// rest, and the dropped wall time is reported.
++		const u64 dropped = (due - run) * tick_ms;
++		counters.dropped_ms += dropped;
++		ticks_since_base += due - run;
++		Msg("! campaign clock: %u ms behind; ran %u ticks, dropped %u ms of simulation time",
++			debt_ms, u32(run), u32(dropped));
++	}
++	return u32(run);
++}
++
++void CCampaignServerClock::Pause(u32 wall_ms)
++{
++	R_ASSERT2(running && !paused, "Campaign clock cannot pause");
++	paused = true;
++	pause_started = wall_ms;
++}
++
++void CCampaignServerClock::Resume(u32 wall_ms)
++{
++	R_ASSERT2(running && paused, "Campaign clock cannot resume");
++	const u32 paused_for = wall_ms - pause_started;
++	counters.paused_ms += paused_for;
++	// Paused wall time is not owed to the simulation.
++	wall_base += paused_for;
++	paused = false;
++}
++
++void CCampaignServerClock::Tick()
++{
++	Device.dwFrame++;
++	Core.dwFrame = Device.dwFrame;
++	Device.dwTimeDelta = tick_ms;
++	Device.dwTimeGlobal += tick_ms;
++	Device.dwTimeContinual = Device.dwTimeGlobal;
++	Device.fTimeDelta = float(tick_ms) / 1000.f;
++	Device.fTimeGlobal = float(Device.dwTimeGlobal) / 1000.f;
++
++	Device.seqFrame.Process(rp_Frame);
++
++	for (u32 i = 0; i < Device.seqParallel.size(); ++i)
++		Device.seqParallel[i]();
++	counters.parallel_jobs += Device.seqParallel.size();
++	Device.seqParallel.clear_not_free();
++
++	Device.seqFrameMT.Process(rp_Frame);
++	++counters.ticks;
++}
++
++void CCampaignServerClock::SchedulerSlot::OnFrame()
++{
++	Engine.Sheduler.Update();
++	++owner->counters.scheduler_updates;
++}
+diff --git a/src/xrEngine/CampaignServerClock.h b/src/xrEngine/CampaignServerClock.h
+new file mode 100644
+index 0000000..5d2f957
+--- /dev/null
++++ b/src/xrEngine/CampaignServerClock.h
+@@ -0,0 +1,70 @@
++#pragma once
++
++#include "pure.h"
++
++// Server simulation clock and serial frame driver for the campaign server
++// (S02-T04). Simulation time advances only in whole ticks, so Device's integer,
++// float and frame clocks always agree. Wall time decides how many ticks are
++// due: a late frame is caught up with at most max_catchup_ticks extra ticks,
++// and any remaining debt is dropped and counted, never silently absorbed.
++// Pause is an explicit server state; paused wall time never becomes debt.
++//
++// One tick, in order:
++//   1. advance Device frame and clocks by exactly one tick
++//   2. Device.seqFrame in priority order; with no game persistent object the
++//      driver runs Engine.Sheduler.Update in the persistent slot (HIGH+1)
++//   3. queued Device.seqParallel jobs, each exactly once
++//   4. Device.seqFrameMT, run serially on this thread
++class ENGINE_API CCampaignServerClock
++{
++public:
++	struct Counters
++	{
++		u64 ticks;
++		u64 catchup_ticks; // ticks beyond the first in one Advance call
++		u64 dropped_ms; // debt dropped beyond the catch-up bound
++		u64 paused_ms; // wall time spent paused
++		u64 parallel_jobs; // seqParallel jobs run
++		u32 max_debt_ms; // largest debt seen by one Advance call
++		u32 scheduler_updates;
++	};
++
++	CCampaignServerClock(u32 tick_ms, u32 max_catchup_ticks);
++	~CCampaignServerClock();
++
++	// Takes over Device's clocks at tick 0 and installs the scheduler slot.
++	void Start(u32 wall_ms);
++	void Stop();
++	// Runs the ticks due by wall_ms and returns how many ran.
++	u32 Advance(u32 wall_ms);
++	void Pause(u32 wall_ms);
++	void Resume(u32 wall_ms);
++
++	bool Running() const { return running; }
++	bool Paused() const { return paused; }
++	u32 TickMs() const { return tick_ms; }
++	// Wall time at which the next tick is due.
++	u32 NextTickWallMs() const { return wall_base + u32(ticks_since_base + 1) * tick_ms; }
++	const Counters& Stats() const { return counters; }
++
++private:
++	void Tick();
++
++	struct SchedulerSlot : public pureFrame
++	{
++		CCampaignServerClock* owner;
++		virtual void _BCL OnFrame();
++	};
++
++	u32 tick_ms;
++	u32 max_catchup_ticks;
++	bool running;
++	bool paused;
++	bool owns_statistic;
++	bool owns_scheduler_slot;
++	u32 wall_base; // wall time of the last rebase
++	u64 ticks_since_base;
++	u32 pause_started;
++	Counters counters;
++	SchedulerSlot scheduler_slot;
++};
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 8c13e4a..f95f729 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -960,6 +960,8 @@ ENGINE_API bool g_campaign_server = false;
+ 
+ #include "GameMtlLib.h"
+ #include "Render.h"
++#include "CampaignServerClock.h"
++#include "ISheduled.h"
+ #include "EnnumerateVertices.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "../Include/xrRender/KinematicsAnimated.h"
+@@ -1128,6 +1130,189 @@ bool RunCampaignModelFixture(LPCSTR command_line)
+         stats.skipped_geometry != 0 && stats.skipped_buffers != 0;
+ }
+ 
++// The campaign frame driver (S02-T04a): 20 ms ticks and at most 5 catch-up
++// ticks per wall frame unless -campaign-tick-ms overrides the tick.
++CCampaignServerClock* g_campaign_clock = nullptr;
++u32 g_campaign_tick_ms = 20;
++CTimer g_campaign_wall;
++
++bool StartCampaignFrameDriver()
++{
++    g_campaign_clock = xr_new<CCampaignServerClock>(g_campaign_tick_ms, 5);
++    g_campaign_wall.Start();
++    g_campaign_clock->Start(g_campaign_wall.GetElapsed_ms());
++    // Loading is not simulation time: the clock stays paused until the
++    // simulation begins.
++    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++    return true;
++}
++
++void StopCampaignFrameDriver()
++{
++    g_campaign_clock->Stop();
++    xr_delete(g_campaign_clock);
++}
++
++// Test probes for the frame driver fixture. Ids record the callback order:
++// 1 app slot (HIGH+1000), 2 scheduled probe, 3 NORMAL, 4 LOW, 5 parallel job,
++// 6 seqFrameMT. Each tick must log 1 [2] 3 4 5 6.
++struct FrameDriverProbe
++{
++    struct Frame : pureFrame
++    {
++        FrameDriverProbe* owner;
++        u32 id;
++        virtual void _BCL OnFrame() { owner->OnProbe(id); }
++    };
++    struct Scheduled : ISheduled
++    {
++        FrameDriverProbe* owner;
++        u32 calls = 0;
++        u64 dt_sum = 0;
++        float shedule_Scale() override { return 0.f; }
++        bool shedule_Needed() override { return true; }
++        shared_str shedule_Name() const override { return shared_str("s02_t04_frame_probe"); }
++        void shedule_Update(u32 dt) override
++        {
++            ISheduled::shedule_Update(dt);
++            ++calls;
++            dt_sum += dt;
++            owner->order.push_back(2);
++        }
++    };
++
++    Frame app, normal, low, mt;
++    Scheduled scheduled;
++    xr_vector<u32> order;
++    u32 last_frame = 0, clock_violations = 0, order_violations = 0;
++
++    void OnProbe(u32 id)
++    {
++        order.push_back(id);
++        if (id == 1)
++        {
++            // Clocks advance by exactly one tick and stay consistent.
++            const u32 tick = g_campaign_clock->TickMs();
++            if (Device.dwFrame != last_frame + 1 || Device.dwTimeDelta != tick ||
++                Device.dwTimeGlobal != Device.dwFrame * tick ||
++                Device.fTimeDelta != float(tick) / 1000.f ||
++                Device.fTimeGlobal != float(Device.dwTimeGlobal) / 1000.f)
++                ++clock_violations;
++            last_frame = Device.dwFrame;
++        }
++        if (id == 3)
++            Device.seqParallel.push_back(fastdelegate::FastDelegate0<>(this, &FrameDriverProbe::Job));
++    }
++    void Job() { order.push_back(5); }
++
++    void Register()
++    {
++        app.owner = normal.owner = low.owner = mt.owner = this;
++        scheduled.owner = this;
++        app.id = 1; normal.id = 3; low.id = 4; mt.id = 6;
++        last_frame = Device.dwFrame;
++        Device.seqFrame.Add(&app, REG_PRIORITY_HIGH + 1000);
++        Device.seqFrame.Add(&normal, REG_PRIORITY_NORMAL);
++        Device.seqFrame.Add(&low, REG_PRIORITY_LOW);
++        Device.seqFrameMT.Add(&mt, REG_PRIORITY_NORMAL);
++        scheduled.shedule.t_min = 20;
++        scheduled.shedule.t_max = 100;
++        scheduled.shedule_register();
++    }
++    void Unregister()
++    {
++        scheduled.shedule_unregister();
++        Device.seqFrameMT.Remove(&mt);
++        Device.seqFrame.Remove(&low);
++        Device.seqFrame.Remove(&normal);
++        Device.seqFrame.Remove(&app);
++    }
++    void CheckOrder()
++    {
++        // Split at each 1 and compare each tick's sequence.
++        for (size_t i = 0; i < order.size();)
++        {
++            size_t j = i + 1;
++            while (j < order.size() && order[j] != 1)
++                ++j;
++            static const u32 plain[] = {1, 3, 4, 5, 6};
++            static const u32 probed[] = {1, 2, 3, 4, 5, 6};
++            const size_t size = j - i;
++            const bool with_probe = size == 6 && order[i + 1] == 2;
++            const u32* expect = with_probe ? probed : plain;
++            const size_t n = with_probe ? 6 : 5;
++            if (size != n || !std::equal(order.begin() + i, order.begin() + j, expect))
++                ++order_violations;
++            i = j;
++        }
++    }
++};
++
++// Wall-paced ticks until the clock reaches target, sleeping between due ticks.
++void RunCampaignTicksTo(u64 target)
++{
++    while (g_campaign_clock->Stats().ticks < target)
++    {
++        const u32 now = g_campaign_wall.GetElapsed_ms();
++        const u32 next = g_campaign_clock->NextTickWallMs();
++        if (now < next)
++            Sleep(next - now);
++        g_campaign_clock->Advance(g_campaign_wall.GetElapsed_ms());
++    }
++}
++
++// 300 ticks with an injected 500 ms stall at tick 100 and a 300 ms pause at
++// tick 200 (H10: long frame, bounded catch-up, explicit pause).
++bool RunCampaignFrameDriverFixture()
++{
++    FrameDriverProbe probe;
++    probe.Register();
++    g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++    const u32 wall_start = g_campaign_wall.GetElapsed_ms();
++
++    RunCampaignTicksTo(100);
++    Sleep(500);
++    const u64 dropped_before = g_campaign_clock->Stats().dropped_ms;
++    const u32 stall_ran = g_campaign_clock->Advance(g_campaign_wall.GetElapsed_ms());
++    const u64 stall_dropped = g_campaign_clock->Stats().dropped_ms - dropped_before;
++
++    RunCampaignTicksTo(200);
++    const u32 calls_before_pause = probe.scheduled.calls;
++    const u64 ticks_before_pause = g_campaign_clock->Stats().ticks;
++    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++    Sleep(300);
++    const u32 paused_ran = g_campaign_clock->Advance(g_campaign_wall.GetElapsed_ms());
++    g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++    const u32 resume_ran = g_campaign_clock->Advance(g_campaign_wall.GetElapsed_ms());
++    const bool pause_still = g_campaign_clock->Stats().ticks - ticks_before_pause == resume_ran &&
++        probe.scheduled.calls - calls_before_pause <= resume_ran;
++
++    RunCampaignTicksTo(300);
++    probe.Unregister();
++    probe.CheckOrder();
++
++    const CCampaignServerClock::Counters& c = g_campaign_clock->Stats();
++    const u32 sim_ms = Device.dwTimeGlobal;
++    const u32 wall_ms = g_campaign_wall.GetElapsed_ms() - wall_start;
++    Msg("S02-T04 clock tick_ms=%u ticks=%u sim_ms=%u wall_ms=%u catchup_ticks=%u dropped_ms=%u paused_ms=%u "
++        "max_debt_ms=%u scheduler_updates=%u parallel_jobs=%u",
++        g_campaign_clock->TickMs(), u32(c.ticks), sim_ms, wall_ms, u32(c.catchup_ticks), u32(c.dropped_ms),
++        u32(c.paused_ms), c.max_debt_ms, c.scheduler_updates, u32(c.parallel_jobs));
++    Msg("S02-T04 probe order_violations=%u clock_violations=%u scheduled_calls=%u scheduled_dt_ms=%u "
++        "stall_ran=%u stall_dropped_ms=%u paused_ran=%u resume_ran=%u",
++        probe.order_violations, probe.clock_violations, probe.scheduled.calls, u32(probe.scheduled.dt_sum),
++        stall_ran, u32(stall_dropped), paused_ran, resume_ran);
++
++    // The scheduled probe's elapsed time is bounded by simulation time.
++    const bool scheduled_ok = probe.scheduled.calls != 0 && probe.scheduled.dt_sum <= sim_ms &&
++        probe.scheduled.dt_sum + 100 >= sim_ms - 2 * g_campaign_clock->TickMs();
++    return c.ticks >= 300 && sim_ms == u32(c.ticks) * g_campaign_clock->TickMs() &&
++        c.scheduler_updates == c.ticks && c.parallel_jobs == c.ticks && probe.order_violations == 0 &&
++        probe.clock_violations == 0 && scheduled_ok && stall_ran == 6 && stall_dropped != 0 &&
++        paused_ran == 0 && resume_ran <= 1 && pause_still && c.paused_ms >= 300 &&
++        c.dropped_ms == stall_dropped;
++}
++
+ // A failed check after loading still owns the loaded library.
+ bool StartCampaignMaterialsOrUnload()
+ {
+@@ -1187,6 +1372,16 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         }
+     }
+ 
++    if (LPCSTR tick_option = strstr(command_line, "-campaign-tick-ms "))
++    {
++        if (sscanf_s(tick_option + 18, "%u", &g_campaign_tick_ms) != 1 || g_campaign_tick_ms == 0 ||
++            g_campaign_tick_ms > 100)
++        {
++            fprintf(stderr, "S02-T04: -campaign-tick-ms needs 1-100.\n");
++            return 2;
++        }
++    }
++
+     g_campaign_server = true;
+     printf("S02-T02 stage=core-start\n");
+     compute_build_id();
+@@ -1274,7 +1469,8 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     xrCampaignGameGlobals_Initialize();
+                     return true;
+                 },
+-                {"campaign-registries-stopped", &xrCampaignGameGlobals_Destroy});
++                {"campaign-registries-stopped", &xrCampaignGameGlobals_Destroy}) &&
++            start("frame-driver", &StartCampaignFrameDriver, {"frame-driver-stopped", &StopCampaignFrameDriver});
+ 
+         bool fixture_ready = services_ready;
+         if (services_ready)
+@@ -1284,6 +1480,13 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             if (!fixture_ready)
+                 result = 5;
+         }
++        if (fixture_ready)
++        {
++            fixture_ready = RunCampaignFrameDriverFixture();
++            stage(fixture_ready ? "frame-driver-fixture-passed" : "frame-driver-fixture-failed");
++            if (!fixture_ready)
++                result = 6;
++        }
+ 
+         if (fixture_ready)
+         {
+diff --git a/src/xrEngine/xrEngine.vcxproj b/src/xrEngine/xrEngine.vcxproj
+index a6681c8..7ebcdd3 100644
+--- a/src/xrEngine/xrEngine.vcxproj
++++ b/src/xrEngine/xrEngine.vcxproj
+@@ -934,6 +934,7 @@
+     <ClInclude Include="xrLevel.h" />
+     <ClInclude Include="xrSASH.h" />
+     <ClInclude Include="xrSheduler.h" />
++    <ClInclude Include="CampaignServerClock.h" />
+     <ClInclude Include="xrTheora_Stream.h" />
+     <ClInclude Include="xrTheora_Surface.h" />
+     <ClInclude Include="xrTheora_Surface_mmx.h" />
+@@ -1052,6 +1053,7 @@
+     <ClCompile Include="xrImage_Resampler.cpp" />
+     <ClCompile Include="xrSASH.cpp" />
+     <ClCompile Include="xrSheduler.cpp" />
++    <ClCompile Include="CampaignServerClock.cpp" />
+     <ClCompile Include="xrTheora_Stream.cpp" />
+     <ClCompile Include="xrTheora_Surface.cpp" />
+     <ClCompile Include="xrTheora_Surface_mmx.cpp" />

@@ -17,6 +17,8 @@ on, so the client is unchanged. The campaign server loads materials with it off.
 `0005-cpu-only-models.patch` (S02-T03b) attaches the renderer module with no
 device, creates only its model pool, skips and counts shader, geometry and GPU
 buffer creation, and registers bone materials without the persistent object.
+`0006-campaign-frame-driver.patch` (S02-T04a) adds `CCampaignServerClock`, the
+server's tick-based clock and serial frame driver, with pause and bounded catch-up.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

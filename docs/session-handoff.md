@@ -1,5 +1,16 @@
 # Session handoff — S02-T05a/b complete; next S02-T05d (level load, spawn, first tick)
 
+## Next session: start S02-T05d
+
+Begin with S02-T05d (renderer-free level load, spawn and first tick) using the
+suffix-task entry in `plan.md`, this handoff and the findings below. The work
+mixes engine edits in `builds/build_1/engine-work`, Windows builds through
+`tools/Build-Stage2.ps1`, and smoke runs through `tools/Run-Stage2Smoke.ps1`.
+Keep the rhythm used so far: finish one step, export the patch, record the
+result in the task report, then commit. Smart App Control is off on this
+machine, so newly built unsigned executables run; if a launch fails with
+"Application Control policy has blocked this file", it has been turned back on.
+
 G02 is In Progress. No headless gameplay, level geometry, physics step or
 simulation tick has run yet. Stage 2 status (details in `plan.md`):
 

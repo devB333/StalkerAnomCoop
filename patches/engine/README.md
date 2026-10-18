@@ -95,6 +95,10 @@ frame sequence) and never drawn. The HUD manager is created on the server too.
 The smoke's loaded report expects `hud=1 game_ui=1 ui_in_frame=0`, and its
 tick report prints the script binder update time and the level frame's pump
 times (`SLevelFrameTiming`, measured on both products). The client is unchanged.
+`0017-alife-actor-position-check.patch` (S02-T06b) adds the smoke's ALife
+actor position check: the actor is teleported 3 m as the script API does, 50
+ticks run, and the live and ALife positions are compared (stage
+`campaign-actor-position-passed`). Server smoke only; no behaviour changes.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

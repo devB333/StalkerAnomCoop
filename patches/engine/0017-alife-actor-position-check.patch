@@ -1,0 +1,119 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index a30334c..e6d53e0 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -994,6 +994,8 @@ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_m
+ extern "C" bool __cdecl xrCampaignLevel_HearingFixtureBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_HearingFixtureTick();
+ extern "C" bool __cdecl xrCampaignLevel_HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++extern "C" bool __cdecl xrCampaignLevel_ActorPositionBegin(float offset_m);
++extern "C" bool __cdecl xrCampaignLevel_ActorPositionEnd(u32 ticks);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1818,6 +1820,28 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 16;
+                     }
+                 }
++                if (result == 0)
++                {
++                    // S02-T06b: the ALife actor must follow the live actor
++                    // (the host exports it every frame); teleport 3 m, run
++                    // 50 ticks (1 s), compare.
++                    bool ok = xrCampaignLevel_ActorPositionBegin(3.f);
++                    if (ok)
++                    {
++                        const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                        g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                        RunCampaignTicksTo(ticks_before + 50);
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                        ok = xrCampaignLevel_ActorPositionEnd(u32(g_campaign_clock->Stats().ticks - ticks_before));
++                    }
++                    if (ok)
++                        stage("campaign-actor-position-passed");
++                    else
++                    {
++                        stage("campaign-actor-position-failed");
++                        result = 17;
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+index c838710..3a75b74 100644
+--- a/src/xrGame/CampaignServerStart.cpp
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -30,6 +30,8 @@
+ #include "../xrphysics/iphworld.h"
+ #include "../xrEngine/CustomHUD.h"
+ #include "UIGameCustom.h"
++#include "CharacterPhysicsSupport.h"
++#include "PHMovementControl.h"
+ void ScriptBinderUpdateStats(float& total_ms, float& actor_ms, u32& actor_calls); // script_binder.cpp
+ #include "../xrEngine/Engine.h"
+ #include "../xrEngine/x_ray.h"
+@@ -310,3 +312,63 @@ extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks)
+ 	}
+ 	return objects != 0 && actors == 1 && actor && actor->g_Alive() && steps != 0 && no_view;
+ }
++
++// S02-T06b: does the server's ALife actor follow the live actor? In single
++// player the host exports every relevant object each frame
++// (CLevel::ClientSend → M_UPDATE → xrServer::Process_update → UPDATE_Read),
++// which rewrites CSE_ALifeCreatureAbstract::o_Position; the switch manager
++// measures distances from it. The check teleports the actor the way the
++// script API does (CScriptGameObject::SetActorPosition with collision
++// correction skipped), lets the ticks run, and compares the live and ALife
++// positions. S02-T04c had seen objects at the 675 m boundary switch online on
++// the client only.
++static Fvector g_actor_position_target;
++static Fvector g_actor_position_before;
++static Fvector g_actor_se_before;
++
++extern "C" bool __cdecl xrCampaignLevel_ActorPositionBegin(float offset_m)
++{
++	CActor* actor = g_actor;
++	const CSE_ALifeCreatureActor* se_actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
++	if (!actor || !se_actor || !actor->g_Alive())
++	{
++		Msg("! S02-T06b actor position: no alive actor or no ALife actor");
++		return false;
++	}
++	g_actor_position_before = actor->Position();
++	g_actor_se_before = se_actor->o_Position;
++	Fvector target = actor->Position();
++	target.x += offset_m;
++	Fmatrix F = actor->XFORM();
++	F.c = target;
++	actor->XFORM().set(F);
++	if (actor->character_physics_support()->movement()->CharacterExist())
++	{
++		actor->character_physics_support()->movement()->SetPosition(F.c);
++		actor->character_physics_support()->movement()->SetVelocity(0.f, 0.f, 0.f);
++	}
++	g_actor_position_target = target;
++	Msg("S02-T06b actor position: teleported from [%.2f,%.2f,%.2f] (alife [%.2f,%.2f,%.2f]) to [%.2f,%.2f,%.2f]",
++		VPUSH(g_actor_position_before), VPUSH(g_actor_se_before), VPUSH(target));
++	return true;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_ActorPositionEnd(u32 ticks)
++{
++	CActor* actor = g_actor;
++	const CSE_ALifeCreatureActor* se_actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
++	if (!actor || !se_actor)
++		return false;
++	const Fvector live = actor->Position();
++	const Fvector alife = se_actor->o_Position;
++	const float live_moved = live.distance_to(g_actor_position_before);
++	const float alife_moved = alife.distance_to(g_actor_se_before);
++	const float gap = live.distance_to(alife);
++	const bool moved = live_moved > 0.5f; // the actor stayed where it was put (physics may settle it)
++	const bool followed = gap < 0.25f;
++	Msg("S02-T06b actor position after %u ticks: live=[%.2f,%.2f,%.2f] moved=%.2f alife=[%.2f,%.2f,%.2f] "
++		"alife_moved=%.2f gap=%.3f relevant=%d ok=%d",
++		ticks, VPUSH(live), live_moved, VPUSH(alife), alife_moved, gap, actor->net_Relevant() ? 1 : 0,
++		moved && followed ? 1 : 0);
++	return moved && followed;
++}

@@ -73,6 +73,10 @@
     {
       "path": "patches/engine/0016-inert-server-game-ui.patch",
       "sha256": "fe0909a17873340418a6011f6242391f138deaa7ae89d62219c683caf83bfa01"
+    },
+    {
+      "path": "patches/engine/0017-alife-actor-position-check.patch",
+      "sha256": "3242b7fddeb77709e5ea38b7b4813d46957356ead65a986953ef4703f6daaaa6"
     }
   ],
   "submodules": [

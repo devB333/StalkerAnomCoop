@@ -221,6 +221,13 @@ kept as the pre-implementation map.
 - **B09.** The native idle loop never pumps loading events while the device is
   not ready (`xrEngine/device.cpp:405-409`); the campaign server pumps
   `g_loading_events` itself with a deadline.
+- **B06/B08 (S02-T05d).** The client stages run with the HUD, render-level
+  load, texture upload and precache skipped; CFORM, physics world, level
+  scripts and `game_cl_Single` are real. `M_SPAWN` events are processed on the
+  first `CLevel::OnFrame` inline, because the spawn-antifreeze prefetch path
+  needs the prefetch thread. A native fallback makes the first spawned stalker
+  the current entity when there is no view entity
+  (`xrGame/ai/stalker/ai_stalker.cpp:739`); the campaign server skips it.
 - **B10.** `CGamePersistent::OnFrame` skips the scheduler until the level is ready
   and while paused; the campaign clock runs the scheduler every tick in the
   persistent slot instead and never registers the persistent frame.

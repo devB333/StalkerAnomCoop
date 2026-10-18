@@ -32,6 +32,13 @@ xrServer, game_sv_Single and ALife from the fixture save with no device: loading
 stages are pumped explicitly, the particle library loads on the CPU, the engine's
 -nosound manager stands in for sound, and the presentation calls on that path are
 guarded (render-resource dump, camera reset, input release, logo, wallmarks).
+`0010-campaign-level-load.patch` (S02-T05d) runs the client loading stages and
+the first server ticks with no device: CFORM, physics world, client game state
+and level scripts load for real while the HUD, render-level load, texture upload
+and precache are skipped; spawns stay inline; the campaign server adopts no
+control or view entity (including the stalker fallback); map locations keep
+their data without spot widgets; the actor stores its PDA task filters; HUD-pick
+users and light shader creation are guarded.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

@@ -51,7 +51,8 @@ A service that fails to start logs `<service>-failed` and the process returns 4.
 | 6a | `application`: `CApplication` with its loading screen, font and level logo skipped; owns the level list, the `$level$` alias and the engine event frame ([S02-T05b](validation/S02-T05b.md)) | `xrEngine/x_ray.cpp`, `Startup` (`pApp`) | Implemented (Services) |
 | 7 | `persistent`: game parameters and environment data; UI, menu, fonts and prefetch skipped ([S02-T05a](validation/S02-T05a.md)) | `IGame_Persistent` / `CGamePersistent` constructor and `OnAppStart` | Implemented (Services) |
 | 8 | `CLevel`, `xrServer`, `game_sv_Single`, ALife from the fixture save: the native start sequence and the server loading stages `net_start1..3`, pumped explicitly with a deadline ([S02-T05b](validation/S02-T05b.md)) | `xrGame/Level_start.cpp:107-230`, `game_sv_single.cpp:26-35`, `alife_simulator.cpp:43-77` | Implemented (GameState) |
-| 9 | Client stages `net_start_client1..6` and `net_start5..6`: level geometry (CFORM), physics world, spawn processing, `game_cl_Single` | `Level_network_start_client.cpp`, `Level_start.cpp:233-363`, `IGame_Level.cpp:86-149` | **Next: S02-T05d** |
+| 9 | Client stages `net_start_client1..6` and `net_start5..6`: direct in-process connection, level geometry (CFORM), physics world, `game_cl_Single`, level script process, spawn queue; HUD, render-level load, texture upload and precache skipped ([S02-T05d](validation/S02-T05d.md)) | `Level_network_start_client.cpp`, `Level_start.cpp:233-363`, `IGame_Level.cpp:86-149` | Implemented (GameState) |
+| 10 | First server ticks through the campaign clock: `CLevel::OnFrame` processes the queued spawns inline, then objects, physics, network processor and scheduler update; no control or view entity is adopted ([S02-T05d](validation/S02-T05d.md)) | `Level.cpp` (`OnFrame`, `ProcessGameEvents`), `Level_network_spawn.cpp`, `CampaignServerClock.cpp` | Implemented (GameState) |
 
 Stage 5 runs before stage 6 because of a real dependency. Every `CXml::Load` calls
 `XMLLuaCallback` (`xrXMLParser/xrXMLParser.cpp:143`). That calls Lua
@@ -119,7 +120,7 @@ belongs to a later task. None may be bypassed with a placeholder.
    The rest of the `CLevel` constructor hasn't been tried: `CDebugRenderer`, the
    spawn-prefetch thread and the HUD/UI members. Separating the HUD is still
    S02-T05 (B04).
-5. **Game state needs `CLevel`** (remaining: `game_cl_Single` is constructed in the client stages, S02-T05d). `game_GameState` reads
+5. **Game state needs `CLevel`** (resolved by S02-T05d: `game_cl_Single` is constructed in the client stages, after stage 8). `game_GameState` reads
    `Level().timeServer_Async()` in its constructor (`xrGame/game_base.cpp:205`).
    So `game_cl_Single` comes after stage 8, as in native order.
 
@@ -142,8 +143,14 @@ not a pass.
 
 ## Limits
 
-- Stage 5 runs real installed scripts at startup only. No level script process,
-  ALife callback, task evaluation or Lua world access has run.
+- Stages 9–10 run the level script process and the installed scripts' object
+  binders for 50 ticks (1 s of simulation). No task evaluation, ALife offline
+  simulation, hit, hearing or save has been checked (S02-T04c, S02-T06).
+- The server adopts no control or view entity. The saved actor is a real,
+  enabled, local object and `g_actor`; its first-eye camera and the
+  single-actor `Actor()` assumptions are Stage 3 items (D1, G03).
+- NPC sound themes log `Couldnt find sounds …` for voice files while NPCs spawn
+  (1,002 in smoke-52); the accepted client logs none. Open, owned by S02-T05c.
 - Graphics absence is checked through engine state: `Device.m_hWnd`, `m_pRender`,
   `b_is_Ready`, `Render` and `pInput`. There is no trace of native graphics API
   calls.

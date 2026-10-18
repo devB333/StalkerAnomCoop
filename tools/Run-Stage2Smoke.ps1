@@ -59,7 +59,7 @@ $start.CreateNoWindow = $true
 $process = New-Object System.Diagnostics.Process
 $process.StartInfo = $start
 if (-not $process.Start()) { throw 'Smoke process did not start.' }
-# GameState loads a saved game (300 s startup watchdog inside the process).
+# GameState loads a saved game (300 s deadlines inside the process for the server and client stages).
 $timeoutMs = if ($Scope -eq 'GameState') { 420000 } else { 120000 }
 if (-not $process.WaitForExit($timeoutMs)) {
     $process.Kill()
@@ -87,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'level-context-required', 'campaign-stopped'); $expectedExit = 3 }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -103,8 +103,8 @@ $result.expected_stages = $expectedStages
 $result.expected_exit_code = $expectedExit
 $result.stages_passed = ($observedStages -join '|') -eq ($expectedStages -join '|')
 $result.outcome_as_expected = $result.exit_code -eq $expectedExit -and -not $result.timed_out -and $result.stages_passed
-# GameState still reports an unmet prerequisite, so it never counts as a pass.
-$result.passed = $result.outcome_as_expected -and $Scope -ne 'GameState'
+# A GameState pass means the renderer-free level load, spawn and first ticks completed (S02-T05d); it is not G02.
+$result.passed = $result.outcome_as_expected
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $logDir 'result.json')
 if (Test-Path $stagePath) { Get-Content $stagePath }
 if ($result.timed_out) { exit 124 }

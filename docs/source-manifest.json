@@ -45,6 +45,10 @@
     {
       "path": "patches/engine/0009-campaign-level-start.patch",
       "sha256": "17f391f4cd5a64108a1818d56f015213223d57a6a426419a61bf4298744673f0"
+    },
+    {
+      "path": "patches/engine/0010-campaign-level-load.patch",
+      "sha256": "83a288b799ba51e4dd23119cb0221b2e50cc437361312b68c8fb5715cb688804"
     }
   ],
   "submodules": [

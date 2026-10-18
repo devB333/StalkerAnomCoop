@@ -1,0 +1,687 @@
+diff --git a/src/Layers/xrRender/light.cpp b/src/Layers/xrRender/light.cpp
+index 7f74a62..e18eabc 100644
+--- a/src/Layers/xrRender/light.cpp
++++ b/src/Layers/xrRender/light.cpp
+@@ -1,5 +1,6 @@
+ #include "StdAfx.h"
+ #include "light.h"
++#include "CpuOnlyResources.h"
+ 
+ static const float SQRT2 = 1.4142135623730950488016887242097f;
+ static const float RSQRTDIV2 = 0.70710678118654752440084436210485f;
+@@ -73,6 +74,14 @@ void light::set_texture(LPCSTR name)
+ 		return;
+ 	}
+ 
++	// With no device (campaign server) the light keeps its CPU state; the
++	// projective and volumetric shaders are skipped and counted like any other.
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedShaders();
++		return;
++	}
++
+ #pragma todo				("Only shadowed spot implements projective texture")
+ 	string256 temp;
+ 
+diff --git a/src/xrEngine/IGame_Level.cpp b/src/xrEngine/IGame_Level.cpp
+index 0fab0ef..cbfecca 100644
+--- a/src/xrEngine/IGame_Level.cpp
++++ b/src/xrEngine/IGame_Level.cpp
+@@ -122,11 +122,18 @@ bool IGame_Level::Load(u32 dwNum)
+ 
+ 
+ 	// HUD + Environment
+-	if (!g_hud)
+-		g_hud = (CCustomHUD*)NEW_INSTANCE(CLSID_HUDMANAGER);
++	// The campaign server presents nothing (S02-T05d): the HUD creates hit
++	// marker and target shaders, and the render-level load is shaders,
++	// sectors, lights, details and occlusion. CFORM, sound geometry,
++	// environment modifiers, AI data and objects stay real.
++	if (!g_campaign_server)
++	{
++		if (!g_hud)
++			g_hud = (CCustomHUD*)NEW_INSTANCE(CLSID_HUDMANAGER);
+ 
+-	// Render-level Load
+-	Render->level_Load(LL_Stream);
++		// Render-level Load
++		Render->level_Load(LL_Stream);
++	}
+ 	// tscreate.FrameEnd ();
+ 	// Msg ("* S-CREATE: %f ms, %d times",tscreate.result,tscreate.count);
+ 
+@@ -139,7 +146,7 @@ bool IGame_Level::Load(u32 dwNum)
+ 	// Done
+ 	FS.r_close(LL_Stream);
+ 	bReady = true;
+-	if (!g_dedicated_server) IR_Capture();
++	if (!g_dedicated_server && pInput) IR_Capture();
+ #ifndef DEDICATED_SERVER
+ 	Device.seqRender.Add(this);
+ #endif
+@@ -202,7 +209,8 @@ void IGame_Level::OnFrame()
+ 	// Update all objects
+ 	VERIFY(bReady);
+ 	Objects.Update(false);
+-	g_hud->OnFrame();
++	if (g_hud)
++		g_hud->OnFrame();
+ 
+ 	// Ambience
+ 	if (Sounds_Random.size() && (Device.dwTimeGlobal > Sounds_Random_dwNextTime))
+diff --git a/src/xrEngine/device.cpp b/src/xrEngine/device.cpp
+index 60a0cc6..71d016a 100644
+--- a/src/xrEngine/device.cpp
++++ b/src/xrEngine/device.cpp
+@@ -243,7 +243,8 @@ void CRenderDevice::PreCache(u32 amount, bool b_draw_loadscreen, bool b_wait_use
+ #ifdef DEDICATED_SERVER
+     amount = 0;
+ #else
+-	if (m_pRender->GetForceGPU_REF())
++	// With no render device (campaign server) there is nothing to precache.
++	if (!m_pRender || m_pRender->GetForceGPU_REF())
+ 		amount = 0;
+ #endif
+ 
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index dba52ce..8596b77 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -980,6 +980,9 @@ extern "C" u32 __cdecl xrCampaignRegisteredModels();
+ extern "C" bool __cdecl xrCampaignLevel_Start(LPCSTR op_server, LPCSTR op_client);
+ extern "C" int __cdecl xrCampaignLevel_PumpServerStages(u32 deadline_ms);
+ extern "C" bool __cdecl xrCampaignLevel_Report();
++extern "C" int __cdecl xrCampaignLevel_PumpClientStages(u32 deadline_ms);
++extern "C" bool __cdecl xrCampaignLevel_ReportLoaded();
++extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1236,6 +1239,8 @@ bool RunCampaignPersistentFixture()
+ // ticks per wall frame unless -campaign-tick-ms overrides the tick.
+ CCampaignServerClock* g_campaign_clock = nullptr;
+ u32 g_campaign_tick_ms = 20;
++// Server ticks run after the level loads (S02-T05d); -campaign-ticks overrides.
++u32 g_campaign_level_ticks = 50;
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -1505,6 +1510,16 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         }
+     }
+ 
++    if (LPCSTR ticks_option = strstr(command_line, "-campaign-ticks "))
++    {
++        if (sscanf_s(ticks_option + 16, "%u", &g_campaign_level_ticks) != 1 || g_campaign_level_ticks == 0 ||
++            g_campaign_level_ticks > 100000)
++        {
++            fprintf(stderr, "S02-T05d: -campaign-ticks needs 1-100000.\n");
++            return 2;
++        }
++    }
++
+     g_campaign_server = true;
+     printf("S02-T02 stage=core-start\n");
+     compute_build_id();
+@@ -1639,8 +1654,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             // Native start sequence (KERNEL:start) for the fixture save, then the
+             // server loading stages: xrServer, game_sv_Single and ALife, which
+             // chooses and loads the level's AI graph. Loading is not simulation
+-            // time, so the clock pauses. The client stages, which load the level
+-            // geometry and spawn objects, are S02-T05d.
++            // time, so the clock pauses.
+             g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
+             const bool created = xrCampaignLevel_Start("player - autosave/single/alife/load", "localhost");
+             stage(created ? "campaign-level-created" : "campaign-level-failed");
+@@ -1659,9 +1673,35 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             }
+             if (result == 0)
+             {
+-                Msg("S02-T05 blocker=level-load: the client stages (level geometry, physics, spawn) are S02-T05d");
+-                stage("level-context-required");
+-                result = 3;
++                // S02-T05d: the client stages load the level (CFORM, AI data,
++                // physics world, level scripts, client game state) with no
++                // HUD, render level or precache, and queue the spawns.
++                const int pumped = xrCampaignLevel_PumpClientStages(300000);
++                if (pumped == 0 && xrCampaignLevel_ReportLoaded())
++                    stage("campaign-level-loaded");
++                else
++                {
++                    stage(pumped == 1 ? "campaign-level-timeout" : "campaign-level-load-failed");
++                    result = 11;
++                }
++            }
++            if (result == 0)
++            {
++                // The first server ticks: the first CLevel::OnFrame processes
++                // the queued spawns; later ticks update the objects, the
++                // physics world, the network processor and the scheduler.
++                const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                RunCampaignTicksTo(ticks_before + g_campaign_level_ticks);
++                g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                if (xrCampaignLevel_ReportTicks(ran))
++                    stage("campaign-ticked");
++                else
++                {
++                    stage("campaign-tick-failed");
++                    result = 12;
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrEngine/xr_object_list.cpp b/src/xrEngine/xr_object_list.cpp
+index 78149d4..b22df4d 100644
+--- a/src/xrEngine/xr_object_list.cpp
++++ b/src/xrEngine/xr_object_list.cpp
+@@ -293,7 +293,8 @@ void CObjectList::Update(bool bForce)
+ 			for (; dIt != dIte; ++dIt)
+ 			{
+ 				(*It).m_Callback(*dIt);
+-				g_hud->net_Relcase(*dIt);
++				if (g_hud)
++					g_hud->net_Relcase(*dIt);
+ 			}
+ 		}
+ 
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index 0ddb529..9634ba6 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -228,6 +228,7 @@ CActor::CActor() : CEntityAlive(), current_ik_cam_shift(0)
+ 	//-----------------------------------------------------------------------------------
+ 	m_memory = g_dedicated_server ? 0 : xr_new<CActorMemory>(this);
+ 	m_bOutBorder = false;
++	m_pda_task_filters.assign(ePdaTreasures | ePdaQuestNpcs | ePdaSecondaryTasks | ePdaPrimaryObjects);
+ 	m_hit_probability = 1.f;
+ 	m_feel_touch_characters = 0;
+ 	//-----------------------------------------------------------------------------------
+@@ -1401,7 +1402,7 @@ void CActor::UpdateCL()
+ 	//g_pGamePersistent->actor_data.helmet = !GetOutfit()->bIsHelmetAvaliable || inventory().ItemFromSlot(HELMET_SLOT) ? 1 : 0;
+ 
+ 	// Update environment radiation value if hud is not shown
+-	if (!psHUD_Flags.test(HUD_DRAW))
++	if (!psHUD_Flags.test(HUD_DRAW) && CurrentGameUI())
+ 		CurrentGameUI()->UIMainIngameWnd->get_hud_states()->UpdateZones();
+ }
+ 
+@@ -2009,7 +2010,9 @@ void CActor::shedule_Update(u32 DT)
+ 		setVisible(TRUE);
+ 
+ 	//÷òî àêòåð âèäèò ïåðåä ñîáîé
+-	collide::rq_result& RQ = HUD().GetRQ();
++	// The HUD's camera pick; with no HUD (campaign server) nothing is looked at.
++	static collide::rq_result no_pick = collide::rq_result().set(NULL, 0.f, 0);
++	collide::rq_result& RQ = g_hud ? HUD().GetRQ() : no_pick;
+ 
+ 
+ 	if (!input_external_handler_installed() && RQ.O && RQ.O->getVisible() && RQ.range < 2.0f)
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 481b171..69818b5 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -259,6 +259,16 @@ protected:
+ 	s32 m_ShotRndSeed;
+ 
+ 	bool m_bOutBorder;
++	// PDA task filters saved with the actor. They live in the task window
++	// when a HUD exists; without one (campaign server) the actor keeps them.
++	enum EPdaTaskFilters : u8
++	{
++		ePdaTreasures = 1 << 0,
++		ePdaQuestNpcs = 1 << 1,
++		ePdaSecondaryTasks = 1 << 2,
++		ePdaPrimaryObjects = 1 << 3,
++	};
++	Flags8 m_pda_task_filters;
+ 	//сохраняет счетчик объектов в feel_touch, для которых необходимо обновлять размер колижена с актером
+ 	u32 m_feel_touch_characters;
+ private:
+diff --git a/src/xrGame/Actor_Feel.cpp b/src/xrGame/Actor_Feel.cpp
+index 4121392..faf4627 100644
+--- a/src/xrGame/Actor_Feel.cpp
++++ b/src/xrGame/Actor_Feel.cpp
+@@ -359,7 +359,8 @@ void CActor::feel_sound_new(CObject* who, int type, CSound_UserDataPtr user_data
+ 
+ void CActor::Feel_Grenade_Update( float rad )
+ {
+-	if ( !IsGameTypeSingle() )
++	// Grenade marks are HUD indicators; nothing to feel without a HUD.
++	if ( !IsGameTypeSingle() || !g_hud )
+ 	{
+ 		return;
+ 	}
+diff --git a/src/xrGame/Actor_Network.cpp b/src/xrGame/Actor_Network.cpp
+index 1d185f8..6cf5ab1 100644
+--- a/src/xrGame/Actor_Network.cpp
++++ b/src/xrGame/Actor_Network.cpp
+@@ -800,7 +800,8 @@ void CActor::net_Relcase(CObject* O)
+ 
+ 	m_pPhysics_support->in_NetRelcase(O);
+ 
+-	HUD().net_Relcase(O);
++	if (g_hud)
++		HUD().net_Relcase(O);
+ }
+ 
+ BOOL CActor::net_Relevant() // relevant for export to server
+@@ -1374,11 +1375,19 @@ void CActor::save(NET_Packet& output_packet)
+ 	inherited::save(output_packet);
+ 	CInventoryOwner::save(output_packet);
+ 	output_packet.w_u8(u8(m_bOutBorder));
+-	CUITaskWnd* task_wnd = HUD().GetGameUI()->GetPdaMenu().pUITaskWnd;
+-	output_packet.w_u8(task_wnd->IsTreasuresEnabled() ? 1 : 0);
+-	output_packet.w_u8(task_wnd->IsQuestNpcsEnabled() ? 1 : 0);
+-	output_packet.w_u8(task_wnd->IsSecondaryTasksEnabled() ? 1 : 0);
+-	output_packet.w_u8(task_wnd->IsPrimaryObjectsEnabled() ? 1 : 0);
++	// The task window owns the filters when a HUD exists; otherwise the
++	// actor's copy (loaded from the save) is written back unchanged.
++	if (CUITaskWnd* task_wnd = g_hud ? HUD().GetGameUI()->GetPdaMenu().pUITaskWnd : nullptr)
++	{
++		m_pda_task_filters.set(ePdaTreasures, task_wnd->IsTreasuresEnabled());
++		m_pda_task_filters.set(ePdaQuestNpcs, task_wnd->IsQuestNpcsEnabled());
++		m_pda_task_filters.set(ePdaSecondaryTasks, task_wnd->IsSecondaryTasksEnabled());
++		m_pda_task_filters.set(ePdaPrimaryObjects, task_wnd->IsPrimaryObjectsEnabled());
++	}
++	output_packet.w_u8(m_pda_task_filters.test(ePdaTreasures) ? 1 : 0);
++	output_packet.w_u8(m_pda_task_filters.test(ePdaQuestNpcs) ? 1 : 0);
++	output_packet.w_u8(m_pda_task_filters.test(ePdaSecondaryTasks) ? 1 : 0);
++	output_packet.w_u8(m_pda_task_filters.test(ePdaPrimaryObjects) ? 1 : 0);
+ 
+ 	output_packet.w_stringZ(g_quick_use_slots[0]);
+ 	output_packet.w_stringZ(g_quick_use_slots[1]);
+@@ -1391,11 +1400,17 @@ void CActor::load(IReader& input_packet)
+ 	inherited::load(input_packet);
+ 	CInventoryOwner::load(input_packet);
+ 	m_bOutBorder = !!(input_packet.r_u8());
+-	CUITaskWnd* task_wnd = HUD().GetGameUI()->GetPdaMenu().pUITaskWnd;
+-	task_wnd->TreasuresEnabled(!!input_packet.r_u8());
+-	task_wnd->QuestNpcsEnabled(!!input_packet.r_u8());
+-	task_wnd->SecondaryTasksEnabled(!!input_packet.r_u8());
+-	task_wnd->PrimaryObjectsEnabled(!!input_packet.r_u8());
++	m_pda_task_filters.set(ePdaTreasures, !!input_packet.r_u8());
++	m_pda_task_filters.set(ePdaQuestNpcs, !!input_packet.r_u8());
++	m_pda_task_filters.set(ePdaSecondaryTasks, !!input_packet.r_u8());
++	m_pda_task_filters.set(ePdaPrimaryObjects, !!input_packet.r_u8());
++	if (CUITaskWnd* task_wnd = g_hud ? HUD().GetGameUI()->GetPdaMenu().pUITaskWnd : nullptr)
++	{
++		task_wnd->TreasuresEnabled(m_pda_task_filters.test(ePdaTreasures));
++		task_wnd->QuestNpcsEnabled(m_pda_task_filters.test(ePdaQuestNpcs));
++		task_wnd->SecondaryTasksEnabled(m_pda_task_filters.test(ePdaSecondaryTasks));
++		task_wnd->PrimaryObjectsEnabled(m_pda_task_filters.test(ePdaPrimaryObjects));
++	}
+ 	//need_quick_slot_reload = true;
+ 
+ 	input_packet.r_stringZ(g_quick_use_slots[0], sizeof(g_quick_use_slots[0]));
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+index 4825296..7c729f9 100644
+--- a/src/xrGame/CampaignServerStart.cpp
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -3,8 +3,9 @@
+ // S02-T05b: campaign server level start. These mirror CApplication::OnEvent
+ // (KERNEL:start / KERNEL:disconnect) without the main-menu console commands,
+ // and run the queued loading stages explicitly instead of from the render idle
+-// loop. Only the server stages run here (xrServer, game_sv_Single, ALife from
+-// the saved game); the client stages that load the level are S02-T05d.
++// loop. The server stages (xrServer, game_sv_Single, ALife from the saved
++// game) come first; S02-T05d adds the client stages (CFORM, physics world,
++// client game state, spawn queue) and the first server ticks.
+ 
+ #include "Level.h"
+ #include "xrServer.h"
+@@ -17,6 +18,16 @@
+ #include "game_graph.h"
+ #include "level_graph.h"
+ #include "xrServer_Objects_ALife_Monsters.h"
++#include "game_cl_base.h"
++#include "script_engine.h"
++#include "script_process.h"
++#include "Actor.h"
++#include "ai/stalker/ai_stalker.h"
++#include "ai/monsters/basemonster/base_monster.h"
++#include "CustomZone.h"
++#include "inventory_item.h"
++#include "../xrphysics/iphworld.h"
++#include "../xrEngine/CustomHUD.h"
+ #include "../xrEngine/x_ray.h"
+ #include "../xrEngine/IGame_Persistent.h"
+ #include "../xrEngine/device.h"
+@@ -112,3 +123,88 @@ extern "C" void __cdecl xrCampaignLevel_Stop()
+ 	}
+ 	g_pGamePersistent->Disconnect();
+ }
++
++// S02-T05d: runs the client stages (net_start_client1..6, net_start5..6) until
++// no loading event remains. net_start_client6 re-queues itself until the
++// server's configuration arrives. Returns 0 when the level is ready, 1 on
++// deadline, 2 when it is not.
++extern "C" int __cdecl xrCampaignLevel_PumpClientStages(u32 deadline_ms)
++{
++	CTimer timer;
++	timer.Start();
++	while (!g_loading_events.empty())
++	{
++		if (timer.GetElapsed_ms() > deadline_ms)
++			return 1;
++		if (g_loading_events.front()())
++			g_loading_events.pop_front();
++	}
++	Msg("S02-T05d client stages finished in %u ms", timer.GetElapsed_ms());
++	CLevel& level = Level();
++	return (level.bReady && level.game && level.game_configured && physics_world()) ? 0 : 2;
++}
++
++// Logs what the client stages produced and checks the level context is real
++// and renderer-free: CFORM geometry, physics world, single-player client game
++// state, level script process; no HUD, no render level, no precache, and no
++// object yet (spawns wait in the event queue for the first tick).
++extern "C" bool __cdecl xrCampaignLevel_ReportLoaded()
++{
++	CLevel& level = Level();
++	CDB::MODEL* cform = level.ObjectSpace.GetStaticModel();
++	const u32 tris = cform ? u32(cform->get_tris_count()) : 0;
++	const u32 verts = cform ? u32(cform->get_verts_count()) : 0;
++	const Fbox& box = level.ObjectSpace.GetBoundingVolume();
++	const bool physics = physics_world() != nullptr;
++	const bool client_game = level.game && level.game->Type() == eGameIDSingle;
++	const bool level_script = ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel) != nullptr;
++	string_path som;
++	const bool som_file = FS.exist(som, "$level$", "level.som") != nullptr;
++	Msg("S02-T05d level ready=%d cform_tris=%u cform_verts=%u bbox=[%.1f,%.1f,%.1f]-[%.1f,%.1f,%.1f] "
++		"physics_world=%d client_game=%d game_configured=%d level_script=%d som_file=%d hud=%d render_device=%d "
++		"precache_frames=%u objects=%u",
++		level.bReady ? 1 : 0, tris, verts, VPUSH(box.min), VPUSH(box.max), physics ? 1 : 0, client_game ? 1 : 0,
++		level.game_configured ? 1 : 0, level_script ? 1 : 0, som_file ? 1 : 0, g_hud ? 1 : 0,
++		Device.m_pRender ? 1 : 0, Device.dwPrecacheFrame, level.Objects.o_count());
++	return level.bReady && tris != 0 && verts != 0 && physics && client_game && level.game_configured &&
++		level_script && !g_hud && !Device.m_pRender && Device.dwPrecacheFrame == 0 && level.Objects.o_count() == 0;
++}
++
++// Logs what the first server ticks produced: the client-side objects spawned
++// from the server entities, the saved actor among them, physics steps, and
++// that the process adopted no control or view entity.
++extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks)
++{
++	CLevel& level = Level();
++	u32 objects = level.Objects.o_count(), actors = 0, stalkers = 0, monsters = 0, zones = 0, items = 0;
++	for (u32 i = 0; i < objects; ++i)
++	{
++		CObject* object = level.Objects.o_get_by_iterator(i);
++		if (smart_cast<CActor*>(object))
++			++actors;
++		else if (smart_cast<CAI_Stalker*>(object))
++			++stalkers;
++		else if (smart_cast<CBaseMonster*>(object))
++			++monsters;
++		else if (smart_cast<CCustomZone*>(object))
++			++zones;
++		else if (smart_cast<CInventoryItem*>(object))
++			++items;
++	}
++	const CActor* actor = g_actor;
++	const CSE_ALifeCreatureActor* se_actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
++	const u64 steps = physics_world() ? physics_world()->StepsNum() : 0;
++	const u32 entities = level.Server ? level.Server->GetEntitiesNum() : 0;
++	const bool no_view = !level.CurrentEntity() && !level.CurrentViewEntity() && !level.CurrentControlEntity();
++	Msg("S02-T05d ticks=%u frame=%u objects=%u actors=%u stalkers=%u monsters=%u zones=%u items=%u "
++		"server_entities=%u physics_steps=%I64u no_view_entity=%d",
++		ticks, Device.dwFrame, objects, actors, stalkers, monsters, zones, items, entities, steps, no_view ? 1 : 0);
++	if (actor)
++		Msg("S02-T05d actor object id=%u alive=%d pos=[%.2f,%.2f,%.2f] se_pos=[%.2f,%.2f,%.2f] enabled=%d local=%d",
++			actor->ID(), actor->g_Alive() ? 1 : 0, VPUSH(actor->Position()),
++			se_actor ? se_actor->o_Position.x : 0.f, se_actor ? se_actor->o_Position.y : 0.f,
++			se_actor ? se_actor->o_Position.z : 0.f, actor->getEnabled() ? 1 : 0, actor->Local() ? 1 : 0);
++	else
++		Msg("! S02-T05d no actor object");
++	return objects != 0 && actors == 1 && actor && actor->g_Alive() && steps != 0 && no_view;
++}
+diff --git a/src/xrGame/CustomZone.cpp b/src/xrGame/CustomZone.cpp
+index 2b637a4..03c3323 100644
+--- a/src/xrGame/CustomZone.cpp
++++ b/src/xrGame/CustomZone.cpp
+@@ -555,7 +555,7 @@ void CCustomZone::UpdateWorkload(u32 dt)
+ 	default: NODEFAULT;
+ 	}
+ 
+-	if (Level().CurrentEntity())
++	if (Level().CurrentEntity() && Level().CurrentControlEntity())
+ 	{
+ 		Fvector P = Level().CurrentControlEntity()->Position();
+ 		P.y -= 0.9f;
+@@ -643,8 +643,11 @@ void CCustomZone::shedule_Update(u32 dt)
+ 
+ 		inherited::shedule_Update(dt);
+ 
+-		// check "fast-mode" border
+-		float act_distance = Level().CurrentControlEntity()->Position().distance_to(P) - s.R;
++		// check "fast-mode" border: distance from the controlled entity. With
++		// none (campaign server) the zone stays scheduled unless always_fast;
++		// the server's activity policy is S02-T04c.
++		CObject* control = Level().CurrentControlEntity();
++		float act_distance = control ? control->Position().distance_to(P) - s.R : flt_max;
+ 		if (act_distance > FASTMODE_DISTANCE && !m_zone_flags.test(eAlwaysFastmode))
+ 			o_switch_2_slow();
+ 		else
+diff --git a/src/xrGame/HudItem.cpp b/src/xrGame/HudItem.cpp
+index a11a4ea..65a02bd 100644
+--- a/src/xrGame/HudItem.cpp
++++ b/src/xrGame/HudItem.cpp
+@@ -1009,6 +1009,10 @@ bool CHudItem::ParentIsActor()
+ 
+ void CHudItem::ApplyAimModifiers(Fmatrix& matrix)
+ {
++	// The modifiers derive from the HUD's camera pick; none without a HUD.
++	if (!g_hud)
++		return;
++
+ 	// Fetch actor
+ 	const CActor* pActor = Actor();
+ 
+@@ -1178,6 +1182,8 @@ void CHudItem::Ray(SPickParam& pp)
+ 
+ void CHudItem::UpdatePick()
+ {
++	if (!g_hud)
++		return;
+ 	Ray(PP);
+ 	HUD().DoPick(PP);
+ 	if (PP.barrel_blocked)
+diff --git a/src/xrGame/Level.cpp b/src/xrGame/Level.cpp
+index ba5a93c..f864d83 100644
+--- a/src/xrGame/Level.cpp
++++ b/src/xrGame/Level.cpp
+@@ -746,7 +746,9 @@ void CLevel::ProcessGameEvents()
+ 
+ //AVO: spawn antifreeze implementation, originally by alpet, reritten by demonized
+ #ifdef SPAWN_ANTIFREEZE
+-			if (spawn_antifreeze && g_bootComplete)
++			// The campaign server runs no prefetch thread, so its spawns are
++			// never deferred (S02-T05d).
++			if (spawn_antifreeze && g_bootComplete && !g_campaign_server)
+ 			{
+ 				// Postpone M_EVENT for postponed spawns
+ 				//if (M_EVENT == ID && PostponedSpawn(dest))
+diff --git a/src/xrGame/Level_load.cpp b/src/xrGame/Level_load.cpp
+index f21cb8a..eef4c88 100644
+--- a/src/xrGame/Level_load.cpp
++++ b/src/xrGame/Level_load.cpp
+@@ -189,7 +189,8 @@ bool CLevel::Load_GameSpecific_After()
+ 
+ 	g_pGamePersistent->Environment().SetGameTime(GetEnvironmentGameDayTimeSec(), game->GetEnvironmentGameTimeFactor());
+ 
+-	HUD().SetRenderable(true);
++	if (g_hud)
++		HUD().SetRenderable(true);
+ 
+ 	return TRUE;
+ }
+diff --git a/src/xrGame/Level_network_spawn.cpp b/src/xrGame/Level_network_spawn.cpp
+index 9217732..7442edf 100644
+--- a/src/xrGame/Level_network_spawn.cpp
++++ b/src/xrGame/Level_network_spawn.cpp
+@@ -10,6 +10,8 @@
+ #include "../xrEngine/xr_object.h"
+ #include "../xrEngine/IGame_Persistent.h"
+ 
++extern ENGINE_API bool g_campaign_server;
++
+ void CLevel::cl_Process_Spawn(NET_Packet& P)
+ {
+ 	// Begin analysis
+@@ -147,7 +149,10 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
+ 					SetDemoSpectator(O);
+ 				}
+ 			}
+-			else
++			// The campaign server has no local input or view (S02-T05d): the
++			// saved actor spawns as a real, enabled object, but the process
++			// adopts no control or view entity.
++			else if (!g_campaign_server)
+ 			{
+ 				if (CurrentEntity() != NULL)
+ 				{
+diff --git a/src/xrGame/Level_network_start_client.cpp b/src/xrGame/Level_network_start_client.cpp
+index 297f92a..104d27d 100644
+--- a/src/xrGame/Level_network_start_client.cpp
++++ b/src/xrGame/Level_network_start_client.cpp
+@@ -216,8 +216,8 @@ bool CLevel::net_start_client5()
+ 	{
+ 		// HUD
+ 
+-		// Textures
+-		if (!g_dedicated_server)
++		// Textures (none without a render device: campaign server)
++		if (!g_dedicated_server && Device.m_pRender)
+ 		{
+ 			//			g_pGamePersistent->LoadTitle		("st_loading_textures");
+ 			g_pGamePersistent->LoadTitle();
+@@ -246,7 +246,8 @@ bool CLevel::net_start_client6()
+ 			pApp->LoadEnd();
+ 			return true;
+ 		}
+-		if (!g_dedicated_server)
++		// The campaign server has no HUD (IGame_Level::Load).
++		if (!g_dedicated_server && g_hud)
+ 		{
+ 			g_hud->Load();
+ 			g_hud->OnConnected();
+diff --git a/src/xrGame/ai/stalker/ai_stalker.cpp b/src/xrGame/ai/stalker/ai_stalker.cpp
+index 7402891..6fd264d 100644
+--- a/src/xrGame/ai/stalker/ai_stalker.cpp
++++ b/src/xrGame/ai/stalker/ai_stalker.cpp
+@@ -62,6 +62,8 @@
+ #include "smart_cover_planner_target_selector.h"
+ #include "../../../xrEngine/CameraBase.h"
+ 
++extern ENGINE_API bool g_campaign_server;
++
+ #ifdef DEBUG
+ #	include "../../alife_simulator.h"
+ #	include "../../alife_object_registry.h"
+@@ -734,7 +736,9 @@ BOOL CAI_Stalker::net_Spawn(CSE_Abstract* DC)
+ 	setEnabled(TRUE);
+ 
+ 
+-	if (!Level().CurrentViewEntity())
++	// Native fallback: with no view entity the first stalker becomes it. The
++	// campaign server has no view, so no object is adopted (S02-T05d).
++	if (!Level().CurrentViewEntity() && !g_campaign_server)
+ 		Level().SetEntity(this);
+ 
+ 	if (!g_Alive())
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 52aebcd..a81f1d0 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -2080,7 +2080,7 @@ static SPickParam* get_pick(ETraceTarget tt)
+ 	switch (tt)
+ 	{
+ 	case TT_CAMERA:
+-		return &HUD().GetPick();
++		return g_hud ? &HUD().GetPick() : nullptr;
+ 	case TT_WEAPON:
+ 		item = g_player_hud->attached_item(0);
+ 		break;
+@@ -2206,7 +2206,8 @@ void set_active_cam(u8 mode)
+ 
+ void reload_hud_xml()
+ {
+-	HUD().OnScreenResolutionChanged();
++	if (g_hud)
++		HUD().OnScreenResolutionChanged();
+ }
+ 
+ bool actor_safemode()
+diff --git a/src/xrGame/map_location.cpp b/src/xrGame/map_location.cpp
+index ae11f33..2d47ebd 100644
+--- a/src/xrGame/map_location.cpp
++++ b/src/xrGame/map_location.cpp
+@@ -31,6 +31,11 @@
+ #include "HUDManager.h"
+ //#include "CustomMonster.h"
+ 
++// Map spots are UI widgets and need the UI core; the campaign server keeps
++// each location's data (hint, flags, ttl, border names) and creates no spot
++// (S02-T05d).
++extern ENGINE_API bool g_campaign_server;
++
+ CMapLocation::CMapLocation(LPCSTR type, u16 object_id)
+ {
+ 	m_flags.zero();
+@@ -166,7 +171,7 @@ void CMapLocation::LoadSpot(LPCSTR type, bool bReload)
+ 	if (node)
+ 	{
+ 		LPCSTR str = g_uiSpotXml->ReadAttrib(path, 0, "spot", "");
+-		if (xr_strlen(str))
++		if (xr_strlen(str) && !g_campaign_server)
+ 		{
+ 			if (!bReload)
+ 			{
+@@ -183,7 +188,7 @@ void CMapLocation::LoadSpot(LPCSTR type, bool bReload)
+ 		m_spot_border_names[1] = g_uiSpotXml->ReadAttrib(path, 0, "spot_na", "");
+ 
+ 		str = g_uiSpotXml->ReadAttrib(path, 0, "pointer", "");
+-		if (xr_strlen(str))
++		if (xr_strlen(str) && !g_campaign_server)
+ 		{
+ 			if (!bReload)
+ 			{
+@@ -202,7 +207,7 @@ void CMapLocation::LoadSpot(LPCSTR type, bool bReload)
+ 	if (node)
+ 	{
+ 		LPCSTR str = g_uiSpotXml->ReadAttrib(path, 0, "spot", "");
+-		if (xr_strlen(str))
++		if (xr_strlen(str) && !g_campaign_server)
+ 		{
+ 			if (!bReload)
+ 			{
+@@ -218,7 +223,7 @@ void CMapLocation::LoadSpot(LPCSTR type, bool bReload)
+ 		m_spot_border_names[3] = g_uiSpotXml->ReadAttrib(path, 0, "spot_na", "");
+ 
+ 		str = g_uiSpotXml->ReadAttrib(path, 0, "pointer", "");
+-		if (xr_strlen(str))
++		if (xr_strlen(str) && !g_campaign_server)
+ 		{
+ 			if (!bReload)
+ 			{
+@@ -237,7 +242,7 @@ void CMapLocation::LoadSpot(LPCSTR type, bool bReload)
+ 	if (node)
+ 	{
+ 		LPCSTR str = g_uiSpotXml->ReadAttrib(path, 0, "spot", "");
+-		if (xr_strlen(str))
++		if (xr_strlen(str) && !g_campaign_server)
+ 		{
+ 			if (!bReload)
+ 			{
+@@ -253,7 +258,7 @@ void CMapLocation::LoadSpot(LPCSTR type, bool bReload)
+ 		m_spot_border_names[5] = g_uiSpotXml->ReadAttrib(path, 0, "spot_na", "");
+ 
+ 		str = g_uiSpotXml->ReadAttrib(path, 0, "pointer", "");
+-		if (xr_strlen(str))
++		if (xr_strlen(str) && !g_campaign_server)
+ 		{
+ 			if (!bReload)
+ 			{

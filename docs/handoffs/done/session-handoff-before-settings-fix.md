@@ -1,14 +1,14 @@
 # Session handoff — 2026-10-17, S02-T02 paused
 
 The user had to leave and asked for a note so work can resume later. Stop here.
-The active objective is [S02-T02](validation/S02-T02.md): campaign-preserving
+The active objective is [S02-T02](../../validation/S02-T02.md): campaign-preserving
 dedicated configuration and startup smoke. **In Progress:** both builds compiled,
 but the campaign startup smoke exits 1 while loading `system.ltx` during
 `InitSettings`. G02 is still unpassed. S02-T03–T06 are not started.
 
 ## Exact resume point
 
-1. Read [S02-T02 validation](validation/S02-T02.md) for commands, artifacts,
+1. Read [S02-T02 validation](../../validation/S02-T02.md) for commands, artifacts,
    SHA-256 values and the failure boundary. Inspect
    `builds/logs/S02-T02/run-smoke-03/result.json` and the associated runtime
    `appdata/logs/xray-campaign-server_djb20.log`.
@@ -39,4 +39,4 @@ but the campaign startup smoke exits 1 while loading `system.ltx` during
 
 Stage 0/G00 and Stage 1/G01 remain accepted for development with the two
 user-approved G01 waivers (completed quest/reward persistence and copied
-original-client comparison). [plan.md](../plan.md) is authoritative.
+original-client comparison). [plan.md](../../../plan.md) is authoritative.

@@ -5,9 +5,9 @@ real game-state/ALife construction (H02) to S02-T05/T06 was the user's decision.
 G02 is In Progress. No headless gameplay, level, ALife tick or physics step has run.
 
 Read first:
-1. [internal context definition](campaign-server-context.md): what the server owns,
+1. [internal context definition](../../campaign-server-context.md): what the server owns,
    the native start order, teardown, and the five blockers with source lines
-2. [context and services validation](validation/S02-T02-context.md): builds, smokes,
+2. [context and services validation](../../validation/S02-T02-context.md): builds, smokes,
    hashes and limits
 
 ## Confirmed results

@@ -5,15 +5,15 @@ S02-T03 and S02-T04 were split into suffix tasks on 2026-10-18 (see `plan.md`):
 
 | Task | Status | Evidence |
 |---|---|---|
-| S02-T03a materials without pair media | Completed | [S02-T03a](validation/S02-T03a.md), patch 0004 |
-| S02-T03b CPU-only model pool, real model load | Completed | [S02-T03b](validation/S02-T03b.md), patch 0005 |
-| S02-T03c bone evaluation against a client capture | Completed | [S02-T03c](validation/S02-T03c.md), patch 0007 |
+| S02-T03a materials without pair media | Completed | [S02-T03a](../../validation/S02-T03a.md), patch 0004 |
+| S02-T03b CPU-only model pool, real model load | Completed | [S02-T03b](../../validation/S02-T03b.md), patch 0005 |
+| S02-T03c bone evaluation against a client capture | Completed | [S02-T03c](../../validation/S02-T03c.md), patch 0007 |
 | S02-T03d skeleton collision, hit picking, physics shell | Not Started | needs a physics world, which needs a level |
-| S02-T04a server clock and frame driver | Completed | [S02-T04a](validation/S02-T04a.md), patch 0006 |
+| S02-T04a server clock and frame driver | Completed | [S02-T04a](../../validation/S02-T04a.md), patch 0006 |
 | S02-T04b physics stepping, falling-body collision | Not Started | needs a level `CObjectSpace` |
 | S02-T04c objects/AI/ALife and activity policy | Not Started | needs a level and ALife |
 
-Start with the [internal context definition](campaign-server-context.md), which
+Start with the [internal context definition](../../campaign-server-context.md), which
 gives the service order and the remaining blockers. The services start in this
 order, and teardown runs in reverse:
 1. `cpu-models`

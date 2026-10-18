@@ -5,7 +5,7 @@ separation smoke. That work is finished for the supported Core startup scope.
 S02-T02 remains **In Progress** because the wider GameState requirement needs a
 real native level context. G02 has no headless gameplay acceptance.
 
-Read [resumed validation](validation/S02-T02-resume.md) first. It records the
+Read [resumed validation](../../validation/S02-T02-resume.md) first. It records the
 failure causes, scope correction, exact commands, hashes and test limitations.
 
 ## Confirmed results

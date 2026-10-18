@@ -17,7 +17,7 @@ G02 is In Progress. Stage 2 status (details in `plan.md`):
 
 | Task | Status | Evidence |
 |---|---|---|
-| S02-T03a–d | **Completed** (parent Completed) | patches 0004, 0005, 0007, 0011; [T03d](validation/S02-T03d.md) |
+| S02-T03a–d | **Completed** (parent Completed) | patches 0004, 0005, 0007, 0011; [T03d](../../validation/S02-T03d.md) |
 | S02-T04a server clock and frame driver | Completed | patch 0006 |
 | S02-T05a/b/d persistent, level, server, ALife, spawn, first ticks | Completed | patches 0008, 0009, 0010 |
 | S02-T05c CPU particles and sound stimuli | In Progress | particles done; sound is the `-nosound` stand-in |

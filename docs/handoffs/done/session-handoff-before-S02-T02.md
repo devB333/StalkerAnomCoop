@@ -4,14 +4,14 @@ The user resumed `plan.md` at S02-T01. That source-mapping task is **Completed**
 Stage 2/G02 is **In Progress**, S02-T02–T06 are **Not Started**. Stage 0/G00 and
 Stage 1/G01 remain completed for development with the two user-approved waivers:
 completed quest/reward persistence and copied original-client comparison remain
-untested. D1–D8 and stage order are unchanged. [plan.md](../plan.md) is authoritative.
+untested. D1–D8 and stage order are unchanged. [plan.md](../../../plan.md) is authoritative.
 
 ## Current evidence
 
-- [S02-T01 validation](validation/S02-T01.md) records exact commands and limits.
-  [Service boundary](headless-service-boundary.md) maps startup, first tick,
+- [S02-T01 validation](../../validation/S02-T01.md) records exact commands and limits.
+  [Service boundary](../../headless-service-boundary.md) maps startup, first tick,
   shutdown, service ownership and ten runtime assertions.
-- [Fixture manifest](headless-fixture.json) pins the preserved real campaign
+- [Fixture manifest](../../headless-fixture.json) pins the preserved real campaign
   autosave/log. No external clients; no dummy actor; CPU bones/collision required.
   Runtime actor/NPC/model/shot identity and level confirmation remain pending.
 - `python3 tools/verify-headless-boundary.py` passed: 62 source ranges, 33 source

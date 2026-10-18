@@ -8,7 +8,7 @@ the camera, and the GameState smoke (`smoke-57`) runs objects, the scheduler,
 the stalker planners, ALife switching, offline scheduled work and the ALife
 clock from the server ticks, then walks stalker 19409 along a 10.5 m reachable
 path to arrival (`campaign-activity-passed`). Details, source citations and
-numbers: [S02-T04c report](validation/S02-T04c.md). Patch 0013 is exported
+numbers: [S02-T04c report](../../validation/S02-T04c.md). Patch 0013 is exported
 (see below).
 
 Remaining steps, in order:
@@ -40,7 +40,7 @@ G02 is In Progress. Stage 2 status (details in `plan.md`):
 |---|---|---|
 | S02-T03a–d | Completed | patches 0004, 0005, 0007, 0011 |
 | S02-T04a/b | Completed | patches 0006, 0012 |
-| S02-T04c | **In Progress** (server passed; client comparison pending) | patch 0013; [T04c](validation/S02-T04c.md) |
+| S02-T04c | **In Progress** (server passed; client comparison pending) | patch 0013; [T04c](../../validation/S02-T04c.md) |
 | S02-T05a/b/d | Completed | patches 0008, 0009, 0010 |
 | S02-T05c | In Progress | particles done; sound is the `-nosound` stand-in |
 | S02-T06 | Not Started | |

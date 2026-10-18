@@ -880,7 +880,7 @@ Do not schedule downstream implementation as if these gates have already passed.
 
 At the start of a development session:
 
-1. Read `AGENTS.md`, this plan's summary/current gate, and [session handoff](docs/session-handoff.md). Then read only evidence and source needed for the selected task. Confirm workspace/repository state before editing; preserve pre-existing changes.
+1. Read `AGENTS.md`, this plan's summary/current gate, and [session handoff](docs/handoffs/current/session-handoff.md). Then read only evidence and source needed for the selected task. Confirm workspace/repository state before editing; preserve pre-existing changes.
 2. Pick a clear primary objective from the next unblocked stage. State its acceptance test and required inputs. Verify that implementation has been authorized for the requested milestone; this planning run itself changes no engine code.
 3. Use existing source references and saved Ghidra evidence. Inspect targeted functions if line mappings changed or a specific uncertainty matters. Do not repeat whole-binary analysis or reopen persistence work merely because a new session started.
 4. Establish the smallest executable fixture that can resolve the task. Run isolated transport/storage/service checks before major integration. Keep native gameplay behavior rather than replacing difficult dependencies with unverified no-ops.
@@ -893,7 +893,7 @@ End a session after a coherent milestone, a necessary focus change, or when cont
 
 ## G. Persistent session handoff
 
-`docs/session-handoff.md` is the short entry point for the next session; this plan remains the authoritative roadmap. Update both at every future implementation-session end, including blocked sessions. The handoff must contain:
+`docs/handoffs/current/session-handoff.md` is the short entry point for the next session; this plan remains the authoritative roadmap. Archived handoffs stay in `docs/handoffs/current/` while the step they point at is open and move to `docs/handoffs/done/` once it is `Completed`. Update both at every future implementation-session end, including blocked sessions. The handoff must contain:
 
 - Current milestone/gate, completed task IDs and any in-progress or blocked task IDs.
 - Files changed, root/engine revisions or reproducible patch locations, and pre-existing changes to preserve.
@@ -933,7 +933,7 @@ Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Comple
 
 | Record | Current state | Evidence / next action |
 |---|---|---|
-| Planning deliverables | Completed | This roadmap and `docs/session-handoff.md`; documentation-only execution. |
+| Planning deliverables | Completed | This roadmap and the session handoff (`docs/handoffs/`); documentation-only execution. |
 | Prior architectural investigation | Existing evidence available | E01–E12 and linked reports; not a runtime implementation gate. |
 | Prior persistent Ghidra save/reopen | Existing verification available | `reverse-engineering/persistence-verification.json`; preserve and reuse. |
 | Stage 0 tasks | Completed | S00-T01–T03; see [G00](docs/validation/G00.md). |

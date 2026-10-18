@@ -16,17 +16,17 @@ simulation tick has run yet. Stage 2 status (details in `plan.md`):
 
 | Task | Status | Evidence |
 |---|---|---|
-| S02-T03a materials without media | Completed | [S02-T03a](validation/S02-T03a.md), patch 0004 |
-| S02-T03b CPU-only model pool | Completed | [S02-T03b](validation/S02-T03b.md), patch 0005 |
-| S02-T03c bones match the client | Completed | [S02-T03c](validation/S02-T03c.md), patch 0007 |
-| S02-T04a server clock and frame driver | Completed | [S02-T04a](validation/S02-T04a.md), patch 0006 |
-| S02-T05a persistent object with no device | Completed | [S02-T05a](validation/S02-T05a.md), patch 0008 |
-| S02-T05b level object, server and ALife from the save | Completed | [S02-T05b](validation/S02-T05b.md), patch 0009 |
+| S02-T03a materials without media | Completed | [S02-T03a](../../validation/S02-T03a.md), patch 0004 |
+| S02-T03b CPU-only model pool | Completed | [S02-T03b](../../validation/S02-T03b.md), patch 0005 |
+| S02-T03c bones match the client | Completed | [S02-T03c](../../validation/S02-T03c.md), patch 0007 |
+| S02-T04a server clock and frame driver | Completed | [S02-T04a](../../validation/S02-T04a.md), patch 0006 |
+| S02-T05a persistent object with no device | Completed | [S02-T05a](../../validation/S02-T05a.md), patch 0008 |
+| S02-T05b level object, server and ALife from the save | Completed | [S02-T05b](../../validation/S02-T05b.md), patch 0009 |
 | S02-T05c CPU particles and sound stimuli | In Progress | particles done (patch 0009); sound is the engine's `-nosound` stand-in, AI hearing not modelled |
 | S02-T05d renderer-free level load, spawn, first tick | Not Started | next |
 | S02-T03d, S02-T04b, S02-T04c | Not Started | follow T05d's level load |
 
-Start with the [internal context definition](campaign-server-context.md), which
+Start with the [internal context definition](../../campaign-server-context.md), which
 lists the service order, the resolved blockers and what remains. Services start
 in this order and stop in reverse: `sound` (interim), `cpu-models`, `spatial-db`,
 `materials`, `script-engine`, `campaign-registries`, `application`, `persistent`,

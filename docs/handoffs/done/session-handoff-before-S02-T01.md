@@ -102,7 +102,7 @@ model UI-01 was later closed as an incorrect expectation. No gate waiver has bee
 
 Updated 2026-10-16. User authorized Build Tools installation/build retry, then
 reported DLL, system.ltx and shader startup errors. Those packaging issues are
-repaired. [plan.md](../plan.md) remains authoritative; D1–D8 are unchanged.
+repaired. [plan.md](../../../plan.md) remains authoritative; D1–D8 are unchanged.
 
 S00-T01–T03/G00 and S01-T01–T02 are Completed. S01-T03 is **In Progress**: first
 unmodified DX11|x64 build **passed**, exit 0, **0 errors / 1,379 warnings**, MSBuild
@@ -115,13 +115,13 @@ Installed Build Tools 17.14.42, MSVC tools 14.44.35207 (compiler 19.44.35229.0),
 MSBuild 17.14.60.43110, SDK 10.0.26100.0, ATL/MFC. Install paths `builds/vs2022`,
 `builds/vscache`, `builds/vsshared`; Windows SDK/installer also register machine
 components. Installer exited 0, no reboot. First retry failed solely on cache-path
-length; shortened it. [Toolchain manifest](toolchain-manifest.json) pins versions,
+length; shortened it. [Toolchain manifest](../../toolchain-manifest.json) pins versions,
 hashes and installer catalog/state. All 33 projects passed compiler/output-path evaluation.
 
 Working source `builds/engine-work` and immutable reference are clean at
 c57fe5b9fab4fe0506659db03137c52d2500eb2f. Optick in working clone is
 8abd28dee1a4034c973a3d32cd1777118e72df7e. No engine patches or committed root changes.
-[Build manifest](build-manifest.json) records EXE/PDB identities. EXE SHA-256:
+[Build manifest](../../build-manifest.json) records EXE/PDB identities. EXE SHA-256:
 4bf2c693ee06c5e1f620a161e000956ceaaa63b6fcce311edf4838ad938c3141.
 
 Independent content `builds/test-install/baseline` contains 79 copied/hash-verified
@@ -147,8 +147,8 @@ For another run choose a new name; reconstruct clean outputs/source for the repe
 requirement, accounting for LuaJIT's generated files. Preserve existing outputs,
 profiles/saves, untracked root work and immutable reference. Do not erase user play.
 
-Evidence: [S01-T01](validation/S01-T01.md), [S01-T02](validation/S01-T02.md),
-[S01-T03](validation/S01-T03.md), [runtime diagnostics](validation/S01-runtime-packaging.md).
+Evidence: [S01-T01](../../validation/S01-T01.md), [S01-T02](../../validation/S01-T02.md),
+[S01-T03](../../validation/S01-T03.md), [runtime diagnostics](../../validation/S01-runtime-packaging.md).
 Ignored logs: builds/logs/S01-T03/build-1/{result.json,msbuild.log,msbuild.binlog};
 startup-1 through startup-5 records/logs under builds/logs/S01-T03. Prior shader
 cache preserved at shader-cache-before-complete-assets. Manifests are in docs/.

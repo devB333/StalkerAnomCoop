@@ -22,9 +22,9 @@ G02 is In Progress. Stage 2 status (details in `plan.md`):
 
 | Task | Status | Evidence |
 |---|---|---|
-| S02-T03a–d | Completed (parent Completed) | patches 0004, 0005, 0007, 0011; [T03d](validation/S02-T03d.md) |
+| S02-T03a–d | Completed (parent Completed) | patches 0004, 0005, 0007, 0011; [T03d](../../validation/S02-T03d.md) |
 | S02-T04a server clock and frame driver | Completed | patch 0006 |
-| S02-T04b native physics stepping, falling body | **Completed** | patch 0012; [T04b](validation/S02-T04b.md) |
+| S02-T04b native physics stepping, falling body | **Completed** | patch 0012; [T04b](../../validation/S02-T04b.md) |
 | S02-T05a/b/d persistent, level, server, ALife, spawn, first ticks | Completed | patches 0008, 0009, 0010 |
 | S02-T05c CPU particles and sound stimuli | In Progress | particles done; sound is the `-nosound` stand-in |
 | S02-T04c | Not Started | prerequisites met |
@@ -87,4 +87,4 @@ rebuild all 63 changed files byte for byte
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
-Previous handoff: [before S02-T04c](session-handoff-before-S02-T04c.md).
+Previous handoff: [before S02-T04c](../done/session-handoff-before-S02-T04c.md).

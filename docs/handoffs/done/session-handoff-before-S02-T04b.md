@@ -20,7 +20,7 @@ been checked headless. Stage 2 status (details in `plan.md`):
 | S02-T04a server clock and frame driver | Completed | patch 0006 |
 | S02-T05a/b persistent, level, server, ALife | Completed | patches 0008, 0009 |
 | S02-T05c CPU particles and sound stimuli | In Progress | particles done; sound is the `-nosound` stand-in |
-| S02-T05d renderer-free level load, spawn, first ticks | Completed | [S02-T05d](validation/S02-T05d.md), patch 0010 |
+| S02-T05d renderer-free level load, spawn, first ticks | Completed | [S02-T05d](../../validation/S02-T05d.md), patch 0010 |
 | S02-T03d, S02-T04b, S02-T04c | Not Started | prerequisites now met |
 
 ## What the server does today (campaign-32, exe `39dd62ec…`)

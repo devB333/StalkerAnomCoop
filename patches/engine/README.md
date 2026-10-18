@@ -47,6 +47,14 @@ its first ticks (stage `campaign-collision-passed`) and by the normal client wit
 the opt-in `-s02-collision-capture` flag one second after the actor spawned. The
 native spawn already builds all of that without the renderer; no engine
 behaviour changes.
+`0012-physics-fixture.patch` (S02-T04b) adds the shared falling-body physics
+fixture (`xrGame/CampaignPhysicsCapture.{h,cpp}`): one existing physics shell
+is lifted a metre and released, and every native physics step is sampled
+through the world's step-time callback (the level's callback keeps running)
+and an added contact callback, by the campaign server after its collision
+capture (stage `campaign-physics-passed`) and by the normal client with the
+opt-in `-s02-physics-capture` flag. The engine's stepping, gravity, per-step
+velocity scale, contacts and sleeping are observed, not changed.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

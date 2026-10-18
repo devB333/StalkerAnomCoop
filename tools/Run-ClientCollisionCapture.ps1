@@ -3,23 +3,29 @@
 # collision forms, shells and hit picks one second after the actor spawned
 # (-s02-collision-capture), then collect the capture. Prepare the runtime first with
 #   python3 tools/prepare-stage2-smoke.py <run> S02-T03d
+# With -Capture physics (S02-T04b) the client runs the falling-body fixture instead
+# (-s02-physics-capture); prepare the runtime with task S02-T04b.
 # The accepted source-client runtime is only read: its bin DLLs, user settings and
 # shader cache are copied, and the archives are read in place through fsgame.ltx.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
+    [ValidateSet('collision', 'physics')][string]$Capture = 'collision',
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
-$runtime = Join-Path $workspace "builds\stage2\test-install\S02-T03d\$Run"
+$task = if ($Capture -eq 'physics') { 'S02-T04b' } else { 'S02-T03d' }
+$flag = if ($Capture -eq 'physics') { '-s02-physics-capture' } else { '-s02-collision-capture' }
+$captureFile = if ($Capture -eq 'physics') { 's02-t04b-physics.csv' } else { 's02-t03d-collision.csv' }
+$runtime = Join-Path $workspace "builds\stage2\test-install\$task\$Run"
 $fixture = Join-Path $runtime 'fixture.json'
-if (-not (Test-Path $fixture)) { throw 'Prepare the isolated runtime first (prepare-stage2-smoke.py <run> S02-T03d).' }
+if (-not (Test-Path $fixture)) { throw "Prepare the isolated runtime first (prepare-stage2-smoke.py <run> $task)." }
 $record = Get-Content $fixture -Raw | ConvertFrom-Json
 $config = Join-Path $runtime 'fsgame.ltx'
 if ((Get-FileHash $config -Algorithm SHA256).Hash.ToLower() -ne $record.config_sha256) { throw 'Runtime configuration changed.' }
 $accepted = Join-Path $workspace 'builds\build_2\test-install\source-client'
 $built = Join-Path $workspace 'builds\build_1\engine-work\_build\_game\bin_dbg'
-$logDir = Join-Path $workspace "builds\logs\S02-T03d\run-$Run"
+$logDir = Join-Path $workspace "builds\logs\$task\run-$Run"
 if (Test-Path $logDir) { throw "Preserving existing run: $logDir" }
 
 # Never start a second client or replace a running one.
@@ -50,7 +56,7 @@ Copy-Item (Join-Path $accepted 'appdata\shaders_cache') $appdata -Recurse
 New-Item -ItemType Directory $logDir -Force | Out-Null
 $exe = Join-Path $bin 'AnomalyDX11.exe'
 # -start must come last: the engine executes everything after it as one console command.
-$arguments = '-fsltx ' + $config + ' -s02-collision-capture -start server(player - autosave/single/alife/load) client(localhost)'
+$arguments = '-fsltx ' + $config + ' ' + $flag + ' -start server(player - autosave/single/alife/load) client(localhost)'
 $result = [ordered]@{
     started_utc = [DateTime]::UtcNow.ToString('o')
     command = '"' + $exe + '" ' + $arguments
@@ -76,16 +82,16 @@ if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
 $process.Refresh()
 $result.exit_code = $process.ExitCode
 $result.finished_utc = [DateTime]::UtcNow.ToString('o')
-$capture = Join-Path $appdata 'logs\s02-t03d-collision.csv'
-$result.capture_present = Test-Path $capture
+$captureCsv = Join-Path $appdata "logs\$captureFile"
+$result.capture_present = Test-Path $captureCsv
 if ($result.capture_present) {
-    Copy-Item $capture (Join-Path $logDir 'client-collision.csv')
-    $result.capture_sha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLower()
+    Copy-Item $captureCsv (Join-Path $logDir "client-$Capture.csv")
+    $result.capture_sha256 = (Get-FileHash $captureCsv -Algorithm SHA256).Hash.ToLower()
 }
 $clientLog = Get-ChildItem (Join-Path $appdata 'logs') -Filter '*.log' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($clientLog) {
     Copy-Item $clientLog.FullName (Join-Path $logDir 'client.log')
-    $result.summary_lines = @(Select-String -Path $clientLog.FullName -Pattern 'S02-T03d' | ForEach-Object { $_.Line })
+    $result.summary_lines = @(Select-String -Path $clientLog.FullName -Pattern $task | ForEach-Object { $_.Line })
 }
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $logDir 'result.json')
 $result | ConvertTo-Json -Depth 5

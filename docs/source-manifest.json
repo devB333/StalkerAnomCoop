@@ -53,6 +53,10 @@
     {
       "path": "patches/engine/0011-collision-capture.patch",
       "sha256": "c6b88dca14a4fdaad60914b5e7f362b5864198df42b33e15a34ec05d4cb6d518"
+    },
+    {
+      "path": "patches/engine/0012-physics-fixture.patch",
+      "sha256": "b7521ef9053ba321987e4e9fd48cb232799a3fb2b88de0ed695ea44e944d6795"
     }
   ],
   "submodules": [

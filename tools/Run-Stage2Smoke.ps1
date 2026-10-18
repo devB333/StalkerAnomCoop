@@ -87,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -104,6 +104,13 @@ $result.collision_capture_present = Test-Path $capturePath
 if ($result.collision_capture_present) {
     Copy-Item $capturePath (Join-Path $logDir 'server-collision.csv')
     $result.collision_capture_sha256 = (Get-FileHash $capturePath -Algorithm SHA256).Hash.ToLower()
+}
+# S02-T04b: the server's falling-body physics capture.
+$physicsPath = Join-Path $runtime 'appdata\logs\s02-t04b-physics.csv'
+$result.physics_capture_present = Test-Path $physicsPath
+if ($result.physics_capture_present) {
+    Copy-Item $physicsPath (Join-Path $logDir 'server-physics.csv')
+    $result.physics_capture_sha256 = (Get-FileHash $physicsPath -Algorithm SHA256).Hash.ToLower()
 }
 $result.stages = $observedStages
 $result.expected_stages = $expectedStages

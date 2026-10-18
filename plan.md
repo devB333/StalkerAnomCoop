@@ -217,7 +217,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
   - **S02-T03a — Material library without presentation media: Completed.** [Validation](docs/validation/S02-T03a.md). Patch 0004.
   - **S02-T03b — CPU-only model pool and real model load: Completed.** [Validation](docs/validation/S02-T03b.md). Patch 0005. The renderer module is attached with no device, and only the model pool exists. Shader, geometry and GPU buffer creation are skipped and counted. Bone materials are registered without the persistent object. Real actor, NPC and HUD models load with their bones, motions and CPU skin data, and a missing model fails explicitly. Prerequisite: S02-T03a.
   - **S02-T03c — Bone and animation evaluation against a matched client capture: Completed.** [Validation](docs/validation/S02-T03c.md). Patch 0007. The server's bones are bit-identical to the client's over 50 steps. Evaluating bones needs an advancing device clock (`CalculateBones` returns early while `dwTimeGlobal` equals `UCalc_Time`), and camera throttling must be removed. Prerequisites: S02-T03b and S02-T04a (available).
-  - **S02-T03d — Skeleton collision, hit picking and physics shell: Not Started.** Prerequisites: S02-T03c and a physics world.
+  - **S02-T03d — Skeleton collision, hit picking and physics shell: Not Started.** Prerequisites: S02-T03c and S02-T05's level load (physics world). Reordered on 2026-10-18 by user decision.
 - **Purpose:** Keep gameplay fidelity while removing GPU model requirements.
 - **Prerequisites:** S02-T02.
 - **Relevant files/subsystems:** E07; xr_object; CharacterPhysicsSupport; IKinematics/model loaders.
@@ -237,8 +237,8 @@ A stage's first task requires the previous stage gate; other prerequisites below
     - Parallel jobs and `seqFrameMT` run serially, exactly once per tick.
     - Explicit pause; loading counts as paused time.
     - Catch-up is bounded, and any dropped time is reported.
-  - **S02-T04b — Native physics stepping and falling-body collision: Not Started.** A physics world needs a level `CObjectSpace` and object list (`xrPhysics/PHWorld.cpp:185-200`). Prerequisites: S02-T04a and a loaded level (S02-T05).
-  - **S02-T04c — Objects, AI, ALife and server activity policy: Not Started.** Prerequisites: S02-T04a/b and real level and ALife context (S02-T05/T06).
+  - **S02-T04b — Native physics stepping and falling-body collision: Not Started.** A physics world needs a level `CObjectSpace` and object list (`xrPhysics/PHWorld.cpp:185-200`). Prerequisites: S02-T04a and S02-T05's level load. Reordered on 2026-10-18 by user decision.
+  - **S02-T04c — Objects, AI, ALife and server activity policy: Not Started.** Prerequisites: S02-T04a/b and S02-T05's level and ALife context. Reordered on 2026-10-18 by user decision.
 - **Purpose:** Make server progression independent of rendering.
 - **Prerequisites:** S02-T02.
 - **Relevant files/subsystems:** E06; E08; Device time; GamePersistent; PHWorld; scheduler.
@@ -252,7 +252,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 - [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
 - **Purpose:** Reach real renderer-free level initialization.
-- **Prerequisites:** S02-T03; S02-T04.
+- **Prerequisites:** S02-T03a–c and S02-T04a (dependency loop resolved by user decision, 2026-10-18). S02-T03d, S02-T04b and S02-T04c follow this task's level load. G02 still requires every task.
 - **Relevant files/subsystems:** E06; E09; EngineAPI; Level_load; IGame_Level; GamePersistent; Level_Bullet_Manager.
 - **Actions:** Separate loading progress, HUD/menu, particles and presentation audio from gameplay hooks. Keep required sound stimuli as simulation data. Retain bullet workload outside rendering; load selected campaign level with no graphics device or view actor requirement. Construct persistent campaign state, `CLevel`, `xrServer`/`game_sv_Single`/ALife and `game_cl_Single` in native order (H02, moved from S02-T02; [context blockers 2–5](docs/campaign-server-context.md)) and extend the GameState smoke until it passes.
 - **Outputs:** Renderer-free boot/load path and headless execution logs. Plus the common task evidence record.

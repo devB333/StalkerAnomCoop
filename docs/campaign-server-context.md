@@ -42,7 +42,7 @@ A service that fails to start logs `<service>-failed` and the process returns 4.
 |---|---|---|---|
 | 1 | Core, filesystem, log, settings | `WinMain_impl`, `InitSettings` | Implemented (Core) |
 | 2 | Engine events/scheduler, command-only console, game factory | `Engine.Initialize`, `CConsole`, `CEngineAPI::Initialize` | Implemented (Core) |
-| 2a | `sound` (interim): the engine's sound manager in `-nosound` mode, so sounds can be created; nothing plays and no sound has feedback ([S02-T05b](validation/S02-T05b.md)) | `InitSound1/2` (`xrEngine/x_ray.cpp`, `Startup`) | Implemented, interim (Services) |
+| 2a | `sound`: the engine's CPU sound core (`-snd_cpu`, `xrSound/SoundRender_CoreCPU`): sources, emitters and AI sound events with no audio device and no listener; every sound has feedback, 2D events are dropped ([S02-T05c](validation/S02-T05c.md); interim `-nosound` stand-in in [S02-T05b](validation/S02-T05b.md)) | `InitSound1/2` (`xrEngine/x_ray.cpp`, `Startup`) | Implemented (Services) |
 | 2b | `cpu-models`: R4 module attached with no device; model pool and particle definitions only; GPU resource creation skipped and counted ([S02-T03b](validation/S02-T03b.md), [S02-T05b](validation/S02-T05b.md)) | `CRender::create` → `Models`, `PSLibrary.OnCreate` (`Layers/xrRenderPC_R4/r4.cpp:535-537`) | Implemented (Services) |
 | 3 | `spatial-db`: `g_SpatialSpace`, `g_SpatialSpacePhysic` | `xrEngine/x_ray.cpp:643-644`, `Startup` | Implemented (Services) |
 | 4 | `materials`: `GMLib.Load` with pair media names but no pair sounds/wallmarks ([S02-T03a](validation/S02-T03a.md)) | `xrGame/GamePersistent.cpp:156-160`, `OnAppStart` | Implemented (Services) |
@@ -137,9 +137,11 @@ not a pass.
    `particles_object` (`anomaly2\teleport_out_00`) and `sound_object`s during that
    auto-load. The particle library now loads on the CPU with the model pool
    (`Layers/xrRenderPC_R4/r4.cpp`, `cpu_models_create`); its per-definition
-   shader creation is skipped like any other. Sound uses the engine's `-nosound`
-   manager for now: `create` returns early (`xrSound/SoundRender_Core.cpp:294`),
-   so no sound has feedback and AI hearing is not modelled (B18, S02-T05c).
+   shader creation is skipped like any other. Sound first used the engine's
+   `-nosound` manager, whose `create` returns early
+   (`xrSound/SoundRender_Core.cpp:294`) so no sound had feedback; since
+   S02-T05c the CPU sound core (`-snd_cpu`) loads the sources and runs the
+   emitters and AI sound events (B18 resolved).
 
 ## Limits
 
@@ -149,8 +151,10 @@ not a pass.
 - The server adopts no control or view entity. The saved actor is a real,
   enabled, local object and `g_actor`; its first-eye camera and the
   single-actor `Actor()` assumptions are Stage 3 items (D1, G03).
-- NPC sound themes log `Couldnt find sounds …` for voice files while NPCs spawn
-  (1,002 in smoke-52); the accepted client logs none. Open, owned by S02-T05c.
+- NPC sound themes logged `Couldnt find sounds …` for voice files while NPCs
+  spawned (1,002 in smoke-52): `sound_theme.script:125` aborts when the engine
+  sound player registers no sounds, which `-nosound` guaranteed. Resolved by
+  the CPU sound core (S02-T05c): none in smoke-58 onwards.
 - Graphics absence is checked through engine state: `Device.m_hWnd`, `m_pRender`,
   `b_is_Ready`, `Render` and `pInput`. There is no trace of native graphics API
   calls.

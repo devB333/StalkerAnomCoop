@@ -34,8 +34,8 @@ New-Item -ItemType Directory $logDir -Force | Out-Null
 $env:TEMP = Join-Path $runtime 'tmp'
 $env:TMP = $env:TEMP
 $mode = switch ($Scope) { 'Core' { '-campaign-core-smoke' } 'Services' { '-campaign-services-smoke' } default { '-campaign-smoke' } }
-# No sound device: the engine's -nosound manager stands in until the CPU stimulus layer (S02-T05c).
-$arguments = $mode + ' -nosound -fsltx ' + $config
+# No sound device: the engine's CPU sound core (-snd_cpu) runs emitters and AI sound events (S02-T05c).
+$arguments = $mode + ' -snd_cpu -fsltx ' + $config
 if ($InjectFailure) { $arguments += ' -campaign-fail-at ' + $InjectFailure }
 if ($Models) { $arguments += ' -campaign-models ' + $Models }
 $result = [ordered]@{
@@ -87,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -118,6 +118,13 @@ $result.activity_capture_present = Test-Path $activityPath
 if ($result.activity_capture_present) {
     Copy-Item $activityPath (Join-Path $logDir 'server-activity.csv')
     $result.activity_capture_sha256 = (Get-FileHash $activityPath -Algorithm SHA256).Hash.ToLower()
+}
+# S02-T05c: the server's hearing capture (sound emitters, AI sound events, NPC hearing).
+$hearingPath = Join-Path $runtime 'appdata\logs\s02-t05c-hearing.csv'
+$result.hearing_capture_present = Test-Path $hearingPath
+if ($result.hearing_capture_present) {
+    Copy-Item $hearingPath (Join-Path $logDir 'server-hearing.csv')
+    $result.hearing_capture_sha256 = (Get-FileHash $hearingPath -Algorithm SHA256).Hash.ToLower()
 }
 $result.stages = $observedStages
 $result.expected_stages = $expectedStages

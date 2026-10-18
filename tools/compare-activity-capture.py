@@ -17,7 +17,9 @@ Row kinds are documented in xrGame/CampaignActivityCapture.h. Rules:
 * Both sides: at least 10 scheduled updates of the stalker while observing, at
   least one planner action, at least one ALife switch and one offline scheduled
   advance, the walk commanded, the stalker arrived within 1 m, the walked path
-  at least 0.8 of the destination distance, and the end row carries ok=1.
+  at least 0.8 of the distance from the walk command to the destination (the
+  stalker may move under its own AI while observed), and the end row carries
+  ok=1.
 * ALife game time advanced at the configured factor on both sides (within 10 %
   of sim_ms * factor). Per-tick averages of object updates, crows and
   scheduler dispatches are reported for both sides.
@@ -50,7 +52,7 @@ NPC_FIELDS = ["n", "phase", "updates", "brain_action", "handler_action", "path_t
               "body", "mental", "px", "py", "pz", "speed", "dest_distance", "queued_actions", "script_control"]
 END_FIELDS = ["ticks", "sim_ms", "wall_ms", "game_time_advance_ms", "npc_updates_observe", "npc_updates_walk",
               "brain_actions", "switched_online", "switched_offline", "scheduled_advanced", "walk_start", "arrival",
-              "travelled", "final_dest_distance", "ok"]
+              "travelled", "final_dest_distance", "ok", "walk_distance"]
 
 
 def load(path):
@@ -71,6 +73,10 @@ def load(path):
             elif kind == "npc":
                 capture["npc"].append(dict(zip(NPC_FIELDS, values, strict=True)))
             elif kind == "end":
+                # Captures before S02-T05c have no walk_distance; the walk then
+                # started from the begin position.
+                if len(values) == len(END_FIELDS) - 1:
+                    values = values + [capture["npcmeta"]["dest_distance"]]
                 capture["end"] = dict(zip(END_FIELDS, values, strict=True))
     for key in ("meta", "npcmeta", "end"):
         if key not in capture:
@@ -122,8 +128,8 @@ def side_rules(name, capture, failures):
         failures.append(f"{name}: walk never commanded")
     if int(end["arrival"]) < 0 or float(end["final_dest_distance"]) >= ARRIVAL_TOL:
         failures.append(f"{name}: no arrival ({end['final_dest_distance']} m from the destination)")
-    if float(end["travelled"]) < WALK_FRACTION * float(npc["dest_distance"]):
-        failures.append(f"{name}: walked {end['travelled']} m of {npc['dest_distance']} m")
+    if float(end["travelled"]) < WALK_FRACTION * float(end["walk_distance"]):
+        failures.append(f"{name}: walked {end['travelled']} m of {end['walk_distance']} m")
     expected = float(end["sim_ms"]) * float(meta["time_factor"])
     if expected > 0 and abs(float(end["game_time_advance_ms"]) - expected) / expected > GAME_TIME_TOL:
         failures.append(f"{name}: game time advanced {end['game_time_advance_ms']} ms, expected {expected:.0f}")

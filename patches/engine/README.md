@@ -55,6 +55,27 @@ and an added contact callback, by the campaign server after its collision
 capture (stage `campaign-physics-passed`) and by the normal client with the
 opt-in `-s02-physics-capture` flag. The engine's stepping, gravity, per-step
 velocity scale, contacts and sleeping are observed, not changed.
+`0013-activity-policy.patch` (S02-T04c) adds the server activity policy
+(`SActivityPolicy g_activity_policy`, `xrEngine/xr_object.{h,cpp}`): while the
+campaign level runs, crow selection and the scheduling scale use the distance
+to the nearest activity anchor (one per online actor, refreshed every frame
+from `CLevel::OnFrame`) instead of the camera; disabled, the client is
+unchanged. `CSheduler::dwUpdated` counts dispatches per frame. The shared
+activity fixture (`xrGame/CampaignActivityCapture.{h,cpp}`) observes the object
+list, the scheduler, a stalker's planner, ALife switching, offline scheduling
+and the ALife clock, then walks the stalker through the native script-control
+path (stage `campaign-activity-passed`, client flag `-s02-activity-capture`).
+`0014-cpu-sound-events.patch` (S02-T05c) adds the CPU sound core
+(`xrSound/SoundRender_CoreCPU.{h,cpp}`, `-snd_cpu`): the native sound core with
+no OpenAL device and no listener, so sources, emitters and AI sound events run
+on the server and 2D events are dropped rather than placed at a fabricated
+listener; `has_listener()` skips the listener-distance start delay. Material
+pairs create their sounds on the server (`SetPairSounds`/`SetPairMarks`), the
+footstep and impact range gates use `activity_range_distance()` instead of the
+camera, the campaign clock pauses emitters, and hearing counters
+(`IGame_Level::snd_Stats`/`snd_Trace`, `CSoundMemoryManager::s_feel_calls`)
+feed the shared hearing fixture (`xrGame/CampaignHearingCapture.{h,cpp}`, stage
+`campaign-hearing-passed`, client flag `-s02-hearing-capture`).
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

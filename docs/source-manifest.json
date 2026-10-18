@@ -61,6 +61,10 @@
     {
       "path": "patches/engine/0013-activity-policy.patch",
       "sha256": "731ca93c692ab04e03f52b804dc8538ea50a4e00e8ad253e9282c62bd3f5d3c5"
+    },
+    {
+      "path": "patches/engine/0014-cpu-sound-events.patch",
+      "sha256": "3837ed500c8a1c04d0b4130e01560498768306731860b2d14363c4514683eea1"
     }
   ],
   "submodules": [

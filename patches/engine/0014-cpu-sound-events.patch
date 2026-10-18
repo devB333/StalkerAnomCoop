@@ -1,0 +1,1491 @@
+diff --git a/src/xrEngine/CampaignServerClock.cpp b/src/xrEngine/CampaignServerClock.cpp
+index 7e6e992..9141350 100644
+--- a/src/xrEngine/CampaignServerClock.cpp
++++ b/src/xrEngine/CampaignServerClock.cpp
+@@ -4,6 +4,8 @@
+ #include "IGame_Persistent.h"
+ #include "Stats.h"
+ 
++extern BOOL g_bLoaded; // device.cpp
++
+ CCampaignServerClock::CCampaignServerClock(u32 tick_ms_, u32 max_catchup_ticks_)
+ 	: tick_ms(tick_ms_), max_catchup_ticks(max_catchup_ticks_), running(false), paused(false),
+ 	  owns_statistic(false), owns_scheduler_slot(false), wall_base(0), ticks_since_base(0),
+@@ -98,11 +100,21 @@ u32 CCampaignServerClock::Advance(u32 wall_ms)
+ 	return u32(run);
+ }
+ 
++// S02-T05c: sound emitters run on the sound core's wall timer, so a paused
++// server pauses them too, as the device does for an application pause
++// (device.cpp, CRenderDevice::Pause).
++static bool s_sound_paused = false;
++
+ void CCampaignServerClock::Pause(u32 wall_ms)
+ {
+ 	R_ASSERT2(running && !paused, "Campaign clock cannot pause");
+ 	paused = true;
+ 	pause_started = wall_ms;
++	if (::Sound && !s_sound_paused)
++	{
++		::Sound->pause_emitters(true);
++		s_sound_paused = true;
++	}
+ }
+ 
+ void CCampaignServerClock::Resume(u32 wall_ms)
+@@ -113,6 +125,11 @@ void CCampaignServerClock::Resume(u32 wall_ms)
+ 	// Paused wall time is not owed to the simulation.
+ 	wall_base += paused_for;
+ 	paused = false;
++	if (::Sound && s_sound_paused)
++	{
++		::Sound->pause_emitters(false);
++		s_sound_paused = false;
++	}
+ }
+ 
+ void CCampaignServerClock::Tick()
+@@ -126,6 +143,10 @@ void CCampaignServerClock::Tick()
+ 	Device.fTimeGlobal = float(Device.dwTimeGlobal) / 1000.f;
+ 
+ 	Device.seqFrame.Process(rp_Frame);
++	// The device marks the engine loaded after its first processed frame
++	// (CRenderDevice::FrameMove); IGame_Level::SoundEvent_Register drops every
++	// hearing event until then (S02-T05c).
++	g_bLoaded = TRUE;
+ 
+ 	for (u32 i = 0; i < Device.seqParallel.size(); ++i)
+ 		Device.seqParallel[i]();
+diff --git a/src/xrEngine/GameMtlLib.cpp b/src/xrEngine/GameMtlLib.cpp
+index 50647cf..62f9bd5 100644
+--- a/src/xrEngine/GameMtlLib.cpp
++++ b/src/xrEngine/GameMtlLib.cpp
+@@ -19,7 +19,8 @@ CGameMtlLibrary::CGameMtlLibrary()
+ #ifndef _EDITOR
+ 	material_count = 0;
+ #endif
+-	presentation_media = true;
++	pair_sounds = true;
++	pair_marks = true;
+ 	PGMLib = &GMLib;
+ }
+ 
+diff --git a/src/xrEngine/GameMtlLib.h b/src/xrEngine/GameMtlLib.h
+index 138238e..dd96c0c 100644
+--- a/src/xrEngine/GameMtlLib.h
++++ b/src/xrEngine/GameMtlLib.h
+@@ -267,15 +267,19 @@ class MTL_EXPORT_API CGameMtlLibrary
+ 	u32 material_count;
+ 	GameMtlPairVec material_pairs_rt;
+ #endif
+-	bool presentation_media;
++	bool pair_sounds;
++	bool pair_marks;
+ public:
+ 	CGameMtlLibrary();
+ 
+-	// Pair sounds and wallmarks need the sound and render devices. Without
+-	// them (the campaign server) pairs keep only the media names; set this
+-	// before Load.
+-	void SetPresentationMedia(bool enabled) { presentation_media = enabled; }
+-	bool PresentationMedia() const { return presentation_media; }
++	// Pair sounds need a sound manager and wallmarks the render device. Pairs
++	// always keep the media names; set these before Load. The campaign server
++	// creates the sounds (its CPU sound core, S02-T05c) and no wallmarks.
++	void SetPairSounds(bool enabled) { pair_sounds = enabled; }
++	void SetPairMarks(bool enabled) { pair_marks = enabled; }
++	void SetPresentationMedia(bool enabled) { pair_sounds = pair_marks = enabled; }
++	bool PairSounds() const { return pair_sounds; }
++	bool PairMarks() const { return pair_marks; }
+ 
+ 	~CGameMtlLibrary()
+ 	{
+diff --git a/src/xrEngine/GameMtlLib_Engine.cpp b/src/xrEngine/GameMtlLib_Engine.cpp
+index 39dcc3a..ccb44d9 100644
+--- a/src/xrEngine/GameMtlLib_Engine.cpp
++++ b/src/xrEngine/GameMtlLib_Engine.cpp
+@@ -115,24 +115,25 @@ void SGameMtlPair::Load(IReader& fs)
+ 	ID_parent = fs.r_u32();
+ 	OwnProps.assign(fs.r_u32());
+ 
+-	const bool media = m_Owner->PresentationMedia();
++	const bool sounds = m_Owner->PairSounds();
++	const bool marks = m_Owner->PairMarks();
+ 
+ 	R_ASSERT(fs.find_chunk(GAMEMTLPAIR_CHUNK_BREAKING));
+ 	fs.r_stringZ(buf);
+ 	BreakingSoundsStr = buf.c_str();
+-	if (media)
++	if (sounds)
+ 		CreateSounds(BreakingSounds, *buf);
+ 
+ 	R_ASSERT(fs.find_chunk(GAMEMTLPAIR_CHUNK_STEP));
+ 	fs.r_stringZ(buf);
+ 	StepSoundsStr = buf.c_str();
+-	if (media)
++	if (sounds)
+ 		CreateSounds(StepSounds, *buf);
+ 
+ 	R_ASSERT(fs.find_chunk(GAMEMTLPAIR_CHUNK_COLLIDE));
+ 	fs.r_stringZ(buf);
+ 	CollideSoundsStr = buf.c_str();
+-	if (media)
++	if (sounds)
+ 		CreateSounds(CollideSounds, *buf);
+ 	fs.r_stringZ(buf);
+ 	CollideParticlesStr = buf.c_str();
+@@ -140,13 +141,13 @@ void SGameMtlPair::Load(IReader& fs)
+ 	fs.r_stringZ(buf);
+ 	//CreateMarks (CollideMarks,*buf);
+ 	CollideMarksStr = buf.c_str();
+-	if (media)
++	if (marks)
+ 		CreateMarks(&*m_pCollideMarks, *buf);
+ }
+ 
+ void SGameMtlPair::CreateSoundsImpl(SoundVec& sounds, LPCSTR str) {
+ 	sounds.clear();
+-	if (m_Owner->PresentationMedia())
++	if (m_Owner->PairSounds())
+ 		CreateSounds(sounds, str);
+ }
+ 
+@@ -157,6 +158,6 @@ void SGameMtlPair::CreateParticlesImpl(PSVec& particles, LPCSTR str) {
+ 
+ void SGameMtlPair::CreateMarksImpl(IWallMarkArray* marks, LPCSTR str) {
+ 	marks->clear();
+-	if (m_Owner->PresentationMedia())
++	if (m_Owner->PairMarks())
+ 		CreateMarks(marks, str);
+ }
+diff --git a/src/xrEngine/IGame_Level.cpp b/src/xrEngine/IGame_Level.cpp
+index cbfecca..728c4ef 100644
+--- a/src/xrEngine/IGame_Level.cpp
++++ b/src/xrEngine/IGame_Level.cpp
+@@ -29,6 +29,8 @@ IGame_Level::IGame_Level()
+ 	bReady = false;
+ 	pCurrentEntity = NULL;
+ 	pCurrentViewEntity = NULL;
++	snd_Stats.registered = snd_Stats.delegates = snd_Stats.dispatched = 0;
++	snd_Trace = nullptr;
+ 	Device.DumpResourcesMemoryUsage();
+ }
+ 
+@@ -302,6 +304,26 @@ void IGame_Level::SoundEvent_Register(ref_sound_data_ptr S, float range)
+ 	VERIFY(_valid(p->max_ai_distance));
+ 	VERIFY(_valid(p->volume));
+ 
++	// S02-T05c: hearing counters and the optional trace read by the fixture.
++	++snd_Stats.registered;
++	SoundEventRecord record;
++	if (snd_Trace)
++	{
++		record.frame = Device.dwFrame;
++		record.file = S->handle ? S->handle->file_name() : "";
++		record.game_type = S->g_type;
++		record.source_id = S->g_object ? S->g_object->ID() : u16(-1);
++		record.source_name = S->g_object ? S->g_object->cName() : "";
++		record.position = snd_position;
++		record.range = range;
++		record.max_ai_distance = p->max_ai_distance;
++		record.volume = p->volume;
++		record.hearers = 0;
++		record.max_power = 0.f;
++		record.nearest_id = u16(-1);
++		record.nearest_distance = flt_max;
++	}
++
+ 	// Query objects
+ 	Fvector bb_size = {range, range, range};
+ 	{
+@@ -337,10 +359,23 @@ void IGame_Level::SoundEvent_Register(ref_sound_data_ptr S, float range)
+ 			{
+ 				_esound_delegate D = {L, S, Power};
+ 				snd_Events.push_back(D);
++				++snd_Stats.delegates;
++				if (snd_Trace)
++				{
++					++record.hearers;
++					record.max_power = _max(record.max_power, Power);
++					if (dist < record.nearest_distance)
++					{
++						record.nearest_distance = dist;
++						record.nearest_id = CO->ID();
++					}
++				}
+ 			}
+ 		}
+ 	}
+ 	snd_ER.clear_not_free();
++	if (snd_Trace)
++		snd_Trace->push_back(record);
+ }
+ 
+ void IGame_Level::SoundEvent_Dispatch()
+@@ -352,6 +387,7 @@ void IGame_Level::SoundEvent_Dispatch()
+ 		VERIFY(D.dest && D.source);
+ 		if (D.source->feedback)
+ 		{
++			++snd_Stats.dispatched;
+ 			D.dest->feel_sound_new(
+ 				D.source->g_object,
+ 				D.source->g_type,
+diff --git a/src/xrEngine/IGame_Level.h b/src/xrEngine/IGame_Level.h
+index 0d29d93..9419bea 100644
+--- a/src/xrEngine/IGame_Level.h
++++ b/src/xrEngine/IGame_Level.h
+@@ -91,6 +91,33 @@ public: // deferred sound events
+ 	};
+ 
+ 	xr_vector<_esound_delegate> snd_Events;
++
++	// S02-T05c: hearing counters (cumulative) and an optional trace of every
++	// registered sound event, filled only while a fixture sets snd_Trace.
++	struct SoundEventStats
++	{
++		u32 registered; // SoundEvent_Register calls that reached the spatial query
++		u32 delegates; // hearers queued for feel_sound_new
++		u32 dispatched; // feel_sound_new calls made
++	};
++	struct SoundEventRecord
++	{
++		u32 frame;
++		shared_str file;
++		int game_type;
++		u16 source_id; // 65535 when the sound has no object
++		shared_str source_name;
++		Fvector position;
++		float range;
++		float max_ai_distance;
++		float volume;
++		u32 hearers;
++		float max_power;
++		u16 nearest_id; // the closest hearer; 65535 when none
++		float nearest_distance;
++	};
++	SoundEventStats snd_Stats;
++	xr_vector<SoundEventRecord>* snd_Trace;
+ public:
+ 	// Main, global functions
+ 	IGame_Level();
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 21b9b8a..a30334c 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -991,6 +991,9 @@ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_ActivityFixtureTick();
+ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureDone();
+ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++extern "C" bool __cdecl xrCampaignLevel_HearingFixtureBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_HearingFixtureTick();
++extern "C" bool __cdecl xrCampaignLevel_HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1016,13 +1019,15 @@ void StopCampaignSpatialDatabases()
+     xr_delete(g_SpatialSpace);
+ }
+ 
+-// Loads materials and pairs without pair sounds or wallmarks. Pairs must keep
+-// their media names, and no sound or wallmark may have been created.
++// Loads materials and pairs with pair sounds (S02-T05c: the CPU sound core is
++// up, so step, collide and breaking sounds are real CPU stimulus data) and
++// without wallmarks (render media). Pairs must keep their media names.
+ bool StartCampaignMaterials()
+ {
+-    GMLib.SetPresentationMedia(false);
++    GMLib.SetPairSounds(::Sound != nullptr);
++    GMLib.SetPairMarks(false);
+     GMLib.Load();
+-    u32 pairs = 0, named_media = 0, created_media = 0;
++    u32 pairs = 0, named_media = 0, created_sounds = 0, created_marks = 0;
+     for (GameMtlPairIt it = GMLib.FirstMaterialPair(); it != GMLib.LastMaterialPair(); ++it)
+     {
+         SGameMtlPair* pair = *it;
+@@ -1030,12 +1035,12 @@ bool StartCampaignMaterials()
+         if (!pair->CollideSoundsStr.empty() || !pair->StepSoundsStr.empty() ||
+             !pair->BreakingSoundsStr.empty() || !pair->CollideMarksStr.empty())
+             ++named_media;
+-        created_media += u32(pair->CollideSounds.size() + pair->StepSounds.size() +
+-            pair->BreakingSounds.size()) + (pair->m_pCollideMarks->empty() ? 0 : 1);
++        created_sounds += u32(pair->CollideSounds.size() + pair->StepSounds.size() + pair->BreakingSounds.size());
++        created_marks += pair->m_pCollideMarks->empty() ? 0 : 1;
+     }
+-    Msg("S02-T03 materials count=%u pairs=%u pairs_with_media_names=%u created_media=%u",
+-        GMLib.CountMaterial(), pairs, named_media, created_media);
+-    return GMLib.CountMaterial() != 0 && pairs != 0 && named_media != 0 && created_media == 0;
++    Msg("S02-T03 materials count=%u pairs=%u pairs_with_media_names=%u created_sounds=%u created_marks=%u",
++        GMLib.CountMaterial(), pairs, named_media, created_sounds, created_marks);
++    return GMLib.CountMaterial() != 0 && pairs != 0 && named_media != 0 && created_sounds != 0 && created_marks == 0;
+ }
+ 
+ void StopCampaignMaterials()
+@@ -1149,20 +1154,21 @@ bool RunCampaignModelFixture(LPCSTR command_line)
+         stats.skipped_geometry != 0 && stats.skipped_buffers != 0;
+ }
+ 
+-// S02-T05c (interim): the engine's own sound manager in -nosound mode, so
+-// scripts and objects can create sounds. Nothing plays and no sound has
+-// feedback, so AI hearing is not modelled yet; the CPU stimulus layer replaces
+-// this. The launcher passes -nosound; the service refuses to run without it.
++// S02-T05c: the engine's CPU sound core (-snd_cpu, xrSound/SoundRender_CoreCPU):
++// sources, emitters and AI sound events with no audio device and no listener,
++// so scripts and objects create and play sounds, every sound has feedback and
++// hearing reaches the NPCs. The launcher passes -snd_cpu; the service refuses
++// to run without it, because -nosound would create sounds without feedback.
+ bool StartCampaignSound()
+ {
+-    if (!strstr(Core.Params, "-nosound"))
++    if (!strstr(Core.Params, "-snd_cpu"))
+     {
+-        Msg("! S02-T05c the campaign server has no sound device; run it with -nosound");
++        Msg("! S02-T05c the campaign server has no sound device; run it with -snd_cpu");
+         return false;
+     }
+     InitSound1();
+     InitSound2();
+-    return ::Sound != nullptr;
++    return ::Sound != nullptr && ::Sound->is_ready() && !::Sound->has_listener();
+ }
+ 
+ void StopCampaignSound() { destroySound(); }
+@@ -1766,8 +1772,13 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 // S02-T04c: the level runs under the activity policy; the fixture
+                 // records object, scheduler, AI and ALife progress after every
+                 // tick, then walks one stalker along a short path.
+-                string_path capture;
++                // S02-T05c: the hearing fixture runs alongside it and records the
++                // sound emitters, AI sound events and NPC hearing the same ticks
++                // produce (the walk's footsteps included).
++                string_path capture, hearing;
+                 FS.update_path(capture, "$logs$", "s02-t04c-activity.csv");
++                FS.update_path(hearing, "$logs$", "s02-t05c-hearing.csv");
++                bool hearing_ok = xrCampaignLevel_HearingFixtureBegin(hearing);
+                 bool ok = xrCampaignLevel_ActivityFixtureBegin(capture);
+                 if (ok)
+                 {
+@@ -1779,12 +1790,17 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     {
+                         RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
+                         xrCampaignLevel_ActivityFixtureTick();
++                        xrCampaignLevel_HearingFixtureTick();
+                     }
+                     const u32 wall_after = g_campaign_wall.GetElapsed_ms();
+                     g_campaign_clock->Pause(wall_after);
+                     const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
+                     ok = xrCampaignLevel_ActivityFixtureEnd(ran, ran * g_campaign_clock->TickMs(), wall_after - wall_before);
++                    hearing_ok = xrCampaignLevel_HearingFixtureEnd(ran, ran * g_campaign_clock->TickMs(),
++                        wall_after - wall_before) && hearing_ok;
+                 }
++                else
++                    hearing_ok = xrCampaignLevel_HearingFixtureEnd(0, 0, 0) && hearing_ok;
+                 if (ok)
+                     stage("campaign-activity-passed");
+                 else
+@@ -1792,6 +1808,16 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     stage("campaign-activity-failed");
+                     result = 15;
+                 }
++                if (result == 0)
++                {
++                    if (hearing_ok)
++                        stage("campaign-hearing-passed");
++                    else
++                    {
++                        stage("campaign-hearing-failed");
++                        result = 16;
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrEngine/xr_object.cpp b/src/xrEngine/xr_object.cpp
+index edb41e3..edee095 100644
+--- a/src/xrEngine/xr_object.cpp
++++ b/src/xrEngine/xr_object.cpp
+@@ -37,6 +37,13 @@ float SActivityPolicy::distance_to(const Fvector& position) const
+ 	return best;
+ }
+ 
++float activity_range_distance(const Fvector& position)
++{
++	if (g_activity_policy.enabled)
++		return g_activity_policy.distance_to(position);
++	return Device.vCameraPosition.distance_to(position);
++}
++
+ inline void CObjectList::o_crow(CObject* O)
+ {
+ 	Objects& crows = get_crows();
+diff --git a/src/xrEngine/xr_object.h b/src/xrEngine/xr_object.h
+index 2429a14..71be4b1 100644
+--- a/src/xrEngine/xr_object.h
++++ b/src/xrEngine/xr_object.h
+@@ -39,6 +39,10 @@ struct ENGINE_API SActivityPolicy
+ 	float distance_to(const Fvector& position) const;
+ };
+ extern ENGINE_API SActivityPolicy g_activity_policy;
++// S02-T05c: the distance behind the game module's camera range gates (step
++// sounds, impact sounds): the nearest anchor while the policy is enabled,
++// the camera otherwise.
++ENGINE_API float activity_range_distance(const Fvector& position);
+ //-----------------------------------------------------------------------------------------------------------
+ // CObject
+ //-----------------------------------------------------------------------------------------------------------
+diff --git a/src/xrGame/CampaignActivityCapture.cpp b/src/xrGame/CampaignActivityCapture.cpp
+index 903c4cd..e3f831a 100644
+--- a/src/xrGame/CampaignActivityCapture.cpp
++++ b/src/xrGame/CampaignActivityCapture.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "CampaignActivityCapture.h"
++#include "CampaignHearingCapture.h"
+ 
+ // S02-T04c: the running level observed from the frame loop (H04). Nothing
+ // here drives the simulation: the object list, the scheduler, the stalkers'
+@@ -84,6 +85,7 @@ struct Fixture
+ 	Fvector dest_position;
+ 	u32 dest_vertex;
+ 	float dest_distance;
++	float walk_distance; // from the position at the walk command
+ 	float travelled;
+ 	int walk_start;
+ 	int arrival;
+@@ -230,9 +232,13 @@ void command_walk(CAI_Stalker* npc)
+ 	npc->AddAction(&action);
+ 	f.walk_start = int(f.ticks);
+ 	f.walk_start_time = Device.dwTimeGlobal;
++	// The stalker may have moved under its own AI while observed (S02-T05c:
++	// it reacts to what it hears), so the distance it has to walk is measured
++	// from here, not from the begin.
++	f.walk_distance = npc->Position().distance_to(f.dest_position);
+ 	f.phase = 1;
+ 	Msg("S02-T04c walk commanded at tick %u: stalker %u from [%.2f,%.2f,%.2f] to vertex %u [%.2f,%.2f,%.2f], %.2f m",
+-		f.ticks, u32(f.id), VPUSH(npc->Position()), f.dest_vertex, VPUSH(f.dest_position), f.dest_distance);
++		f.ticks, u32(f.id), VPUSH(npc->Position()), f.dest_vertex, VPUSH(f.dest_position), f.walk_distance);
+ }
+ 
+ void release_walk(CAI_Stalker* npc)
+@@ -247,12 +253,12 @@ void log_summary(LPCSTR prefix, const ActivityFixtureSummary& s, bool ok, LPCSTR
+ {
+ 	Msg("%s npc=%u ticks=%u sim_ms=%u wall_ms=%u game_time_advance=%u factor=%.2f updates_observe=%u updates_walk=%u "
+ 		"brain_actions=%u scheduler_updates=%u object_updates=%u switched_online=%u switched_offline=%u "
+-		"scheduled_advanced=%u walk_start=%d arrival=%d travelled=%.2f dest=%.2f final_dest_distance=%.3f alive=%d "
++		"scheduled_advanced=%u walk_start=%d arrival=%d travelled=%.2f dest=%.2f walk=%.2f final_dest_distance=%.3f alive=%d "
+ 		"finite=%d ok=%d out=%s",
+ 		prefix, u32(s.npc_id), s.ticks, s.sim_ms, s.wall_ms, s.game_time_advance_ms, s.time_factor,
+ 		s.npc_updates_observe, s.npc_updates_walk, s.brain_actions, s.scheduler_updates, s.object_updates,
+ 		s.switched_online, s.switched_offline, s.scheduled_advanced, s.walk_start, s.arrival, s.travelled,
+-		s.dest_distance, s.final_dest_distance, s.alive ? 1 : 0, s.finite ? 1 : 0, ok ? 1 : 0, out);
++		s.dest_distance, s.walk_distance, s.final_dest_distance, s.alive ? 1 : 0, s.finite ? 1 : 0, ok ? 1 : 0, out);
+ 	if (s.missing[0])
+ 		Msg("! %s missing: %s", prefix, s.missing);
+ }
+@@ -435,6 +441,16 @@ bool ActivityFixtureDone()
+ 	return !g_fixture.running;
+ }
+ 
++int ActivityFixturePhase()
++{
++	return g_fixture.phase;
++}
++
++u16 ActivityFixtureNpcId()
++{
++	return g_fixture.id;
++}
++
+ bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSummary& summary)
+ {
+ 	Fixture& f = g_fixture;
+@@ -464,6 +480,7 @@ bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSumm
+ 	summary.arrival = f.arrival;
+ 	summary.travelled = f.travelled;
+ 	summary.final_dest_distance = npc ? npc->Position().distance_to(f.dest_position) : -1.f;
++	summary.walk_distance = f.walk_distance;
+ 	summary.alive = npc != nullptr;
+ 	check(summary.travelled);
+ 	summary.finite = f.finite;
+@@ -493,16 +510,16 @@ bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSumm
+ 	else if (summary.arrival < 0)
+ 		xr_sprintf(summary.missing, "stalker %u did not arrive: %.2f m from the destination after %.2f m walked",
+ 			u32(f.id), summary.final_dest_distance, summary.travelled);
+-	else if (summary.travelled < 0.8f * f.dest_distance)
++	else if (summary.travelled < 0.8f * f.walk_distance)
+ 		xr_sprintf(summary.missing, "stalker %u walked only %.2f m of %.2f m", u32(f.id), summary.travelled,
+-			f.dest_distance);
++			f.walk_distance);
+ 	else if (!summary.finite)
+ 		xr_strcpy(summary.missing, "a sampled value is not finite");
+ 	const bool ok = !summary.missing[0];
+-	fprintf(f.out, "end,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%d,%.6f,%.6f,%d\n", f.ticks, sim_ms, wall_ms,
++	fprintf(f.out, "end,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%d,%.6f,%.6f,%d,%.6f\n", f.ticks, sim_ms, wall_ms,
+ 		summary.game_time_advance_ms, summary.npc_updates_observe, summary.npc_updates_walk, summary.brain_actions,
+ 		summary.switched_online, summary.switched_offline, summary.scheduled_advanced, summary.walk_start,
+-		summary.arrival, summary.travelled, summary.final_dest_distance, ok ? 1 : 0);
++		summary.arrival, summary.travelled, summary.final_dest_distance, ok ? 1 : 0, summary.walk_distance);
+ 	fclose(f.out);
+ 	f.out = nullptr;
+ 	(void)frames;
+@@ -540,7 +557,10 @@ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_m
+ 
+ void ClientActivityCaptureOnFrame()
+ {
+-	static const bool requested = strstr(Core.Params, "-s02-activity-capture") != nullptr;
++	// S02-T05c: -s02-hearing-capture runs the hearing fixture alongside this
++	// one, since the walk's footsteps are the stimuli it listens for.
++	static const bool hearing = strstr(Core.Params, "-s02-hearing-capture") != nullptr;
++	static const bool requested = hearing || strstr(Core.Params, "-s02-activity-capture") != nullptr;
+ 	static u32 since = 0;
+ 	static u32 begin_time = 0;
+ 	static u32 begin_frame = 0;
+@@ -548,6 +568,7 @@ void ClientActivityCaptureOnFrame()
+ 	static bool done = false;
+ 	static ActivityFixtureSummary summary;
+ 	static string_path out;
++	static string_path hearing_out;
+ 	if (!requested || done || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor || Device.dwPrecacheFrame)
+ 		return;
+ 	if (!since)
+@@ -565,20 +586,31 @@ void ClientActivityCaptureOnFrame()
+ 		FS.update_path(out, "$logs$", "s02-t04c-activity.csv");
+ 		begin_time = Device.dwTimeGlobal;
+ 		begin_frame = Device.dwFrame;
++		if (hearing)
++		{
++			FS.update_path(hearing_out, "$logs$", "s02-t05c-hearing.csv");
++			ClientHearingCaptureBegin(hearing_out);
++		}
+ 		if (ActivityFixtureBegin(out, summary))
+ 			return;
+ 		done = true;
+ 		log_summary("S02-T04c client activity", summary, false, out);
++		if (hearing)
++			ClientHearingCaptureEnd(0, 0);
+ 	}
+ 	else
+ 	{
+ 		ActivityFixtureTick();
++		if (hearing)
++			ClientHearingCaptureTick();
+ 		if (!ActivityFixtureDone())
+ 			return;
+ 		done = true;
+ 		const u32 elapsed = Device.dwTimeGlobal - begin_time;
+ 		const bool ok = ActivityFixtureEnd(Device.dwFrame - begin_frame, elapsed, elapsed, summary);
+ 		log_summary("S02-T04c client activity", summary, ok, out);
++		if (hearing)
++			ClientHearingCaptureEnd(Device.dwFrame - begin_frame, elapsed);
+ 	}
+ 	FlushLog();
+ 	Console->Execute("quit");
+diff --git a/src/xrGame/CampaignActivityCapture.h b/src/xrGame/CampaignActivityCapture.h
+index 78072bd..69b8dba 100644
+--- a/src/xrGame/CampaignActivityCapture.h
++++ b/src/xrGame/CampaignActivityCapture.h
+@@ -31,7 +31,10 @@
+ //         handler_action: the object handler planner's current action id)
+ //   end,<ticks>,<sim_ms>,<wall_ms>,<game_time_advance_ms>,<npc_updates_observe>,<npc_updates_walk>,
+ //        <brain_actions>,<switched_online>,<switched_offline>,<scheduled_advanced>,<walk_start>,<arrival>,
+-//        <travelled>,<final_dest_distance>,<ok>
++//        <travelled>,<final_dest_distance>,<ok>,<walk_distance>
++//        (walk_distance: from the stalker's position when the walk was commanded
++//         to the destination; the stalker may move under its own AI while
++//         observed, so the walked-fraction rule uses this, not dest_distance)
+ struct ActivityFixtureSummary
+ {
+ 	u16 npc_id;
+@@ -53,6 +56,7 @@ struct ActivityFixtureSummary
+ 	float travelled; // path length the stalker walked, metres
+ 	float final_dest_distance;
+ 	float dest_distance; // from the start position
++	float walk_distance; // from the position at the walk command
+ 	bool alive;
+ 	bool finite;
+ 	string256 missing; // first missing-data finding, empty when none
+@@ -74,6 +78,10 @@ void ActivityFixtureTick();
+ bool ActivityFixtureDone();
+ // Releases the stalker, writes the end row, evaluates the fixture.
+ bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSummary& summary);
++// For the hearing fixture that runs alongside (S02-T05c): the current phase
++// (0 observe, 1 walk) and the walked stalker's id.
++int ActivityFixturePhase();
++u16 ActivityFixtureNpcId();
+ 
+ // Campaign server entries, used by the smoke after the physics fixture.
+ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureBegin(LPCSTR out_path);
+@@ -82,5 +90,6 @@ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureDone();
+ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+ 
+ // Normal client, with -s02-activity-capture and a -start command: one second of
+-// device time after the actor spawned, run the fixture, log and quit.
++// device time after the actor spawned, run the fixture, log and quit. With
++// -s02-hearing-capture (S02-T05c) the hearing fixture runs alongside it.
+ void ClientActivityCaptureOnFrame();
+diff --git a/src/xrGame/CampaignHearingCapture.cpp b/src/xrGame/CampaignHearingCapture.cpp
+new file mode 100644
+index 0000000..e319d74
+--- /dev/null
++++ b/src/xrGame/CampaignHearingCapture.cpp
+@@ -0,0 +1,319 @@
++#include "pch_script.h"
++#include "CampaignHearingCapture.h"
++#include "CampaignActivityCapture.h"
++
++// S02-T05c: nothing here produces a sound. The emitters come from the
++// simulation (CStepManager footsteps, script sound objects, physics impacts),
++// the AI events from the sound core's emitter state machine
++// (CSoundRender_Emitter::Event_Propagade), the hearers from
++// IGame_Level::SoundEvent_Register and the receptions from
++// CSoundMemoryManager::feel_sound_new; the fixture reads their counters.
++
++#include "Level.h"
++#include "ai/stalker/ai_stalker.h"
++#include "memory_manager.h"
++#include "sound_memory_manager.h"
++#include "../xrServerEntities/ai_sounds.h"
++#include "../xrEngine/xr_object.h"
++#include "../xrCDB/ISpatial.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++
++extern float g_step_sound_distance; // step_manager.cpp
++static const float impact_sound_distance = 70.f; // physics_game.cpp SOUND_EFFECT_DIST
++static const float hearer_query_radius = 50.f;
++static const u16 default_npc_id = 19409;
++
++namespace
++{
++struct Counters
++{
++	u32 started, events, events_2d_skipped, registered, delegates, dispatched, feel_calls;
++};
++
++struct Fixture
++{
++	FILE* out;
++	bool running;
++	u16 id;
++	u32 ticks;
++	Counters begin;
++	xr_vector<IGame_Level::SoundEventRecord> trace;
++	u32 npc_events;
++	u32 npc_walk_events;
++	u32 step_events;
++	bool finite;
++};
++
++Fixture g_fixture;
++
++u32 option_u32(LPCSTR name, u32 fallback)
++{
++	u32 value = fallback;
++	LPCSTR at = strstr(Core.Params, name);
++	if (at)
++		sscanf(at + xr_strlen(name), "%u", &value);
++	return value;
++}
++
++CAI_Stalker* npc_alive(u16 id)
++{
++	CObject* object = Level().Objects.net_Find(id);
++	CAI_Stalker* npc = object && !object->getDestroy() ? smart_cast<CAI_Stalker*>(object) : nullptr;
++	return npc && npc->g_Alive() ? npc : nullptr;
++}
++
++LPCSTR core_name()
++{
++	if (strstr(Core.Params, "-snd_cpu"))
++		return "cpu";
++	if (strstr(Core.Params, "-nosound"))
++		return "none";
++	return "openal";
++}
++
++Counters read_counters()
++{
++	Counters c = {};
++	CSound_stats stats = {};
++	if (::Sound)
++	{
++		::Sound->statistic(&stats, nullptr);
++		c.started = stats._started;
++		c.events = stats._events_total;
++		c.events_2d_skipped = stats._events_2d_skipped;
++	}
++	if (g_pGameLevel)
++	{
++		c.registered = g_pGameLevel->snd_Stats.registered;
++		c.delegates = g_pGameLevel->snd_Stats.delegates;
++		c.dispatched = g_pGameLevel->snd_Stats.dispatched;
++	}
++	c.feel_calls = CSoundMemoryManager::s_feel_calls;
++	return c;
++}
++
++u32 hearers_near(const Fvector& position)
++{
++	xr_vector<ISpatial*> found;
++	Fvector size = {hearer_query_radius, hearer_query_radius, hearer_query_radius};
++	g_SpatialSpace->q_box(found, 0, STYPE_REACTTOSOUND, position, size);
++	u32 count = 0;
++	for (ISpatial* spatial : found)
++	{
++		CObject* object = spatial->dcast_CObject();
++		if (object && !object->getDestroy())
++			++count;
++	}
++	return count;
++}
++
++void check(float value, bool& finite)
++{
++	if (!_valid(value))
++		finite = false;
++}
++
++void log_summary(LPCSTR prefix, const HearingFixtureSummary& s, bool ok, LPCSTR out)
++{
++	Msg("%s npc=%u ticks=%u sim_ms=%u wall_ms=%u started=%u events=%u events_2d_skipped=%u registered=%u "
++		"delegates=%u dispatched=%u feel_calls=%u npc_events=%u npc_walk_events=%u step_events=%u npc_feel=%u "
++		"finite=%d ok=%d out=%s",
++		prefix, u32(s.npc_id), s.ticks, s.sim_ms, s.wall_ms, s.started, s.events, s.events_2d_skipped, s.registered,
++		s.delegates, s.dispatched, s.feel_calls, s.npc_events, s.npc_walk_events, s.step_events, s.npc_feel,
++		s.finite ? 1 : 0, ok ? 1 : 0, out);
++	if (!ok)
++		Msg("! %s missing: %s", prefix, s.missing);
++}
++} // namespace
++
++bool HearingFixtureBegin(LPCSTR out_path, HearingFixtureSummary& summary)
++{
++	ZeroMemory(&summary, sizeof(summary));
++	summary.finite = true;
++	Fixture& f = g_fixture;
++	f = Fixture();
++	f.finite = true;
++	f.id = u16(option_u32("-s02-activity-npc ", default_npc_id));
++	summary.npc_id = f.id;
++
++	if (!g_pGameLevel || !g_pGameLevel->bReady || !g_SpatialSpace)
++	{
++		xr_strcpy(summary.missing, "no loaded level");
++		return false;
++	}
++	if (!::Sound || !::Sound->is_ready())
++	{
++		xr_strcpy(summary.missing, "no ready sound core (-nosound creates sounds without feedback)");
++		return false;
++	}
++	CAI_Stalker* npc = npc_alive(f.id);
++	if (!npc)
++	{
++		xr_sprintf(summary.missing, "fixture stalker %u is not an alive stalker on the level", u32(f.id));
++		return false;
++	}
++	FILE* out = fopen(out_path, "w");
++	if (!out)
++	{
++		xr_sprintf(summary.missing, "cannot write %s", out_path);
++		return false;
++	}
++	f.out = out;
++	f.begin = read_counters();
++	g_pGameLevel->snd_Trace = &f.trace;
++
++	string_path path;
++	const bool som = FS.exist(path, "$level$", "level.som") != nullptr;
++	const bool snd_env = FS.exist(path, "$level$", "level.snd_env") != nullptr;
++	const Fvector position = npc->Position();
++	fprintf(out, "meta,%u,%u,%s,%s,%d,%d,%u,%.1f,%.1f,%d,%d,%u,%s,%.6f,%.6f,%.6f,%u,%u,%u,%u,%u,%u,%u,%u\n",
++		Device.dwFrame, Device.dwTimeGlobal, *Level().name(), core_name(), ::Sound->has_listener() ? 1 : 0,
++		g_activity_policy.enabled ? 1 : 0, u32(g_activity_policy.anchors.size()), g_step_sound_distance,
++		impact_sound_distance, som ? 1 : 0, snd_env ? 1 : 0, u32(f.id), npc->cName().c_str(), VPUSH(position),
++		hearers_near(position), f.begin.started, f.begin.events, f.begin.events_2d_skipped, f.begin.registered,
++		f.begin.delegates, f.begin.dispatched, f.begin.feel_calls);
++	f.running = true;
++	return true;
++}
++
++void HearingFixtureTick()
++{
++	Fixture& f = g_fixture;
++	if (!f.running)
++		return;
++	++f.ticks;
++	const int phase = ActivityFixturePhase();
++	CAI_Stalker* npc = npc_alive(f.id);
++
++	for (const IGame_Level::SoundEventRecord& r : f.trace)
++	{
++		if (r.source_id == f.id)
++		{
++			++f.npc_events;
++			if (phase == 1)
++				++f.npc_walk_events;
++		}
++		if (r.game_type & SOUND_TYPE_STEP)
++			++f.step_events;
++		check(r.range, f.finite);
++		check(r.max_power, f.finite);
++		check(r.position.x, f.finite);
++		check(r.position.y, f.finite);
++		check(r.position.z, f.finite);
++		fprintf(f.out, "event,%u,%d,%u,%s,%d,%u,%s,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f,%u,%.4f,%u,%.3f\n", f.ticks, phase,
++			r.frame, r.file.c_str(), r.game_type, u32(r.source_id), r.source_name.c_str(), VPUSH(r.position),
++			r.range, r.max_ai_distance, r.volume, r.hearers, r.max_power, u32(r.nearest_id),
++			r.hearers ? r.nearest_distance : -1.f);
++	}
++	f.trace.clear();
++
++	CSound_stats stats = {};
++	::Sound->statistic(&stats, nullptr);
++	const Counters c = read_counters();
++	fprintf(f.out, "tick,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", f.ticks, phase, Device.dwFrame,
++		Device.dwTimeGlobal, stats._simulated, stats._rendered, c.started, c.events, c.events_2d_skipped,
++		c.registered, c.delegates, c.dispatched, c.feel_calls, npc ? npc->memory().sound().feel_count() : 0,
++		npc ? u32(npc->memory().sound().objects().size()) : 0);
++}
++
++bool HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, HearingFixtureSummary& summary)
++{
++	Fixture& f = g_fixture;
++	if (!f.out)
++	{
++		if (!summary.missing[0])
++			xr_strcpy(summary.missing, "fixture was not started");
++		return false;
++	}
++	f.running = false;
++	if (g_pGameLevel)
++		g_pGameLevel->snd_Trace = nullptr;
++	const Counters c = read_counters();
++	CAI_Stalker* npc = npc_alive(f.id);
++
++	summary.ticks = f.ticks;
++	summary.sim_ms = sim_ms;
++	summary.wall_ms = wall_ms;
++	summary.started = c.started - f.begin.started;
++	summary.events = c.events - f.begin.events;
++	summary.events_2d_skipped = c.events_2d_skipped - f.begin.events_2d_skipped;
++	summary.registered = c.registered - f.begin.registered;
++	summary.delegates = c.delegates - f.begin.delegates;
++	summary.dispatched = c.dispatched - f.begin.dispatched;
++	summary.feel_calls = c.feel_calls - f.begin.feel_calls;
++	summary.npc_events = f.npc_events;
++	summary.npc_walk_events = f.npc_walk_events;
++	summary.step_events = f.step_events;
++	summary.npc_feel = npc ? npc->memory().sound().feel_count() : 0;
++	summary.finite = f.finite;
++
++	if (!summary.started)
++		xr_strcpy(summary.missing, "no sound emitter started");
++	else if (!summary.registered)
++		xr_strcpy(summary.missing, "no AI sound event reached the level");
++	else if (!summary.delegates)
++		xr_strcpy(summary.missing, "no AI sound event reached a hearer");
++	else if (!summary.dispatched || !summary.feel_calls)
++		xr_strcpy(summary.missing, "no feel_sound_new call was made");
++	else if (!summary.npc_walk_events)
++		xr_sprintf(summary.missing, "stalker %u produced no AI sound event while walking", u32(f.id));
++	else if (!summary.finite)
++		xr_strcpy(summary.missing, "a sampled value is not finite");
++	const bool ok = !summary.missing[0];
++	fprintf(f.out, "end,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d\n", f.ticks, sim_ms, wall_ms, summary.started,
++		summary.events, summary.events_2d_skipped, summary.registered, summary.delegates, summary.dispatched,
++		summary.feel_calls, summary.npc_events, summary.npc_walk_events, summary.step_events, summary.npc_feel,
++		ok ? 1 : 0);
++	fclose(f.out);
++	f.out = nullptr;
++	(void)frames;
++	return ok;
++}
++
++static HearingFixtureSummary g_server_summary;
++static string_path g_server_out;
++
++extern "C" bool __cdecl xrCampaignLevel_HearingFixtureBegin(LPCSTR out_path)
++{
++	xr_strcpy(g_server_out, out_path);
++	const bool ok = HearingFixtureBegin(out_path, g_server_summary);
++	if (!ok)
++		log_summary("S02-T05c hearing", g_server_summary, false, out_path);
++	return ok;
++}
++
++extern "C" void __cdecl xrCampaignLevel_HearingFixtureTick()
++{
++	HearingFixtureTick();
++}
++
++extern "C" bool __cdecl xrCampaignLevel_HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms)
++{
++	const bool ok = HearingFixtureEnd(frames, sim_ms, wall_ms, g_server_summary);
++	log_summary("S02-T05c hearing", g_server_summary, ok, g_server_out);
++	return ok;
++}
++
++static HearingFixtureSummary g_client_summary;
++static string_path g_client_out;
++static bool g_client_begun = false;
++
++void ClientHearingCaptureBegin(LPCSTR out_path)
++{
++	xr_strcpy(g_client_out, out_path);
++	g_client_begun = HearingFixtureBegin(out_path, g_client_summary);
++	if (!g_client_begun)
++		log_summary("S02-T05c client hearing", g_client_summary, false, out_path);
++}
++
++void ClientHearingCaptureTick()
++{
++	HearingFixtureTick();
++}
++
++void ClientHearingCaptureEnd(u32 frames, u32 elapsed_ms)
++{
++	const bool ok = HearingFixtureEnd(frames, elapsed_ms, elapsed_ms, g_client_summary) && g_client_begun;
++	log_summary("S02-T05c client hearing", g_client_summary, ok, g_client_out);
++}
+diff --git a/src/xrGame/CampaignHearingCapture.h b/src/xrGame/CampaignHearingCapture.h
+new file mode 100644
+index 0000000..067e6c5
+--- /dev/null
++++ b/src/xrGame/CampaignHearingCapture.h
+@@ -0,0 +1,77 @@
++#pragma once
++
++// S02-T05c: CPU sound events and AI hearing on the loaded level (B18). The
++// fixture runs alongside the activity fixture (S02-T04c): while that one
++// observes the level and walks a stalker, this one records the sound emitters
++// the simulation starts (footsteps from the material pairs, script voices,
++// impacts), the AI sound events the sound core propagates to the level, the
++// hearers each event reaches and the NPCs' feel_sound_new calls. The campaign
++// server (CPU sound core, no device, no listener) and the normal client
++// (OpenAL core) write the same CSV rows:
++//   meta,<frame>,<time_ms>,<level>,<core>,<listener>,<policy>,<anchors>,<step_gate_m>,<impact_gate_m>,
++//        <som>,<snd_env>,<npc>,<npc_name>,<px>,<py>,<pz>,<hearers_50m>,<started>,<events>,<events_2d_skipped>,
++//        <registered>,<delegates>,<dispatched>,<feel_calls>
++//        (core: cpu|openal|none; listener: the core has one; step/impact gates: the
++//         range checks around footstep and impact sounds; som/snd_env: the level
++//         has level.som / level.snd_env; hearers_50m: objects that react to sound
++//         within 50 m of the stalker; the counters are the cumulative values at the
++//         begin, so later rows are relative to them)
++//   tick,<n>,<phase>,<frame>,<time_ms>,<emitters>,<rendered>,<started>,<events>,<events_2d_skipped>,
++//        <registered>,<delegates>,<dispatched>,<feel_calls>,<npc_feel>,<npc_sounds>
++//        (phase from the activity fixture, 0 observe, 1 walk; emitters/rendered are
++//         the sound core's live counts; started..feel_calls are cumulative:
++//         emitters started, AI events handed to the level, 2D events the CPU
++//         core dropped, events that reached the spatial query, hearers queued,
++//         feel_sound_new calls made, feel_sound_new calls on any NPC; npc_feel and
++//         npc_sounds are the walked stalker's own calls and remembered sounds)
++//   event,<n>,<phase>,<frame>,<file>,<game_type>,<source_id>,<source_name>,<px>,<py>,<pz>,<range>,<max_ai>,
++//        <volume>,<hearers>,<max_power>,<nearest_id>,<nearest_distance>
++//        (one per registered AI sound event; source_id 65535 when the sound has no object)
++//   end,<ticks>,<sim_ms>,<wall_ms>,<started>,<events>,<events_2d_skipped>,<registered>,<delegates>,<dispatched>,
++//        <feel_calls>,<npc_events>,<npc_walk_events>,<step_events>,<npc_feel>,<ok>
++//        (deltas over the fixture; npc_events: events whose source is the walked
++//         stalker, npc_walk_events: those during the walk; step_events: events of a
++//         step sound type)
++struct HearingFixtureSummary
++{
++	u16 npc_id;
++	u32 ticks;
++	u32 sim_ms;
++	u32 wall_ms;
++	u32 started;
++	u32 events;
++	u32 events_2d_skipped;
++	u32 registered;
++	u32 delegates;
++	u32 dispatched;
++	u32 feel_calls;
++	u32 npc_events;
++	u32 npc_walk_events;
++	u32 step_events;
++	u32 npc_feel;
++	bool finite;
++	string256 missing; // first missing-data finding, empty when none
++};
++
++// Records the sound core, the gates and the begin counters, attaches the
++// level's event trace and opens the CSV. Returns false and names the reason
++// when there is no loaded level, no sound core or no stalker.
++bool HearingFixtureBegin(LPCSTR out_path, HearingFixtureSummary& summary);
++// Called once after every frame, after the activity fixture's tick: drains the
++// event trace and writes the rows.
++void HearingFixtureTick();
++// Detaches the trace, writes the end row, evaluates the fixture: a sound core
++// is present, emitters started, events reached hearers and feel_sound_new, and
++// the walked stalker produced at least one event while walking.
++bool HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, HearingFixtureSummary& summary);
++
++// Campaign server entries, used by the smoke around the activity fixture.
++extern "C" bool __cdecl xrCampaignLevel_HearingFixtureBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_HearingFixtureTick();
++extern "C" bool __cdecl xrCampaignLevel_HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++
++// Normal client entries, driven by ClientActivityCaptureOnFrame with
++// -s02-hearing-capture.
++void ClientHearingCaptureBegin(LPCSTR out_path);
++void ClientHearingCaptureTick();
++void ClientHearingCaptureEnd(u32 frames, u32 elapsed_ms);
+diff --git a/src/xrGame/physics_game.cpp b/src/xrGame/physics_game.cpp
+index 7d13b65..941d027 100644
+--- a/src/xrGame/physics_game.cpp
++++ b/src/xrGame/physics_game.cpp
+@@ -268,9 +268,10 @@ void TContactShotMark(CDB::TRI* T, dContactGeom* c)
+ 		return;
+ 	//float vel_cret= GetVelCret(c);
+ 
+-	Fvector to_camera;
+-	to_camera.sub(cast_fv(c->pos), Device.vCameraPosition);
+-	float square_cam_dist = to_camera.square_magnitude();
++	// S02-T05c: the camera range on the client, the activity anchors on the
++	// server (activity_range_distance).
++	const float cam_dist = activity_range_distance(cast_fv(c->pos));
++	float square_cam_dist = cam_dist * cam_dist;
+ 	if (data)
+ 	{
+ 		SGameMtlPair* mtl_pair = GMLib.GetMaterialPair(T->material, data->material);
+diff --git a/src/xrGame/sound_memory_manager.cpp b/src/xrGame/sound_memory_manager.cpp
+index 9c4c0e8..3398476 100644
+--- a/src/xrGame/sound_memory_manager.cpp
++++ b/src/xrGame/sound_memory_manager.cpp
+@@ -125,10 +125,14 @@ IC bool is_sound_type(int s, const ESoundTypes& t)
+ 	return ((s & t) == t);
+ }
+ 
++u32 CSoundMemoryManager::s_feel_calls = 0;
++
+ void CSoundMemoryManager::feel_sound_new(CObject* object, int sound_type, CSound_UserDataPtr user_data,
+                                          const Fvector& position, float sound_power)
+ {
+ 	PROF_EVENT("CSoundMemoryManager::feel_sound_new");
++	++m_feel_count;
++	++s_feel_calls;
+ #ifndef MASTER_GOLD
+ 	if (object && smart_cast<CActor*>(object) && psAI_Flags.test(aiIgnoreActor))
+ 		return;
+diff --git a/src/xrGame/sound_memory_manager.h b/src/xrGame/sound_memory_manager.h
+index e738276..f5ccbb9 100644
+--- a/src/xrGame/sound_memory_manager.h
++++ b/src/xrGame/sound_memory_manager.h
+@@ -97,6 +97,13 @@ public:
+ 
+ public:
+ 	IC const SOUNDS& objects() const;
++	// S02-T05c: hearing counters for the fixture; feel_sound_new calls on this
++	// NPC and on all NPCs since the module loaded.
++	u32 feel_count() const { return m_feel_count; }
++	static u32 s_feel_calls;
++private:
++	u32 m_feel_count = 0;
++public:
+ #ifdef USE_SELECTED_SOUND
+ 	IC		const CSoundObject	*sound					() const;
+ #endif
+diff --git a/src/xrGame/step_manager.cpp b/src/xrGame/step_manager.cpp
+index 0c908c8..492ec02 100644
+--- a/src/xrGame/step_manager.cpp
++++ b/src/xrGame/step_manager.cpp
+@@ -165,7 +165,9 @@ void CStepManager::update(bool b_hud_view)
+ 		if (m_step_info.disable) return;
+ 		if (!m_blend) return;
+ 
+-		float dist = m_object->Position().distance_to(Device.vCameraPosition);
++		// S02-T05c: the camera range on the client, the activity anchors on
++		// the server (activity_range_distance).
++		float dist = activity_range_distance(m_object->Position());
+         bool b_play_sound = dist < g_step_sound_distance;
+ 		bool b_play_particles = dist < g_step_particle_distance;
+ 
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 0801014..d2a2945 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2001,6 +2001,7 @@
+     <ClInclude Include="CampaignPhysicsCapture.h" />
+     <ClInclude Include="CampaignActivityCapture.h" />
+     <ClInclude Include="CampaignActivityPolicy.h" />
++    <ClInclude Include="CampaignHearingCapture.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4348,6 +4349,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignHearingCapture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+diff --git a/src/xrSound/NotificationClient.cpp b/src/xrSound/NotificationClient.cpp
+index 70e12eb..600ea64 100644
+--- a/src/xrSound/NotificationClient.cpp
++++ b/src/xrSound/NotificationClient.cpp
+@@ -72,24 +72,29 @@ inline STDMETHODIMP_(HRESULT __stdcall) CNotificationClient::OnDefaultDeviceChan
+     if (flow != eRender || role != eConsole)
+         return S_OK;
+ 
+-    SoundRenderA->bPendingDefaultDeviceSwitch = TRUE;
++    // S02-T05c: the OpenAL core may not exist yet or at all (CPU core).
++    if (SoundRenderA)
++        SoundRenderA->bPendingDefaultDeviceSwitch = TRUE;
+     return S_OK;
+ }
+ 
+ inline STDMETHODIMP_(HRESULT __stdcall) CNotificationClient::OnDeviceRemoved(LPCWSTR pwstrDeviceId)
+ {
+-    SoundRenderA->bPendingDeviceListRefresh = TRUE;
++    if (SoundRenderA)
++        SoundRenderA->bPendingDeviceListRefresh = TRUE;
+     return S_OK;
+ }
+ 
+ inline STDMETHODIMP_(HRESULT __stdcall) CNotificationClient::OnDeviceStateChanged(LPCWSTR pwstrDeviceId, DWORD dwNewState)
+ {
+-    SoundRenderA->bPendingDeviceListRefresh = TRUE;
++    if (SoundRenderA)
++        SoundRenderA->bPendingDeviceListRefresh = TRUE;
+     return S_OK;
+ }
+ 
+ inline STDMETHODIMP_(HRESULT __stdcall) CNotificationClient::OnPropertyValueChanged(LPCWSTR pwstrDeviceId, const PROPERTYKEY key)
+ {
+-    SoundRenderA->bPendingDeviceListRefresh = TRUE;
++    if (SoundRenderA)
++        SoundRenderA->bPendingDeviceListRefresh = TRUE;
+     return S_OK;
+ }
+diff --git a/src/xrSound/Sound.h b/src/xrSound/Sound.h
+index 458a742..5805171 100644
+--- a/src/xrSound/Sound.h
++++ b/src/xrSound/Sound.h
+@@ -351,6 +351,10 @@ public:
+ 	u32 _cache_hits;
+ 	u32 _cache_misses;
+ 	u32 _events;
++	// S02-T05c: cumulative counters for the hearing fixture.
++	u32 _started; // emitters started since the manager was created
++	u32 _events_total; // AI sound events handed to the level's handler
++	u32 _events_2d_skipped; // 2D events the CPU core dropped (no listener)
+ };
+ 
+ class XRSOUND_API CSound_stats_ext
+@@ -433,6 +437,8 @@ public:
+ 
+ 	virtual void object_relcase(CObject* obj) = 0;
+ 	virtual const Fvector& listener_position() = 0;
++	// S02-T05c: false for the CPU core, which has no listener.
++	virtual bool has_listener() = 0;
+ #ifdef __BORLANDC__
+ 	virtual SoundEnvironment_LIB*	get_env_library			()																						= 0;
+ 	virtual void					refresh_env_library		()																						= 0;
+diff --git a/src/xrSound/SoundRender_Core.cpp b/src/xrSound/SoundRender_Core.cpp
+index 0f2d5e6..bbbbe1b 100644
+--- a/src/xrSound/SoundRender_Core.cpp
++++ b/src/xrSound/SoundRender_Core.cpp
+@@ -52,6 +52,10 @@ CSoundRender_Core::CSoundRender_Core()
+ 	fTimer_Value = Timer.GetElapsed_sec();
+ 	fTimer_Delta = 0.0f;
+ 	m_iPauseCounter = 1;
++	m_is_supported = false;
++	s_emitters_started = 0;
++	s_events_total = 0;
++	s_events_2d_skipped = 0;
+ 	pSysNotification = xr_new<CNotificationClient>();
+ }
+ 
+diff --git a/src/xrSound/SoundRender_Core.h b/src/xrSound/SoundRender_Core.h
+index 97aaae0..a5cacfd 100644
+--- a/src/xrSound/SoundRender_Core.h
++++ b/src/xrSound/SoundRender_Core.h
+@@ -36,6 +36,10 @@ public:
+ 	float fTimer_Value;
+ 	float fTimer_Delta;
+ 	sound_event* Handler;
++	// S02-T05c: cumulative counters reported through statistic().
++	u32 s_emitters_started;
++	u32 s_events_total;
++	u32 s_events_2d_skipped;
+ protected:
+ 	// Collider
+ #ifndef _EDITOR
+@@ -123,6 +127,9 @@ public:
+ 	BOOL i_allow_play(CSoundRender_Emitter* E);
+ 	virtual BOOL i_locked() { return bLocked; }
+ 	virtual BOOL is_ready() { return bReady; }
++	// S02-T05c: false for the CPU core, which has no listener; the emitters
++	// then skip the listener-distance start delay.
++	virtual bool has_listener() { return true; }
+ 
+ 	virtual void object_relcase(CObject* obj);
+ 	void i_create_all_sources();
+diff --git a/src/xrSound/SoundRender_CoreCPU.cpp b/src/xrSound/SoundRender_CoreCPU.cpp
+new file mode 100644
+index 0000000..f96ca92
+--- /dev/null
++++ b/src/xrSound/SoundRender_CoreCPU.cpp
+@@ -0,0 +1,67 @@
++#include "stdafx.h"
++#pragma hdrstop
++
++#include "SoundRender_CoreCPU.h"
++#include "SoundRender_Emitter.h"
++#include "NotificationClient.h"
++
++CSoundRender_CoreCPU* SoundRenderCPU = nullptr;
++
++// The stream cache only serves rendering targets; a small one keeps the
++// per-source category tables valid without the client's 256 MB.
++static const u32 cpu_cache_kb = 1024;
++
++CSoundRender_CoreCPU::CSoundRender_CoreCPU() : CSoundRender_Core()
++{
++	no_listener.set(0.f, 0.f, 0.f);
++	// No device: the audio endpoint notifications are not wanted.
++	xr_delete(pSysNotification);
++}
++
++CSoundRender_CoreCPU::~CSoundRender_CoreCPU() {}
++
++void CSoundRender_CoreCPU::_initialize(int stage)
++{
++	// Stage 0 enumerates devices in the OpenAL core; there are none here.
++	if (stage == 0)
++		return;
++	Timer.Start();
++	env_load();
++	bPresent = TRUE;
++	cache_bytes_per_line = (sdef_target_block / 8) * 276400 / 1000;
++	cache.initialize(cpu_cache_kb, cache_bytes_per_line);
++	bReady = TRUE;
++	Msg("* sound : CPU core, no device, no listener (-snd_cpu)");
++}
++
++void CSoundRender_CoreCPU::_clear()
++{
++	inherited::_clear();
++}
++
++void CSoundRender_CoreCPU::_restart()
++{
++	cache.destroy();
++	cache.initialize(cpu_cache_kb, cache_bytes_per_line);
++	env_apply();
++}
++
++void CSoundRender_CoreCPU::update_events()
++{
++	PROF_EVENT("CSoundRender_CoreCPU::update_events");
++	for (u32 it = 0; it < s_events.size(); it++)
++	{
++		event& E = s_events[it];
++		if (E.first->feedback && E.first->feedback->is_2D())
++		{
++			// A 2D sound has no world position; the OpenAL core places it at
++			// the listener, which this core does not have.
++			++s_events_2d_skipped;
++			continue;
++		}
++		++s_events_total;
++		if (Handler)
++			Handler(E.first, E.second);
++	}
++	s_events.clear_not_free();
++}
+diff --git a/src/xrSound/SoundRender_CoreCPU.h b/src/xrSound/SoundRender_CoreCPU.h
+new file mode 100644
+index 0000000..37aa84f
+--- /dev/null
++++ b/src/xrSound/SoundRender_CoreCPU.h
+@@ -0,0 +1,39 @@
++#pragma once
++#include "SoundRender_Core.h"
++
++// S02-T05c: the CPU sound core, selected with -snd_cpu. It is the engine's
++// own sound core with no audio device: sources load their headers (length,
++// game type, volume, AI range from the ogg comment), emitters run the native
++// state machine and propagate AI sound events to the level's handler, and
++// nothing is mixed because there are no targets. It has no listener: 3D
++// events keep their world position, 2D events (UI, music, intro) are dropped
++// instead of being placed at a fabricated listener, and the listener-distance
++// start delay and listener occlusion do not apply. The OpenAL core
++// (CSoundRender_CoreA) is unchanged for the client.
++class CSoundRender_CoreCPU : public CSoundRender_Core
++{
++	typedef CSoundRender_Core inherited;
++	Fvector no_listener; // zero; returned where the interface needs a reference
++
++public:
++	CSoundRender_CoreCPU();
++	virtual ~CSoundRender_CoreCPU();
++
++	virtual void _initialize(int stage);
++	virtual void _clear();
++	virtual void _restart();
++	virtual void set_master_volume(float f) {}
++	virtual void update_listener(const Fvector& P, const Fvector& D, const Fvector& N, float dt) {}
++	virtual void set_listener(const CSoundRender_Environment& env) {}
++	virtual void get_listener(CSoundRender_Environment& env) {}
++	virtual void commit() {}
++	virtual void default_device_changed() {}
++	virtual const Fvector& listener_position() { return no_listener; }
++	virtual bool has_listener() { return false; }
++	// Playback occlusion is measured from the listener; without one there is
++	// none. Hearing occlusion (get_occlusion_to) is hearer-to-source and stays native.
++	virtual float get_occlusion(Fvector& P, float R, Fvector* occ) { return 1.f; }
++	virtual void update_events();
++};
++
++extern CSoundRender_CoreCPU* SoundRenderCPU;
+diff --git a/src/xrSound/SoundRender_Core_Processor.cpp b/src/xrSound/SoundRender_Core_Processor.cpp
+index 076cf07..9b65ba0 100644
+--- a/src/xrSound/SoundRender_Core_Processor.cpp
++++ b/src/xrSound/SoundRender_Core_Processor.cpp
+@@ -16,6 +16,7 @@ CSoundRender_Emitter* CSoundRender_Core::i_play(ref_sound* S, BOOL _loop, float
+ 	S->_p->feedback = E;
+ 	E->start(S, _loop, delay);
+ 	s_emitters.push_back(E);
++	++s_emitters_started;
+ 	return E;
+ }
+ 
+@@ -170,6 +171,7 @@ void CSoundRender_Core::update_events()
+ 	for (u32 it = 0; it < s_events.size(); it++)
+ 	{
+ 		event& E = s_events[it];
++		++s_events_total;
+ 		Handler(E.first, E.second);
+ 	}
+ 	s_events.clear_not_free();
+@@ -189,6 +191,9 @@ void CSoundRender_Core::statistic(CSound_stats* dest, CSound_stats_ext* ext)
+ 		dest->_cache_hits = cache._stat_hit;
+ 		dest->_cache_misses = cache._stat_miss;
+ 		dest->_events = g_saved_event_count;
++		dest->_started = s_emitters_started;
++		dest->_events_total = s_events_total;
++		dest->_events_2d_skipped = s_events_2d_skipped;
+ 		cache.stats_clear();
+ 	}
+ 	if (ext)
+diff --git a/src/xrSound/SoundRender_Emitter_FSM.cpp b/src/xrSound/SoundRender_Emitter_FSM.cpp
+index 0dafad8..b789c51 100644
+--- a/src/xrSound/SoundRender_Emitter_FSM.cpp
++++ b/src/xrSound/SoundRender_Emitter_FSM.cpp
+@@ -56,7 +56,9 @@ void CSoundRender_Emitter::update(float dt)
+ 	// Then gradually ramp up to delay calculated by math
+ 	// Starting at 90m, full delay kicks in
+ 	// Don't apply delay to already delayed sounds, they are most likely already handled in respective parts of code and scripts
+-	if (need_preplay_update && m_current_state < stPlaying && starting_delay == 0.f)
++	// S02-T05c: the delay is the sound's travel time to the listener, so a
++	// core without one (the campaign server's CPU core) applies none.
++	if (need_preplay_update && m_current_state < stPlaying && starting_delay == 0.f && SoundRender->has_listener())
+ 	{
+ 		PROF_EVENT("Sound: distance delay");
+ 		if (_valid(p_source.position) && !p_source.position.similar(Fvector().set(0.f, 0.f, 0.f)) && owner_data && source() && source()->channels_num() == 1)
+diff --git a/src/xrSound/sound.cpp b/src/xrSound/sound.cpp
+index af37781..be52754 100644
+--- a/src/xrSound/sound.cpp
++++ b/src/xrSound/sound.cpp
+@@ -2,6 +2,7 @@
+ #pragma hdrstop
+ 
+ #include "SoundRender_CoreA.h"
++#include "SoundRender_CoreCPU.h"
+ 
+ XRSOUND_API xr_token* snd_devices_token = NULL;
+ XRSOUND_API xr_string snd_device_name;
+@@ -10,17 +11,28 @@ void CSound_manager_interface::_create(int stage)
+ {
+ 	if (stage == 0)
+ 	{
+-		SoundRenderA = xr_new<CSoundRender_CoreA>();
+-		SoundRender = SoundRenderA;
+-		Sound = SoundRender;
+-
+-		if (strstr(Core.Params, "-nosound"))
++		if (strstr(Core.Params, "-snd_cpu"))
+ 		{
+-			SoundRender->bPresent = FALSE;
+-			return;
++			// S02-T05c: emitters and AI sound events with no audio device.
++			SoundRenderCPU = xr_new<CSoundRender_CoreCPU>();
++			SoundRender = SoundRenderCPU;
++			Sound = SoundRender;
++			SoundRender->bPresent = TRUE;
+ 		}
+ 		else
+-			SoundRender->bPresent = TRUE;
++		{
++			SoundRenderA = xr_new<CSoundRender_CoreA>();
++			SoundRender = SoundRenderA;
++			Sound = SoundRender;
++
++			if (strstr(Core.Params, "-nosound"))
++			{
++				SoundRender->bPresent = FALSE;
++				return;
++			}
++			else
++				SoundRender->bPresent = TRUE;
++		}
+ 	}
+ 
+ 	if (!SoundRender->bPresent) return;
+@@ -31,5 +43,7 @@ void CSound_manager_interface::_destroy()
+ {
+ 	Sound->_clear();
+ 	xr_delete(SoundRender);
++	SoundRenderA = nullptr;
++	SoundRenderCPU = nullptr;
+ 	Sound = 0;
+ }
+diff --git a/src/xrSound/xrSound.vcxproj b/src/xrSound/xrSound.vcxproj
+index d0f9b15..187ad1a 100644
+--- a/src/xrSound/xrSound.vcxproj
++++ b/src/xrSound/xrSound.vcxproj
+@@ -309,6 +309,7 @@
+     <ClInclude Include="SoundRender_Cache.h" />
+     <ClInclude Include="SoundRender_Core.h" />
+     <ClInclude Include="SoundRender_CoreA.h" />
++    <ClInclude Include="SoundRender_CoreCPU.h" />
+     <ClInclude Include="SoundRender_Emitter.h" />
+     <ClInclude Include="SoundRender_Environment.h" />
+     <ClInclude Include="SoundRender_Source.h" />
+@@ -335,6 +336,7 @@
+     <ClCompile Include="SoundRender_Cache.cpp" />
+     <ClCompile Include="SoundRender_Core.cpp" />
+     <ClCompile Include="SoundRender_CoreA.cpp" />
++    <ClCompile Include="SoundRender_CoreCPU.cpp" />
+     <ClCompile Include="SoundRender_Core_Processor.cpp" />
+     <ClCompile Include="SoundRender_Core_SourceManager.cpp" />
+     <ClCompile Include="SoundRender_Core_StartStop.cpp" />
+diff --git a/src/xrSound/xrSound.vcxproj.filters b/src/xrSound/xrSound.vcxproj.filters
+index 7ad6b4e..43a9dc2 100644
+--- a/src/xrSound/xrSound.vcxproj.filters
++++ b/src/xrSound/xrSound.vcxproj.filters
+@@ -51,6 +51,9 @@
+     <ClInclude Include="SoundRender_CoreA.h">
+       <Filter>Core\OpenAL</Filter>
+     </ClInclude>
++    <ClInclude Include="SoundRender_CoreCPU.h">
++      <Filter>Core</Filter>
++    </ClInclude>
+     <ClInclude Include="SoundRender_Emitter.h">
+       <Filter>Emitter</Filter>
+     </ClInclude>
+@@ -101,6 +104,9 @@
+     <ClCompile Include="SoundRender_CoreA.cpp">
+       <Filter>Core\OpenAL</Filter>
+     </ClCompile>
++    <ClCompile Include="SoundRender_CoreCPU.cpp">
++      <Filter>Core</Filter>
++    </ClCompile>
+     <ClCompile Include="SoundRender_Emitter.cpp">
+       <Filter>Emitter</Filter>
+     </ClCompile>

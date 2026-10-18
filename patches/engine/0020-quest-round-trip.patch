@@ -1,0 +1,1376 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 5c90e59..c437f13 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1003,6 +1003,15 @@ extern "C" bool __cdecl xrCampaignLevel_CombatFixtureEnd(u32 frames, u32 sim_ms,
+ extern "C" bool __cdecl xrCampaignLevel_CheckpointSave(LPCSTR save_name, LPCSTR out_path);
+ extern "C" bool __cdecl xrCampaignLevel_CheckpointServerCheck();
+ extern "C" bool __cdecl xrCampaignLevel_CheckpointEnd(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_QuestApproachBegin();
++extern "C" bool __cdecl xrCampaignLevel_QuestApproachTick();
++extern "C" bool __cdecl xrCampaignLevel_QuestGive(LPCSTR out_path);
++extern "C" bool __cdecl xrCampaignLevel_QuestObserved(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_QuestRestored();
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteBegin();
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteTick();
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteEnd(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_QuestPersisted();
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1277,6 +1286,17 @@ u32 g_campaign_combat_ticks = 3500;
+ // written to the run's $game_saves$ (.scop and .scoc). Lowercase: the Lua
+ // storage manager lowercases the .scoc name it writes.
+ LPCSTR g_campaign_checkpoint_name = "s02-t06d-checkpoint";
++// Second checkpoint, written after the quest is completed (S02-T06e).
++LPCSTR g_campaign_quest_checkpoint_name = "s02-t06e-checkpoint";
++// Ticks run after the quest is given (100 ticks are 2 s, longer than the Lua
++// task manager's 0.5-1 s check interval) and the budget for completing it
++// (1500 ticks are 30 s: item online, status functor, turn-in, the
++// completion through UpdateTasks and the one-second reward timer).
++// Budget for the giver to come online after the actor is moved beside him
++// (1000 ticks are 20 s; fixture spawns switched online within ~10 ticks).
++u32 g_campaign_quest_approach_ticks = 1000;
++u32 g_campaign_quest_ticks = 100;
++u32 g_campaign_quest_complete_ticks = 1500;
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -1891,32 +1911,33 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 18;
+                     }
+                 }
+-                if (result == 0)
+-                {
+-                    // S02-T06d: native checkpoint. The fixture sends the
+-                    // save request the console `save` command sends and
+-                    // checks the written .scop/.scoc against the live state.
++                // S02-T06d: native checkpoint round-trip. The fixture sends the
++                // save request the console `save` command sends, checks the
++                // written .scop/.scoc against the live state, then the level is
++                // stopped and started again from the checkpoint the way the
++                // engine reconnects (KERNEL:disconnect, KERNEL:start); the
++                // server and client stages and the first ticks run and the
++                // state is compared with what the checkpoint was written from.
++                // Used twice: after the quest is given (stage names
++                // campaign-checkpoint-*, exits 19-21) and after it is completed
++                // (campaign-quest-checkpoint-*, exits 25-27).
++                auto checkpoint_round_trip = [&](LPCSTR name, LPCSTR csv, LPCSTR prefix, int save_code, int restart_code,
++                                                 int passed_code) {
++                    string64 stage_name;
+                     string_path capture;
+-                    FS.update_path(capture, "$logs$", "s02-t06d-checkpoint.csv");
+-                    if (xrCampaignLevel_CheckpointSave(g_campaign_checkpoint_name, capture))
+-                        stage("campaign-checkpoint-saved");
++                    FS.update_path(capture, "$logs$", csv);
++                    if (xrCampaignLevel_CheckpointSave(name, capture))
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "checkpoint-saved"));
+                     else
+                     {
+-                        stage("campaign-checkpoint-save-failed");
+-                        result = 19;
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "checkpoint-save-failed"));
++                        result = save_code;
++                        return;
+                     }
+-                }
+-                if (result == 0)
+-                {
+-                    // S02-T06d: restart from the checkpoint the way the
+-                    // engine reconnects (KERNEL:disconnect, KERNEL:start):
+-                    // stop the level, start it from the written save, run
+-                    // the server and client stages and the first ticks, and
+-                    // compare with the state the checkpoint was written from.
+                     xrCampaignLevel_Stop();
+                     stage("campaign-stopped");
+                     string256 op_server;
+-                    xr_sprintf(op_server, "%s/single/alife/load", g_campaign_checkpoint_name);
++                    xr_sprintf(op_server, "%s/single/alife/load", name);
+                     bool ok = xrCampaignLevel_Start(op_server, "localhost");
+                     if (ok)
+                     {
+@@ -1924,39 +1945,130 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         ok = pumped == 0 && xrCampaignLevel_Report() && xrCampaignLevel_CheckpointServerCheck();
+                     }
+                     if (ok)
+-                        stage("campaign-restart-server-ready");
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "restart-server-ready"));
+                     else
+                     {
+-                        stage("campaign-restart-server-failed");
+-                        result = 20;
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "restart-server-failed"));
++                        result = restart_code;
++                        return;
+                     }
+-                    if (ok)
+                     {
+                         const int pumped = xrCampaignLevel_PumpClientStages(300000);
+                         ok = pumped == 0 && xrCampaignLevel_ReportLoaded();
+-                        if (ok)
+-                            stage("campaign-restart-level-loaded");
+-                        else
++                    }
++                    if (ok)
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "restart-level-loaded"));
++                    else
++                    {
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "restart-load-failed"));
++                        result = restart_code;
++                        return;
++                    }
++                    const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                    g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                    RunCampaignTicksTo(ticks_before + g_campaign_level_ticks);
++                    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                    const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                    ok = xrCampaignLevel_ReportTicks(ran) && xrCampaignLevel_CheckpointEnd(ran);
++                    if (ok)
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "checkpoint-passed"));
++                    else
++                    {
++                        stage(strconcat(sizeof(stage_name), stage_name, prefix, "checkpoint-failed"));
++                        result = passed_code;
++                    }
++                };
++                if (result == 0)
++                {
++                    // S02-T06e: a quest is given through the installed
++                    // dialogue functions, then the task manager runs.
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s02-t06e-quest.csv");
++                    bool ok = xrCampaignLevel_QuestApproachBegin();
++                    if (ok)
++                    {
++                        const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                        g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                        while (g_campaign_clock->Stats().ticks - ticks_before < g_campaign_quest_approach_ticks)
+                         {
+-                            stage("campaign-restart-load-failed");
+-                            result = 20;
++                            RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                            if (xrCampaignLevel_QuestApproachTick())
++                                break;
+                         }
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                        ok = xrCampaignLevel_QuestApproachTick();
+                     }
++                    ok = ok && xrCampaignLevel_QuestGive(capture);
+                     if (ok)
+                     {
+                         const u64 ticks_before = g_campaign_clock->Stats().ticks;
+                         g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
+-                        RunCampaignTicksTo(ticks_before + g_campaign_level_ticks);
++                        RunCampaignTicksTo(ticks_before + g_campaign_quest_ticks);
+                         g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
+-                        const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
+-                        ok = xrCampaignLevel_ReportTicks(ran) && xrCampaignLevel_CheckpointEnd(ran);
+-                        if (ok)
+-                            stage("campaign-checkpoint-passed");
+-                        else
++                        ok = xrCampaignLevel_QuestObserved(u32(g_campaign_clock->Stats().ticks - ticks_before));
++                    }
++                    if (ok)
++                        stage("campaign-quest-given");
++                    else
++                    {
++                        stage("campaign-quest-give-failed");
++                        result = 22;
++                    }
++                }
++                if (result == 0)
++                    checkpoint_round_trip(g_campaign_checkpoint_name, "s02-t06d-checkpoint.csv", "campaign-", 19, 20, 21);
++                if (result == 0)
++                {
++                    // S02-T06e: the given task came back through the checkpoint.
++                    if (xrCampaignLevel_QuestRestored())
++                        stage("campaign-quest-restored");
++                    else
++                    {
++                        stage("campaign-quest-restore-failed");
++                        result = 23;
++                    }
++                }
++                if (result == 0)
++                {
++                    // S02-T06e: the fetch item appears in the inventory, the
++                    // task is turned in through the dialogue functions and the
++                    // completion lands through the task manager and its callbacks.
++                    bool ok = xrCampaignLevel_QuestCompleteBegin();
++                    u32 ran = 0;
++                    if (ok)
++                    {
++                        const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                        g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                        while (g_campaign_clock->Stats().ticks - ticks_before < g_campaign_quest_complete_ticks)
+                         {
+-                            stage("campaign-checkpoint-failed");
+-                            result = 21;
++                            RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                            if (xrCampaignLevel_QuestCompleteTick())
++                                break;
+                         }
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                        ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                    }
++                    ok = xrCampaignLevel_QuestCompleteEnd(ran) && ok;
++                    if (ok)
++                        stage("campaign-quest-completed");
++                    else
++                    {
++                        stage("campaign-quest-complete-failed");
++                        result = 24;
++                    }
++                }
++                if (result == 0)
++                    checkpoint_round_trip(g_campaign_quest_checkpoint_name, "s02-t06e-checkpoint.csv", "campaign-quest-", 25, 26, 27);
++                if (result == 0)
++                {
++                    // S02-T06e: the completed task and its rewards came back
++                    // through the second checkpoint.
++                    if (xrCampaignLevel_QuestPersisted())
++                        stage("campaign-quest-persisted");
++                    else
++                    {
++                        stage("campaign-quest-persist-failed");
++                        result = 28;
+                     }
+                 }
+             }
+diff --git a/src/xrGame/CampaignCheckpoint.cpp b/src/xrGame/CampaignCheckpoint.cpp
+index 5a84ad1..3000573 100644
+--- a/src/xrGame/CampaignCheckpoint.cpp
++++ b/src/xrGame/CampaignCheckpoint.cpp
+@@ -39,6 +39,62 @@ string_path g_out_path;
+ string64 g_save_name;
+ CheckpointSnapshot g_saved; // right after the save
+ bool g_have_saved = false;
++// The level registry's savable top-level objects at the save (id, section,
++// parent), to name any object the reloaded registry does not hold.
++struct SavedLevelObject
++{
++	u16 id;
++	u16 parent;
++	string64 section;
++};
++xr_vector<SavedLevelObject> g_saved_level_objects;
++
++void remember_level_objects()
++{
++	g_saved_level_objects.clear();
++	const CALifeSimulator* alife = ai().get_alife();
++	if (!alife)
++		return;
++	for (const auto& entry : alife->graph().level().objects())
++	{
++		SavedLevelObject o;
++		o.id = entry.second->ID;
++		o.parent = entry.second->ID_Parent;
++		xr_strcpy(o.section, entry.second->name());
++		g_saved_level_objects.push_back(o);
++	}
++}
++
++// Names every saved level-registry object the reloaded registry lacks and
++// returns how many of them are unexplained: not in ALife any more, or
++// registered under another level. A squad member that is still in ALife on
++// this level is explained: online-offline group members are registered
++// individually only while under direct control
++// (CALifeGraphRegistry::update, alife_graph_registry.cpp:49-52), so a member
++// that was online at the save can sit under its group after the load.
++u32 report_missing_level_objects()
++{
++	const CALifeSimulator* alife = ai().get_alife();
++	if (!alife)
++		return 0;
++	u32 unexplained = 0;
++	for (const SavedLevelObject& o : g_saved_level_objects)
++	{
++		if (alife->graph().level().objects().find(o.id) != alife->graph().level().objects().end())
++			continue;
++		const CSE_ALifeDynamicObject* now = alife->objects().object(o.id, true);
++		const u32 now_level = now ? u32(ai().game_graph().vertex(now->m_tGraphID)->level_id()) : u32(-1);
++		const bool explained = now && now_level == alife->graph().level().level_id();
++		Msg("S02-T06d level registry after the reload lacks %u (%s, parent %u at the save): %s", u32(o.id), o.section,
++			u32(o.parent), !now ? "not in ALife" : explained ? "still in ALife on this level" : "on another level");
++		if (now)
++			Msg("S02-T06d   now: parent %u graph %u (level %u) online %d", u32(now->ID_Parent), u32(now->m_tGraphID),
++				now_level, now->m_bOnline ? 1 : 0);
++		if (!explained)
++			++unexplained;
++	}
++	return unexplained;
++}
+ 
+ // What CALifeObjectRegistry::save writes: top-level objects that can save
+ // and are not redundant, and their children that can save, through the
+@@ -308,6 +364,7 @@ extern "C" bool __cdecl xrCampaignLevel_CheckpointSave(LPCSTR save_name, LPCSTR
+ 
+ 	take(g_saved, "after-save");
+ 	g_have_saved = true;
++	remember_level_objects();
+ 	log_snapshot(g_saved);
+ 	write_row(out, g_saved);
+ 
+@@ -374,8 +431,15 @@ extern "C" bool __cdecl xrCampaignLevel_CheckpointServerCheck()
+ 	ok = rule(xr_strcmp(loaded.level, a.level) == 0 && loaded.level_id == a.level_id, "same level") && ok;
+ 	ok = rule(loaded.alife_objects == a.alife_savable,
+ 			 "ALife holds exactly the objects the checkpoint wrote") && ok;
+-	ok = rule(loaded.level_objects == a.level_savable,
+-			 "the level registry holds exactly the level objects the checkpoint wrote") && ok;
++	u32 unexplained = 0;
++	if (loaded.level_objects != a.level_savable)
++		unexplained = report_missing_level_objects();
++	const u32 level_delta = loaded.level_objects > a.level_savable ? loaded.level_objects - a.level_savable
++																  : a.level_savable - loaded.level_objects;
++	ok = rule(loaded.level_objects == a.level_savable ||
++				 (unexplained == 0 && level_delta <= _max(10u, a.level_savable / 1000)),
++			 "the level registry holds the level objects the checkpoint wrote (squad members under their group "
++			 "explained)") && ok;
+ 	ok = rule(loaded.game_time >= a.game_time && loaded.game_time - a.game_time < 2000,
+ 			 "the ALife clock resumed from the saved time") && ok;
+ 	ok = rule(loaded.se_actor && loaded.se_actor_pos.distance_to(a.se_actor_pos) < 0.01f,
+diff --git a/src/xrGame/CampaignQuestCapture.cpp b/src/xrGame/CampaignQuestCapture.cpp
+new file mode 100644
+index 0000000..38e759d
+--- /dev/null
++++ b/src/xrGame/CampaignQuestCapture.cpp
+@@ -0,0 +1,812 @@
++#include "pch_script.h"
++#include "CampaignQuestCapture.h"
++
++// S02-T06e: see CampaignQuestCapture.h. The fixture adds nothing to the task
++// system: it drives the installed dialogue functions with the real actor and
++// the real NPC, spawns the fetch item the way a script would, and reads the
++// native and Lua task state back.
++
++#include "Level.h"
++#include "Actor.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "alife_graph_registry.h"
++#include "ai_object_location.h"
++#include "GametaskManager.h"
++#include "GameTask.h"
++#include "InventoryOwner.h"
++#include "Inventory.h"
++#include "inventory_item.h"
++#include "relation_registry.h"
++#include "character_community.h"
++#include "script_game_object.h"
++#include "script_engine.h"
++#include "CharacterPhysicsSupport.h"
++#include "PHMovementControl.h"
++#include "../xrServerEntities/xrServer_Objects_ALife.h"
++#include "../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++
++// alife_simulator_script.cpp: the alife():create(section, position, lvid, gvid,
++// parent) binding. With an online parent it spawns the child through the
++// server (M_SPAWN -> xrServer::Process_spawn) so that the object exists in
++// the parent's inventory; the offline registration alone would leave a child
++// registered in ALife with no server object.
++CSE_Abstract* CALifeSimulator__spawn_item2(CALifeSimulator* self, LPCSTR section, const Fvector& position,
++	u32 level_vertex_id, GameGraph::_GRAPH_ID game_vertex_id, ALife::_OBJECT_ID id_parent);
++
++namespace
++{
++const u16 no_id = u16(-1);
++LPCSTR default_task = "mar_base_stalker_tech_task_1";
++LPCSTR default_giver = "mar_base_stalker_tech";
++LPCSTR info_tier1 = "mar_base_stalker_tech_upgrade_tier_1";
++
++string_path g_out_path;
++string128 g_task_id;
++string128 g_giver_profile;
++u16 g_giver_id = no_id;
++QuestSnapshot g_given;
++bool g_have_given = false;
++QuestSnapshot g_completed;
++bool g_have_completed = false;
++u32 g_available_count = 0;
++u32 g_spawned_items = 0;
++// completion phases: 0 waiting for the item and the status functor, 1 turned
++// in, waiting for the completion to land, 2 done
++u32 g_complete_phase = 0;
++u32 g_complete_ticks = 0;
++u32 g_turnin_tick = 0;
++u32 g_completed_tick = 0;
++bool g_turnin_ok = false;
++
++void read_options()
++{
++	xr_strcpy(g_task_id, default_task);
++	xr_strcpy(g_giver_profile, default_giver);
++	if (LPCSTR option = strstr(Core.Params, "-s02-quest-task "))
++		sscanf_s(option + 16, "%127s", g_task_id, static_cast<unsigned>(_countof(g_task_id)));
++	if (LPCSTR option = strstr(Core.Params, "-s02-quest-giver "))
++		sscanf_s(option + 17, "%127s", g_giver_profile, static_cast<unsigned>(_countof(g_giver_profile)));
++}
++
++// The ALife stalker whose character profile is the giver's.
++CSE_ALifeHumanStalker* find_giver()
++{
++	const CALifeSimulator* alife = ai().get_alife();
++	if (!alife)
++		return nullptr;
++	for (const auto& entry : alife->objects().objects())
++	{
++		CSE_ALifeHumanStalker* stalker = smart_cast<CSE_ALifeHumanStalker*>(entry.second);
++		if (stalker && xr_strcmp(stalker->character_profile().c_str(), g_giver_profile) == 0)
++			return stalker;
++	}
++	return nullptr;
++}
++
++CGameObject* giver_object()
++{
++	if (g_giver_id == no_id || !g_pGameLevel)
++		return nullptr;
++	CObject* object = Level().Objects.net_Find(g_giver_id);
++	return object && !object->getDestroy() ? smart_cast<CGameObject*>(object) : nullptr;
++}
++
++u32 count_items(LPCSTR section)
++{
++	if (!g_actor || !section || !section[0])
++		return 0;
++	u32 count = 0;
++	for (PIItem item : g_actor->inventory().m_all)
++		if (item && xr_strcmp(item->object().cNameSect_str(), section) == 0)
++			++count;
++	return count;
++}
++
++int community_goodwill(LPCSTR community)
++{
++	if (!g_actor)
++		return 0;
++	CHARACTER_COMMUNITY c;
++	c.set(community);
++	return int(RELATION_REGISTRY().GetCommunityGoodwill(c.index(), g_actor->ID()));
++}
++
++luabind::object lua_globals() { return luabind::get_globals(ai().script_engine().lua()); }
++
++// A nil bound to the current Lua state: a default-constructed luabind::object
++// has no state and faults on type().
++luabind::object lua_nil() { return luabind::object(ai().script_engine().lua()); }
++
++luabind::object lua_db_actor()
++{
++	luabind::object db = lua_globals()["db"];
++	if (db.type() != LUA_TTABLE)
++		return lua_nil();
++	return db["actor"];
++}
++
++// A read-only Lua helper that copies the fields of
++// task_manager.get_task_manager().task_info[id] into a plain table (the
++// task manager is a Lua class instance, which luabind proxies do not index
++// reliably from C++). Defined once in _G; it changes no task state.
++bool ensure_lua_helper()
++{
++	static lua_State* defined_for = nullptr;
++	lua_State* L = ai().script_engine().lua();
++	if (defined_for == L)
++	{
++		luabind::object existing = lua_globals()["s02_quest_info"];
++		if (existing.type() == LUA_TFUNCTION)
++			return true;
++	}
++	LPCSTR source =
++		"function s02_quest_info(id)\n"
++		"  local tm = task_manager.get_task_manager()\n"
++		"  local t = tm and tm.task_info and tm.task_info[id]\n"
++		"  if not t then return nil end\n"
++		"  return { status = t.status, stage = t.stage, loaded = (t.loaded == true), has_t = (t.t ~= nil),\n"
++		"           checked = (t.check_time ~= nil), giver = t.task_giver_id }\n"
++		"end\n";
++	if (luaL_loadbuffer(L, source, xr_strlen(source), "s02_quest_info") != 0 || lua_pcall(L, 0, 0, 0) != 0)
++	{
++		Msg("! S02-T06e Lua helper failed: %s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		return false;
++	}
++	defined_for = L;
++	return true;
++}
++
++// A plain-table copy of task_manager.get_task_manager().task_info[id], or nil.
++luabind::object lua_task_info()
++{
++	luabind::functor<luabind::object> info;
++	if (!ensure_lua_helper() || !ai().script_engine().functor("_G.s02_quest_info", info))
++		return lua_nil();
++	return info(static_cast<LPCSTR>(g_task_id));
++}
++
++// load_var(db.actor, name): the actor's portable store (_g.script).
++luabind::object lua_load_var(LPCSTR name)
++{
++	luabind::object actor = lua_db_actor();
++	luabind::functor<luabind::object> load_var;
++	if (actor.type() == LUA_TNIL || !ai().script_engine().functor("_G.load_var", load_var))
++		return lua_nil();
++	return load_var(actor, name);
++}
++
++// axr_task_manager.available_tasks[npc_id], the list the dialog offers from.
++luabind::object lua_available_tasks(u16 npc_id)
++{
++	luabind::object manager = lua_globals()["axr_task_manager"];
++	if (manager.type() != LUA_TTABLE)
++		return lua_nil();
++	luabind::object available = manager["available_tasks"];
++	if (available.type() != LUA_TTABLE)
++		return lua_nil();
++	return available[int(npc_id)];
++}
++
++int lua_int(const luabind::object& value, int fallback)
++{
++	if (value.type() != LUA_TNUMBER)
++		return fallback;
++	return int(luabind::object_cast<float>(value));
++}
++
++void take(QuestSnapshot& s, LPCSTR label)
++{
++	ZeroMemory(&s, sizeof(s));
++	xr_strcpy(s.label, label);
++	xr_strcpy(s.task_id, g_task_id);
++	s.giver_id = g_giver_id;
++	s.native_state = -1;
++	xr_strcpy(s.lua_status, "-");
++	s.lua_stage = -1;
++	s.lua_giver_id = -1;
++	xr_strcpy(s.fetch_section, "-");
++	s.available_count = g_available_count;
++	s.spawned_items = g_spawned_items;
++	s.tm_updates = g_s02_task_manager_updates;
++	s.state_updates = g_s02_task_state_updates;
++
++	if (CSE_ALifeHumanStalker* giver = find_giver())
++	{
++		s.giver_se = true;
++		s.giver_alive = giver->g_Alive();
++		s.giver_online = giver->m_bOnline;
++	}
++	CGameObject* npc = giver_object();
++	s.giver_live = npc != nullptr;
++	if (npc)
++		if (CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc))
++			s.npc_talking = owner->IsTalking();
++
++	if (g_pGameLevel && g_actor)
++	{
++		CGameTaskManager& tm = Level().GameTaskManager();
++		CGameTask* task = tm.HasGameTask(g_task_id, false);
++		s.native_task = task != nullptr;
++		if (task)
++		{
++			s.native_state = int(task->GetTaskState());
++			s.receive_time = task->m_ReceiveTime;
++		}
++		s.native_total = u32(tm.GetGameTasks().size());
++		s.native_inprogress = tm.GetTaskCount(eTaskStateInProgress);
++		s.native_completed = tm.GetTaskCount(eTaskStateCompleted);
++		s.active_is_task = tm.ActiveTask() == task && task != nullptr;
++		s.money = g_actor->get_money();
++		s.goodwill_csky = community_goodwill("csky");
++		s.info_tier1 = g_actor->HasInfo(info_tier1);
++		s.actor_talking = g_actor->IsTalking();
++	}
++
++	// Lua side
++	luabind::object info = lua_task_info();
++	if (info.type() == LUA_TTABLE)
++	{
++		s.lua_task = true;
++		luabind::object status = info["status"];
++		if (status.type() == LUA_TSTRING)
++			xr_strcpy(s.lua_status, luabind::object_cast<LPCSTR>(status));
++		s.lua_stage = lua_int(info["stage"], -1);
++		luabind::object loaded = info["loaded"];
++		s.lua_loaded = loaded.type() == LUA_TBOOLEAN && luabind::object_cast<bool>(loaded);
++		luabind::object has_t = info["has_t"];
++		s.lua_has_t = has_t.type() == LUA_TBOOLEAN && luabind::object_cast<bool>(has_t);
++		luabind::object checked = info["checked"];
++		s.lua_checked = checked.type() == LUA_TBOOLEAN && luabind::object_cast<bool>(checked);
++		s.lua_giver_id = lua_int(info["giver"], -1);
++	}
++	string256 var;
++	strconcat(sizeof(var), var, g_task_id, "_fetch");
++	luabind::object fetch = lua_load_var(var);
++	if (fetch.type() == LUA_TSTRING)
++		xr_strcpy(s.fetch_section, luabind::object_cast<LPCSTR>(fetch));
++	strconcat(sizeof(var), var, g_task_id, "_fetch_count");
++	s.fetch_count = lua_int(lua_load_var(var), s.fetch_section[0] != '-' ? 1 : 0);
++	s.items_in_inventory = s.fetch_section[0] != '-' ? count_items(s.fetch_section) : 0;
++	luabind::functor<luabind::object> get_event;
++	if (ai().script_engine().functor("_G.GetEvent", get_event))
++	{
++		luabind::object used = get_event("used_npc_id");
++		s.used_npc_event = used.type() == LUA_TNUMBER && lua_int(used, -1) == int(g_giver_id);
++	}
++}
++
++void write_header(FILE* out)
++{
++	if (!out)
++		return;
++	fprintf(out,
++		"label,task_id,giver_id,giver_se,giver_alive,giver_online,giver_live,native_task,native_state,receive_time,"
++		"native_total,native_inprogress,native_completed,active_is_task,tm_updates,state_updates,lua_task,lua_status,"
++		"lua_stage,lua_loaded,lua_has_t,lua_checked,lua_giver_id,fetch_section,fetch_count,items_in_inventory,money,"
++		"goodwill_csky,info_tier1,actor_talking,npc_talking,used_npc_event,available_count,spawned_items\n");
++}
++
++void write_row(FILE* out, const QuestSnapshot& s)
++{
++	if (!out)
++		return;
++	fprintf(out, "%s,%s,%u,%d,%d,%d,%d,%d,%d,%I64u,%u,%u,%u,%d,%u,%u,%d,%s,%d,%d,%d,%d,%d,%s,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u\n",
++		s.label, s.task_id, u32(s.giver_id), s.giver_se ? 1 : 0, s.giver_alive ? 1 : 0, s.giver_online ? 1 : 0,
++		s.giver_live ? 1 : 0, s.native_task ? 1 : 0, s.native_state, s.receive_time, s.native_total,
++		s.native_inprogress, s.native_completed, s.active_is_task ? 1 : 0, s.tm_updates, s.state_updates,
++		s.lua_task ? 1 : 0, s.lua_status, s.lua_stage, s.lua_loaded ? 1 : 0, s.lua_has_t ? 1 : 0,
++		s.lua_checked ? 1 : 0, s.lua_giver_id, s.fetch_section, s.fetch_count, s.items_in_inventory, s.money,
++		s.goodwill_csky, s.info_tier1 ? 1 : 0, s.actor_talking ? 1 : 0, s.npc_talking ? 1 : 0,
++		s.used_npc_event ? 1 : 0, s.available_count, s.spawned_items);
++	fflush(out);
++}
++
++void log_snapshot(const QuestSnapshot& s)
++{
++	Msg("S02-T06e %s task=%s giver=%u se=%d alive=%d online=%d live=%d | native=%d state=%d receive_time=%I64u "
++		"total=%u inprogress=%u completed=%u active=%d tm_updates=%u state_updates=%u",
++		s.label, s.task_id, u32(s.giver_id), s.giver_se ? 1 : 0, s.giver_alive ? 1 : 0, s.giver_online ? 1 : 0,
++		s.giver_live ? 1 : 0, s.native_task ? 1 : 0, s.native_state, s.receive_time, s.native_total,
++		s.native_inprogress, s.native_completed, s.active_is_task ? 1 : 0, s.tm_updates, s.state_updates);
++	Msg("S02-T06e %s lua=%d status=%s stage=%d loaded=%d has_t=%d checked=%d giver=%d fetch=%s x%d in_inventory=%u | "
++		"money=%u goodwill_csky=%d info_tier1=%d talking actor=%d npc=%d used_npc=%d available=%u spawned=%u "
++		"actor_schedule_updates=%u",
++		s.label, s.lua_task ? 1 : 0, s.lua_status, s.lua_stage, s.lua_loaded ? 1 : 0, s.lua_has_t ? 1 : 0,
++		s.lua_checked ? 1 : 0, s.lua_giver_id, s.fetch_section, s.fetch_count, s.items_in_inventory, s.money,
++		s.goodwill_csky, s.info_tier1 ? 1 : 0, s.actor_talking ? 1 : 0, s.npc_talking ? 1 : 0,
++		s.used_npc_event ? 1 : 0, s.available_count, s.spawned_items, CActor::s_schedule_updates);
++}
++
++FILE* open_out(LPCSTR mode)
++{
++	FILE* out = fopen(g_out_path, mode);
++	if (!out)
++		Msg("! S02-T06e cannot open %s", g_out_path);
++	return out;
++}
++
++void write_snapshot(const QuestSnapshot& s, bool first)
++{
++	log_snapshot(s);
++	FILE* out = open_out(first ? "w" : "a");
++	if (first)
++		write_header(out);
++	write_row(out, s);
++	if (out)
++		fclose(out);
++}
++
++bool rule(bool ok, LPCSTR what)
++{
++	Msg("S02-T06e rule %s: %s", ok ? "ok  " : "FAIL", what);
++	return ok;
++}
++
++// The dialogue frame: what using the NPC and opening the talk window does
++// before any phrase (CUsableScriptObject::use -> the stalker binder's
++// use_callback; CActor::RunTalkDialog's OfferTalk/StartTalk; the PDA
++// script's actor_menu_mode(10) on the window showing), and what closing it
++// does (actor_menu_mode(11), StopTalk). The window itself is not shown.
++bool dialog_open(CGameObject* npc)
++{
++	CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc);
++	if (!owner || !g_actor)
++		return false;
++	const bool used = npc->use(g_actor);
++	const bool offered = owner->OfferTalk(g_actor);
++	if (offered)
++		g_actor->StartTalk(owner);
++	luabind::functor<void> menu_mode;
++	const bool have_menu = ai().script_engine().functor("pda.actor_menu_mode", menu_mode);
++	if (have_menu)
++		menu_mode(10);
++	Msg("S02-T06e dialog open: used=%d offered=%d actor_talking=%d npc_talking=%d menu_mode=%d", used ? 1 : 0,
++		offered ? 1 : 0, g_actor->IsTalking() ? 1 : 0, owner->IsTalking() ? 1 : 0, have_menu ? 1 : 0);
++	return used && offered && have_menu;
++}
++
++void dialog_close(CGameObject* npc)
++{
++	luabind::functor<void> menu_mode;
++	if (ai().script_engine().functor("pda.actor_menu_mode", menu_mode))
++		menu_mode(11);
++	if (g_actor)
++		g_actor->StopTalk();
++	if (CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc))
++		owner->StopTalk();
++}
++
++// The "any work for me?" phrases: generate the NPC's available tasks, skip
++// until the wanted one is offered (the dialog lets the player skip offers),
++// show the job text (runs on_job_descr and the fetch_func) and accept.
++bool dialog_accept_task(CGameObject* npc)
++{
++	CScriptGameObject* actor_go = g_actor->lua_game_object();
++	CScriptGameObject* npc_go = npc->lua_game_object();
++	luabind::functor<void> generate, skip, give;
++	luabind::functor<bool> has_task;
++	luabind::functor<luabind::object> text;
++	if (!ai().script_engine().functor("dialogs.generate_available_tasks", generate) ||
++		!ai().script_engine().functor("dialogs.npc_has_task", has_task) ||
++		!ai().script_engine().functor("dialogs.npc_skip_task", skip) ||
++		!ai().script_engine().functor("dialogs.text_npc_has_task", text) ||
++		!ai().script_engine().functor("dialogs.npc_give_task", give))
++	{
++		Msg("! S02-T06e dialogs task functions missing");
++		return false;
++	}
++	generate(actor_go, npc_go);
++	g_available_count = 0;
++	{
++		luabind::object list = lua_available_tasks(npc->ID());
++		if (list.type() == LUA_TTABLE)
++			for (int i = 1;; ++i)
++			{
++				luabind::object entry = list[i];
++				if (entry.type() == LUA_TNIL)
++					break;
++				++g_available_count;
++			}
++	}
++	Msg("S02-T06e giver %u offers %u task(s)", npc->ID(), g_available_count);
++	u32 skipped = 0;
++	for (; skipped <= g_available_count; ++skipped)
++	{
++		if (!has_task(actor_go, npc_go))
++			break;
++		luabind::object list = lua_available_tasks(npc->ID());
++		luabind::object first = list.type() == LUA_TTABLE ? luabind::object(list[1]) : lua_nil();
++		if (first.type() == LUA_TSTRING && xr_strcmp(luabind::object_cast<LPCSTR>(first), g_task_id) == 0)
++		{
++			luabind::object job = text(actor_go, npc_go);
++			Msg("S02-T06e offered %s after %u skip(s): \"%s\"", g_task_id, skipped,
++				job.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(job) : "-");
++			give(actor_go, npc_go);
++			return true;
++		}
++		Msg("S02-T06e skipping offered task %s", first.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(first) : "-");
++		skip(actor_go, npc_go);
++	}
++	Msg("! S02-T06e giver %u never offered %s", npc->ID(), g_task_id);
++	return false;
++}
++
++// The turn-in phrases: the finished-task list and "job done".
++bool dialog_turn_in(CGameObject* npc)
++{
++	CScriptGameObject* actor_go = g_actor->lua_game_object();
++	CScriptGameObject* npc_go = npc->lua_game_object();
++	luabind::functor<bool> finished;
++	luabind::functor<luabind::object> text;
++	luabind::functor<void> complete;
++	if (!ai().script_engine().functor("dialogs.actor_has_finished_task", finished) ||
++		!ai().script_engine().functor("dialogs.text_npc_task_finish", text) ||
++		!ai().script_engine().functor("dialogs.npc_set_finished_task_complete", complete))
++	{
++		Msg("! S02-T06e dialogs turn-in functions missing");
++		return false;
++	}
++	const bool has_finished = finished(actor_go, npc_go);
++	Msg("S02-T06e turn-in: actor_has_finished_task=%d", has_finished ? 1 : 0);
++	if (!has_finished)
++		return false;
++	luabind::object t = text(actor_go, npc_go);
++	Msg("S02-T06e turn-in text: \"%s\"", t.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(t) : "-");
++	complete(actor_go, npc_go);
++	return true;
++}
++
++bool give_task()
++{
++	CGameObject* npc = giver_object();
++	if (!npc)
++	{
++		Msg("! S02-T06e giver %s (%u) is not a live object", g_giver_profile, u32(g_giver_id));
++		return false;
++	}
++	bool ok = dialog_open(npc);
++	ok = dialog_accept_task(npc) && ok;
++	dialog_close(npc);
++	return ok;
++}
++
++// Spawn the fetch items into the actor's inventory the way a script's
++// alife_create_item(section, db.actor) does: alife():create with the actor
++// as parent (CALifeSimulator__spawn_item2, the Lua binding).
++bool spawn_fetch_items(LPCSTR section, u32 count)
++{
++	if (!g_actor || !section || section[0] == '-' || !ai().get_alife())
++		return false;
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	const CSE_ALifeCreatureActor* se_actor = alife->graph().actor();
++	if (!se_actor)
++		return false;
++	for (u32 i = 0; i < count; ++i)
++	{
++		CSE_Abstract* entity = CALifeSimulator__spawn_item2(alife, section, g_actor->Position(),
++			g_actor->ai_location().level_vertex_id(), se_actor->m_tGraphID, g_actor->ID());
++		if (!entity)
++		{
++			Msg("! S02-T06e %s did not spawn", section);
++			return false;
++		}
++		++g_spawned_items;
++		Msg("S02-T06e spawned %s id=%u into the actor's inventory", section, entity->ID);
++	}
++	return true;
++}
++} // namespace
++
++extern "C" bool __cdecl xrCampaignLevel_QuestApproachBegin()
++{
++	read_options();
++	if (!g_pGameLevel || !ai().get_alife() || !g_actor || !g_actor->g_Alive())
++	{
++		Msg("! S02-T06e quest: no level, ALife or alive actor");
++		return false;
++	}
++	CSE_ALifeHumanStalker* giver = find_giver();
++	if (!giver)
++	{
++		Msg("! S02-T06e quest: no ALife stalker with profile %s", g_giver_profile);
++		return false;
++	}
++	g_giver_id = giver->ID;
++	const float distance = giver->o_Position.distance_to(g_actor->Position());
++	if (giver_object())
++	{
++		Msg("S02-T06e approach: giver %s (%u) is online %.1f m away", g_giver_profile, u32(g_giver_id), distance);
++		return true;
++	}
++	// 2 m beside the giver, as the script API's SetActorPosition would put the actor
++	Fvector target = giver->o_Position;
++	target.x += 2.f;
++	const Fvector from = g_actor->Position();
++	Fmatrix F = g_actor->XFORM();
++	F.c = target;
++	g_actor->XFORM().set(F);
++	if (g_actor->character_physics_support()->movement()->CharacterExist())
++	{
++		g_actor->character_physics_support()->movement()->SetPosition(F.c);
++		g_actor->character_physics_support()->movement()->SetVelocity(0.f, 0.f, 0.f);
++	}
++	Msg("S02-T06e approach: giver %s (%u) offline %.1f m away at [%.2f,%.2f,%.2f]; actor moved from [%.2f,%.2f,%.2f] "
++		"to [%.2f,%.2f,%.2f]",
++		g_giver_profile, u32(g_giver_id), distance, VPUSH(giver->o_Position), VPUSH(from), VPUSH(target));
++	return true;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestApproachTick()
++{
++	CGameObject* npc = giver_object();
++	if (!npc)
++		return false;
++	Msg("S02-T06e approach: giver %u online, %.1f m from the actor", u32(g_giver_id),
++		g_actor ? npc->Position().distance_to(g_actor->Position()) : -1.f);
++	return true;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestGive(LPCSTR out_path)
++{
++	xr_strcpy(g_out_path, out_path);
++	read_options();
++	g_have_given = g_have_completed = false;
++	g_available_count = g_spawned_items = 0;
++	if (!g_pGameLevel || !ai().get_alife() || !g_actor || !g_actor->g_Alive())
++	{
++		Msg("! S02-T06e quest: no level, ALife or alive actor");
++		return false;
++	}
++	CSE_ALifeHumanStalker* giver = find_giver();
++	g_giver_id = giver ? giver->ID : no_id;
++	QuestSnapshot before;
++	take(before, "before-give");
++	write_snapshot(before, true);
++
++	bool ok = true;
++	ok = rule(before.giver_se && before.giver_alive, "the task giver exists in ALife and is alive") && ok;
++	ok = rule(before.giver_online && before.giver_live, "the task giver is online near the actor") && ok;
++	ok = rule(!before.native_task && !before.lua_task, "the task is not yet given") && ok;
++	ok = rule(!before.info_tier1, "the task's completion info portion is not yet set") && ok;
++	if (!ok)
++		return false;
++
++	const u32 state_updates_before = g_s02_task_state_updates;
++	ok = give_task() && ok;
++	take(g_given, "given");
++	g_have_given = true;
++	write_snapshot(g_given, false);
++	ok = rule(g_given.native_task && g_given.native_state == int(eTaskStateInProgress),
++			 "the native task exists and is in progress") && ok;
++	ok = rule(g_given.receive_time == Level().GetGameTime(), "the native task's receive time is the current game time") && ok;
++	ok = rule(g_given.active_is_task, "the new task is the active task") && ok;
++	ok = rule(g_given.lua_task && xr_strcmp(g_given.lua_status, "selected") == 0 && g_given.lua_stage == 0,
++			 "the Lua task is selected at stage 0") && ok;
++	ok = rule(g_given.lua_giver_id == int(g_giver_id), "the Lua task records the giver") && ok;
++	ok = rule(g_given.fetch_section[0] != '-' && g_given.fetch_count >= 1,
++			 "the fetch item and count are in the actor's portable store") && ok;
++	ok = rule(g_given.items_in_inventory == 0, "the actor does not have the fetch item yet") && ok;
++	ok = rule(!g_given.actor_talking && !g_given.npc_talking && !g_given.used_npc_event,
++			 "the dialogue is closed again") && ok;
++	ok = rule(g_given.money == before.money && !g_given.info_tier1, "no reward before completion") && ok;
++	(void)state_updates_before;
++	return ok;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestObserved(u32 ticks)
++{
++	if (!g_have_given)
++		return false;
++	QuestSnapshot s;
++	take(s, "ticked");
++	write_snapshot(s, false);
++	bool ok = true;
++	ok = rule(s.native_task && s.native_state == int(eTaskStateInProgress), "the native task is still in progress") && ok;
++	ok = rule(s.tm_updates - g_given.tm_updates >= ticks / 2,
++			 "the native task manager updated on the level frames") && ok;
++	ok = rule(s.state_updates > g_given.state_updates, "the native task evaluated its state") && ok;
++	ok = rule(s.lua_task && s.lua_has_t && s.lua_checked, "the Lua task found its native task and ran check_task") && ok;
++	ok = rule(s.lua_stage == 0 && xr_strcmp(s.lua_status, "selected") == 0, "the Lua task stays at stage 0 without the item") && ok;
++	return ok;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestRestored()
++{
++	if (!g_have_given)
++		return false;
++	// a new process state after the reload: the giver id is looked up again
++	CSE_ALifeHumanStalker* giver = find_giver();
++	g_giver_id = giver ? giver->ID : no_id;
++	QuestSnapshot s;
++	take(s, "restored");
++	write_snapshot(s, false);
++	bool ok = true;
++	ok = rule(s.giver_se && s.giver_alive && s.giver_id == g_given.giver_id, "the task giver is back with the same id") && ok;
++	ok = rule(s.native_task && s.native_state == int(eTaskStateInProgress), "the native task came back in progress") && ok;
++	ok = rule(s.receive_time == g_given.receive_time, "the native task kept its receive time") && ok;
++	ok = rule(s.active_is_task, "the task is the active task again") && ok;
++	ok = rule(s.lua_task && s.lua_loaded && xr_strcmp(s.lua_status, "selected") == 0 && s.lua_stage == 0,
++			 "the Lua task was loaded from the marshal, selected at stage 0") && ok;
++	ok = rule(s.lua_giver_id == g_given.lua_giver_id, "the Lua task kept its giver") && ok;
++	ok = rule(xr_strcmp(s.fetch_section, g_given.fetch_section) == 0 && s.fetch_count == g_given.fetch_count,
++			 "the fetch item came back through the portable store") && ok;
++	ok = rule(s.lua_has_t && s.lua_checked, "the Lua task re-found its native task and ran check_task") && ok;
++	ok = rule(s.money == g_given.money && s.goodwill_csky == g_given.goodwill_csky && !s.info_tier1,
++			 "no reward crossed the checkpoint") && ok;
++	ok = rule(s.items_in_inventory == 0, "the actor still has no fetch item") && ok;
++	return ok;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteBegin()
++{
++	if (!g_have_given)
++		return false;
++	QuestSnapshot s;
++	take(s, "before-complete");
++	g_complete_phase = 0;
++	g_complete_ticks = g_turnin_tick = g_completed_tick = 0;
++	g_turnin_ok = false;
++	return spawn_fetch_items(s.fetch_section, u32(_max(1, s.fetch_count)));
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteTick()
++{
++	++g_complete_ticks;
++	if (g_complete_phase == 2)
++		return true;
++	QuestSnapshot s;
++	take(s, "tick");
++	if (g_complete_phase == 0)
++	{
++		// the item is online in the inventory and the status functor saw it
++		if (s.items_in_inventory >= u32(_max(1, s.fetch_count)) && s.lua_stage == 1)
++		{
++			g_turnin_tick = g_complete_ticks;
++			CGameObject* npc = giver_object();
++			g_turnin_ok = npc && dialog_open(npc);
++			g_turnin_ok = npc && dialog_turn_in(npc) && g_turnin_ok;
++			if (npc)
++				dialog_close(npc);
++			g_complete_phase = g_turnin_ok ? 1 : 2;
++		}
++		return g_complete_phase == 2;
++	}
++	// phase 1: the completion lands through UpdateTasks and the callbacks
++	// (the money comes one second later through a time event)
++	if (s.native_state == int(eTaskStateCompleted) && s.info_tier1 && s.money > g_given.money &&
++		s.items_in_inventory == 0)
++	{
++		g_completed_tick = g_complete_ticks;
++		g_complete_phase = 2;
++		return true;
++	}
++	return false;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteEnd(u32 ticks)
++{
++	if (!g_have_given)
++		return false;
++	take(g_completed, "completed");
++	g_have_completed = true;
++	write_snapshot(g_completed, false);
++	Msg("S02-T06e completion: %u ticks, turn-in at tick %u (ok=%d), completed at tick %u, spawned %u", ticks,
++		g_turnin_tick, g_turnin_ok ? 1 : 0, g_completed_tick, g_spawned_items);
++	const QuestSnapshot& s = g_completed;
++	bool ok = true;
++	ok = rule(g_spawned_items >= 1, "the fetch item was spawned into the inventory") && ok;
++	ok = rule(g_turnin_tick != 0, "the status functor saw the item (Lua stage 1)") && ok;
++	ok = rule(g_turnin_ok, "the giver listed the task as finished and accepted the turn-in") && ok;
++	ok = rule(s.native_task && s.native_state == int(eTaskStateCompleted), "the native task is completed") && ok;
++	ok = rule(s.native_completed > g_given.native_completed && s.native_inprogress + 1 == g_given.native_inprogress,
++			 "the native task counts moved from in progress to completed") && ok;
++	ok = rule(!s.lua_task, "the Lua task entry was retired (no repeat)") && ok;
++	ok = rule(s.info_tier1, "on_complete set the info portion") && ok;
++	ok = rule(s.money > g_given.money, "on_complete paid the reward") && ok;
++	ok = rule(s.goodwill_csky > g_given.goodwill_csky, "on_complete raised the faction goodwill") && ok;
++	ok = rule(s.items_in_inventory == 0, "on_complete removed the fetch item") && ok;
++	ok = rule(!s.actor_talking && !s.npc_talking && !s.used_npc_event, "the dialogue is closed again") && ok;
++	return ok;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_QuestPersisted()
++{
++	if (!g_have_completed)
++		return false;
++	CSE_ALifeHumanStalker* giver = find_giver();
++	g_giver_id = giver ? giver->ID : no_id;
++	QuestSnapshot s;
++	take(s, "persisted");
++	write_snapshot(s, false);
++	bool ok = true;
++	ok = rule(s.native_task && s.native_state == int(eTaskStateCompleted), "the native task came back completed") && ok;
++	ok = rule(s.receive_time == g_given.receive_time, "the native task kept its receive time") && ok;
++	ok = rule(s.native_completed == g_completed.native_completed && s.native_inprogress == g_completed.native_inprogress,
++			 "the native task counts came back") && ok;
++	ok = rule(!s.lua_task, "the Lua task entry stays retired") && ok;
++	ok = rule(s.info_tier1, "the info portion persisted") && ok;
++	ok = rule(s.money == g_completed.money, "the reward money persisted") && ok;
++	ok = rule(s.goodwill_csky == g_completed.goodwill_csky, "the goodwill persisted") && ok;
++	ok = rule(s.items_in_inventory == 0, "the fetch item stays removed") && ok;
++	return ok;
++}
++
++void ClientQuestCaptureOnFrame()
++{
++	static const bool restored_run = strstr(Core.Params, "-s02-quest-capture") != nullptr;
++	static const bool persisted_run = strstr(Core.Params, "-s02-quest-persisted") != nullptr;
++	static u32 since = 0;
++	static u32 phase = 0; // 0 waiting, 1 approaching the giver, 2 completing, 3 done
++	static u32 complete_since = 0;
++	if ((!restored_run && !persisted_run) || phase == 3 || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor ||
++		Device.dwPrecacheFrame)
++		return;
++	if (!since)
++	{
++		since = Device.dwTimeGlobal;
++		return;
++	}
++	if (Device.dwTimeGlobal - since < 1000)
++		return;
++	if (phase == 0)
++	{
++		// the giver must be online for the dialogue (and for the client's
++		// row to describe him); the server's checkpoint left the actor beside
++		// him, so this is normally a no-op
++		if (!xrCampaignLevel_QuestApproachBegin())
++		{
++			Msg("! S02-T06e client: no giver");
++			phase = 3;
++			Console->Execute("quit");
++			return;
++		}
++		complete_since = Device.dwTimeGlobal;
++		phase = 1;
++		return;
++	}
++	if (phase == 1)
++	{
++		if (!xrCampaignLevel_QuestApproachTick())
++		{
++			if (Device.dwTimeGlobal - complete_since < 20000)
++				return;
++			Msg("! S02-T06e client: giver did not come online");
++		}
++		FS.update_path(g_out_path, "$logs$", "s02-t06e-quest.csv");
++		QuestSnapshot s;
++		take(s, persisted_run ? "client-persisted" : "client-restored");
++		write_snapshot(s, true);
++		if (persisted_run)
++		{
++			phase = 3;
++			Msg("S02-T06e client quest capture written to %s", g_out_path);
++			FlushLog();
++			Console->Execute("quit");
++			return;
++		}
++		// the compare tool checks the row against the server's; here only
++		// what the completion needs
++		g_given = s;
++		g_have_given = true;
++		xrCampaignLevel_QuestCompleteBegin();
++		complete_since = Device.dwTimeGlobal;
++		phase = 2;
++		return;
++	}
++	// phase 2: one step per frame, 30 s of device time at most
++	const bool done = xrCampaignLevel_QuestCompleteTick();
++	if (!done && Device.dwTimeGlobal - complete_since < 30000)
++		return;
++	if (!done)
++		Msg("! S02-T06e client completion timed out in phase %u", g_complete_phase);
++	xrCampaignLevel_QuestCompleteEnd(0);
++	phase = 3;
++	Msg("S02-T06e client quest capture written to %s", g_out_path);
++	FlushLog();
++	Console->Execute("quit");
++}
+diff --git a/src/xrGame/CampaignQuestCapture.h b/src/xrGame/CampaignQuestCapture.h
+new file mode 100644
+index 0000000..fce3144
+--- /dev/null
++++ b/src/xrGame/CampaignQuestCapture.h
+@@ -0,0 +1,112 @@
++#pragma once
++
++// S02-T06e: a quest (task) given, carried across a checkpoint, completed and
++// carried across a second checkpoint, on the campaign server and on the
++// normal client.
++//
++// The installed task system has two halves. Native: CGameTaskManager owns
++// the CGameTask objects (GametaskManager.cpp), updates them every level
++// frame (CLevel::OnFrame -> UpdateTasks -> CGameTask::UpdateState, whose
++// complete/fail functors call back into Lua) and persists them in the ALife
++// registry container (CGameTaskWrapper, saved into the .scop by
++// CALifeStorageManager::save). Lua: task_manager.script's CRandomTask keeps
++// a CGeneralTask per task (task_objects.script), updated from the actor's
++// binder (bind_stalker.script), with its state marshalled into the .scoc
++// (task_manager.save_state/load_state) and the fetch item in the actor's
++// portable store (save_var/load_var, _g.script).
++//
++// A fetch task is given in dialogue and completed in dialogue: the player
++// uses the NPC (engine use path -> the stalker binder's use_callback, which
++// records the talked-to id), the talk state starts (CInventoryOwner::
++// OfferTalk/StartTalk, what CActor::RunTalkDialog does before it shows the
++// window), the dialog phrases call dialogs.generate_available_tasks,
++// text_npc_has_task (runs the task's fetch_func) and npc_give_task; later
++// actor_has_finished_task and npc_set_finished_task_complete; closing the
++// dialog runs pda.actor_menu_mode(11). The fixture calls exactly those
++// functions in that order, with the real actor and the real NPC, and shows
++// no window; everything the task does (CGameTask creation, status functor,
++// completion through UpdateTasks, task_callback, on_complete effects:
++// money, goodwill, info portion, item removal) is the installed code's.
++//
++// Default quest: mar_base_stalker_tech_task_1 from Novikov, the Clear Sky
++// mechanic (character profile mar_base_stalker_tech), a fetch task for one
++// itm_basickit (tm_marsh.ltx). Its on_complete grants goodwill, pays for the
++// kit, removes it and sets the info portion mar_base_stalker_tech_upgrade_tier_1.
++// Options: -s02-quest-task <id>, -s02-quest-giver <profile>.
++
++struct QuestSnapshot
++{
++	string64 label;
++	string128 task_id;
++	// the task giver
++	u16 giver_id;
++	bool giver_se;
++	bool giver_alive;
++	bool giver_online;
++	bool giver_live;
++	// native task manager
++	bool native_task; // HasGameTask(id, false)
++	int native_state; // ETaskState or -1
++	u64 receive_time;
++	u32 native_total;
++	u32 native_inprogress;
++	u32 native_completed;
++	bool active_is_task;
++	u32 tm_updates; // CGameTaskManager::UpdateTasks calls so far (this process)
++	u32 state_updates; // CGameTask::UpdateState calls so far (this process)
++	// Lua task manager
++	bool lua_task; // task_info[id] exists
++	string32 lua_status;
++	int lua_stage;
++	bool lua_loaded;
++	bool lua_has_t;
++	bool lua_checked; // check_time set: check_task ran
++	int lua_giver_id;
++	string64 fetch_section; // load_var(actor, id.."_fetch")
++	int fetch_count;
++	// the world
++	u32 items_in_inventory; // actor items of fetch_section
++	u32 money;
++	int goodwill_csky;
++	bool info_tier1; // actor has mar_base_stalker_tech_upgrade_tier_1
++	bool actor_talking;
++	bool npc_talking;
++	bool used_npc_event; // GetEvent("used_npc_id") == giver
++	u32 available_count; // axr_task_manager.available_tasks[giver] size when offered
++	u32 spawned_items;
++};
++
++// Server smoke. Give: use the giver, start the talk, offer and accept the
++// task through the dialog functions, close the dialog; writes rows
++// before-give and given. Observed: after the first ticks (row ticked).
++// Restored: after the first checkpoint round-trip (row restored).
++// Complete: spawn the fetch item into the actor's inventory, wait for the
++// status functor, turn the task in through the dialog functions, wait for
++// the completion to land (row completed). Persisted: after the second
++// checkpoint round-trip (row persisted).
++// Approach: the player walks to the giver. When the giver is offline (not
++// within the ALife switch distance of the actor), the actor is moved next
++// to the giver's ALife position the way the script API's SetActorPosition
++// does (as in S02-T06b) and the switch manager brings the giver online on
++// its own; Tick returns true once the giver is a live object.
++extern "C" bool __cdecl xrCampaignLevel_QuestApproachBegin();
++extern "C" bool __cdecl xrCampaignLevel_QuestApproachTick();
++extern "C" bool __cdecl xrCampaignLevel_QuestGive(LPCSTR out_path);
++extern "C" bool __cdecl xrCampaignLevel_QuestObserved(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_QuestRestored();
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteBegin();
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteTick(); // true when finished (either way)
++extern "C" bool __cdecl xrCampaignLevel_QuestCompleteEnd(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_QuestPersisted();
++
++// Normal client. -s02-quest-capture: started from the server's first
++// checkpoint (task given), snapshot client-restored one second after the
++// actor spawned, then complete the task the same way and snapshot
++// client-completed, then quit. -s02-quest-persisted: started from the
++// server's second checkpoint, snapshot client-persisted and quit. Rows go
++// to $logs$/s02-t06e-quest.csv.
++void ClientQuestCaptureOnFrame();
++
++// Observation counters (GametaskManager.cpp, GameTask.cpp).
++extern u32 g_s02_task_manager_updates;
++extern u32 g_s02_task_state_updates;
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 3eaa178..239fa2a 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -8,6 +8,7 @@
+ #include "CampaignActivityCapture.h"
+ #include "CampaignCombatCapture.h"
+ #include "CampaignCheckpoint.h"
++#include "CampaignQuestCapture.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -948,6 +949,8 @@ void CGamePersistent::OnFrame()
+ 	ClientCombatCaptureOnFrame();
+ 	// S02-T06d: opt-in checkpoint capture (record the state loaded from a server checkpoint), then quit.
+ 	ClientCheckpointCaptureOnFrame();
++	// S02-T06e: opt-in quest capture (restore a given task, complete it, or record the persisted state), then quit.
++	ClientQuestCaptureOnFrame();
+ }
+ 
+ void CGamePersistent::ImGui_OnRender(LPCSTR name)
+diff --git a/src/xrGame/GameTask.cpp b/src/xrGame/GameTask.cpp
+index d4a30a2..e05e461 100644
+--- a/src/xrGame/GameTask.cpp
++++ b/src/xrGame/GameTask.cpp
+@@ -139,8 +139,11 @@ void CGameTask::ChangeStateCallback()
+ 	Actor()->callback(GameObject::eTaskStateChange)(this, GetTaskState());
+ }
+ 
++extern u32 g_s02_task_state_updates; // S02-T06e observation counter
++
+ ETaskState CGameTask::UpdateState()
+ {
++	++g_s02_task_state_updates;
+ 	if ((m_ReceiveTime != m_TimeToComplete))
+ 	{
+ 		if (Level().GetGameTime() > m_TimeToComplete)
+diff --git a/src/xrGame/GametaskManager.cpp b/src/xrGame/GametaskManager.cpp
+index 4c01bfc..ba294a1 100644
+--- a/src/xrGame/GametaskManager.cpp
++++ b/src/xrGame/GametaskManager.cpp
+@@ -158,9 +158,15 @@ void CGameTaskManager::SetTaskState(const shared_str& id, ETaskState state)
+ 	SetTaskState(t, state);
+ }
+ 
++// S02-T06e observation counters: level-frame task manager updates and
++// per-task state evaluations (read by the quest fixture).
++u32 g_s02_task_manager_updates = 0;
++u32 g_s02_task_state_updates = 0;
++
+ void CGameTaskManager::UpdateTasks()
+ {
+ 	if (Device.Paused()) return;
++	++g_s02_task_manager_updates;
+ 
+ 	Level().MapManager().DisableAllPointers();
+ 
+diff --git a/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp b/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp
+index 2a4dd70..0ed6ae2 100644
+--- a/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp
++++ b/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp
+@@ -56,8 +56,11 @@ void CPsyDogAura::reinit()
+ 	m_time_actor_saw_phantom = 0;
+ 	m_time_phantom_saw_actor = 0;
+ 
++	// S02-T06e: the aura is a camera post-process on the controlled entity. The
++	// campaign server controls no entity (D1), so there is no one to show it to
++	// and update_schedule returns early; the per-participant form is a Stage 3
++	// item (B21).
+ 	m_actor = smart_cast<CActor *>(Level().CurrentEntity());
+-	VERIFY(m_actor);
+ }
+ 
+ void CPsyDogAura::update_schedule()
+@@ -65,6 +68,10 @@ void CPsyDogAura::update_schedule()
+ 	if (!m_object->g_Alive())
+ 		return;
+ 
++	// S02-T06e: no controlled entity, no aura (see reinit).
++	if (!m_actor)
++		return;
++
+ 	m_time_phantom_saw_actor = 0;
+ 
+ 	// check memory of actor and check memory of phantoms
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index e83a241..d4dd95f 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2004,6 +2004,7 @@
+     <ClInclude Include="CampaignHearingCapture.h" />
+     <ClInclude Include="CampaignCombatCapture.h" />
+     <ClInclude Include="CampaignCheckpoint.h" />
++    <ClInclude Include="CampaignQuestCapture.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4363,6 +4364,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignQuestCapture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

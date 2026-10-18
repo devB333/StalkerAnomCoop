@@ -9,13 +9,14 @@ one second after the normal client spawned its actor from the checkpoint the
 server wrote. Rules, server ``after-save`` against client ``client-loaded``:
 
 * Same level and level id.
-* The ALife holds the objects the checkpoint wrote and the level registry
-  the level objects it wrote: exactly (``alife_objects`` equals the server's
-  ``alife_savable``, ``level_objects`` equals ``level_savable``) for the
-  server's ``reloaded-alife`` row, taken before any tick; within
-  max(10, 0.1 %) for the rows taken after the loaded level ran (the client
-  cannot snapshot before its first tick, and the simulation releases and
-  spawns objects as game time passes).
+* The ALife holds the objects the checkpoint wrote: exactly (``alife_objects``
+  equals the server's ``alife_savable``) for the server's ``reloaded-alife``
+  row, taken before any tick; within max(10, 0.1 %) for the rows taken after
+  the loaded level ran (the client cannot snapshot before its first tick, and
+  the simulation releases and spawns objects as game time passes). The level
+  registry holds the level objects it wrote within the same tolerance in
+  every row: a squad member online at the save is registered under its group
+  after the load (the server fixture names each such object).
 * The ALife clock resumed from the saved time (not before it, and less than
   two game minutes after it).
 * The live actor stands within 0.25 m of where the server's stood, alive,
@@ -89,10 +90,12 @@ def compare(saved, loaded, live_expected):
     checks["same_level"] = saved["level"] == loaded["level"] and saved["level_id"] == loaded["level_id"]
     if live_expected:
         checks["alife_objects_near_saved"] = near(loaded["alife_objects"], saved["alife_savable"])
-        checks["level_objects_near_saved"] = near(loaded["level_objects"], saved["level_savable"])
     else:
         checks["alife_objects_equal_saved"] = loaded["alife_objects"] == saved["alife_savable"]
-        checks["level_objects_equal_saved"] = loaded["level_objects"] == saved["level_savable"]
+    # The level registry may hold a few fewer objects than it did at the save: a squad member that was
+    # online at the save is registered under its group after the load (the C++ rule names each one and
+    # checks it is still in ALife on this level).
+    checks["level_objects_near_saved"] = near(loaded["level_objects"], saved["level_savable"])
     game_time_delta = loaded["game_time"] - saved["game_time"]
     checks["game_time_resumed"] = 0 <= game_time_delta < GAME_TWO_MINUTES_MS
     checks["se_actor_position"] = loaded["se_actor"] == 1 and distance(saved, loaded, "se_actor_") < 0.25

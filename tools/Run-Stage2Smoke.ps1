@@ -60,8 +60,9 @@ $process = New-Object System.Diagnostics.Process
 $process.StartInfo = $start
 if (-not $process.Start()) { throw 'Smoke process did not start.' }
 # GameState loads a saved game (300 s deadlines inside the process for the server and client stages),
-# then saves a checkpoint and loads the level a second time from it (S02-T06d).
-$timeoutMs = if ($Scope -eq 'GameState') { 600000 } else { 120000 }
+# then saves a checkpoint and loads the level a second time from it (S02-T06d), completes a quest and
+# does it once more (S02-T06e).
+$timeoutMs = if ($Scope -eq 'GameState') { 900000 } else { 120000 }
 if (-not $process.WaitForExit($timeoutMs)) {
     $process.Kill()
     $process.WaitForExit()
@@ -88,7 +89,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -142,12 +143,24 @@ if ($result.checkpoint_capture_present) {
     Copy-Item $checkpointPath (Join-Path $logDir 'server-checkpoint.csv')
     $result.checkpoint_capture_sha256 = (Get-FileHash $checkpointPath -Algorithm SHA256).Hash.ToLower()
 }
+# S02-T06e: the quest capture (rows before-give, given, ticked, restored, completed, persisted), the second
+# checkpoint's capture and the second checkpoint itself.
+$questPath = Join-Path $runtime 'appdata\logs\s02-t06e-quest.csv'
+$result.quest_capture_present = Test-Path $questPath
+if ($result.quest_capture_present) {
+    Copy-Item $questPath (Join-Path $logDir 'server-quest.csv')
+    $result.quest_capture_sha256 = (Get-FileHash $questPath -Algorithm SHA256).Hash.ToLower()
+}
+$questCheckpointPath = Join-Path $runtime 'appdata\logs\s02-t06e-checkpoint.csv'
+if (Test-Path $questCheckpointPath) { Copy-Item $questCheckpointPath (Join-Path $logDir 'server-quest-checkpoint.csv') }
 $result.checkpoint_saves = @()
-foreach ($extension in @('scop', 'scoc')) {
-    $savePath = Join-Path $runtime "appdata\savedgames\s02-t06d-checkpoint.$extension"
-    if (Test-Path $savePath) {
-        Copy-Item $savePath (Join-Path $logDir "s02-t06d-checkpoint.$extension")
-        $result.checkpoint_saves += [ordered]@{ name = "s02-t06d-checkpoint.$extension"; bytes = (Get-Item $savePath).Length; sha256 = (Get-FileHash $savePath -Algorithm SHA256).Hash.ToLower() }
+foreach ($name in @('s02-t06d-checkpoint', 's02-t06e-checkpoint')) {
+    foreach ($extension in @('scop', 'scoc')) {
+        $savePath = Join-Path $runtime "appdata\savedgames\$name.$extension"
+        if (Test-Path $savePath) {
+            Copy-Item $savePath (Join-Path $logDir "$name.$extension")
+            $result.checkpoint_saves += [ordered]@{ name = "$name.$extension"; bytes = (Get-Item $savePath).Length; sha256 = (Get-FileHash $savePath -Algorithm SHA256).Hash.ToLower() }
+        }
     }
 }
 $result.stages = $observedStages

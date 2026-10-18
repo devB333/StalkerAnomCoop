@@ -147,8 +147,8 @@ not a pass.
 
 - Stages 9–10 run the level script process and the installed scripts' object
   binders for 50 ticks (1 s of simulation). ALife offline simulation, hits, hearing and
-  the native save/reload were checked later (S02-T04c, S02-T05c, S02-T06);
-  task evaluation is still observed only as the task scripts running.
+  the native save/reload were checked later (S02-T04c, S02-T05c, S02-T06),
+  and a quest was given, completed and persisted (S02-T06e).
 - The server adopts no control or view entity. The saved actor is a real,
   enabled, local object and `g_actor`; its first-eye camera and the
   single-actor `Actor()` assumptions are Stage 3 items (D1, G03).

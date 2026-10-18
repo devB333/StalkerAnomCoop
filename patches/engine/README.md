@@ -123,6 +123,23 @@ ALife registries, clock, actor and fixture NPCs with the state the checkpoint
 was written from. The normal client takes the same snapshot from a server
 checkpoint with the opt-in `-s02-checkpoint-capture` flag. Observation only;
 no save, load or spawn behaviour changes.
+`0020-quest-round-trip.patch` (S02-T06e) adds the quest round-trip
+(`xrGame/CampaignQuestCapture.{h,cpp}`): the campaign server moves the actor
+beside the Clear Sky mechanic, uses him (the engine use path and the stalker
+binder's use callback), starts the talk state, offers and accepts a fetch task
+through the installed dialogue functions, lets the task manager run, carries
+the given task through the checkpoint round-trip, spawns the fetch item the way
+`alife():create` does, turns the task in through the dialogue functions and
+carries the completed task, its info portion, money and goodwill through a
+second round-trip (stages `campaign-quest-given`, `campaign-quest-restored`,
+`campaign-quest-completed`, `campaign-quest-checkpoint-*`,
+`campaign-quest-persisted`); the normal client does the same from the server's
+checkpoints with `-s02-quest-capture` and `-s02-quest-persisted`. Observation
+counters in `CGameTaskManager::UpdateTasks` and `CGameTask::UpdateState`. The
+checkpoint check names level-registry objects the reload holds under their
+group. One behaviour change: the psy dog's aura (`psy_dog_aura.cpp`) no longer
+dereferences `Level().CurrentEntity()` when there is none (blocker B21); the
+aura is a camera post-process and is skipped with no controlled entity.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

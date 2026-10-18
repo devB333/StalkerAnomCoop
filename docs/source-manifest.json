@@ -57,6 +57,10 @@
     {
       "path": "patches/engine/0012-physics-fixture.patch",
       "sha256": "b7521ef9053ba321987e4e9fd48cb232799a3fb2b88de0ed695ea44e944d6795"
+    },
+    {
+      "path": "patches/engine/0013-activity-policy.patch",
+      "sha256": "731ca93c692ab04e03f52b804dc8538ea50a4e00e8ad253e9282c62bd3f5d3c5"
     }
   ],
   "submodules": [

@@ -87,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -111,6 +111,13 @@ $result.physics_capture_present = Test-Path $physicsPath
 if ($result.physics_capture_present) {
     Copy-Item $physicsPath (Join-Path $logDir 'server-physics.csv')
     $result.physics_capture_sha256 = (Get-FileHash $physicsPath -Algorithm SHA256).Hash.ToLower()
+}
+# S02-T04c: the server's activity capture (objects, scheduler, AI, ALife, stalker walk).
+$activityPath = Join-Path $runtime 'appdata\logs\s02-t04c-activity.csv'
+$result.activity_capture_present = Test-Path $activityPath
+if ($result.activity_capture_present) {
+    Copy-Item $activityPath (Join-Path $logDir 'server-activity.csv')
+    $result.activity_capture_sha256 = (Get-FileHash $activityPath -Algorithm SHA256).Hash.ToLower()
 }
 $result.stages = $observedStages
 $result.expected_stages = $expectedStages

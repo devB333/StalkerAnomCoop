@@ -1,0 +1,1033 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 469e905..21b9b8a 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -987,6 +987,10 @@ extern "C" bool __cdecl xrCampaignLevel_CaptureCollision(LPCSTR out_path);
+ extern "C" bool __cdecl xrCampaignLevel_PhysicsFixtureBegin(LPCSTR out_path);
+ extern "C" bool __cdecl xrCampaignLevel_PhysicsFixtureDone();
+ extern "C" bool __cdecl xrCampaignLevel_PhysicsFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_ActivityFixtureTick();
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureDone();
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1248,6 +1252,9 @@ u32 g_campaign_level_ticks = 50;
+ // Tick budget for the falling-body fixture (S02-T04b): 400 ticks are 8 s, more
+ // than the fixture's own 600-step (6 s) limit.
+ u32 g_campaign_physics_ticks = 400;
++// Tick budget for the activity fixture (S02-T04c): 3000 ticks are 60 s, more
++// than its default 10 s observation plus 30 s walk.
++u32 g_campaign_activity_ticks = 3000;
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -1754,6 +1761,38 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     result = 14;
+                 }
+             }
++            if (result == 0)
++            {
++                // S02-T04c: the level runs under the activity policy; the fixture
++                // records object, scheduler, AI and ALife progress after every
++                // tick, then walks one stalker along a short path.
++                string_path capture;
++                FS.update_path(capture, "$logs$", "s02-t04c-activity.csv");
++                bool ok = xrCampaignLevel_ActivityFixtureBegin(capture);
++                if (ok)
++                {
++                    const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                    const u32 wall_before = g_campaign_wall.GetElapsed_ms();
++                    g_campaign_clock->Resume(wall_before);
++                    while (!xrCampaignLevel_ActivityFixtureDone() &&
++                        g_campaign_clock->Stats().ticks < ticks_before + g_campaign_activity_ticks)
++                    {
++                        RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                        xrCampaignLevel_ActivityFixtureTick();
++                    }
++                    const u32 wall_after = g_campaign_wall.GetElapsed_ms();
++                    g_campaign_clock->Pause(wall_after);
++                    const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                    ok = xrCampaignLevel_ActivityFixtureEnd(ran, ran * g_campaign_clock->TickMs(), wall_after - wall_before);
++                }
++                if (ok)
++                    stage("campaign-activity-passed");
++                else
++                {
++                    stage("campaign-activity-failed");
++                    result = 15;
++                }
++            }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+         }
+diff --git a/src/xrEngine/xrSheduler.cpp b/src/xrEngine/xrSheduler.cpp
+index 543969e..c542ddd 100644
+--- a/src/xrEngine/xrSheduler.cpp
++++ b/src/xrEngine/xrSheduler.cpp
+@@ -14,6 +14,7 @@ void CSheduler::Initialize()
+ {
+ 	m_current_step_obj = NULL;
+ 	m_processing_now = false;
++	dwUpdated = 0;
+ }
+ 
+ void CSheduler::Destroy()
+@@ -366,6 +367,7 @@ void CSheduler::ProcessStep()
+ 		m_current_step_obj = T.Object;
+ 		// try {
+ 		T.Object->shedule_Update(clampr(Elapsed, u32(1), u32(_max(u32(T.Object->shedule.t_max), u32(1000)))));
++		++dwUpdated;
+ 		if (!m_current_step_obj)
+ 		{
+ #ifdef DEBUG_SCHEDULER
+@@ -454,6 +456,7 @@ void CSheduler::Update()
+ #endif // DEBUG_SCHEDULER
+ 	// Realtime priority
+ 	m_processing_now = true;
++	dwUpdated = 0;
+ 	u32 dwTime = Device.dwTimeGlobal;
+ 	for (u32 it = 0; it < ItemsRT.size(); it++)
+ 	{
+@@ -477,6 +480,7 @@ void CSheduler::Update()
+         T.Object->dbg_startframe = Device.dwFrame;
+ #endif
+ 		T.Object->shedule_Update(Elapsed);
++		++dwUpdated;
+ 		T.dwTimeOfLastExecute = dwTime;
+ 	}
+ 
+diff --git a/src/xrEngine/xrSheduler.h b/src/xrEngine/xrSheduler.h
+index 1452051..656402f 100644
+--- a/src/xrEngine/xrSheduler.h
++++ b/src/xrEngine/xrSheduler.h
+@@ -48,6 +48,9 @@ private:
+ public:
+ 	u64 cycles_start;
+ 	u64 cycles_limit;
++	// S02-T04c: shedule_Update calls made by the last Update (real-time
++	// and normal items), so a tick's scheduler dispatch can be recorded.
++	u32 dwUpdated;
+ public:
+ 	void ProcessStep();
+ 	void Process();
+diff --git a/src/xrEngine/xr_object.cpp b/src/xrEngine/xr_object.cpp
+index e8f6286..edb41e3 100644
+--- a/src/xrEngine/xr_object.cpp
++++ b/src/xrEngine/xr_object.cpp
+@@ -22,6 +22,21 @@
+ 
+ #pragma intrinsic(_InterlockedCompareExchange)
+ 
++// S02-T04c: disabled by default, so the client keeps its camera-derived
++// selection; the crow radius is the client's radius for visible objects, since
++// a server has no visibility test to narrow it.
++SActivityPolicy g_activity_policy;
++
++SActivityPolicy::SActivityPolicy() : enabled(false), crow_radius(CROW_RADIUS2) {}
++
++float SActivityPolicy::distance_to(const Fvector& position) const
++{
++	float best = flt_max;
++	for (const Fvector& anchor : anchors)
++		best = _min(best, anchor.distance_to(position));
++	return best;
++}
++
+ inline void CObjectList::o_crow(CObject* O)
+ {
+ 	Objects& crows = get_crows();
+@@ -379,7 +394,15 @@ void CObject::UpdateCL()
+ 	spatial_update(base_spu_epsP * 5, base_spu_epsR * 5);
+ 
+ 	// crow
+-	if (Parent == g_pGameLevel->CurrentViewEntity())
++	if (g_activity_policy.enabled)
++	{
++		// S02-T04c: the server's activity anchors replace the camera and the
++		// view entity (there is none); no visibility test exists, so the
++		// full crow_radius applies to every object.
++		if (AlwaysTheCrow() || g_activity_policy.distance_to(Position()) < g_activity_policy.crow_radius)
++			MakeMeCrow();
++	}
++	else if (Parent == g_pGameLevel->CurrentViewEntity())
+ 		MakeMeCrow();
+ 	else if (AlwaysTheCrow())
+ 		MakeMeCrow();
+diff --git a/src/xrEngine/xr_object.h b/src/xrEngine/xr_object.h
+index 7c2b8c8..2429a14 100644
+--- a/src/xrEngine/xr_object.h
++++ b/src/xrEngine/xr_object.h
+@@ -20,6 +20,26 @@ class CSE_Abstract;
+ #define CROW_RADIUS (30.f)
+ #define CROW_RADIUS2 (60.f)
+ //-----------------------------------------------------------------------------------------------------------
++// S02-T04c: server activity policy. The client decides which objects update
++// every frame (crows) and how often each is scheduled from the camera
++// position (CObject::UpdateCL, CObject::shedule_Scale). A server has no
++// camera, so while the policy is enabled both decisions use the distance to
++// the nearest activity anchor instead: one anchor per online participant
++// actor, refreshed by the game module every frame. Objects within crow_radius
++// of an anchor update every frame; the rest update on their scheduled updates,
++// as on the client beyond its crow radius. Disabled, nothing changes.
++struct ENGINE_API SActivityPolicy
++{
++	bool enabled;
++	float crow_radius;
++	xr_vector<Fvector> anchors;
++
++	SActivityPolicy();
++	// Distance to the nearest anchor; flt_max when there is none.
++	float distance_to(const Fvector& position) const;
++};
++extern ENGINE_API SActivityPolicy g_activity_policy;
++//-----------------------------------------------------------------------------------------------------------
+ // CObject
+ //-----------------------------------------------------------------------------------------------------------
+ class IPhysicsShell;
+@@ -100,7 +120,13 @@ public:
+ 	virtual BOOL Ready() { return Props.net_Ready; }
+ 	BOOL GetTmpPreDestroy() const { return Props.bPreDestroy; }
+ 	void SetTmpPreDestroy(BOOL b) { Props.bPreDestroy = b; }
+-	virtual float shedule_Scale() { return Device.vCameraPosition.distance_to(Position()) / 200.f; }
++	virtual float shedule_Scale()
++	{
++		// S02-T04c: the server's activity anchors replace the camera.
++		if (g_activity_policy.enabled)
++			return g_activity_policy.distance_to(Position()) / 200.f;
++		return Device.vCameraPosition.distance_to(Position()) / 200.f;
++	}
+ 	virtual bool shedule_Needed() { return processing_enabled(); };
+ 
+ 	// Parentness
+diff --git a/src/xrGame/CampaignActivityCapture.cpp b/src/xrGame/CampaignActivityCapture.cpp
+new file mode 100644
+index 0000000..903c4cd
+--- /dev/null
++++ b/src/xrGame/CampaignActivityCapture.cpp
+@@ -0,0 +1,585 @@
++#include "pch_script.h"
++#include "CampaignActivityCapture.h"
++
++// S02-T04c: the running level observed from the frame loop (H04). Nothing
++// here drives the simulation: the object list, the scheduler, the stalkers'
++// planners and ALife's switch and schedule registries run from the frame
++// callbacks as they do on the client; the fixture reads their counters after
++// each frame. The walk uses the native script-control path (the same
++// CScriptEntity action queue Lua's object:command drives), so the stalker's
++// own movement manager, detail path and character physics move it.
++
++#include "Level.h"
++#include "Actor.h"
++#include "ai/stalker/ai_stalker.h"
++#include "stalker_planner.h"
++#include "object_handler_planner.h"
++#include "stalker_movement_manager_smart_cover.h"
++#include "ai_object_location.h"
++#include "ai_space.h"
++#include "level_graph.h"
++#include "alife_simulator.h"
++#include "alife_graph_registry.h"
++#include "alife_level_registry.h"
++#include "alife_schedule_registry.h"
++#include "alife_time_manager.h"
++#include "script_entity_action.h"
++#include "../xrServerEntities/xrServer_Objects_ALife.h"
++#include "../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
++#include "../xrphysics/IPHWorld.h"
++#include "../xrEngine/xr_object.h"
++#include "../xrEngine/Engine.h"
++#include "../xrEngine/Stats.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++
++namespace
++{
++const u16 default_npc_id = 19409; // esc_2_12_stalker_fanat, 0.6 m from the saved actor on k00_marsh
++const u32 default_observe_ms = 10000;
++const u32 default_walk_ms = 30000;
++const float default_distance = 10.f;
++const float arrival_tolerance = 1.f; // metres from the destination vertex
++const u32 max_search_vertices = 50000; // breadth-first search bound
++const u32 min_observe_updates = 10; // scheduled updates of the stalker while observing
++const float game_time_tolerance = 0.1f; // relative, ALife game time against sim time * factor
++LPCSTR script_name = "s02_t04c_walk";
++
++struct NpcSample
++{
++	u32 updates;
++	int brain_action;
++	int handler_action;
++	Fvector position;
++	u32 dest_vertex;
++};
++
++struct Fixture
++{
++	FILE* out;
++	bool running;
++	u16 id;
++	CAI_Stalker* npc;
++	u32 observe_ms;
++	u32 walk_ms;
++	float distance;
++	u32 begin_time;
++	u32 ticks;
++	int phase; // 0 observe, 1 walk
++	u32 last_update_time; // the stalker's m_dwLastUpdateTime at the previous row
++	u32 npc_updates_observe;
++	u32 npc_updates_walk;
++	xr_vector<int> brain_actions; // distinct ids seen while observing
++	u32 scheduler_updates;
++	u32 object_updates;
++	u32 switched_online;
++	u32 switched_offline;
++	u32 scheduled_advanced;
++	xr_map<u16, bool> online; // ALife objects of this level, previous online state
++	xr_map<u16, u64> schedule_counters;
++	u64 game_time_begin;
++	float time_factor;
++	Fvector start_position;
++	Fvector previous_position;
++	Fvector dest_position;
++	u32 dest_vertex;
++	float dest_distance;
++	float travelled;
++	int walk_start;
++	int arrival;
++	u32 walk_start_time;
++	bool finite;
++};
++
++Fixture g_fixture;
++
++void check(float value)
++{
++	if (!_valid(value))
++		g_fixture.finite = false;
++}
++
++void check(const Fvector& v)
++{
++	check(v.x);
++	check(v.y);
++	check(v.z);
++}
++
++u32 option_u32(LPCSTR name, u32 fallback)
++{
++	LPCSTR option = strstr(Core.Params, name);
++	u32 value = fallback;
++	if (option && sscanf_s(option + xr_strlen(name), "%u", &value) != 1)
++		value = fallback;
++	return value;
++}
++
++float option_float(LPCSTR name, float fallback)
++{
++	LPCSTR option = strstr(Core.Params, name);
++	float value = fallback;
++	if (option && sscanf_s(option + xr_strlen(name), "%f", &value) != 1)
++		value = fallback;
++	return value;
++}
++
++// The fixture stalker must still be the same live object.
++CAI_Stalker* npc_alive()
++{
++	CObject* found = Level().Objects.net_Find(g_fixture.id);
++	if (!found || found != g_fixture.npc || found->getDestroy())
++		return nullptr;
++	return g_fixture.npc->g_Alive() ? g_fixture.npc : nullptr;
++}
++
++const CALifeSimulator* alife()
++{
++	return ai().get_alife();
++}
++
++u64 game_time()
++{
++	return alife() ? alife()->time().game_time() : 0;
++}
++
++Fvector actor_alife_position()
++{
++	const CSE_ALifeCreatureActor* actor = alife() ? alife()->graph().actor() : nullptr;
++	Fvector none = {0.f, 0.f, 0.f};
++	return actor ? actor->o_Position : none;
++}
++
++// Breadth-first search over the level graph from the stalker's vertex for
++// the first accessible vertex at least `distance` away; the level path
++// manager plans on the same graph, so the vertex is reachable by construction.
++bool choose_destination(u32 start, float distance, u32& dest, Fvector& position)
++{
++	const CLevelGraph& graph = ai().level_graph();
++	if (!graph.valid_vertex_id(start))
++		return false;
++	const Fvector origin = graph.vertex_position(start);
++	xr_vector<u32> queue;
++	xr_set<u32> seen;
++	queue.push_back(start);
++	seen.insert(start);
++	for (u32 head = 0; head < queue.size() && seen.size() < max_search_vertices; ++head)
++	{
++		const u32 vertex = queue[head];
++		CLevelGraph::const_iterator i, e;
++		graph.begin(vertex, i, e);
++		for (; i != e; ++i)
++		{
++			const u32 next = graph.value(vertex, i);
++			if (!graph.valid_vertex_id(next) || seen.count(next))
++				continue;
++			seen.insert(next);
++			if (!graph.is_accessible(next))
++				continue;
++			const Fvector p = graph.vertex_position(next);
++			if (p.distance_to(origin) >= distance)
++			{
++				dest = next;
++				position = p;
++				return true;
++			}
++			queue.push_back(next);
++		}
++	}
++	return false;
++}
++
++int brain_action(CAI_Stalker* npc)
++{
++	return npc->brain().initialized() ? int(npc->brain().current_action_id()) : -1;
++}
++
++int handler_action(CAI_Stalker* npc)
++{
++	return npc->CObjectHandler::planner().initialized() ? int(npc->CObjectHandler::planner().current_action_id()) : -1;
++}
++
++void write_npc_row(CAI_Stalker* npc, float dt)
++{
++	Fixture& f = g_fixture;
++	const Fvector p = npc->Position();
++	const float moved = p.distance_to(f.previous_position);
++	if (f.phase == 1)
++		f.travelled += moved;
++	const float speed = dt > 0.f ? moved / dt : 0.f;
++	const float dest_distance = p.distance_to(f.dest_position);
++	check(p);
++	check(speed);
++	fprintf(f.out, "npc,%u,%d,%u,%d,%d,%d,%u,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%d\n", f.ticks, f.phase,
++		f.npc_updates_observe + f.npc_updates_walk, brain_action(npc), handler_action(npc),
++		int(npc->movement().path_type()), npc->movement().level_dest_vertex_id(), int(npc->movement().movement_type()),
++		int(npc->movement().body_state()), int(npc->movement().mental_state()), VPUSH(p), speed, dest_distance,
++		u32(npc->GetCurrentAction() ? 1 : 0), npc->GetScriptControl() ? 1 : 0);
++	f.previous_position = p;
++}
++
++void command_walk(CAI_Stalker* npc)
++{
++	Fixture& f = g_fixture;
++	npc->set_script_capture(true);
++	npc->SetScriptControl(true, script_name);
++	CScriptMovementAction move(MonsterSpace::eBodyStateStand, MonsterSpace::eMovementTypeWalk,
++		DetailPathManager::eDetailPathTypeSmooth, &f.dest_position, 0.f);
++	CScriptEntityAction action;
++	action.SetAction(move);
++	npc->AddAction(&action);
++	f.walk_start = int(f.ticks);
++	f.walk_start_time = Device.dwTimeGlobal;
++	f.phase = 1;
++	Msg("S02-T04c walk commanded at tick %u: stalker %u from [%.2f,%.2f,%.2f] to vertex %u [%.2f,%.2f,%.2f], %.2f m",
++		f.ticks, u32(f.id), VPUSH(npc->Position()), f.dest_vertex, VPUSH(f.dest_position), f.dest_distance);
++}
++
++void release_walk(CAI_Stalker* npc)
++{
++	if (!npc->GetScriptControl())
++		return;
++	npc->ResetScriptData();
++	npc->SetScriptControl(false, script_name);
++}
++
++void log_summary(LPCSTR prefix, const ActivityFixtureSummary& s, bool ok, LPCSTR out)
++{
++	Msg("%s npc=%u ticks=%u sim_ms=%u wall_ms=%u game_time_advance=%u factor=%.2f updates_observe=%u updates_walk=%u "
++		"brain_actions=%u scheduler_updates=%u object_updates=%u switched_online=%u switched_offline=%u "
++		"scheduled_advanced=%u walk_start=%d arrival=%d travelled=%.2f dest=%.2f final_dest_distance=%.3f alive=%d "
++		"finite=%d ok=%d out=%s",
++		prefix, u32(s.npc_id), s.ticks, s.sim_ms, s.wall_ms, s.game_time_advance_ms, s.time_factor,
++		s.npc_updates_observe, s.npc_updates_walk, s.brain_actions, s.scheduler_updates, s.object_updates,
++		s.switched_online, s.switched_offline, s.scheduled_advanced, s.walk_start, s.arrival, s.travelled,
++		s.dest_distance, s.final_dest_distance, s.alive ? 1 : 0, s.finite ? 1 : 0, ok ? 1 : 0, out);
++	if (s.missing[0])
++		Msg("! %s missing: %s", prefix, s.missing);
++}
++} // namespace
++
++bool ActivityFixtureBegin(LPCSTR out_path, ActivityFixtureSummary& summary)
++{
++	ZeroMemory(&summary, sizeof(summary));
++	summary.walk_start = -1;
++	summary.arrival = -1;
++	summary.finite = true;
++	Fixture& f = g_fixture;
++	f = Fixture();
++	f.walk_start = -1;
++	f.arrival = -1;
++	f.finite = true;
++	f.id = u16(option_u32("-s02-activity-npc ", default_npc_id));
++	f.observe_ms = option_u32("-s02-activity-observe-ms ", default_observe_ms);
++	f.walk_ms = option_u32("-s02-activity-walk-ms ", default_walk_ms);
++	f.distance = option_float("-s02-activity-distance ", default_distance);
++	summary.npc_id = f.id;
++
++	if (!g_pGameLevel || !g_pGameLevel->bReady || !physics_world() || !alife() || !ai().get_level_graph())
++	{
++		xr_strcpy(summary.missing, "no loaded level, physics world, ALife or level graph");
++		return false;
++	}
++	CObject* object = Level().Objects.net_Find(f.id);
++	CAI_Stalker* npc = object && !object->getDestroy() ? smart_cast<CAI_Stalker*>(object) : nullptr;
++	if (!npc || !npc->g_Alive())
++	{
++		xr_sprintf(summary.missing, "fixture stalker %u is not an alive stalker on the level", u32(f.id));
++		return false;
++	}
++	const u32 start_vertex = npc->ai_location().level_vertex_id();
++	if (!choose_destination(start_vertex, f.distance, f.dest_vertex, f.dest_position))
++	{
++		xr_sprintf(summary.missing, "no accessible level vertex at least %.1f m from stalker %u (vertex %u)", f.distance,
++			u32(f.id), start_vertex);
++		return false;
++	}
++	FILE* out = fopen(out_path, "w");
++	if (!out)
++	{
++		xr_sprintf(summary.missing, "cannot write %s", out_path);
++		return false;
++	}
++
++	f.out = out;
++	f.npc = npc;
++	f.begin_time = Device.dwTimeGlobal;
++	f.last_update_time = npc->m_dwLastUpdateTime;
++	f.game_time_begin = game_time();
++	f.time_factor = alife()->time().time_factor();
++	f.start_position = npc->Position();
++	f.previous_position = f.start_position;
++	f.dest_distance = f.start_position.distance_to(f.dest_position);
++	summary.time_factor = f.time_factor;
++	summary.dest_distance = f.dest_distance;
++
++	// Previous online states and schedule counters, so the first row's
++	// switches and advances are relative to the begin.
++	u32 online = 0;
++	for (const auto& entry : alife()->graph().level().objects())
++	{
++		f.online[entry.first] = entry.second->m_bOnline;
++		if (entry.second->m_bOnline)
++			++online;
++	}
++	for (const auto& entry : alife()->scheduled().objects())
++		f.schedule_counters[entry.first] = entry.second->m_schedule_counter;
++
++	const float anchor_distance = g_activity_policy.enabled ? g_activity_policy.distance_to(f.start_position) : -1.f;
++	fprintf(out, "meta,%u,%u,%s,%d,%.1f,%u,%.3f,%.3f,%.3f,%u,%u,%u,%.3f,%I64u,%u,%u,%u,%u,%u,%.2f\n", Device.dwFrame,
++		Device.dwTimeGlobal, *Level().name(), g_activity_policy.enabled ? 1 : 0, g_activity_policy.crow_radius,
++		u32(g_activity_policy.anchors.size()), alife()->switch_distance(), alife()->online_distance(),
++		alife()->offline_distance(), u32(alife()->shedule.t_min), u32(alife()->shedule.t_max),
++		alife()->scheduled().objects_per_update(), f.time_factor, f.game_time_begin,
++		u32(alife()->graph().level().objects().size()), online, u32(alife()->scheduled().objects().size()),
++		f.observe_ms, f.walk_ms, f.distance);
++	fprintf(out, "npcmeta,%u,%s,%s,%u,%u,%d,%u,%.6f,%.6f,%.6f,%.3f,%u,%.6f,%.6f,%.6f,%.3f\n", u32(f.id), npc->cName().c_str(),
++		npc->cNameSect().c_str(), u32(npc->shedule.t_min), u32(npc->shedule.t_max), npc->g_Alive() ? 1 : 0,
++		start_vertex, VPUSH(f.start_position), anchor_distance, f.dest_vertex, VPUSH(f.dest_position), f.dest_distance);
++	check(f.start_position);
++	check(f.dest_position);
++	f.running = true;
++	return true;
++}
++
++void ActivityFixtureTick()
++{
++	Fixture& f = g_fixture;
++	if (!f.running)
++		return;
++	++f.ticks;
++	CAI_Stalker* npc = npc_alive();
++	if (!npc)
++	{
++		f.running = false;
++		return;
++	}
++
++	// Frame counters: the object list's, the scheduler's, the physics world's.
++	const CStats* stats = Device.Statistic;
++	const u32 updated = stats ? stats->UpdateClient_updated : 0;
++	f.object_updates += updated;
++	f.scheduler_updates += Engine.Sheduler.dwUpdated;
++
++	// ALife: online state changes on this level and offline scheduled work.
++	u32 online = 0, switched_online = 0, switched_offline = 0, scheduled_advanced = 0;
++	const Fvector actor = actor_alife_position();
++	for (const auto& entry : alife()->graph().level().objects())
++	{
++		const CSE_ALifeDynamicObject* object = entry.second;
++		if (object->m_bOnline)
++			++online;
++		auto previous = f.online.find(entry.first);
++		const bool was_online = previous != f.online.end() ? previous->second : object->m_bOnline;
++		if (was_online != object->m_bOnline)
++		{
++			if (object->m_bOnline)
++				++switched_online;
++			else
++				++switched_offline;
++			fprintf(f.out, "switch,%u,%u,%s,%s,%.3f\n", f.ticks, u32(entry.first), object->name_replace(),
++				object->m_bOnline ? "online" : "offline", actor.distance_to(object->o_Position));
++		}
++		f.online[entry.first] = object->m_bOnline;
++	}
++	for (const auto& entry : alife()->scheduled().objects())
++	{
++		auto previous = f.schedule_counters.find(entry.first);
++		if (previous != f.schedule_counters.end() && previous->second != entry.second->m_schedule_counter)
++			++scheduled_advanced;
++		f.schedule_counters[entry.first] = entry.second->m_schedule_counter;
++	}
++	f.switched_online += switched_online;
++	f.switched_offline += switched_offline;
++	f.scheduled_advanced += scheduled_advanced;
++
++	fprintf(f.out, "tick,%u,%d,%u,%u,%I64u,%u,%u,%u,%u,%u,%I64u,%u,%u,%u,%u,%u\n", f.ticks, f.phase, Device.dwFrame,
++		Device.dwTimeGlobal, game_time(), Level().Objects.o_count(), stats ? stats->UpdateClient_active : 0,
++		stats ? stats->UpdateClient_crows : 0, updated, Engine.Sheduler.dwUpdated, physics_world()->StepsNum(), online,
++		switched_online, switched_offline, u32(alife()->scheduled().objects().size()), scheduled_advanced);
++
++	// The stalker: one scheduled update per change of its last update time.
++	if (npc->m_dwLastUpdateTime != f.last_update_time)
++	{
++		f.last_update_time = npc->m_dwLastUpdateTime;
++		if (f.phase == 0)
++			++f.npc_updates_observe;
++		else
++			++f.npc_updates_walk;
++	}
++	if (f.phase == 0)
++	{
++		const int action = brain_action(npc);
++		if (action >= 0 && std::find(f.brain_actions.begin(), f.brain_actions.end(), action) == f.brain_actions.end())
++			f.brain_actions.push_back(action);
++	}
++	write_npc_row(npc, Device.fTimeDelta);
++
++	const u32 elapsed = Device.dwTimeGlobal - f.begin_time;
++	if (f.phase == 0 && elapsed >= f.observe_ms)
++		command_walk(npc);
++	else if (f.phase == 1)
++	{
++		if (npc->Position().distance_to(f.dest_position) < arrival_tolerance)
++		{
++			f.arrival = int(f.ticks);
++			f.running = false;
++		}
++		else if (Device.dwTimeGlobal - f.walk_start_time >= f.walk_ms)
++			f.running = false;
++	}
++}
++
++bool ActivityFixtureDone()
++{
++	return !g_fixture.running;
++}
++
++bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSummary& summary)
++{
++	Fixture& f = g_fixture;
++	if (!f.out)
++	{
++		xr_strcpy(summary.missing, "fixture was not started");
++		return false;
++	}
++	f.running = false;
++	CAI_Stalker* npc = npc_alive();
++	if (npc)
++		release_walk(npc);
++
++	summary.ticks = f.ticks;
++	summary.sim_ms = sim_ms;
++	summary.wall_ms = wall_ms;
++	summary.game_time_advance_ms = u32(game_time() - f.game_time_begin);
++	summary.npc_updates_observe = f.npc_updates_observe;
++	summary.npc_updates_walk = f.npc_updates_walk;
++	summary.brain_actions = u32(f.brain_actions.size());
++	summary.scheduler_updates = f.scheduler_updates;
++	summary.object_updates = f.object_updates;
++	summary.switched_online = f.switched_online;
++	summary.switched_offline = f.switched_offline;
++	summary.scheduled_advanced = f.scheduled_advanced;
++	summary.walk_start = f.walk_start;
++	summary.arrival = f.arrival;
++	summary.travelled = f.travelled;
++	summary.final_dest_distance = npc ? npc->Position().distance_to(f.dest_position) : -1.f;
++	summary.alive = npc != nullptr;
++	check(summary.travelled);
++	summary.finite = f.finite;
++
++	const float expected_game_ms = float(sim_ms) * f.time_factor;
++	const float game_error = expected_game_ms > 0.f ?
++		_abs(float(summary.game_time_advance_ms) - expected_game_ms) / expected_game_ms : 0.f;
++
++	if (!summary.alive)
++		xr_sprintf(summary.missing, "fixture stalker %u died or was destroyed", u32(f.id));
++	else if (summary.npc_updates_observe < min_observe_updates)
++		xr_sprintf(summary.missing, "stalker %u had %u scheduled updates while observing (need %u)", u32(f.id),
++			summary.npc_updates_observe, min_observe_updates);
++	else if (!summary.brain_actions)
++		xr_sprintf(summary.missing, "stalker %u's planner never had a current action", u32(f.id));
++	else if (!summary.scheduler_updates || !summary.object_updates)
++		xr_strcpy(summary.missing, "no scheduler dispatch or object update was counted");
++	else if (!summary.switched_online && !summary.switched_offline)
++		xr_strcpy(summary.missing, "ALife switched no object online or offline");
++	else if (!summary.scheduled_advanced)
++		xr_strcpy(summary.missing, "no offline scheduled object advanced");
++	else if (game_error > game_time_tolerance)
++		xr_sprintf(summary.missing, "ALife game time advanced %u ms, expected %.0f ms", summary.game_time_advance_ms,
++			expected_game_ms);
++	else if (summary.walk_start < 0)
++		xr_strcpy(summary.missing, "the walk was never commanded");
++	else if (summary.arrival < 0)
++		xr_sprintf(summary.missing, "stalker %u did not arrive: %.2f m from the destination after %.2f m walked",
++			u32(f.id), summary.final_dest_distance, summary.travelled);
++	else if (summary.travelled < 0.8f * f.dest_distance)
++		xr_sprintf(summary.missing, "stalker %u walked only %.2f m of %.2f m", u32(f.id), summary.travelled,
++			f.dest_distance);
++	else if (!summary.finite)
++		xr_strcpy(summary.missing, "a sampled value is not finite");
++	const bool ok = !summary.missing[0];
++	fprintf(f.out, "end,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%d,%.6f,%.6f,%d\n", f.ticks, sim_ms, wall_ms,
++		summary.game_time_advance_ms, summary.npc_updates_observe, summary.npc_updates_walk, summary.brain_actions,
++		summary.switched_online, summary.switched_offline, summary.scheduled_advanced, summary.walk_start,
++		summary.arrival, summary.travelled, summary.final_dest_distance, ok ? 1 : 0);
++	fclose(f.out);
++	f.out = nullptr;
++	(void)frames;
++	return ok;
++}
++
++static ActivityFixtureSummary g_server_summary;
++static string_path g_server_out;
++
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureBegin(LPCSTR out_path)
++{
++	xr_strcpy(g_server_out, out_path);
++	const bool ok = ActivityFixtureBegin(out_path, g_server_summary);
++	if (!ok)
++		log_summary("S02-T04c activity", g_server_summary, false, out_path);
++	return ok;
++}
++
++extern "C" void __cdecl xrCampaignLevel_ActivityFixtureTick()
++{
++	ActivityFixtureTick();
++}
++
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureDone()
++{
++	return ActivityFixtureDone();
++}
++
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms)
++{
++	const bool ok = ActivityFixtureEnd(frames, sim_ms, wall_ms, g_server_summary);
++	log_summary("S02-T04c activity", g_server_summary, ok, g_server_out);
++	return ok;
++}
++
++void ClientActivityCaptureOnFrame()
++{
++	static const bool requested = strstr(Core.Params, "-s02-activity-capture") != nullptr;
++	static u32 since = 0;
++	static u32 begin_time = 0;
++	static u32 begin_frame = 0;
++	static bool started = false;
++	static bool done = false;
++	static ActivityFixtureSummary summary;
++	static string_path out;
++	if (!requested || done || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor || Device.dwPrecacheFrame)
++		return;
++	if (!since)
++	{
++		since = Device.dwTimeGlobal;
++		return;
++	}
++	if (!started)
++	{
++		// One second of device time after the actor spawned, like the other
++		// captures; the server runs the fixture after its physics fixture.
++		if (Device.dwTimeGlobal - since < 1000)
++			return;
++		started = true;
++		FS.update_path(out, "$logs$", "s02-t04c-activity.csv");
++		begin_time = Device.dwTimeGlobal;
++		begin_frame = Device.dwFrame;
++		if (ActivityFixtureBegin(out, summary))
++			return;
++		done = true;
++		log_summary("S02-T04c client activity", summary, false, out);
++	}
++	else
++	{
++		ActivityFixtureTick();
++		if (!ActivityFixtureDone())
++			return;
++		done = true;
++		const u32 elapsed = Device.dwTimeGlobal - begin_time;
++		const bool ok = ActivityFixtureEnd(Device.dwFrame - begin_frame, elapsed, elapsed, summary);
++		log_summary("S02-T04c client activity", summary, ok, out);
++	}
++	FlushLog();
++	Console->Execute("quit");
++}
+diff --git a/src/xrGame/CampaignActivityCapture.h b/src/xrGame/CampaignActivityCapture.h
+new file mode 100644
+index 0000000..78072bd
+--- /dev/null
++++ b/src/xrGame/CampaignActivityCapture.h
+@@ -0,0 +1,86 @@
++#pragma once
++
++// S02-T04c: objects, the scheduler, AI and ALife on the loaded level (H04).
++// The fixture watches the running level for an observation period and then
++// walks one identified stalker along a short reachable path. The campaign
++// server (no device, activity anchors instead of a camera) and the normal
++// client run the same fixture on the same saved game and write the same CSV
++// rows:
++//   meta,<frame>,<time_ms>,<level>,<policy>,<crow_radius>,<anchors>,<switch_distance>,<online_distance>,
++//        <offline_distance>,<alife_t_min>,<alife_t_max>,<objects_per_update>,<time_factor>,<game_time>,
++//        <level_alife_objects>,<online>,<scheduled>,<observe_ms>,<move_ms>,<distance>
++//   npcmeta,<id>,<name>,<section>,<t_min>,<t_max>,<alive>,<level_vertex>,<px>,<py>,<pz>,<anchor_distance>,
++//        <dest_vertex>,<dx>,<dy>,<dz>,<dest_distance>
++//        (the walk destination: the first level vertex found by breadth-first
++//         search from the stalker's vertex that is accessible and at least
++//         <distance> metres away)
++//   tick,<n>,<phase>,<frame>,<time_ms>,<game_time>,<objects>,<active>,<crows>,<updated>,<scheduled_updates>,
++//        <physics_steps>,<online>,<switched_online>,<switched_offline>,<scheduled_objects>,<scheduled_advanced>
++//        (phase 0 observes, 1 walks; objects/active/crows/updated are the
++//         object list's own counters for the frame; scheduled_updates is the
++//         scheduler's dispatch count for the frame; online counts the ALife
++//         objects of this level that are online; switched_* count ALife
++//         objects whose online state changed since the previous row;
++//         scheduled_objects/advanced count the offline schedule registry and
++//         the objects whose schedule counter advanced)
++//   switch,<n>,<id>,<name>,<state>,<actor_distance>   (one per changed object; state online|offline)
++//   npc,<n>,<phase>,<updates>,<brain_action>,<handler_action>,<path_type>,<dest_vertex>,<movement>,<body>,
++//        <mental>,<px>,<py>,<pz>,<speed>,<dest_distance>,<queued_actions>,<script_control>
++//        (updates: scheduled updates of the stalker so far; brain_action: the
++//         stalker planner's current action id, -1 before it runs;
++//         handler_action: the object handler planner's current action id)
++//   end,<ticks>,<sim_ms>,<wall_ms>,<game_time_advance_ms>,<npc_updates_observe>,<npc_updates_walk>,
++//        <brain_actions>,<switched_online>,<switched_offline>,<scheduled_advanced>,<walk_start>,<arrival>,
++//        <travelled>,<final_dest_distance>,<ok>
++struct ActivityFixtureSummary
++{
++	u16 npc_id;
++	u32 ticks;
++	u32 sim_ms;
++	u32 wall_ms;
++	u32 game_time_advance_ms; // ALife game time advanced over the fixture
++	float time_factor; // ALife time factor, for the expected advance
++	u32 npc_updates_observe; // the stalker's scheduled updates in the observation phase
++	u32 npc_updates_walk;
++	u32 brain_actions; // distinct stalker planner action ids seen while observing
++	u32 scheduler_updates; // scheduler dispatches over all ticks
++	u32 object_updates; // object list updates over all ticks
++	u32 switched_online;
++	u32 switched_offline;
++	u32 scheduled_advanced; // offline scheduled objects whose counter advanced, summed over ticks
++	int walk_start; // tick at which the walk was commanded; -1 if never
++	int arrival; // tick at which the stalker arrived; -1 if never
++	float travelled; // path length the stalker walked, metres
++	float final_dest_distance;
++	float dest_distance; // from the start position
++	bool alive;
++	bool finite;
++	string256 missing; // first missing-data finding, empty when none
++};
++
++// Looks the stalker up (-s02-activity-npc <id>, default 19409: the stalker
++// beside the saved actor on k00_marsh), records the policy, ALife and
++// scheduling parameters, chooses the walk destination and opens the CSV.
++// Returns false and names the reason when the level, ALife, the stalker or a
++// destination is missing. The observation lasts -s02-activity-observe-ms
++// (default 10000 ms of simulation time), the walk at most
++// -s02-activity-walk-ms (default 30000), the destination is at least
++// -s02-activity-distance metres away (default 10).
++bool ActivityFixtureBegin(LPCSTR out_path, ActivityFixtureSummary& summary);
++// Called once after every frame: writes the rows, starts the walk when the
++// observation ends, detects arrival.
++void ActivityFixtureTick();
++// True once the stalker arrived (or died), or the walk budget ran out.
++bool ActivityFixtureDone();
++// Releases the stalker, writes the end row, evaluates the fixture.
++bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSummary& summary);
++
++// Campaign server entries, used by the smoke after the physics fixture.
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_ActivityFixtureTick();
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureDone();
++extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++
++// Normal client, with -s02-activity-capture and a -start command: one second of
++// device time after the actor spawned, run the fixture, log and quit.
++void ClientActivityCaptureOnFrame();
+diff --git a/src/xrGame/CampaignActivityPolicy.h b/src/xrGame/CampaignActivityPolicy.h
+new file mode 100644
+index 0000000..56bdc56
+--- /dev/null
++++ b/src/xrGame/CampaignActivityPolicy.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++// S02-T04c: the campaign server's activity policy (engine side:
++// SActivityPolicy in xrEngine/xr_object.h). The client prioritises simulation
++// from its camera; the server has none, so while a level is running it keeps
++// one activity anchor per online actor on the level and the engine's crow
++// selection and scheduling scale use the nearest anchor instead. Enabled when
++// the campaign level starts, refreshed every CLevel::OnFrame after the game
++// events (so an actor spawned this frame already counts), disabled when the
++// level stops.
++void CampaignActivityPolicyEnable();
++void CampaignActivityPolicyDisable();
++void CampaignActivityRefreshAnchors();
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+index 7c729f9..1e222c6 100644
+--- a/src/xrGame/CampaignServerStart.cpp
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -8,6 +8,7 @@
+ // client game state, spawn queue) and the first server ticks.
+ 
+ #include "Level.h"
++#include "CampaignActivityPolicy.h"
+ #include "xrServer.h"
+ #include "ai_space.h"
+ #include "alife_simulator.h"
+@@ -44,6 +45,8 @@ extern "C" bool __cdecl xrCampaignLevel_Start(LPCSTR op_server, LPCSTR op_client
+ 	if (!g_pGameLevel)
+ 		return false;
+ 	pApp->LoadBegin();
++	// S02-T04c: anchors replace the camera for the whole life of the level.
++	CampaignActivityPolicyEnable();
+ 	g_pGamePersistent->Start(op_server);
+ 	const bool queued = g_pGameLevel->net_Start(op_server, op_client);
+ 	pApp->LoadEnd();
+@@ -122,6 +125,38 @@ extern "C" void __cdecl xrCampaignLevel_Stop()
+ 		DEL_INSTANCE(g_pGameLevel);
+ 	}
+ 	g_pGamePersistent->Disconnect();
++	CampaignActivityPolicyDisable();
++}
++
++// S02-T04c: one anchor per alive actor on the level. With the saved actor
++// that is one anchor; a second participant (Stage 3) adds its own.
++void CampaignActivityPolicyEnable()
++{
++	g_activity_policy.anchors.clear();
++	g_activity_policy.enabled = true;
++}
++
++void CampaignActivityPolicyDisable()
++{
++	g_activity_policy.enabled = false;
++	g_activity_policy.anchors.clear();
++}
++
++void CampaignActivityRefreshAnchors()
++{
++	g_activity_policy.anchors.clear();
++	if (!g_pGameLevel)
++		return;
++	CLevel& level = Level();
++	for (u32 i = 0; i < level.Objects.o_count(); ++i)
++	{
++		CObject* object = level.Objects.o_get_by_iterator(i);
++		if (object->getDestroy())
++			continue;
++		CActor* actor = smart_cast<CActor*>(object);
++		if (actor && actor->g_Alive())
++			g_activity_policy.anchors.push_back(actor->Position());
++	}
+ }
+ 
+ // S02-T05d: runs the client stages (net_start_client1..6, net_start5..6) until
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 26a187c..8be9156 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -5,6 +5,7 @@
+ #include "../xrEngine/CampaignBoneCapture.h"
+ #include "CampaignCollisionCapture.h"
+ #include "CampaignPhysicsCapture.h"
++#include "CampaignActivityCapture.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -923,6 +924,8 @@ void CGamePersistent::OnFrame()
+ 	ClientCollisionCaptureOnFrame();
+ 	// S02-T04b: opt-in falling-body fixture on the loaded level, then quit.
+ 	ClientPhysicsCaptureOnFrame();
++	// S02-T04c: opt-in activity fixture (observe, then walk a stalker), then quit.
++	ClientActivityCaptureOnFrame();
+ }
+ 
+ void CGamePersistent::ImGui_OnRender(LPCSTR name)
+diff --git a/src/xrGame/Level.cpp b/src/xrGame/Level.cpp
+index f864d83..3dd0df9 100644
+--- a/src/xrGame/Level.cpp
++++ b/src/xrGame/Level.cpp
+@@ -5,6 +5,7 @@
+ #include "xrEngine/IGame_Persistent.h"
+ #include "ParticlesObject.h"
+ #include "Level.h"
++#include "CampaignActivityPolicy.h"
+ #include "HUDManager.h"
+ #include "xrServer.h"
+ #include "NET_Queue.h"
+@@ -1027,6 +1028,10 @@ void CLevel::OnFrame()
+ 	}
+ 	
+ 	ProcessGameEvents();
++	// S02-T04c: the server has no camera; its activity anchors follow the
++	// actors, including one spawned by the events just processed.
++	if (g_campaign_server)
++		CampaignActivityRefreshAnchors();
+ #ifdef SPAWN_ANTIFREEZE
+ 	{
+ 		bool queueEmpty = false;
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index dac3167..0801014 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -1999,6 +1999,8 @@
+     <ClInclude Include="xrGameSpyServer_callbacks.h" />
+     <ClInclude Include="CampaignCollisionCapture.h" />
+     <ClInclude Include="CampaignPhysicsCapture.h" />
++    <ClInclude Include="CampaignActivityCapture.h" />
++    <ClInclude Include="CampaignActivityPolicy.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4342,6 +4344,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignActivityCapture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

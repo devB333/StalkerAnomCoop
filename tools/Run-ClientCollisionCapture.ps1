@@ -4,19 +4,20 @@
 # (-s02-collision-capture), then collect the capture. Prepare the runtime first with
 #   python3 tools/prepare-stage2-smoke.py <run> S02-T03d
 # With -Capture physics (S02-T04b) the client runs the falling-body fixture instead
-# (-s02-physics-capture); prepare the runtime with task S02-T04b.
+# (-s02-physics-capture); prepare the runtime with task S02-T04b. With -Capture activity
+# (S02-T04c) it observes the level and walks a stalker (-s02-activity-capture); task S02-T04c.
 # The accepted source-client runtime is only read: its bin DLLs, user settings and
 # shader cache are copied, and the archives are read in place through fsgame.ltx.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
-    [ValidateSet('collision', 'physics')][string]$Capture = 'collision',
+    [ValidateSet('collision', 'physics', 'activity')][string]$Capture = 'collision',
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
-$task = if ($Capture -eq 'physics') { 'S02-T04b' } else { 'S02-T03d' }
-$flag = if ($Capture -eq 'physics') { '-s02-physics-capture' } else { '-s02-collision-capture' }
-$captureFile = if ($Capture -eq 'physics') { 's02-t04b-physics.csv' } else { 's02-t03d-collision.csv' }
+$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } default { 'S02-T03d' } }
+$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } default { '-s02-collision-capture' } }
+$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } default { 's02-t03d-collision.csv' } }
 $runtime = Join-Path $workspace "builds\stage2\test-install\$task\$Run"
 $fixture = Join-Path $runtime 'fixture.json'
 if (-not (Test-Path $fixture)) { throw "Prepare the isolated runtime first (prepare-stage2-smoke.py <run> $task)." }

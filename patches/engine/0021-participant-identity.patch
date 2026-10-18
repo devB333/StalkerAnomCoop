@@ -1,0 +1,1712 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index c437f13..8a4037b 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -977,6 +977,11 @@ extern "C" void __cdecl xrCampaignScriptEngine_Destroy();
+ extern "C" void __cdecl xrCampaignGameGlobals_Destroy();
+ extern "C" void __cdecl xrCampaignRegisterModel(IRenderVisual* V);
+ extern "C" u32 __cdecl xrCampaignRegisteredModels();
++extern "C" bool __cdecl xrCampaignIdentity_Start();
++extern "C" void __cdecl xrCampaignIdentity_Stop();
++extern "C" bool __cdecl xrCampaignIdentity_Fixture(LPCSTR name);
++extern "C" bool __cdecl xrCampaignIdentity_BindBridge();
++extern "C" bool __cdecl xrCampaignLevel_IdentityCheck();
+ extern "C" bool __cdecl xrCampaignLevel_Start(LPCSTR op_server, LPCSTR op_client);
+ extern "C" int __cdecl xrCampaignLevel_PumpServerStages(u32 deadline_ms);
+ extern "C" bool __cdecl xrCampaignLevel_Report();
+@@ -1019,6 +1024,7 @@ namespace
+ enum class CampaignSmokeScope
+ {
+     Core,
++    Identity, // S03-T01: identity unit fixtures on the core only
+     Services,
+     GameState
+ };
+@@ -1517,6 +1523,8 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+     CampaignSmokeScope scope;
+     if (strstr(command_line, "-campaign-core-smoke"))
+         scope = CampaignSmokeScope::Core;
++    else if (strstr(command_line, "-campaign-identity-smoke"))
++        scope = CampaignSmokeScope::Identity;
+     else if (strstr(command_line, "-campaign-services-smoke"))
+         scope = CampaignSmokeScope::Services;
+     else if (strstr(command_line, "-campaign-smoke"))
+@@ -1636,13 +1644,38 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         return true;
+     };
+ 
+-    if (scope != CampaignSmokeScope::Core)
++    if (scope == CampaignSmokeScope::Identity)
++    {
++        // S03-T01: the identity registry and its unit fixtures need nothing
++        // beyond the core. Each fixture builds its own registry.
++        if (start("identity", &xrCampaignIdentity_Start, {"identity-stopped", &xrCampaignIdentity_Stop}))
++        {
++            static LPCSTR const fixtures[] = {"engine-id", "slot-reuse", "disconnect-retention", "role-context"};
++            for (LPCSTR fixture : fixtures)
++            {
++                const bool ok = xrCampaignIdentity_Fixture(fixture);
++                string128 name;
++                xr_sprintf(name, "identity-%s-fixture-%s", fixture, ok ? "passed" : "failed");
++                stage(name);
++                if (!ok)
++                {
++                    result = 29;
++                    break;
++                }
++            }
++        }
++    }
++
++    if (scope == CampaignSmokeScope::Services || scope == CampaignSmokeScope::GameState)
+     {
+         // Native order: spatial databases follow persistent construction;
+         // persistent app start then loads materials before game globals.
+         // Native order: the renderer's model pool exists before persistent
+         // construction (Device.Create), which precedes the spatial databases.
+         const bool services_ready =
++            // S03-T01: the identity registry first, so it sees every engine id
++            // the level assigns.
++            start("identity", &xrCampaignIdentity_Start, {"identity-stopped", &xrCampaignIdentity_Stop}) &&
+             start("sound", &StartCampaignSound, {"sound-stopped", &StopCampaignSound}) &&
+             start("cpu-models", &StartCampaignCpuModels, {"cpu-models-stopped", &StopCampaignCpuModels}) &&
+             start("spatial-db",
+@@ -1742,6 +1775,17 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 }
+             }
+             if (result == 0)
++            {
++                // S03-T01: the in-process direct client (created by the client
++                // stages, Level_network_start_client.cpp:55-57) is the private
++                // state bridge; record it so it can never be attached as a participant.
++                if (!xrCampaignIdentity_BindBridge())
++                {
++                    stage("campaign-identity-bridge-failed");
++                    result = 30;
++                }
++            }
++            if (result == 0)
+             {
+                 // The first server ticks: the first CLevel::OnFrame processes
+                 // the queued spawns; later ticks update the objects, the
+@@ -1760,6 +1804,19 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 }
+             }
+             if (result == 0)
++            {
++                // S03-T01: every online object and ALife object holds a current
++                // engine-id binding, no binding is orphaned, and the saved actor
++                // is held by a participant reference.
++                if (xrCampaignLevel_IdentityCheck())
++                    stage("campaign-identity-passed");
++                else
++                {
++                    stage("campaign-identity-failed");
++                    result = 31;
++                }
++            }
++            if (result == 0)
+             {
+                 // S02-T03d: the skeleton collision forms, character controllers
+                 // and physics shells the spawn created, plus hit picks through
+diff --git a/src/xrGame/CampaignIdentity.cpp b/src/xrGame/CampaignIdentity.cpp
+new file mode 100644
+index 0000000..eebdc20
+--- /dev/null
++++ b/src/xrGame/CampaignIdentity.cpp
+@@ -0,0 +1,443 @@
++#include "pch_script.h"
++#include "CampaignIdentity.h"
++#include "CampaignIdentityHooks.h"
++#include "../xrServerEntities/xrServer_Object_Base.h"
++
++// S03-T01: see CampaignIdentity.h. No engine globals are read here; the
++// registry is a plain state machine over the ids the hooks report.
++
++campaign::CampaignIdentityRegistry* g_campaign_identity = nullptr;
++
++void CampaignIdentity_OnServerIncarnation()
++{
++	if (g_campaign_identity)
++		g_campaign_identity->on_server_incarnation();
++}
++
++void CampaignIdentity_OnServerDestroyed()
++{
++	if (g_campaign_identity)
++		g_campaign_identity->on_server_destroyed();
++}
++
++void CampaignIdentity_OnEngineIdsCleared()
++{
++	// xrServer::clear_ids rebuilds the generator (game_sv_Single::restart_simulator):
++	// every id is free again, so every binding is stale.
++	if (g_campaign_identity)
++		g_campaign_identity->on_server_incarnation();
++}
++
++void CampaignIdentity_OnEngineIdAssigned(u16 id, CSE_Abstract* object)
++{
++	if (g_campaign_identity)
++		g_campaign_identity->on_engine_id_assigned(id, object ? &object->m_campaign_entity : nullptr);
++}
++
++void CampaignIdentity_OnEngineIdFreed(u16 id)
++{
++	if (g_campaign_identity)
++		g_campaign_identity->on_engine_id_freed(id);
++}
++
++namespace campaign
++{
++LPCSTR refusal_name(Refusal refusal)
++{
++	switch (refusal)
++	{
++	case Refusal::None: return "none";
++	case Refusal::NotAuthoritative: return "not-authoritative";
++	case Refusal::WrongRole: return "wrong-role";
++	case Refusal::InvalidIdentity: return "invalid-identity";
++	case Refusal::SlotsFull: return "slots-full";
++	case Refusal::AlreadyBound: return "already-bound";
++	case Refusal::UnknownParticipant: return "unknown-participant";
++	case Refusal::StaleReference: return "stale-reference";
++	case Refusal::UnknownSession: return "unknown-session";
++	case Refusal::SessionInUse: return "session-in-use";
++	case Refusal::BridgeNotParticipant: return "bridge-not-participant";
++	case Refusal::NotAttached: return "not-attached";
++	case Refusal::WrongParty: return "wrong-party";
++	}
++	return "unknown-refusal";
++}
++
++LPCSTR participant_state_name(ParticipantState state)
++{
++	switch (state)
++	{
++	case ParticipantState::Free: return "free";
++	case ParticipantState::Bound: return "bound";
++	case ParticipantState::Attached: return "attached";
++	case ParticipantState::Detached: return "detached";
++	}
++	return "unknown-state";
++}
++
++namespace
++{
++const EngineEntityKey no_key = {kNoEngineId, 0};
++const EntityId no_entity = {0};
++
++void clear_identity(Participant& p)
++{
++	p.player = PlayerId();
++	p.party = PartyId();
++	p.session = 0;
++	p.actor = no_entity;
++	p.actor_key = no_key;
++	p.bound_at = 0;
++	p.attached_at = 0;
++	p.detached_at = 0;
++}
++} // namespace
++
++CampaignIdentityRegistry::CampaignIdentityRegistry(Role role, u8 active_slots)
++	: m_role(role), m_active_slots(active_slots), m_authority(this), m_next_entity(1), m_bridge_session(0),
++	  m_bridge_known(false)
++{
++	ZeroMemory(&m_stats, sizeof(m_stats));
++	m_stats.next_entity = m_next_entity;
++	// Slot generations start at 1 so a zero ParticipantRef never resolves.
++	m_slots.resize(active_slots);
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		m_slots[i].state = ParticipantState::Free;
++		m_slots[i].generation = 1;
++		clear_identity(m_slots[i]);
++	}
++	// Engine generations start at 0 (never assigned); the first assignment is 1.
++	EngineBinding none = {0, no_entity, false, false};
++	m_bindings.assign(kEngineIdCount, none);
++}
++
++const ServerAuthority* CampaignIdentityRegistry::authority() const
++{
++	return m_role == Role::Server ? &m_authority : nullptr;
++}
++
++bool CampaignIdentityRegistry::authorized(const ServerAuthority* authority) const
++{
++	return authority && authority->m_owner == this && m_role == Role::Server;
++}
++
++// --- engine id mapping -----------------------------------------------------
++
++void CampaignIdentityRegistry::retire_all_bindings()
++{
++	for (u32 i = 0; i < m_bindings.size(); ++i)
++	{
++		m_bindings[i].live = false;
++		m_bindings[i].freed_this_incarnation = false;
++	}
++	m_stats.live = 0;
++}
++
++void CampaignIdentityRegistry::on_server_incarnation()
++{
++	retire_all_bindings();
++	++m_stats.incarnations;
++}
++
++void CampaignIdentityRegistry::on_server_destroyed()
++{
++	retire_all_bindings();
++}
++
++EngineEntityKey CampaignIdentityRegistry::on_engine_id_assigned(u16 id, u64* continuity)
++{
++	if (id >= kEngineIdCount)
++		return no_key;
++	EngineBinding& binding = m_bindings[id];
++	EntityId entity;
++	if (continuity && *continuity != 0)
++	{
++		// The object already has an identity: the same id re-requested across
++		// an ALife switch, or a new id for an object that moved.
++		entity.value = *continuity;
++		++m_stats.continued;
++	}
++	else
++	{
++		entity.value = m_next_entity++;
++		if (continuity)
++			*continuity = entity.value;
++	}
++	if (binding.freed_this_incarnation && binding.entity != entity)
++		++m_stats.reassigned_after_free;
++	if (!binding.live)
++		++m_stats.live;
++	++binding.generation;
++	binding.entity = entity;
++	binding.live = true;
++	binding.freed_this_incarnation = false;
++	++m_stats.assigned;
++	if (binding.generation > m_stats.max_generation)
++		m_stats.max_generation = binding.generation;
++	m_stats.next_entity = m_next_entity;
++	EngineEntityKey key = {id, binding.generation};
++	return key;
++}
++
++void CampaignIdentityRegistry::on_engine_id_freed(u16 id)
++{
++	if (id >= kEngineIdCount)
++		return;
++	EngineBinding& binding = m_bindings[id];
++	if (!binding.live)
++	{
++		++m_stats.freed_unbound;
++		return;
++	}
++	binding.live = false;
++	binding.freed_this_incarnation = true;
++	++m_stats.freed;
++	--m_stats.live;
++}
++
++bool CampaignIdentityRegistry::current_key(u16 id, EngineEntityKey& out) const
++{
++	if (id >= kEngineIdCount || !m_bindings[id].live)
++		return false;
++	out.id = id;
++	out.generation = m_bindings[id].generation;
++	return true;
++}
++
++Refusal CampaignIdentityRegistry::resolve(const EngineEntityKey& key, EntityId& out) const
++{
++	out = no_entity;
++	if (key.id >= kEngineIdCount || key.generation == 0)
++		return Refusal::InvalidIdentity;
++	const EngineBinding& binding = m_bindings[key.id];
++	if (!binding.live || binding.generation != key.generation)
++		return Refusal::StaleReference;
++	out = binding.entity;
++	return Refusal::None;
++}
++
++// --- participants ----------------------------------------------------------
++
++Refusal CampaignIdentityRegistry::slot_for(const ParticipantRef& ref, Participant*& out)
++{
++	out = nullptr;
++	if (ref.slot >= m_slots.size())
++		return Refusal::UnknownParticipant;
++	Participant& p = m_slots[ref.slot];
++	if (p.state == ParticipantState::Free)
++		return Refusal::UnknownParticipant;
++	if (p.generation != ref.generation)
++		return Refusal::StaleReference;
++	out = &p;
++	return Refusal::None;
++}
++
++Refusal CampaignIdentityRegistry::participant(const ParticipantRef& ref, const Participant*& out) const
++{
++	out = nullptr;
++	if (ref.slot >= m_slots.size())
++		return Refusal::UnknownParticipant;
++	const Participant& p = m_slots[ref.slot];
++	if (p.state == ParticipantState::Free)
++		return Refusal::UnknownParticipant;
++	if (p.generation != ref.generation)
++		return Refusal::StaleReference;
++	out = &p;
++	return Refusal::None;
++}
++
++Refusal CampaignIdentityRegistry::find_player(const PlayerId& player, ParticipantRef& out) const
++{
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		const Participant& p = m_slots[i];
++		if (p.state != ParticipantState::Free && p.player == player)
++		{
++			out.slot = u8(i);
++			out.generation = p.generation;
++			return Refusal::None;
++		}
++	}
++	return Refusal::UnknownParticipant;
++}
++
++u8 CampaignIdentityRegistry::bound_count() const
++{
++	u8 count = 0;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++		if (m_slots[i].state != ParticipantState::Free)
++			++count;
++	return count;
++}
++
++Refusal CampaignIdentityRegistry::bind_participant(const ServerAuthority* authority, const PlayerId& player,
++	const PartyId& party, u64 now, ParticipantRef& out)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	if (!player.valid() || !party.valid())
++		return Refusal::InvalidIdentity;
++	ParticipantRef existing;
++	if (find_player(player, existing) == Refusal::None)
++		return Refusal::AlreadyBound;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		Participant& p = m_slots[i];
++		if (p.state != ParticipantState::Free)
++			continue;
++		clear_identity(p);
++		p.state = ParticipantState::Bound;
++		p.player = player;
++		p.party = party;
++		p.bound_at = now;
++		out.slot = u8(i);
++		out.generation = p.generation;
++		return Refusal::None;
++	}
++	return Refusal::SlotsFull;
++}
++
++Refusal CampaignIdentityRegistry::attach_session(const ServerAuthority* authority, const ParticipantRef& ref,
++	u32 session, u64 now)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	if (session == 0)
++		return Refusal::InvalidIdentity;
++	if (m_bridge_known && session == m_bridge_session)
++		return Refusal::BridgeNotParticipant;
++	Participant* p = nullptr;
++	const Refusal refusal = slot_for(ref, p);
++	if (refusal != Refusal::None)
++		return refusal;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		const Participant& other = m_slots[i];
++		if (&other != p && other.state == ParticipantState::Attached && other.session == session)
++			return Refusal::SessionInUse;
++	}
++	if (p->state == ParticipantState::Attached)
++		return p->session == session ? Refusal::None : Refusal::SessionInUse;
++	p->state = ParticipantState::Attached;
++	p->session = session;
++	p->attached_at = now;
++	return Refusal::None;
++}
++
++Refusal CampaignIdentityRegistry::detach_session(const ServerAuthority* authority, u32 session, u64 now)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		Participant& p = m_slots[i];
++		if (p.state != ParticipantState::Attached || p.session != session)
++			continue;
++		// Identity, party and actor stay with the slot.
++		p.state = ParticipantState::Detached;
++		p.session = 0;
++		p.detached_at = now;
++		return Refusal::None;
++	}
++	return Refusal::UnknownSession;
++}
++
++Refusal CampaignIdentityRegistry::bind_actor(const ServerAuthority* authority, const ParticipantRef& ref,
++	const EngineEntityKey& key)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	Participant* p = nullptr;
++	Refusal refusal = slot_for(ref, p);
++	if (refusal != Refusal::None)
++		return refusal;
++	EntityId entity;
++	refusal = resolve(key, entity);
++	if (refusal != Refusal::None)
++		return refusal;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		const Participant& other = m_slots[i];
++		if (&other != p && other.state != ParticipantState::Free && other.actor == entity)
++			return Refusal::AlreadyBound;
++	}
++	p->actor = entity;
++	p->actor_key = key;
++	return Refusal::None;
++}
++
++Refusal CampaignIdentityRegistry::release_participant(const ServerAuthority* authority, const ParticipantRef& ref,
++	u64 now)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	Participant* p = nullptr;
++	const Refusal refusal = slot_for(ref, p);
++	if (refusal != Refusal::None)
++		return refusal;
++	(void)now;
++	p->state = ParticipantState::Free;
++	++p->generation;
++	clear_identity(*p);
++	return Refusal::None;
++}
++
++Refusal CampaignIdentityRegistry::set_bridge_session(const ServerAuthority* authority, u32 session)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++		if (m_slots[i].state == ParticipantState::Attached && m_slots[i].session == session)
++			return Refusal::SessionInUse;
++	m_bridge_session = session;
++	m_bridge_known = true;
++	return Refusal::None;
++}
++
++Refusal CampaignIdentityRegistry::resolve_session(u32 session, ParticipantRef& out) const
++{
++	if (session == 0)
++		return Refusal::InvalidIdentity;
++	if (m_bridge_known && session == m_bridge_session)
++		return Refusal::BridgeNotParticipant;
++	for (u32 i = 0; i < m_slots.size(); ++i)
++	{
++		const Participant& p = m_slots[i];
++		if (p.state == ParticipantState::Attached && p.session == session)
++		{
++			out.slot = u8(i);
++			out.generation = p.generation;
++			return Refusal::None;
++		}
++	}
++	return Refusal::UnknownSession;
++}
++
++Refusal CampaignIdentityRegistry::authorize(const ActionContext& context, Scope scope) const
++{
++	// Authorization is the server's; a client-role registry never grants it.
++	if (m_role != Role::Server)
++		return Refusal::WrongRole;
++	const Participant* p = nullptr;
++	Refusal refusal = participant(context.actor, p);
++	if (refusal != Refusal::None)
++		return refusal;
++	if (context.origin == Origin::ClientIntent)
++	{
++		if (scope == Scope::Identity || scope == Scope::World)
++			return Refusal::NotAuthoritative;
++		// The session decides who is acting; the named participant is a
++		// claim that must agree with it.
++		ParticipantRef bound;
++		refusal = resolve_session(context.session, bound);
++		if (refusal != Refusal::None)
++			return refusal;
++		if (bound != context.actor)
++			return Refusal::NotAuthoritative;
++	}
++	if (scope == Scope::Party && p->party != context.party)
++		return Refusal::WrongParty;
++	return Refusal::None;
++}
++} // namespace campaign
+diff --git a/src/xrGame/CampaignIdentity.h b/src/xrGame/CampaignIdentity.h
+new file mode 100644
+index 0000000..8140798
+--- /dev/null
++++ b/src/xrGame/CampaignIdentity.h
+@@ -0,0 +1,272 @@
++#pragma once
++
++// S03-T01: stable participants and authoritative contexts.
++//
++// Why this exists. The engine names every server object by a u16 that
++// xrServer's CID_Generator recycles (id_generator.h: freed ids return to
++// 256-entry blocks and the block freed longest ago is reused first;
++// alife_simulator_script.cpp releases objects with free time 0, so their ids
++// come back soonest), a connection by a u32 ClientID (xrCore/client_id.h)
++// and the player by one global, g_actor (Actor_Network.cpp). None of those
++// is an identity: a recycled u16 names a different object to an old packet
++// or a stale script reference, ClientID 1 is the in-process bridge client
++// ("single_player", xrServer::create_direct_client), and the global actor is
++// whichever actor spawned last with the local/as-player flags. Two
++// participants need identities that survive all three.
++//
++// The model, in three layers:
++//  1. Persistent identities. 128-bit ids for the few long-lived things
++//     (campaign, player, party) and 64-bit serials for entities, allocated
++//     monotonically by the server and never reused within the registry's
++//     life. Items are entities in X-Ray (CSE_ALifeInventoryItem derives from
++//     CSE_Abstract and draws its id from the same generator), so ItemId is
++//     EntityId; there is no second namespace to keep consistent. Stage 7
++//     persists these; here they live for the process.
++//  2. Engine mapping. Every u16 the server hands out gets a generation
++//     (incremented at every assignment of that u16, never reset) and an
++//     EntityId. A reference is {u16, generation}; it resolves only while the
++//     binding it was taken from is live, so a recycled u16 cannot alias.
++//  3. Participants. A fixed number of slots (two, as policy, set at
++//     construction) each holding a player, a party, an optional session
++//     (ClientID value) and an optional actor reference. A slot keeps its
++//     identity when its session detaches; it changes hands only when the
++//     server releases it, and each hand-over bumps the slot's generation so a
++//     stale ParticipantRef is refused rather than resolved to the new owner.
++//
++// Authority. Mutating the registry needs a ServerAuthority, a token only a
++// Server-role registry mints, so client code cannot bind identities by
++// construction. A request that arrived on a session (Origin::ClientIntent)
++// is authorized against the participant that session is attached to; the
++// participant it names is a claim that must agree with that binding, and
++// identity and world scopes are refused to it outright. Nothing here reads
++// engine globals; the engine adapter is CampaignIdentityHooks.h.
++
++namespace campaign
++{
++struct Uuid128
++{
++	u64 hi;
++	u64 lo;
++
++	bool valid() const { return (hi | lo) != 0; }
++	bool operator==(const Uuid128& other) const { return hi == other.hi && lo == other.lo; }
++	bool operator!=(const Uuid128& other) const { return !(*this == other); }
++};
++
++// Distinct types: a PlayerId cannot be passed where a PartyId is expected.
++struct CampaignId : Uuid128
++{
++};
++
++struct PlayerId : Uuid128
++{
++};
++
++struct PartyId : Uuid128
++{
++};
++
++// Server-allocated serial, unique for the life of the registry; 0 is none.
++struct EntityId
++{
++	u64 value;
++
++	bool valid() const { return value != 0; }
++	bool operator==(const EntityId& other) const { return value == other.value; }
++	bool operator!=(const EntityId& other) const { return value != other.value; }
++};
++
++typedef EntityId ItemId;
++
++const u16 kNoEngineId = u16(-1);
++// The server generator hands out 0..u16(-2) (xrServer.h id_generator_type).
++const u32 kEngineIdCount = 0xffff;
++
++// A transient reference to a server object: the engine u16 plus the
++// generation of the assignment it was taken from.
++struct EngineEntityKey
++{
++	u16 id;
++	u32 generation;
++
++	bool operator==(const EngineEntityKey& other) const { return id == other.id && generation == other.generation; }
++	bool operator!=(const EngineEntityKey& other) const { return !(*this == other); }
++};
++
++enum class Role : u8
++{
++	Server, // the dedicated process: simulation authority
++	Client, // a rendering client: input and presentation
++};
++
++enum class Origin : u8
++{
++	ServerInternal, // produced inside the authoritative process
++	ClientIntent, // arrived on a session; a request, never an outcome
++};
++
++// What an action touches; decides which origins may perform it.
++enum class Scope : u8
++{
++	Identity, // binding, attaching, releasing participants (server only)
++	World, // shared simulation state (server only)
++	Party, // party-shared state; the context's party must be the actor's
++	Self, // the acting participant's own actor
++};
++
++enum class Refusal : u8
++{
++	None,
++	NotAuthoritative, // no server token, or a client intent beyond its session's participant
++	WrongRole, // a server-internal context on a client-role registry
++	InvalidIdentity, // zero player, party or engine key
++	SlotsFull, // every active slot is bound
++	AlreadyBound, // the player already holds a slot
++	UnknownParticipant, // free slot, or slot index out of range
++	StaleReference, // slot or engine generation no longer current
++	UnknownSession, // no participant is attached to that session
++	SessionInUse, // the session is attached to another participant
++	BridgeNotParticipant, // the in-process bridge client is never a participant
++	NotAttached, // the participant has no session
++	WrongParty, // the context's party is not the participant's party
++};
++
++LPCSTR refusal_name(Refusal refusal);
++
++struct ParticipantRef
++{
++	u8 slot;
++	u32 generation;
++
++	bool operator==(const ParticipantRef& other) const { return slot == other.slot && generation == other.generation; }
++	bool operator!=(const ParticipantRef& other) const { return !(*this == other); }
++};
++
++enum class ParticipantState : u8
++{
++	Free,
++	Bound, // identity held, no session yet
++	Attached, // a session is connected
++	Detached, // the session went away; identity, party and actor retained
++};
++
++LPCSTR participant_state_name(ParticipantState state);
++
++struct Participant
++{
++	ParticipantState state;
++	u32 generation; // bumped when the slot is released
++	PlayerId player;
++	PartyId party;
++	u32 session; // ClientID value while Attached, else 0
++	EntityId actor; // the participant's actor, if bound
++	EngineEntityKey actor_key;
++	u64 bound_at;
++	u64 attached_at;
++	u64 detached_at;
++};
++
++struct ActionContext
++{
++	Origin origin;
++	u32 session; // the session a client intent arrived on; 0 for server-internal
++	ParticipantRef actor; // the participant the action is about
++	PartyId party; // the party the action claims to act within (Scope::Party)
++};
++
++class CampaignIdentityRegistry;
++
++// Capability token. Only a Server-role registry constructs one, and only for
++// itself; there is no public constructor and no copy.
++class ServerAuthority
++{
++	friend class CampaignIdentityRegistry;
++	const CampaignIdentityRegistry* m_owner;
++
++	explicit ServerAuthority(const CampaignIdentityRegistry* owner) : m_owner(owner)
++	{
++	}
++
++	ServerAuthority(const ServerAuthority&);
++	ServerAuthority& operator=(const ServerAuthority&);
++};
++
++class CampaignIdentityRegistry
++{
++public:
++	struct EngineIdStats
++	{
++		u64 assigned; // PerformIDgen results seen
++		u64 freed; // FreeID calls seen for live bindings
++		u64 freed_unbound; // FreeID calls for ids with no live binding (a flow the hooks do not model)
++		u64 reassigned_after_free; // a u16 freed earlier in this incarnation handed to a different object
++		u64 continued; // a u16 re-requested by the object that held it (the ALife switches)
++		u64 live; // bindings currently live
++		u64 incarnations; // server constructions and id resets
++		u32 max_generation;
++		u64 next_entity; // the next EntityId that will be allocated
++	};
++
++	CampaignIdentityRegistry(Role role, u8 active_slots = 2);
++
++	Role role() const { return m_role; }
++	u8 active_slots() const { return m_active_slots; }
++	// The token for this registry, or null on a client.
++	const ServerAuthority* authority() const;
++
++	// Engine id mapping (fed by CampaignIdentityHooks.h on the server).
++	void on_server_incarnation();
++	void on_server_destroyed();
++	// continuity: the object's stored entity id (0 = none); read to continue an
++	// existing identity, written when a new one is allocated. Null for no object.
++	EngineEntityKey on_engine_id_assigned(u16 id, u64* continuity = nullptr);
++	void on_engine_id_freed(u16 id);
++	bool current_key(u16 id, EngineEntityKey& out) const;
++	Refusal resolve(const EngineEntityKey& key, EntityId& out) const;
++	const EngineIdStats& engine_id_stats() const { return m_stats; }
++
++	// Participants. Every mutation needs this registry's token.
++	Refusal bind_participant(const ServerAuthority* authority, const PlayerId& player, const PartyId& party, u64 now,
++		ParticipantRef& out);
++	Refusal attach_session(const ServerAuthority* authority, const ParticipantRef& ref, u32 session, u64 now);
++	Refusal detach_session(const ServerAuthority* authority, u32 session, u64 now);
++	Refusal bind_actor(const ServerAuthority* authority, const ParticipantRef& ref, const EngineEntityKey& key);
++	Refusal release_participant(const ServerAuthority* authority, const ParticipantRef& ref, u64 now);
++	Refusal set_bridge_session(const ServerAuthority* authority, u32 session);
++
++	// Lookups.
++	Refusal resolve_session(u32 session, ParticipantRef& out) const;
++	Refusal participant(const ParticipantRef& ref, const Participant*& out) const;
++	Refusal find_player(const PlayerId& player, ParticipantRef& out) const;
++	u8 bound_count() const;
++	// Whether the context may perform an action of the given scope.
++	Refusal authorize(const ActionContext& context, Scope scope) const;
++
++private:
++	struct EngineBinding
++	{
++		u32 generation;
++		EntityId entity;
++		bool live;
++		bool freed_this_incarnation;
++	};
++
++	bool authorized(const ServerAuthority* authority) const;
++	Refusal slot_for(const ParticipantRef& ref, Participant*& out);
++	void retire_all_bindings();
++
++	Role m_role;
++	u8 m_active_slots;
++	ServerAuthority m_authority;
++	xr_vector<Participant> m_slots;
++	xr_vector<EngineBinding> m_bindings;
++	EngineIdStats m_stats;
++	u64 m_next_entity;
++	u32 m_bridge_session;
++	bool m_bridge_known;
++};
++} // namespace campaign
++
++// The process's registry: created by the campaign server's identity service
++// (x_ray.cpp), null on the client until S03-T02 decides the client's role.
++extern campaign::CampaignIdentityRegistry* g_campaign_identity;
+diff --git a/src/xrGame/CampaignIdentityFixture.cpp b/src/xrGame/CampaignIdentityFixture.cpp
+new file mode 100644
+index 0000000..29819cb
+--- /dev/null
++++ b/src/xrGame/CampaignIdentityFixture.cpp
+@@ -0,0 +1,563 @@
++#include "pch_script.h"
++#include "CampaignIdentityFixture.h"
++#include "CampaignIdentity.h"
++#include "id_generator.h"
++
++// S03-T01: see CampaignIdentityFixture.h.
++
++#include "Level.h"
++#include "xrServer.h"
++#include "Actor.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "../xrEngine/xr_object.h"
++#include "../xrEngine/device.h"
++
++using namespace campaign;
++
++namespace
++{
++// The same instantiation as xrServer::id_generator_type (xrServer.h:145-155),
++// which is private there: u16 ids 0..u16(-2), 256-id blocks, u16(-1) invalid.
++typedef CID_Generator<u32, u8, u16, u8, u16, 0, u16(-2), 256, u16(-1)> engine_generator_type;
++
++struct Fixture
++{
++	LPCSTR name;
++	u32 checks;
++	u32 failures;
++
++	explicit Fixture(LPCSTR fixture_name) : name(fixture_name), checks(0), failures(0)
++	{
++	}
++
++	bool check(bool condition, LPCSTR what)
++	{
++		++checks;
++		if (!condition)
++		{
++			++failures;
++			Msg("! S03-T01 %s failed: %s", name, what);
++		}
++		return condition;
++	}
++
++	bool expect(Refusal observed, Refusal expected, LPCSTR what)
++	{
++		++checks;
++		if (observed != expected)
++		{
++			++failures;
++			Msg("! S03-T01 %s failed: %s: expected %s, observed %s", name, what, refusal_name(expected),
++				refusal_name(observed));
++		}
++		return observed == expected;
++	}
++
++	bool done()
++	{
++		Msg("S03-T01 %s checks=%u failures=%u", name, checks, failures);
++		return failures == 0;
++	}
++};
++
++PlayerId player_id(u64 n)
++{
++	PlayerId id;
++	id.hi = 0x5303000000000001ull;
++	id.lo = n;
++	return id;
++}
++
++PartyId party_id(u64 n)
++{
++	PartyId id;
++	id.hi = 0x5303000000000002ull;
++	id.lo = n;
++	return id;
++}
++
++// --- engine-id -------------------------------------------------------------
++
++bool fixture_engine_id()
++{
++	Fixture f("engine-id-fixture");
++	engine_generator_type* generator = xr_new<engine_generator_type>();
++	CampaignIdentityRegistry registry(Role::Server);
++	registry.on_server_incarnation();
++
++	// One release with free time 0, the time the script release path passes
++	// (alife_simulator_script.cpp): the generator hands the same id out again.
++	const u16 first = generator->tfGetID(u16(-1));
++	const EngineEntityKey key_first = registry.on_engine_id_assigned(first);
++	EntityId entity;
++	f.expect(registry.resolve(key_first, entity), Refusal::None, "a live key resolves");
++	f.check(entity.value == 1, "the first entity id is 1");
++	generator->vfFreeID(first, 0);
++	registry.on_engine_id_freed(first);
++	f.expect(registry.resolve(key_first, entity), Refusal::StaleReference, "a freed key is stale");
++	const u16 second = generator->tfGetID(u16(-1));
++	const EngineEntityKey key_second = registry.on_engine_id_assigned(second);
++	Msg("S03-T01 engine-id first=%u freed-at-0 then=%u generation %u -> %u", u32(first), u32(second),
++		key_first.generation, key_second.generation);
++	f.check(second == first, "the generator reused the id freed at time 0");
++	f.check(key_second != key_first, "the reassignment has a new generation");
++	f.expect(registry.resolve(key_first, entity), Refusal::StaleReference, "the old key does not resolve to the new object");
++	f.expect(registry.resolve(key_second, entity), Refusal::None, "the new key resolves");
++	f.check(entity.value == 2, "the reassignment has a new entity id");
++
++	// A release stamped with a later time: the generator prefers blocks freed
++	// earlier, so the id comes back later rather than at once (xrServer frees
++	// destroyed entities with Device.TimerAsync()).
++	generator->vfFreeID(second, 1000);
++	registry.on_engine_id_freed(second);
++	const u16 third = generator->tfGetID(u16(-1));
++	const EngineEntityKey key_third = registry.on_engine_id_assigned(third);
++	Msg("S03-T01 engine-id freed-at-1000 then=%u (same=%d)", u32(third), third == second ? 1 : 0);
++	f.expect(registry.resolve(key_second, entity), Refusal::StaleReference, "a key freed with a later time is stale too");
++	f.expect(registry.resolve(key_third, entity), Refusal::None, "the third key resolves");
++
++	// A thousand objects released and a thousand spawned: no new key equals an
++	// old one, every old key is stale, every new key resolves to a distinct id.
++	xr_vector<EngineEntityKey> round_one;
++	for (u32 i = 0; i < 1000; ++i)
++		round_one.push_back(registry.on_engine_id_assigned(generator->tfGetID(u16(-1))));
++	for (u32 i = 0; i < round_one.size(); ++i)
++	{
++		generator->vfFreeID(round_one[i].id, 0);
++		registry.on_engine_id_freed(round_one[i].id);
++	}
++	xr_vector<EngineEntityKey> round_two;
++	u32 reused_ids = 0, equal_keys = 0, stale_old = 0, live_new = 0;
++	xr_set<u64> entities;
++	for (u32 i = 0; i < 1000; ++i)
++	{
++		const u16 id = generator->tfGetID(u16(-1));
++		round_two.push_back(registry.on_engine_id_assigned(id));
++		for (u32 j = 0; j < round_one.size(); ++j)
++		{
++			if (round_one[j].id == id)
++				++reused_ids;
++			if (round_one[j] == round_two.back())
++				++equal_keys;
++		}
++	}
++	for (u32 i = 0; i < round_one.size(); ++i)
++		if (registry.resolve(round_one[i], entity) == Refusal::StaleReference)
++			++stale_old;
++	for (u32 i = 0; i < round_two.size(); ++i)
++		if (registry.resolve(round_two[i], entity) == Refusal::None)
++		{
++			++live_new;
++			entities.insert(entity.value);
++		}
++	Msg("S03-T01 engine-id released=1000 respawned=1000 reused_ids=%u equal_keys=%u stale_old=%u live_new=%u "
++		"distinct_entities=%u",
++		reused_ids, equal_keys, stale_old, live_new, u32(entities.size()));
++	f.check(reused_ids > 0, "the generator reused released ids");
++	f.check(equal_keys == 0, "no new key equals an old key");
++	f.check(stale_old == 1000, "every old key is stale");
++	f.check(live_new == 1000 && entities.size() == 1000, "every new key resolves to a distinct entity");
++
++	// The ALife switch pattern (alife_switch_manager.cpp:52-62, 91-95): the
++	// object frees its id and re-requests the same id at once. With the
++	// object's stored entity id the identity continues under a new
++	// generation; a different object taking a freed id gets a new identity.
++	u64 object_a = 0;
++	const u16 switched = generator->tfGetID(u16(-1));
++	const EngineEntityKey before_switch = registry.on_engine_id_assigned(switched, &object_a);
++	EntityId entity_before;
++	registry.resolve(before_switch, entity_before);
++	f.check(object_a == entity_before.value && object_a != 0, "the object stores the entity id it was given");
++	generator->vfFreeID(switched, 0);
++	registry.on_engine_id_freed(switched);
++	const u16 switched_again = generator->tfGetID(switched); // PerformIDgen(object_id)
++	const EngineEntityKey after_switch = registry.on_engine_id_assigned(switched_again, &object_a);
++	EntityId entity_after;
++	f.expect(registry.resolve(after_switch, entity_after), Refusal::None, "the re-requested id resolves");
++	f.check(switched_again == switched && entity_after == entity_before, "the same object keeps its entity id across the switch");
++	f.check(after_switch.generation == before_switch.generation + 1, "the switch still turns the generation");
++	EntityId stale_entity;
++	f.expect(registry.resolve(before_switch, stale_entity), Refusal::StaleReference, "a key from before the switch is stale");
++	generator->vfFreeID(switched, 0);
++	registry.on_engine_id_freed(switched);
++	u64 object_b = 0;
++	const u16 taken = generator->tfGetID(u16(-1));
++	const EngineEntityKey by_other = registry.on_engine_id_assigned(taken, &object_b);
++	EntityId entity_other;
++	registry.resolve(by_other, entity_other);
++	Msg("S03-T01 engine-id switch id=%u entity %I64u -> %I64u; other object id=%u entity %I64u", u32(switched),
++		entity_before.value, entity_after.value, u32(taken), entity_other.value);
++	f.check(taken == switched && object_b != object_a && entity_other != entity_before,
++		"a different object taking the freed id gets a different entity id");
++
++	// Invalid keys and a new server incarnation.
++	EngineEntityKey zero_generation = {third, 0};
++	f.expect(registry.resolve(zero_generation, entity), Refusal::InvalidIdentity, "generation 0 never resolves");
++	EngineEntityKey invalid_id = {kNoEngineId, 1};
++	f.expect(registry.resolve(invalid_id, entity), Refusal::InvalidIdentity, "the invalid engine id never resolves");
++	registry.on_server_incarnation();
++	f.expect(registry.resolve(key_third, entity), Refusal::StaleReference, "a new server incarnation stales every key");
++	const EngineEntityKey key_again = registry.on_engine_id_assigned(third);
++	f.check(key_again.generation == key_third.generation + 1, "generations continue across incarnations");
++
++	const CampaignIdentityRegistry::EngineIdStats& stats = registry.engine_id_stats();
++	Msg("S03-T01 engine-id stats assigned=%I64u freed=%I64u freed_unbound=%I64u reassigned_after_free=%I64u "
++		"continued=%I64u live=%I64u incarnations=%I64u max_generation=%u next_entity=%I64u",
++		stats.assigned, stats.freed, stats.freed_unbound, stats.reassigned_after_free, stats.continued, stats.live,
++		stats.incarnations, stats.max_generation, stats.next_entity);
++	f.check(stats.reassigned_after_free >= 1 + reused_ids, "every reuse of a freed id by another object was counted");
++	f.check(stats.continued == 1, "the one switch was counted as a continuation, not a reuse");
++	f.check(stats.incarnations == 2 && stats.live == 1, "two incarnations, one live binding at the end");
++	xr_delete(generator);
++	return f.done();
++}
++
++// --- slot-reuse ------------------------------------------------------------
++
++bool fixture_slot_reuse()
++{
++	Fixture f("slot-reuse-fixture");
++	CampaignIdentityRegistry registry(Role::Server, 2);
++	const ServerAuthority* authority = registry.authority();
++	f.check(authority != nullptr, "a server registry mints a token");
++	const PartyId party = party_id(1);
++	ParticipantRef p1, p2, p3, scratch;
++	f.expect(registry.bind_participant(authority, player_id(1), party, 10, p1), Refusal::None, "player 1 binds");
++	f.expect(registry.bind_participant(authority, player_id(2), party, 11, p2), Refusal::None, "player 2 binds");
++	f.check(p1.slot != p2.slot, "the two players hold different slots");
++	f.expect(registry.bind_participant(authority, player_id(3), party, 12, p3), Refusal::SlotsFull,
++		"a third player is refused (two active slots)");
++	f.expect(registry.bind_participant(authority, player_id(1), party, 13, scratch), Refusal::AlreadyBound,
++		"a bound player cannot bind twice");
++	f.expect(registry.bind_participant(authority, PlayerId(), party, 14, scratch), Refusal::InvalidIdentity,
++		"a zero player id is refused");
++	f.expect(registry.bind_participant(authority, player_id(4), PartyId(), 14, scratch), Refusal::InvalidIdentity,
++		"a zero party id is refused");
++	f.check(registry.bound_count() == 2, "two participants bound");
++
++	// Release and reuse.
++	f.expect(registry.release_participant(authority, p1, 20), Refusal::None, "player 1 released");
++	const Participant* view = nullptr;
++	f.expect(registry.participant(p1, view), Refusal::UnknownParticipant, "a released reference is unknown");
++	f.expect(registry.release_participant(authority, p1, 21), Refusal::UnknownParticipant, "a second release is refused");
++	f.expect(registry.bind_participant(authority, player_id(3), party, 22, p3), Refusal::None, "player 3 takes the free slot");
++	Msg("S03-T01 slot-reuse p1={%u,%u} released; p3={%u,%u}", u32(p1.slot), p1.generation, u32(p3.slot),
++		p3.generation);
++	f.check(p3.slot == p1.slot, "player 3 reuses player 1's slot");
++	f.check(p3.generation == p1.generation + 1, "the reused slot has a new generation");
++	f.expect(registry.participant(p1, view), Refusal::StaleReference, "player 1's old reference is stale, not player 3");
++	f.expect(registry.participant(p3, view), Refusal::None, "player 3's reference resolves");
++	f.check(view && view->player == player_id(3), "the reused slot holds player 3");
++	f.expect(registry.find_player(player_id(1), scratch), Refusal::UnknownParticipant, "player 1 is gone");
++	f.expect(registry.find_player(player_id(3), scratch), Refusal::None, "player 3 is found");
++	f.check(scratch == p3, "find_player returns the current reference");
++
++	// Tokens belong to one server registry.
++	CampaignIdentityRegistry other_server(Role::Server, 2);
++	f.expect(other_server.bind_participant(authority, player_id(5), party, 30, scratch), Refusal::NotAuthoritative,
++		"another registry's token is refused");
++	f.expect(registry.bind_participant(nullptr, player_id(5), party, 30, scratch), Refusal::NotAuthoritative,
++		"no token, no binding");
++	CampaignIdentityRegistry client(Role::Client, 2);
++	f.check(client.authority() == nullptr, "a client registry mints no token");
++	f.expect(client.bind_participant(authority, player_id(5), party, 30, scratch), Refusal::NotAuthoritative,
++		"a client registry refuses a server token");
++
++	// Policy, not structure: a registry built with one slot refuses the second player.
++	CampaignIdentityRegistry single(Role::Server, 1);
++	f.expect(single.bind_participant(single.authority(), player_id(1), party, 40, scratch), Refusal::None,
++		"one-slot registry binds one");
++	f.expect(single.bind_participant(single.authority(), player_id(2), party, 41, scratch), Refusal::SlotsFull,
++		"one-slot registry refuses the second");
++	return f.done();
++}
++
++// --- disconnect-retention --------------------------------------------------
++
++bool fixture_disconnect_retention()
++{
++	Fixture f("disconnect-retention-fixture");
++	CampaignIdentityRegistry registry(Role::Server, 2);
++	const ServerAuthority* authority = registry.authority();
++	registry.on_server_incarnation();
++	const PartyId party = party_id(1);
++	const u32 bridge = 1; // xrServer::create_direct_client: ClientID 1, "single_player"
++	f.expect(registry.set_bridge_session(authority, bridge), Refusal::None, "the bridge session is recorded");
++	ParticipantRef p1, p2, found;
++	f.expect(registry.bind_participant(authority, player_id(1), party, 10, p1), Refusal::None, "player 1 binds");
++	f.expect(registry.attach_session(authority, p1, bridge, 11), Refusal::BridgeNotParticipant,
++		"the bridge client cannot be a participant's session");
++	f.expect(registry.attach_session(authority, p1, 0, 11), Refusal::InvalidIdentity, "session 0 is refused");
++	f.expect(registry.attach_session(authority, p1, 7, 11), Refusal::None, "session 7 attaches to player 1");
++	f.expect(registry.attach_session(authority, p1, 7, 12), Refusal::None, "attaching the same session again is idempotent");
++	f.expect(registry.attach_session(authority, p1, 8, 12), Refusal::SessionInUse,
++		"a second session cannot attach while the first is attached");
++
++	// The participant's actor.
++	const EngineEntityKey actor_key = registry.on_engine_id_assigned(0);
++	f.expect(registry.bind_actor(authority, p1, actor_key), Refusal::None, "player 1's actor binds");
++	f.expect(registry.bind_participant(authority, player_id(2), party, 13, p2), Refusal::None, "player 2 binds");
++	f.expect(registry.attach_session(authority, p2, 7, 14), Refusal::SessionInUse, "one session, one participant");
++	f.expect(registry.attach_session(authority, p2, 9, 14), Refusal::None, "session 9 attaches to player 2");
++	f.expect(registry.bind_actor(authority, p2, actor_key), Refusal::AlreadyBound, "one actor, one participant");
++	registry.on_engine_id_freed(0);
++	const EngineEntityKey recycled = registry.on_engine_id_assigned(0);
++	f.expect(registry.bind_actor(authority, p2, actor_key), Refusal::StaleReference, "a stale actor key is refused");
++	f.expect(registry.bind_actor(authority, p2, recycled), Refusal::None, "player 2 binds the recycled id's new object");
++
++	// Disconnect: the slot keeps everything but the session.
++	f.expect(registry.detach_session(authority, 7, 20), Refusal::None, "session 7 detaches");
++	f.expect(registry.detach_session(authority, 7, 21), Refusal::UnknownSession, "a second detach is refused");
++	f.expect(registry.resolve_session(7, found), Refusal::UnknownSession, "session 7 resolves to nobody");
++	const Participant* view = nullptr;
++	f.expect(registry.participant(p1, view), Refusal::None, "player 1's reference still resolves");
++	if (view)
++	{
++		Msg("S03-T01 disconnect-retention p1 state=%s session=%u actor=%I64u actor_key={%u,%u} detached_at=%I64u",
++			participant_state_name(view->state), view->session, view->actor.value, u32(view->actor_key.id),
++			view->actor_key.generation, view->detached_at);
++		f.check(view->state == ParticipantState::Detached, "player 1 is detached");
++		f.check(view->session == 0, "the detached participant has no session");
++		f.check(view->player == player_id(1) && view->party == party, "identity and party retained");
++		f.check(view->actor.value == 1 && view->actor_key == actor_key, "the actor binding is retained");
++	}
++	f.check(registry.bound_count() == 2, "the detached participant keeps its slot");
++	ParticipantRef p3;
++	f.expect(registry.bind_participant(authority, player_id(3), party, 22, p3), Refusal::SlotsFull,
++		"a third player cannot take a detached participant's slot");
++
++	// Reconnect on a new session.
++	f.expect(registry.attach_session(authority, p1, 11, 30), Refusal::None, "session 11 re-attaches player 1");
++	f.expect(registry.resolve_session(11, found), Refusal::None, "session 11 resolves");
++	f.check(found == p1, "session 11 is player 1's original slot and generation");
++	f.expect(registry.participant(p1, view), Refusal::None, "player 1 resolves after the reconnect");
++	f.check(view && view->state == ParticipantState::Attached && view->actor_key == actor_key,
++		"the reconnected participant is attached with its actor");
++	f.expect(registry.resolve_session(bridge, found), Refusal::BridgeNotParticipant, "the bridge never resolves");
++	f.expect(registry.resolve_session(0, found), Refusal::InvalidIdentity, "session 0 never resolves");
++
++	// Release makes the slot free; a reconnect with the old reference is stale.
++	f.expect(registry.release_participant(authority, p1, 40), Refusal::None, "player 1 released by the server");
++	f.expect(registry.resolve_session(11, found), Refusal::UnknownSession, "the released participant's session is gone");
++	f.expect(registry.attach_session(authority, p1, 11, 41), Refusal::UnknownParticipant,
++		"the released reference cannot re-attach");
++	f.expect(registry.bind_participant(authority, player_id(3), party, 42, p3), Refusal::None, "player 3 takes the slot");
++	f.expect(registry.attach_session(authority, p1, 11, 43), Refusal::StaleReference,
++		"player 1's old reference is stale once the slot has a new owner");
++	return f.done();
++}
++
++// --- role-context ----------------------------------------------------------
++
++bool fixture_role_context()
++{
++	Fixture f("role-context-fixture");
++	CampaignIdentityRegistry registry(Role::Server, 2);
++	const ServerAuthority* authority = registry.authority();
++	registry.on_server_incarnation();
++	const PartyId party = party_id(1);
++	const PartyId other_party = party_id(2);
++	registry.set_bridge_session(authority, 1);
++	ParticipantRef p1, p2;
++	registry.bind_participant(authority, player_id(1), party, 10, p1);
++	registry.bind_participant(authority, player_id(2), party, 11, p2);
++	registry.attach_session(authority, p1, 7, 12);
++	registry.attach_session(authority, p2, 9, 13);
++
++	ActionContext client = {Origin::ClientIntent, 7, p1, party};
++	f.expect(registry.authorize(client, Scope::Self), Refusal::None, "a client acts on its own actor");
++	f.expect(registry.authorize(client, Scope::Party), Refusal::None, "a client acts within its party");
++	f.expect(registry.authorize(client, Scope::World), Refusal::NotAuthoritative, "a client never mutates the world");
++	f.expect(registry.authorize(client, Scope::Identity), Refusal::NotAuthoritative, "a client never binds identities");
++	ActionContext wrong_party = {Origin::ClientIntent, 7, p1, other_party};
++	f.expect(registry.authorize(wrong_party, Scope::Party), Refusal::WrongParty, "a client cannot claim another party");
++	f.expect(registry.authorize(wrong_party, Scope::Self), Refusal::None, "the party claim does not matter for Self");
++	ActionContext impersonation = {Origin::ClientIntent, 7, p2, party};
++	f.expect(registry.authorize(impersonation, Scope::Self), Refusal::NotAuthoritative,
++		"a client intent naming another participant is refused");
++	ActionContext from_bridge = {Origin::ClientIntent, 1, p1, party};
++	f.expect(registry.authorize(from_bridge, Scope::Self), Refusal::BridgeNotParticipant,
++		"an intent on the bridge session is refused");
++	ActionContext unknown_session = {Origin::ClientIntent, 42, p1, party};
++	f.expect(registry.authorize(unknown_session, Scope::Self), Refusal::UnknownSession,
++		"an intent on an unknown session is refused");
++	ParticipantRef stale = {p1.slot, p1.generation + 1};
++	ActionContext stale_actor = {Origin::ClientIntent, 7, stale, party};
++	f.expect(registry.authorize(stale_actor, Scope::Self), Refusal::StaleReference, "a stale participant is refused");
++	ParticipantRef out_of_range = {5, 1};
++	ActionContext bad_slot = {Origin::ClientIntent, 7, out_of_range, party};
++	f.expect(registry.authorize(bad_slot, Scope::Self), Refusal::UnknownParticipant, "an out-of-range slot is refused");
++
++	ActionContext internal = {Origin::ServerInternal, 0, p1, party};
++	f.expect(registry.authorize(internal, Scope::World), Refusal::None, "the server mutates the world");
++	f.expect(registry.authorize(internal, Scope::Identity), Refusal::None, "the server binds identities");
++	f.expect(registry.authorize(internal, Scope::Party), Refusal::None, "the server acts within the actor's party");
++	f.expect(registry.authorize(internal, Scope::Self), Refusal::None, "the server acts on the actor");
++	ActionContext internal_wrong_party = {Origin::ServerInternal, 0, p1, other_party};
++	f.expect(registry.authorize(internal_wrong_party, Scope::Party), Refusal::WrongParty,
++		"the server is held to the actor's party too");
++
++	// After a disconnect the client's intents are refused; the server can
++	// still act for the retained participant.
++	registry.detach_session(authority, 7, 20);
++	f.expect(registry.authorize(client, Scope::Self), Refusal::UnknownSession, "a detached session's intents are refused");
++	f.expect(registry.authorize(internal, Scope::Self), Refusal::None, "the server still acts for a detached participant");
++	// Once released, nothing acts for the old reference.
++	registry.release_participant(authority, p1, 30);
++	f.expect(registry.authorize(internal, Scope::Self), Refusal::UnknownParticipant, "a released participant has no context");
++
++	CampaignIdentityRegistry client_registry(Role::Client, 2);
++	f.expect(client_registry.authorize(internal, Scope::Self), Refusal::WrongRole, "a client registry authorizes nothing");
++	f.expect(client_registry.authorize(client, Scope::Self), Refusal::WrongRole, "a client registry authorizes no intents");
++	return f.done();
++}
++} // namespace
++
++extern "C" bool __cdecl xrCampaignIdentity_Start()
++{
++	R_ASSERT2(!g_campaign_identity, "The identity registry already exists");
++	g_campaign_identity = xr_new<CampaignIdentityRegistry>(Role::Server, 2);
++	Msg("S03-T01 identity registry role=server active_slots=%u engine_ids=%u", u32(g_campaign_identity->active_slots()),
++		kEngineIdCount);
++	return true;
++}
++
++extern "C" void __cdecl xrCampaignIdentity_Stop()
++{
++	if (!g_campaign_identity)
++		return;
++	const CampaignIdentityRegistry::EngineIdStats& stats = g_campaign_identity->engine_id_stats();
++	Msg("S03-T01 identity stop engine ids assigned=%I64u freed=%I64u freed_unbound=%I64u reassigned_after_free=%I64u "
++		"continued=%I64u live=%I64u incarnations=%I64u max_generation=%u next_entity=%I64u participants=%u",
++		stats.assigned, stats.freed, stats.freed_unbound, stats.reassigned_after_free, stats.continued, stats.live,
++		stats.incarnations, stats.max_generation, stats.next_entity, u32(g_campaign_identity->bound_count()));
++	xr_delete(g_campaign_identity);
++}
++
++extern "C" bool __cdecl xrCampaignIdentity_Fixture(LPCSTR name)
++{
++	if (!xr_strcmp(name, "engine-id"))
++		return fixture_engine_id();
++	if (!xr_strcmp(name, "slot-reuse"))
++		return fixture_slot_reuse();
++	if (!xr_strcmp(name, "disconnect-retention"))
++		return fixture_disconnect_retention();
++	if (!xr_strcmp(name, "role-context"))
++		return fixture_role_context();
++	Msg("! S03-T01 unknown fixture %s", name);
++	return false;
++}
++
++// The in-process direct client (xrServer::create_direct_client) is the
++// private state bridge, never a participant.
++extern "C" bool __cdecl xrCampaignIdentity_BindBridge()
++{
++	if (!g_campaign_identity || !g_pGameLevel || !Level().Server)
++		return false;
++	IClient* bridge = Level().Server->GetServerClient();
++	if (!bridge)
++	{
++		Msg("! S03-T01 the server has no bridge client");
++		return false;
++	}
++	const Refusal refusal = g_campaign_identity->set_bridge_session(g_campaign_identity->authority(), bridge->ID.value());
++	Msg("S03-T01 bridge session=%u local=%d refusal=%s", bridge->ID.value(), bridge->flags.bLocal ? 1 : 0,
++		refusal_name(refusal));
++	return refusal == Refusal::None;
++}
++
++// Audits the live bindings against the level: every online object and every
++// ALife object holds a current binding, and no live binding is without an
++// object. Then binds the saved actor to a fixture participant as the first
++// real engine object held by a participant reference.
++extern "C" bool __cdecl xrCampaignLevel_IdentityCheck()
++{
++	if (!g_campaign_identity || !g_pGameLevel || !Level().Server || !ai().get_alife())
++		return false;
++	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	CLevel& level = Level();
++	const CALifeObjectRegistry::OBJECT_REGISTRY& alife_objects = ai().get_alife()->objects().objects();
++
++	u32 objects = 0, missing_online = 0, missing_entity = 0, missing_alife = 0, orphans = 0;
++	EngineEntityKey key;
++	for (u32 i = 0; i < level.Objects.o_count(); ++i)
++	{
++		CObject* object = level.Objects.o_get_by_iterator(i);
++		++objects;
++		if (!registry.current_key(object->ID(), key))
++		{
++			++missing_online;
++			if (missing_online <= 5)
++				Msg("! S03-T01 online object %u (%s) has no live binding", u32(object->ID()), object->cName().c_str());
++		}
++		if (!level.Server->ID_to_entity(object->ID()))
++			++missing_entity;
++	}
++	u32 mismatched = 0;
++	EntityId entity;
++	for (CALifeObjectRegistry::OBJECT_REGISTRY::const_iterator it = alife_objects.begin(); it != alife_objects.end(); ++it)
++	{
++		if (!registry.current_key(it->first, key))
++		{
++			++missing_alife;
++			if (missing_alife <= 5)
++				Msg("! S03-T01 ALife object %u (%s) has no live binding", u32(it->first), it->second->name_replace());
++			continue;
++		}
++		registry.resolve(key, entity);
++		if (entity.value != it->second->m_campaign_entity)
++		{
++			++mismatched;
++			if (mismatched <= 5)
++				Msg("! S03-T01 ALife object %u (%s) stores entity %I64u, binding says %I64u", u32(it->first),
++					it->second->name_replace(), it->second->m_campaign_entity, entity.value);
++		}
++	}
++	for (u32 id = 0; id < kEngineIdCount; ++id)
++	{
++		if (!registry.current_key(u16(id), key))
++			continue;
++		if (level.Server->ID_to_entity(u16(id)) || alife_objects.find(u16(id)) != alife_objects.end())
++			continue;
++		++orphans;
++		if (orphans <= 5)
++			Msg("! S03-T01 live binding %u generation %u has no server entity and no ALife object", id, key.generation);
++	}
++	const CampaignIdentityRegistry::EngineIdStats& stats = registry.engine_id_stats();
++	Msg("S03-T01 identity-check online_objects=%u alife_objects=%u server_entities=%u live=%I64u missing_online=%u "
++		"missing_entity=%u missing_alife=%u mismatched=%u orphans=%u assigned=%I64u freed=%I64u freed_unbound=%I64u "
++		"reassigned_after_free=%I64u continued=%I64u incarnations=%I64u max_generation=%u next_entity=%I64u",
++		objects, u32(alife_objects.size()), level.Server->GetEntitiesNum(), stats.live, missing_online, missing_entity,
++		missing_alife, mismatched, orphans, stats.assigned, stats.freed, stats.freed_unbound, stats.reassigned_after_free,
++		stats.continued, stats.incarnations, stats.max_generation, stats.next_entity);
++
++	// The saved actor under a participant reference (fixture identities; the
++	// authenticated binding is S04-T04, the second actor S03-T03).
++	bool actor_bound = false;
++	if (g_actor)
++	{
++		const ServerAuthority* authority = registry.authority();
++		ParticipantRef ref;
++		Refusal refusal = registry.find_player(player_id(1), ref);
++		if (refusal != Refusal::None)
++			refusal = registry.bind_participant(authority, player_id(1), party_id(1), Device.dwFrame, ref);
++		EngineEntityKey actor_key;
++		if (refusal == Refusal::None && registry.current_key(g_actor->ID(), actor_key))
++			refusal = registry.bind_actor(authority, ref, actor_key);
++		const Participant* view = nullptr;
++		if (refusal == Refusal::None)
++			refusal = registry.participant(ref, view);
++		actor_bound = refusal == Refusal::None && view && view->actor_key.id == g_actor->ID();
++		CSE_Abstract* se_actor = level.Server->ID_to_entity(g_actor->ID());
++		Msg("S03-T01 actor id=%u key={%u,%u} entity=%I64u stored=%I64u participant={%u,%u} state=%s refusal=%s",
++			u32(g_actor->ID()), u32(actor_key.id), actor_key.generation, view ? view->actor.value : 0ull,
++			se_actor ? se_actor->m_campaign_entity : 0ull, u32(ref.slot), ref.generation,
++			view ? participant_state_name(view->state) : "-", refusal_name(refusal));
++	}
++	else
++		Msg("! S03-T01 no actor to bind");
++	return missing_online == 0 && missing_entity == 0 && missing_alife == 0 && mismatched == 0 && orphans == 0 &&
++		actor_bound;
++}
+diff --git a/src/xrGame/CampaignIdentityFixture.h b/src/xrGame/CampaignIdentityFixture.h
+new file mode 100644
+index 0000000..3bee77c
+--- /dev/null
++++ b/src/xrGame/CampaignIdentityFixture.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++// S03-T01: the campaign server's identity service and its unit fixtures.
++//
++// The service owns the process registry (g_campaign_identity, Role::Server,
++// two active slots). The fixtures each build their own registry, so the
++// process registry only ever sees the engine's real id traffic:
++//  - engine-id: the server's own id generator type recycles a freed u16 at
++//    once; the registry's generations keep the old reference from resolving
++//    to the new object, in a single step and across a thousand releases.
++//  - slot-reuse: two slots as policy; a third player is refused; a released
++//    slot changes hands under a new generation, so the old reference is
++//    stale rather than the new owner.
++//  - disconnect-retention: a detached participant keeps its slot, player,
++//    party and actor; a new session re-attaches to the same participant;
++//    the bridge client is never a participant; one session, one participant.
++//  - role-context: client intents act only as their session's participant
++//    and never in identity or world scope; wrong-party and stale contexts
++//    are refused; a client-role registry authorizes nothing and mints no
++//    token.
++// With a level loaded, xrCampaignLevel_IdentityCheck audits the live
++// bindings against the online objects and the ALife registry.
++
++extern "C" bool __cdecl xrCampaignIdentity_Start();
++extern "C" void __cdecl xrCampaignIdentity_Stop();
++extern "C" bool __cdecl xrCampaignIdentity_Fixture(LPCSTR name);
++extern "C" bool __cdecl xrCampaignIdentity_BindBridge();
++extern "C" bool __cdecl xrCampaignLevel_IdentityCheck();
+diff --git a/src/xrGame/CampaignIdentityHooks.h b/src/xrGame/CampaignIdentityHooks.h
+new file mode 100644
+index 0000000..dacac4a
+--- /dev/null
++++ b/src/xrGame/CampaignIdentityHooks.h
+@@ -0,0 +1,17 @@
++#pragma once
++
++// S03-T01: engine entity-id events, forwarded to the campaign identity
++// registry when one exists (the campaign server) and no-ops otherwise. Called
++// from xrServer's id generator wrappers, so every u16 assignment and release
++// in the server (spawns, ALife loads and switches, script releases, entity
++// destruction) is observed at one place. See CampaignIdentity.h.
++
++class CSE_Abstract;
++
++void CampaignIdentity_OnServerIncarnation();
++void CampaignIdentity_OnServerDestroyed();
++void CampaignIdentity_OnEngineIdsCleared();
++// object may be null (the actor id reservation in CALifeUpdateManager::new_game);
++// with an object, its entity id continues across a free and re-request of the same id.
++void CampaignIdentity_OnEngineIdAssigned(u16 id, CSE_Abstract* object);
++void CampaignIdentity_OnEngineIdFreed(u16 id);
+diff --git a/src/xrGame/alife_dynamic_object.cpp b/src/xrGame/alife_dynamic_object.cpp
+index e71b5c9..68cdb2f 100644
+--- a/src/xrGame/alife_dynamic_object.cpp
++++ b/src/xrGame/alife_dynamic_object.cpp
+@@ -270,7 +270,7 @@ void CSE_ALifeInventoryBox::add_offline(const xr_vector<ALife::_OBJECT_ID>& save
+ #endif
+ 
+ 		ALife::_OBJECT_ID item_id = inventory_item->base()->ID;
+-		inventory_item->base()->ID = object->alife().server().PerformIDgen(item_id);
++		inventory_item->base()->ID = object->alife().server().PerformIDgen(item_id, inventory_item->base());
+ 
+ 		if (!child->can_save())
+ 		{
+diff --git a/src/xrGame/alife_simulator_base.cpp b/src/xrGame/alife_simulator_base.cpp
+index 6b2be2a..910028e 100644
+--- a/src/xrGame/alife_simulator_base.cpp
++++ b/src/xrGame/alife_simulator_base.cpp
+@@ -104,7 +104,7 @@ CSE_Abstract* CALifeSimulatorBase::spawn_item(LPCSTR section, const Fvector& pos
+ 	abstract->s_name = section;
+ 	//.	abstract->s_gameid			= u8(GAME_SINGLE);
+ 	abstract->s_RP = 0xff;
+-	abstract->ID = server().PerformIDgen(0xffff);
++	abstract->ID = server().PerformIDgen(0xffff, abstract);
+ 	abstract->ID_Parent = parent_id;
+ 	abstract->ID_Phantom = 0xffff;
+ 	abstract->o_Position = position;
+@@ -162,7 +162,7 @@ CSE_Abstract* CALifeSimulatorBase::create(CSE_ALifeGroupAbstract* tpALifeGroupAb
+ 	k->UPDATE_Read(tNetPacket);
+ 	k->s_name = S;
+ 	k->m_tSpawnID = j->m_tSpawnID;
+-	k->ID = server().PerformIDgen(0xffff);
++	k->ID = server().PerformIDgen(0xffff, k);
+ 	k->m_bDirectControl = false;
+ 	k->m_bALifeControl = true;
+ 
+@@ -206,7 +206,7 @@ void CALifeSimulatorBase::create(CSE_ALifeDynamicObject*& i, CSE_ALifeDynamicObj
+ 	if (!graph().actor() && smart_cast<CSE_ALifeCreatureActor*>(i))
+ 		i->ID = 0;
+ 	else
+-		i->ID = server().PerformIDgen(0xffff);
++		i->ID = server().PerformIDgen(0xffff, i);
+ 
+ 	register_object(i, true);
+ 	i->m_bALifeControl = true;
+diff --git a/src/xrGame/alife_storage_manager.cpp b/src/xrGame/alife_storage_manager.cpp
+index 9f58031..c25c801 100644
+--- a/src/xrGame/alife_storage_manager.cpp
++++ b/src/xrGame/alife_storage_manager.cpp
+@@ -149,7 +149,7 @@ void CALifeStorageManager::load(void* buffer, const u32& buffer_size, LPCSTR fil
+ 	for (I = B; I != E; ++I)
+ 	{
+ 		ALife::_OBJECT_ID id = (*I).second->ID;
+-		(*I).second->ID = server().PerformIDgen(id);
++		(*I).second->ID = server().PerformIDgen(id, (*I).second);
+ 		VERIFY(id == (*I).second->ID);
+ 		register_object((*I).second, false);
+ 	}
+diff --git a/src/xrGame/alife_switch_manager.cpp b/src/xrGame/alife_switch_manager.cpp
+index 1308172..9a08250 100644
+--- a/src/xrGame/alife_switch_manager.cpp
++++ b/src/xrGame/alife_switch_manager.cpp
+@@ -92,7 +92,7 @@ void CALifeSwitchManager::remove_online(CSE_ALifeDynamicObject* object, bool upd
+ 		VERIFY(object->children.empty());
+ 
+ 		_OBJECT_ID object_id = object->ID;
+-		object->ID = server().PerformIDgen(object_id);
++		object->ID = server().PerformIDgen(object_id, object);
+ 
+ #ifdef DEBUG
+ 	if (psAI_Flags.test(aiALife))
+diff --git a/src/xrGame/alife_trader_abstract.cpp b/src/xrGame/alife_trader_abstract.cpp
+index 0e168df..8c5a2f6 100644
+--- a/src/xrGame/alife_trader_abstract.cpp
++++ b/src/xrGame/alife_trader_abstract.cpp
+@@ -260,7 +260,7 @@ void add_offline_impl(CSE_ALifeDynamicObject* object, const xr_vector<ALife::_OB
+ #endif
+ 
+ 		ALife::_OBJECT_ID item_id = inventory_item->base()->ID;
+-		inventory_item->base()->ID = object->alife().server().PerformIDgen(item_id);
++		inventory_item->base()->ID = object->alife().server().PerformIDgen(item_id, inventory_item->base());
+ 
+ 		if (!child->can_save())
+ 		{
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index d4dd95f..1c71fcc 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2005,6 +2005,9 @@
+     <ClInclude Include="CampaignCombatCapture.h" />
+     <ClInclude Include="CampaignCheckpoint.h" />
+     <ClInclude Include="CampaignQuestCapture.h" />
++    <ClInclude Include="CampaignIdentity.h" />
++    <ClInclude Include="CampaignIdentityHooks.h" />
++    <ClInclude Include="CampaignIdentityFixture.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4368,6 +4371,14 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignIdentity.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
++    <ClCompile Include="CampaignIdentityFixture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+diff --git a/src/xrGame/xrServer.cpp b/src/xrGame/xrServer.cpp
+index 0d059cc..94ffe79 100644
+--- a/src/xrGame/xrServer.cpp
++++ b/src/xrGame/xrServer.cpp
+@@ -62,6 +62,8 @@ xrServer::xrServer() : IPureServer(Device.GetTimerGlobal(), g_dedicated_server)
+ 	m_server_rules = NULL;
+ 	m_last_updates_size = 0;
+ 	m_last_update_time = 0;
++	// S03-T01: a fresh id generator; every earlier engine-id reference is stale.
++	CampaignIdentity_OnServerIncarnation();
+ }
+ 
+ xrServer::~xrServer()
+@@ -80,6 +82,8 @@ xrServer::~xrServer()
+ 		tmp_client = net_players.GetFoundClient(&ClientDestroyer::true_generator);
+ 	}
+ 	m_aDelayedPackets.clear();
++	// S03-T01: the entities go with the server; no FreeID runs for them.
++	CampaignIdentity_OnServerDestroyed();
+ 	entities.clear();
+ 	delete_data(m_info_uploaders);
+ 	xr_delete(m_server_logo);
+@@ -870,7 +874,7 @@ if( dbg_net_Draw_Flags.test( dbg_destroy ) )
+ #endif
+ 	R_ASSERT(P);
+ 	entities.erase(P->ID);
+-	m_tID_Generator.vfFreeID(P->ID, Device.TimerAsync());
++	FreeID(P->ID, Device.TimerAsync());
+ 
+ 	if (P->owner && P->owner->owner == P)
+ 		P->owner->owner = NULL;
+diff --git a/src/xrGame/xrServer.h b/src/xrGame/xrServer.h
+index 79d0e03..a328338 100644
+--- a/src/xrGame/xrServer.h
++++ b/src/xrGame/xrServer.h
+@@ -14,6 +14,7 @@
+ #include "secure_messaging.h"
+ #include "xrServer_updates_compressor.h"
+ #include "xrClientsPool.h"
++#include "CampaignIdentityHooks.h"
+ 
+ #ifdef DEBUG
+ //. #define SLOW_VERIFY_ENTITIES
+@@ -172,16 +173,22 @@ public:
+ 	IC void clear_ids()
+ 	{
+ 		m_tID_Generator = id_generator_type();
++		CampaignIdentity_OnEngineIdsCleared();
+ 	}
+ 
+-	IC u16 PerformIDgen(u16 ID)
++	// S03-T01: pass the object that takes the id so its campaign entity id
++	// survives the free-and-re-request the ALife switches do.
++	IC u16 PerformIDgen(u16 ID, CSE_Abstract* object = nullptr)
+ 	{
+-		return (m_tID_Generator.tfGetID(ID));
++		const u16 result = m_tID_Generator.tfGetID(ID);
++		CampaignIdentity_OnEngineIdAssigned(result, object);
++		return (result);
+ 	}
+ 
+ 	IC void FreeID(u16 ID, u32 time)
+ 	{
+-		return (m_tID_Generator.vfFreeID(ID, time));
++		m_tID_Generator.vfFreeID(ID, time);
++		CampaignIdentity_OnEngineIdFreed(ID);
+ 	}
+ 
+ 	void Perform_connect_spawn(CSE_Abstract* E, xrClientData* to, NET_Packet& P);
+diff --git a/src/xrGame/xrServer_process_spawn.cpp b/src/xrGame/xrServer_process_spawn.cpp
+index 30e36e7..f56fe34 100644
+--- a/src/xrGame/xrServer_process_spawn.cpp
++++ b/src/xrGame/xrServer_process_spawn.cpp
+@@ -76,7 +76,7 @@ CSE_Abstract* xrServer::Process_spawn(NET_Packet& P, ClientID sender, BOOL bSpaw
+ 		CSE_Abstract* Phantom = entity_Create(*E->s_name);
+ 		R_ASSERT(Phantom);
+ 		Phantom->Spawn_Read(P);
+-		Phantom->ID = PerformIDgen(0xffff);
++		Phantom->ID = PerformIDgen(0xffff, Phantom);
+ 		Phantom->ID_Phantom = Phantom->ID; // Self-linked to avoid phantom-breeding
+ 		Phantom->owner = NULL;
+ 		entities.insert(mk_pair(Phantom->ID, Phantom));
+@@ -84,7 +84,7 @@ CSE_Abstract* xrServer::Process_spawn(NET_Packet& P, ClientID sender, BOOL bSpaw
+ 		Phantom->s_flags.set(M_SPAWN_OBJECT_PHANTOM,TRUE);
+ 
+ 		// Spawn entity
+-		E->ID = PerformIDgen(E->ID);
++		E->ID = PerformIDgen(E->ID, E);
+ 		E->ID_Phantom = Phantom->ID;
+ 		E->owner = CL;
+ 		entities.insert(mk_pair(E->ID, E));
+@@ -94,7 +94,7 @@ CSE_Abstract* xrServer::Process_spawn(NET_Packet& P, ClientID sender, BOOL bSpaw
+ 		if (E->s_flags.is(M_SPAWN_OBJECT_PHANTOM))
+ 		{
+ 			// Clone from Phantom
+-			E->ID = PerformIDgen(0xffff);
++			E->ID = PerformIDgen(0xffff, E);
+ 			E->owner = CL; //		= SelectBestClientToMigrateTo	(E);
+ 			E->s_flags.set(M_SPAWN_OBJECT_PHANTOM,FALSE);
+ 			entities.insert({ E->ID, E });
+@@ -109,7 +109,7 @@ CSE_Abstract* xrServer::Process_spawn(NET_Packet& P, ClientID sender, BOOL bSpaw
+ 				R_ASSERT(P);
+ 				E->ID_Parent = P->ID;
+ 			}
+-			E->ID = PerformIDgen(E->ID);
++			E->ID = PerformIDgen(E->ID, E);
+ 			E->owner = CL;
+ 			entities.insert({ E->ID, E });
+ 		}
+diff --git a/src/xrServerEntities/xrServer_Object_Base.cpp b/src/xrServerEntities/xrServer_Object_Base.cpp
+index 10f250f..c74e41e 100644
+--- a/src/xrServerEntities/xrServer_Object_Base.cpp
++++ b/src/xrServerEntities/xrServer_Object_Base.cpp
+@@ -87,6 +87,7 @@ CSE_Abstract::CSE_Abstract(LPCSTR caSection)
+ 	ID = 0xffff;
+ 	ID_Parent = 0xffff;
+ 	ID_Phantom = 0xffff;
++	m_campaign_entity = 0;
+ 	owner = 0;
+ 	m_gameType.SetDefaults();
+ 	//.	s_gameid					= 0;
+diff --git a/src/xrServerEntities/xrServer_Object_Base.h b/src/xrServerEntities/xrServer_Object_Base.h
+index 413fb1f..a150559 100644
+--- a/src/xrServerEntities/xrServer_Object_Base.h
++++ b/src/xrServerEntities/xrServer_Object_Base.h
+@@ -75,6 +75,10 @@ public:
+ 	u16 ID; // internal ID
+ 	u16 ID_Parent; // internal ParentID, 0xffff means no parent
+ 	u16 ID_Phantom; // internal PhantomID, 0xffff means no phantom
++	// S03-T01: the campaign entity id (xrGame/CampaignIdentity.h), 0 until
++	// the identity registry sees the object's first engine-id assignment;
++	// kept across the offline/online switches that free and re-request ID.
++	u64 m_campaign_entity;
+ 	xrClientData* owner;
+ 
+ 	// spawn data

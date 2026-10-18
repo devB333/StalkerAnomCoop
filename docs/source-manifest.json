@@ -89,6 +89,10 @@
     {
       "path": "patches/engine/0020-quest-round-trip.patch",
       "sha256": "548dffb851188ff183e7bdefcadbc7a4a1b4be66a61135e6d8d1fbf9daf97d47"
+    },
+    {
+      "path": "patches/engine/0021-participant-identity.patch",
+      "sha256": "7c9dd3fe8badb6c2050b23dfe27a992ac9f023e6a53846d7532006cf8537fda2"
     }
   ],
   "submodules": [

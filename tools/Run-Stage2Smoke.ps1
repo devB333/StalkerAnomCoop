@@ -1,8 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
-    [Parameter(Mandatory = $true)][ValidateSet('Core', 'Services', 'GameState')][string]$Scope,
+    [Parameter(Mandatory = $true)][ValidateSet('Core', 'Identity', 'Services', 'GameState')][string]$Scope,
     # Test-only: report this service as failed before it starts, to check the partial-start unwind.
-    [ValidateSet('', 'sound', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'application', 'persistent', 'frame-driver')][string]$InjectFailure = '',
+    [ValidateSet('', 'identity', 'sound', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'application', 'persistent', 'frame-driver')][string]$InjectFailure = '',
     # Optional comma-separated model list for the CPU model fixture (no spaces).
     [ValidatePattern('^[A-Za-z0-9_\\,.]*$')][string]$Models = '',
     # Test-only: the model list contains a missing model, so the fixture must fail (exit 5).
@@ -33,7 +33,7 @@ if (Test-Path $logDir) { throw "Preserving existing smoke run: $logDir" }
 New-Item -ItemType Directory $logDir -Force | Out-Null
 $env:TEMP = Join-Path $runtime 'tmp'
 $env:TMP = $env:TEMP
-$mode = switch ($Scope) { 'Core' { '-campaign-core-smoke' } 'Services' { '-campaign-services-smoke' } default { '-campaign-smoke' } }
+$mode = switch ($Scope) { 'Core' { '-campaign-core-smoke' } 'Identity' { '-campaign-identity-smoke' } 'Services' { '-campaign-services-smoke' } default { '-campaign-smoke' } }
 # No sound device: the engine's CPU sound core (-snd_cpu) runs emitters and AI sound events (S02-T05c).
 $arguments = $mode + ' -snd_cpu -fsltx ' + $config
 if ($InjectFailure) { $arguments += ' -campaign-fail-at ' + $InjectFailure }
@@ -78,10 +78,14 @@ $stagePath = Join-Path $runtime 'appdata\logs\campaign-smoke-stages.log'
 $expectedStages = @('core-ready', 'settings-ready', 'scheduler-ready', 'console-ready',
     'game-factory-ready', 'graphics-window-input-absent')
 $expectedExit = 0
-if ($Scope -ne 'Core') {
+if ($Scope -eq 'Identity') {
+    # S03-T01: the identity registry and its unit fixtures on the core only (no level).
+    $expectedStages += @('identity-ready', 'identity-engine-id-fixture-passed', 'identity-slot-reuse-fixture-passed', 'identity-disconnect-retention-fixture-passed', 'identity-role-context-fixture-passed', 'identity-stopped')
+}
+if ($Scope -eq 'Services' -or $Scope -eq 'GameState') {
     # Services start in native order and stop in reverse; a failed start unwinds only started services.
     $started = @()
-    foreach ($service in @('sound', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'application', 'persistent', 'frame-driver')) {
+    foreach ($service in @('identity', 'sound', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'application', 'persistent', 'frame-driver')) {
         if ($service -eq $InjectFailure) { $expectedStages += "$service-failed"; $expectedExit = 4; break }
         $expectedStages += "$service-ready"
         $started += $service
@@ -89,7 +93,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-identity-passed', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }

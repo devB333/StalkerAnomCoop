@@ -140,6 +140,20 @@ checkpoint check names level-registry objects the reload holds under their
 group. One behaviour change: the psy dog's aura (`psy_dog_aura.cpp`) no longer
 dereferences `Level().CurrentEntity()` when there is none (blocker B21); the
 aura is a camera post-process and is skipped with no controlled entity.
+`0021-participant-identity.patch` (S03-T01) adds the participant identity
+model and registry (`xrGame/CampaignIdentity.{h,cpp}`): 128-bit campaign,
+player and party ids, 64-bit entity ids (items are entities), engine-id
+references `{u16, generation}` that go stale when the server recycles the
+u16, two participant slots as policy with slot generations, session
+attach/detach with identity retention, a server-only authority token and
+action-context authorization. `xrServer::PerformIDgen`, `FreeID` and
+`clear_ids` and the `xrServer` constructor report to the registry through
+`xrGame/CampaignIdentityHooks.h` (no-ops on the client, where no registry
+exists yet); `xrServer::entity_Destroy` frees through `FreeID`. The campaign
+server gets an `identity` service, an `Identity` smoke scope with four unit
+fixtures (`xrGame/CampaignIdentityFixture.{h,cpp}`), the bridge-session
+binding after the server is ready and a level identity check after the first
+ticks (stage `campaign-identity-passed`). No gameplay behaviour changes.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

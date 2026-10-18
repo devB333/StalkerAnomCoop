@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
     [Parameter(Mandatory = $true)][ValidateSet('Core', 'Services', 'GameState')][string]$Scope,
     # Test-only: report this service as failed before it starts, to check the partial-start unwind.
-    [ValidateSet('', 'spatial-db', 'campaign-registries', 'script-engine')][string]$InjectFailure = ''
+    [ValidateSet('', 'spatial-db', 'materials', 'script-engine', 'campaign-registries')][string]$InjectFailure = ''
 )
 if ($InjectFailure -and $Scope -ne 'Services') { throw '-InjectFailure requires -Scope Services.' }
 $ErrorActionPreference = 'Stop'
@@ -68,7 +68,7 @@ $expectedExit = 0
 if ($Scope -ne 'Core') {
     # Services start in native order and stop in reverse; a failed start unwinds only started services.
     $started = @()
-    foreach ($service in @('spatial-db', 'script-engine', 'campaign-registries')) {
+    foreach ($service in @('spatial-db', 'materials', 'script-engine', 'campaign-registries')) {
         if ($service -eq $InjectFailure) { $expectedStages += "$service-failed"; $expectedExit = 4; break }
         $expectedStages += "$service-ready"
         $started += $service

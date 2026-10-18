@@ -93,12 +93,15 @@ belongs to a later task. None may be bypassed with a placeholder.
    `CollideParticlesStr`, `CollideMarksStr`) are already stored, so no data has to
    be invented. `GMLib.Load` also only logs and returns when the material file is
    missing (`GameMtlLib.cpp:73-77`). The split must turn that into a failure.
-2. **Persistent state needs the render factory.** The `IGame_Persistent`
-   constructor creates `CEnvironment` (`xrEngine/IGame_Persistent.cpp:51`). Its
-   constructor calls `OnDeviceCreate` (`xrEngine/Environment.cpp:59-72`), which
-   calls `m_pRender->OnDeviceCreate()` (`xrEngine/Environment_render.cpp:216-219`).
-   `m_pRender` is a `FactoryPtr` created through `RenderFactory`
-   (`Include/xrRender/FactoryPtr.h:13`). Native `net_start1` and the ALife
+2. **Persistent state creates GPU resources.** The `IGame_Persistent` constructor
+   creates `CEnvironment` (`xrEngine/IGame_Persistent.cpp:51`). Its constructor
+   calls `OnDeviceCreate` (`xrEngine/Environment.cpp:59-72`, `Environment_render.cpp:216-219`).
+   That reaches `dxEnvironmentRender::OnDeviceCreate`, which creates the sky and
+   cloud shaders and geometry through the resource manager
+   (`Layers/xrRender/dxEnvironmentRender.cpp:400-406`). The render factory itself is
+   always available: `FactoryPtr` falls back to the statically linked
+   `RenderFactoryImpl` (`Include/xrRender/FactoryPtr.h:9-13`). The GPU work is the
+   resource creation, not the factory object. Native `net_start1` and the ALife
    constructor both read `g_pGamePersistent->m_game_params`
    (`Level_start.cpp:115`, `alife_simulator.cpp:54-55`). The environment data and
    render split is S02-T04/T05 (S02-T01 B03, B09, B10).

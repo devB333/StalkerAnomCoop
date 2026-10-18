@@ -21,6 +21,10 @@
     {
       "path": "patches/engine/0003-campaign-services-smoke.patch",
       "sha256": "449a85f513ff5df65b3e6f5770bdb8eb923dec6af178aee221e47938586fa68b"
+    },
+    {
+      "path": "patches/engine/0004-materials-without-media.patch",
+      "sha256": "8f04c72238bdae564bfe765d8249457bef2a6832a02f0a467be80e2e710d5244"
     }
   ],
   "submodules": [

@@ -11,6 +11,10 @@ reports the missing native level prerequisite; it is not a runtime pass.
 (spatial DBs, script engine, character registries) with reverse-order owner
 teardown, a Services smoke scope and a test-only `-campaign-fail-at` unwind check.
 Its xrGame functions are additive; the client's game-globals functions are unchanged.
+`0004-materials-without-media.patch` (S02-T03a) adds a material-library switch
+that keeps pair media names but creates no pair sounds or wallmarks; it defaults
+on, so the client is unchanged. The campaign server loads materials with it off.
+Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):
 

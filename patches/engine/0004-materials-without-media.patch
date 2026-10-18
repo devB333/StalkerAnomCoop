@@ -1,0 +1,184 @@
+diff --git a/src/xrEngine/GameMtlLib.cpp b/src/xrEngine/GameMtlLib.cpp
+index 613e221..50647cf 100644
+--- a/src/xrEngine/GameMtlLib.cpp
++++ b/src/xrEngine/GameMtlLib.cpp
+@@ -19,6 +19,7 @@ CGameMtlLibrary::CGameMtlLibrary()
+ #ifndef _EDITOR
+ 	material_count = 0;
+ #endif
++	presentation_media = true;
+ 	PGMLib = &GMLib;
+ }
+ 
+diff --git a/src/xrEngine/GameMtlLib.h b/src/xrEngine/GameMtlLib.h
+index d1a29f8..138238e 100644
+--- a/src/xrEngine/GameMtlLib.h
++++ b/src/xrEngine/GameMtlLib.h
+@@ -267,9 +267,16 @@ class MTL_EXPORT_API CGameMtlLibrary
+ 	u32 material_count;
+ 	GameMtlPairVec material_pairs_rt;
+ #endif
++	bool presentation_media;
+ public:
+ 	CGameMtlLibrary();
+ 
++	// Pair sounds and wallmarks need the sound and render devices. Without
++	// them (the campaign server) pairs keep only the media names; set this
++	// before Load.
++	void SetPresentationMedia(bool enabled) { presentation_media = enabled; }
++	bool PresentationMedia() const { return presentation_media; }
++
+ 	~CGameMtlLibrary()
+ 	{
+ 		/*
+diff --git a/src/xrEngine/GameMtlLib_Engine.cpp b/src/xrEngine/GameMtlLib_Engine.cpp
+index 4a07b01..39dcc3a 100644
+--- a/src/xrEngine/GameMtlLib_Engine.cpp
++++ b/src/xrEngine/GameMtlLib_Engine.cpp
+@@ -115,32 +115,39 @@ void SGameMtlPair::Load(IReader& fs)
+ 	ID_parent = fs.r_u32();
+ 	OwnProps.assign(fs.r_u32());
+ 
++	const bool media = m_Owner->PresentationMedia();
++
+ 	R_ASSERT(fs.find_chunk(GAMEMTLPAIR_CHUNK_BREAKING));
+ 	fs.r_stringZ(buf);
+ 	BreakingSoundsStr = buf.c_str();
+-	CreateSounds(BreakingSounds, *buf);
++	if (media)
++		CreateSounds(BreakingSounds, *buf);
+ 
+ 	R_ASSERT(fs.find_chunk(GAMEMTLPAIR_CHUNK_STEP));
+ 	fs.r_stringZ(buf);
+ 	StepSoundsStr = buf.c_str();
+-	CreateSounds(StepSounds, *buf);
++	if (media)
++		CreateSounds(StepSounds, *buf);
+ 
+ 	R_ASSERT(fs.find_chunk(GAMEMTLPAIR_CHUNK_COLLIDE));
+ 	fs.r_stringZ(buf);
+ 	CollideSoundsStr = buf.c_str();
+-	CreateSounds(CollideSounds, *buf);
++	if (media)
++		CreateSounds(CollideSounds, *buf);
+ 	fs.r_stringZ(buf);
+ 	CollideParticlesStr = buf.c_str();
+ 	CreatePSs(CollideParticles, *buf);
+ 	fs.r_stringZ(buf);
+ 	//CreateMarks (CollideMarks,*buf);
+ 	CollideMarksStr = buf.c_str();
+-	CreateMarks(&*m_pCollideMarks, *buf);
++	if (media)
++		CreateMarks(&*m_pCollideMarks, *buf);
+ }
+ 
+ void SGameMtlPair::CreateSoundsImpl(SoundVec& sounds, LPCSTR str) {
+ 	sounds.clear();
+-	CreateSounds(sounds, str);
++	if (m_Owner->PresentationMedia())
++		CreateSounds(sounds, str);
+ }
+ 
+ void SGameMtlPair::CreateParticlesImpl(PSVec& particles, LPCSTR str) {
+@@ -150,5 +157,6 @@ void SGameMtlPair::CreateParticlesImpl(PSVec& particles, LPCSTR str) {
+ 
+ void SGameMtlPair::CreateMarksImpl(IWallMarkArray* marks, LPCSTR str) {
+ 	marks->clear();
+-	CreateMarks(marks, str);
++	if (m_Owner->PresentationMedia())
++		CreateMarks(marks, str);
+ }
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 548c325..81340cf 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -958,6 +958,8 @@ ENGINE_API bool g_campaign_server = false;
+ #error Campaign server requires single-player campaign services and a distinct runtime role.
+ #endif
+ 
++#include "GameMtlLib.h"
++
+ extern "C" void __cdecl xrCampaignGameGlobals_Initialize();
+ extern "C" bool __cdecl xrCampaignScriptEngine_Initialize();
+ extern "C" void __cdecl xrCampaignScriptEngine_Destroy();
+@@ -985,13 +987,50 @@ void StopCampaignSpatialDatabases()
+     xr_delete(g_SpatialSpacePhysic);
+     xr_delete(g_SpatialSpace);
+ }
++
++// Loads materials and pairs without pair sounds or wallmarks. Pairs must keep
++// their media names, and no sound or wallmark may have been created.
++bool StartCampaignMaterials()
++{
++    GMLib.SetPresentationMedia(false);
++    GMLib.Load();
++    u32 pairs = 0, named_media = 0, created_media = 0;
++    for (GameMtlPairIt it = GMLib.FirstMaterialPair(); it != GMLib.LastMaterialPair(); ++it)
++    {
++        SGameMtlPair* pair = *it;
++        ++pairs;
++        if (!pair->CollideSoundsStr.empty() || !pair->StepSoundsStr.empty() ||
++            !pair->BreakingSoundsStr.empty() || !pair->CollideMarksStr.empty())
++            ++named_media;
++        created_media += u32(pair->CollideSounds.size() + pair->StepSounds.size() +
++            pair->BreakingSounds.size()) + (pair->m_pCollideMarks->empty() ? 0 : 1);
++    }
++    Msg("S02-T03 materials count=%u pairs=%u pairs_with_media_names=%u created_media=%u",
++        GMLib.CountMaterial(), pairs, named_media, created_media);
++    return GMLib.CountMaterial() != 0 && pairs != 0 && named_media != 0 && created_media == 0;
++}
++
++void StopCampaignMaterials()
++{
++    GMLib.Unload();
++    GMLib.SetPresentationMedia(true);
++}
++
++// A failed check after loading still owns the loaded library.
++bool StartCampaignMaterialsOrUnload()
++{
++    if (StartCampaignMaterials())
++        return true;
++    StopCampaignMaterials();
++    return false;
++}
+ }
+ 
+ // This smoke path exercises core/settings, console commands, the native game
+ // factory and the renderer-free CPU campaign services (spatial databases,
+-// character registries and the script engine). The material library, persistent
+-// state, CLevel and ALife still need the later CPU-model and presentation split:
+-// material pairs create sounds and render wallmark arrays when they load.
++// materials without pair media, the script engine and character registries).
++// Persistent state, CLevel and ALife still need the later CPU-model and
++// presentation split.
+ static int RunCampaignServerSmoke(LPCSTR command_line)
+ {
+     CampaignSmokeScope scope;
+@@ -1091,8 +1130,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+     if (scope != CampaignSmokeScope::Core)
+     {
+         // Native order: spatial databases follow persistent construction;
+-        // persistent app start then loads game globals (after materials, which
+-        // the campaign server cannot load yet).
++        // persistent app start then loads materials before game globals.
+         const bool services_ready =
+             start("spatial-db",
+                 []()
+@@ -1102,6 +1140,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     return true;
+                 },
+                 {"spatial-db-stopped", &StopCampaignSpatialDatabases}) &&
++            start("materials", &StartCampaignMaterialsOrUnload, {"materials-stopped", &StopCampaignMaterials}) &&
+             // Every CXml load calls Lua _G.COnXmlRead through the script
+             // engine (XMLLuaCallback), so it must exist before the registries.
+             start("script-engine", &xrCampaignScriptEngine_Initialize,
+@@ -1128,7 +1167,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             // CLevel construction loads player HUD models through Render.
+             if (!g_pGamePersistent)
+             {
+-                Msg("S02-T02 blocker=persistent: CEnvironment::OnDeviceCreate needs the render factory");
++                Msg("S02-T02 blocker=persistent: CEnvironment::OnDeviceCreate creates sky/cloud GPU resources");
+                 stage("persistent-context-required");
+                 result = 3;
+             }

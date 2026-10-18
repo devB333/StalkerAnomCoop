@@ -1,4 +1,4 @@
-Current execution follows [plan.md](../plan.md). Stage 0/G00 and Stage 1/G01 are complete for development with the [two explicit G01 waivers](validation/G01.md). [S02-T01](validation/S02-T01.md) completed the headless service boundary and fixture specification. [S02-T02](validation/S02-T02.md) is in progress: client and campaign builds passed, settings fixed, Core startup/shutdown passed; GameState still requires real native level context. G02 has no gameplay acceptance. The roadmap below is historical.
+Current execution follows [plan.md](../plan.md). Stage 0/G00 and Stage 1/G01 are complete for development with the [two explicit G01 waivers](validation/G01.md). [S02-T01](validation/S02-T01.md) completed the headless service boundary and fixture specification. Stage 2 engineering (S02-T01–T06) is complete ([S02-T06](validation/S02-T06.md) covers the actor binder, combat and the native checkpoint round-trip); [G02](validation/G02.md) records the evidence and awaits the user's acceptance. The roadmap below is historical.
 
 # Implementation roadmap — authorization required
 

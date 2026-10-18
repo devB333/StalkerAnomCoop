@@ -110,6 +110,19 @@ manager; by the campaign server after its actor position check (stage
 `campaign-combat-passed`) and by the normal client with the opt-in
 `-s02-combat-capture` flag. The hooks only count and record; no combat
 behaviour changes.
+`0019-checkpoint-round-trip.patch` (S02-T06d) adds the native checkpoint
+round-trip (`xrGame/CampaignCheckpoint.{h,cpp}`): the campaign server sends
+the `M_SAVE_GAME` packet the console `save` command and the autosave manager
+send (handled synchronously by the in-memory server: `game_sv_Single::save_game`
+→ `CALifeStorageManager::save`, the Lua storage-manager callbacks and the
+`.scop`), checks the written `.scop`/`.scoc` against the live state, stops the
+level and starts it again from the checkpoint the way the engine reconnects
+(stages `campaign-checkpoint-saved`, `campaign-restart-server-ready`,
+`campaign-restart-level-loaded`, `campaign-checkpoint-passed`), comparing the
+ALife registries, clock, actor and fixture NPCs with the state the checkpoint
+was written from. The normal client takes the same snapshot from a server
+checkpoint with the opt-in `-s02-checkpoint-capture` flag. Observation only;
+no save, load or spawn behaviour changes.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

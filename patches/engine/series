@@ -16,3 +16,4 @@
 0016-inert-server-game-ui.patch
 0017-alife-actor-position-check.patch
 0018-combat-fixture.patch
+0019-checkpoint-round-trip.patch

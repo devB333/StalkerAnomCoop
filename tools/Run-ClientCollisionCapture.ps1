@@ -9,19 +9,24 @@
 # With -Capture hearing (S02-T05c) it runs the same walk and records sound emitters, AI sound
 # events and NPC hearing (-s02-hearing-capture); task S02-T05c. With -Capture combat (S02-T06c)
 # it spawns a monster near the stalker and records vision, bullets, impacts, hits and deaths
-# (-s02-combat-capture); task S02-T06c.
+# (-s02-combat-capture); task S02-T06c. With -Capture checkpoint (S02-T06d) the client starts from the
+# checkpoint a campaign server smoke wrote (-CheckpointRun <smoke run>, copied from its run log directory)
+# and records the loaded state one second after its actor spawned (-s02-checkpoint-capture); task S02-T06d.
 # The accepted source-client runtime is only read: its bin DLLs, user settings and
 # shader cache are copied, and the archives are read in place through fsgame.ltx.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
-    [ValidateSet('collision', 'physics', 'activity', 'hearing', 'combat')][string]$Capture = 'collision',
+    [ValidateSet('collision', 'physics', 'activity', 'hearing', 'combat', 'checkpoint')][string]$Capture = 'collision',
+    # -Capture checkpoint: the campaign smoke run whose s02-t06d-checkpoint.{scop,scoc} the client loads.
+    [ValidatePattern('^[a-zA-Z0-9-]*$')][string]$CheckpointRun = '',
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
-$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } 'hearing' { 'S02-T05c' } 'combat' { 'S02-T06c' } default { 'S02-T03d' } }
-$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } 'hearing' { '-s02-hearing-capture' } 'combat' { '-s02-combat-capture' } default { '-s02-collision-capture' } }
-$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } 'hearing' { 's02-t05c-hearing.csv' } 'combat' { 's02-t06c-combat.csv' } default { 's02-t03d-collision.csv' } }
+if (($Capture -eq 'checkpoint') -ne [bool]$CheckpointRun) { throw '-CheckpointRun is required with, and only with, -Capture checkpoint.' }
+$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } 'hearing' { 'S02-T05c' } 'combat' { 'S02-T06c' } 'checkpoint' { 'S02-T06d' } default { 'S02-T03d' } }
+$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } 'hearing' { '-s02-hearing-capture' } 'combat' { '-s02-combat-capture' } 'checkpoint' { '-s02-checkpoint-capture' } default { '-s02-collision-capture' } }
+$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } 'hearing' { 's02-t05c-hearing.csv' } 'combat' { 's02-t06c-combat.csv' } 'checkpoint' { 's02-t06d-checkpoint.csv' } default { 's02-t03d-collision.csv' } }
 $runtime = Join-Path $workspace "builds\stage2\test-install\$task\$Run"
 $fixture = Join-Path $runtime 'fixture.json'
 if (-not (Test-Path $fixture)) { throw "Prepare the isolated runtime first (prepare-stage2-smoke.py <run> $task)." }
@@ -60,14 +65,37 @@ Copy-Item (Join-Path $accepted 'appdata\shaders_cache') $appdata -Recurse
 
 New-Item -ItemType Directory $logDir -Force | Out-Null
 $exe = Join-Path $bin 'AnomalyDX11.exe'
+# S02-T06d: the checkpoint the campaign server wrote (kept by Run-Stage2Smoke.ps1 beside its stage log) becomes
+# the saved game this client starts from; the server's after-save row names the fixture stalker and the combat monster.
+$saveName = 'player - autosave'
+$checkpoint = @()
+$fixtureOptions = ''
+if ($Capture -eq 'checkpoint') {
+    $smokeLog = Join-Path $workspace "builds\logs\S02-T02\run-$CheckpointRun"
+    foreach ($extension in @('scop', 'scoc')) {
+        $source = Join-Path $smokeLog "s02-t06d-checkpoint.$extension"
+        if (-not (Test-Path $source)) { throw "Checkpoint file missing: $source" }
+        $dest = Join-Path $appdata "savedgames\s02-t06d-checkpoint.$extension"
+        Copy-Item $source $dest
+        $checkpoint += [ordered]@{ name = "s02-t06d-checkpoint.$extension"; source = $source; bytes = (Get-Item $dest).Length; sha256 = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower() }
+    }
+    $serverRows = Import-Csv (Join-Path $smokeLog 'server-checkpoint.csv')
+    $afterSave = $serverRows | Where-Object { $_.label -eq 'after-save' } | Select-Object -First 1
+    if (-not $afterSave) { throw 'The server checkpoint capture has no after-save row.' }
+    if ([int]$afterSave.npc_id -ne 65535 -and [int]$afterSave.npc_id -ne 0) { $fixtureOptions += ' -s02-checkpoint-npc ' + $afterSave.npc_id }
+    if ([int]$afterSave.monster_id -ne 65535) { $fixtureOptions += ' -s02-checkpoint-monster ' + $afterSave.monster_id }
+    $saveName = 's02-t06d-checkpoint'
+}
 # -start must come last: the engine executes everything after it as one console command.
-$arguments = '-fsltx ' + $config + ' ' + $flag + ' -start server(player - autosave/single/alife/load) client(localhost)'
+$arguments = '-fsltx ' + $config + ' ' + $flag + $fixtureOptions + ' -start server(' + $saveName + '/single/alife/load) client(localhost)'
 $result = [ordered]@{
     started_utc = [DateTime]::UtcNow.ToString('o')
     command = '"' + $exe + '" ' + $arguments
     executable_sha256 = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
     config_sha256 = $record.config_sha256
     runtime = $runtime
+    checkpoint_run = $CheckpointRun
+    checkpoint = $checkpoint
 }
 $env:TEMP = Join-Path $runtime 'tmp'
 $env:TMP = $env:TEMP

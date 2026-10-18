@@ -1,80 +1,66 @@
-# Session handoff — S02-T06c complete; next: S02-T06d native save/reload
+# Session handoff — S02-T06 complete, G02 evidence recorded; next: the user's G02 decision, then Stage 3
 
-## Next session: finish S02-T06 with the save/reload round-trip
+## State at the end of the session (2026-10-18)
 
-S02-T04 and S02-T05 are Completed; S02-T06 is In Progress with T06a, T06b
-and T06c done (details: [S02-T06 report](../../validation/S02-T06.md)):
+S02-T06d (native checkpoint round-trip) is **Completed** and committed as patch
+0019 (`02d97fd5…50bdd`, 7 files). The campaign server saves through the host's
+own `M_SAVE_GAME` path, restarts the level from the checkpoint and gets its
+ALife, clock, actor and NPC state back (smoke-83, exit 0, 54 s wall, 25 rules
+ok); the normal client loads the same checkpoint and
+`compare-checkpoint-capture.py` matches (capture-11, exit 0). Details: part 5
+of [S02-T06](../../validation/S02-T06.md).
 
-- **S02-T06c (patch 0018):** combat between NPCs runs headless. The shared
-  combat fixture (`xrGame/CampaignCombatCapture.{h,cpp}`) spawns a
-  `boar_normal` through the native ALife spawn 12 m from the fixture stalker
-  (actor god mode for the fixture's duration) and observes the fight through
-  observation hooks (every bullet the bullet manager adds, every hit event it
-  commits, every `CEntityAlive::Hit` and `Die`) plus the stalker's visual
-  memory and enemy selection and the monster's enemy manager. Server
-  (smoke-78, `campaign-combat-passed`): boar online in 0.2 s, seen and
-  selected, 19 rounds, 6 fire wounds, death at 9.5 s, real-time. Client
-  (client-21, capture-09): same rules pass (2 rounds, 3 fire wounds, death at
-  10.3 s); `compare-combat-capture.py` matches.
+Every Stage 2 task (S02-T01–T06) is Completed. The **G02 evidence record**
+([G02.md](../../validation/G02.md)) maps each gate requirement to its evidence
+and names the one gap: task (quest) execution is observed only as the
+installed task scripts running without error through the actor's binder. No
+task was given, advanced or completed headless. G02 stays **In Progress**
+until the user accepts it (with the gap as a named risk) or asks for a quest
+fixture first. Do not mark G02 Completed without that decision.
 
-Remaining S02-T06 items:
+## Findings worth keeping
 
-1. **Native save/reload (S02-T06d).** Save on the server (the actor's binder
-   save, `alife_storage_manager`, is reachable since T06a), reload in the same
-   process or a second run, compare the counters the smoke already reports
-   (object counts, ALife registries, the actor's position, the stalker's
-   state). The server's save path is the host's: `CLevel::ClientSave` /
-   `xrServer` `M_SAVE_GAME` → `CALifeSimulator::save`; check whether the
-   console `save` command path or a direct call is the honest entry.
-2. **G02 evidence record** (plan.md §D) once T06d is in.
+- The client's checkpoint snapshot must get the fixture ids from the command
+  line (`-s02-checkpoint-npc`, `-s02-checkpoint-monster`): the activity
+  fixture's id accessor returns 0 (the actor) when no fixture ran
+  (capture-10 described the actor in the stalker columns).
+- A normal client's ALife clock runs through its level load (~75–85 s of game
+  time), so its loaded object count can be a few lower than the checkpoint's;
+  the compare tool's rules for rows taken after the level ran are the C++
+  ticked rules (counts within max(10, 0.1 %), stalker health within 0.05).
+- The Lua `.scoc` is written with `io.open`; `FS` never sees it, check with
+  `_stat64`.
+- capture-10's client exited `0xC0000005` after its full teardown log;
+  capture-11 (final source) exited 0. Unexplained; watch for it.
+- smoke-81 failed its hearing stage (`npc_walk_events=0`) and passed on rerun:
+  per-run variation, not a code change.
 
-## Findings that shape the next tasks
+## Next steps
 
-- **Hits are events through the host's own server loop** (`GE_HIT` via
-  `xrServer`), so the first hit lands one tick after the first impact on both
-  products; anything that routes events differently in Stage 3 must keep
-  that ordering.
-- **Physics contact damage is live headless**: a dog that ran into the
-  stalker's character controller died of a 1.58 strike (smoke-77). The same
-  installed behaviour as on the client; a fast small monster is a poor target
-  for the "bullet hits the monster" rule, which is why the default is a boar.
-- **Fixture spawns go online within ~10 ticks** through the level registry's
-  time-limited switch update; no manual switch was needed.
-- The `-s02-combat-*` options (`section`, `distance`, `ms`, `online-ms`) are
-  read from the command line by both products.
-- **Timing instruments** in the smoke's tick report: `S02-T06 timing`
-  (script binder updates; the actor's is ~5.8 ms per call, every tick) and
-  `S02-T06 frame_ms`. Use them first when the clock logs `behind`.
-- `CScriptBinder` logs native faults with symbols; Lua runtime errors are
-  fatal on both products.
-- `tools/xray-db-extract.py grep` escapes its pattern unless `--regex`; the
-  section lookups in this session used literal `[name]` patterns with
-  `-m creatures`.
+1. **Ask the user for the G02 decision** (see "Decision requested" in G02.md).
+   If accepted: set G02 Completed in plan.md (§D gate table row, §I table, the
+   stage summary and "Roadmap at a glance"), record the acceptance and the
+   named risk in G02.md the way G01.md does, commit `docs: accept G02`.
+   If a quest fixture is required: new sub-task S02-T06e; the task manager
+   runs through the actor binder, so give a task through the native script
+   path and compare its state across the checkpoint on both products.
+2. Then Stage 3, S03-T01 (participants and authoritative contexts), per
+   plan.md. Read plan.md §D (D1–D8 binding) before designing.
 
 ## Tools and runs
 
-- **Last run names:** `campaign-65`, `smoke-78`, `client-21`, `capture-09`
-  (all passed; `campaign-62…64`, `smoke-77` were iterations); `smoke-20`
-  reserved for the user. Next: `campaign-66`, `client-22`, `smoke-79`,
-  `capture-10`. Check `builds/logs/S02-T02/`.
-- **Smoke:** `python3 tools/prepare-stage2-smoke.py <run>`, then
-  `Run-Stage2Smoke.ps1 -Run <run> -Scope Core|Services|GameState`; the server
-  runs with `-snd_cpu`. GameState expects `campaign-activity-passed`,
-  `campaign-hearing-passed`, `campaign-actor-position-passed` and
-  `campaign-combat-passed`; the loaded report expects `hud=1 game_ui=1
-  ui_in_frame=0`. The GameState smoke takes ~50 s wall.
-- **Client captures:** `python3 tools/prepare-stage2-smoke.py <run> <task>`
-  then `Run-ClientCollisionCapture.ps1 -Run <run> -Capture collision|physics|activity|hearing|combat`
-  (`combat` is task `S02-T06c`; `hearing` writes both the activity and
-  hearing CSVs, task `S02-T05c`).
-- **Compare:** `tools/compare-activity-capture.py`,
-  `tools/compare-hearing-capture.py`, `tools/compare-combat-capture.py`.
-- **Build:** `Build-Stage2.ps1 -Run <name> -Product Campaign|Client`; quote
-  the script path from WSL. Game-module-only changes build in 1–2 min.
-- **Patches:** 0001–0018 exported; next export is
-  `python3 tools/export-engine-patch.py <name> 20`.
+- Last run names: `campaign-69`, `client-24`, `smoke-83`, `capture-11`
+  (`patch-check-20a/b`). Next: `campaign-70`, `client-25`, `smoke-84`,
+  `capture-12`; next patch export is `python3 tools/export-engine-patch.py <name> 21`.
+- Smoke: `python3 tools/prepare-stage2-smoke.py <run>` then
+  `Run-Stage2Smoke.ps1 -Run <run> -Scope GameState` (~55–80 s; expects the
+  checkpoint stages too). Client captures: `prepare-stage2-smoke.py <run> <task>`
+  then `Run-ClientCollisionCapture.ps1 -Run <run> -Capture collision|physics|activity|hearing|combat|checkpoint [-CheckpointRun <smoke>]`.
+  Compare tools: `tools/compare-*-capture.py`.
+- Build: `Build-Stage2.ps1 -Run <name> -Product Campaign|Client` (~1m45s each
+  for game-module changes); build logs land in `builds/logs/S02-T02/<name>/`.
 - Smart App Control is off (user, 2026-10-17).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
-Previous snapshot: [before S02-T06d](../done/snapshot-before-S02-T06d.md).
+Previous snapshot: [before the G02 decision](../done/snapshot-before-G02-decision.md).

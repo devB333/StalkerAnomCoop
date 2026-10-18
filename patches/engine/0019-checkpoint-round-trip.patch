@@ -1,0 +1,738 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 6319a19..5c90e59 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1000,6 +1000,9 @@ extern "C" bool __cdecl xrCampaignLevel_CombatFixtureBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_CombatFixtureTick();
+ extern "C" bool __cdecl xrCampaignLevel_CombatFixtureDone();
+ extern "C" bool __cdecl xrCampaignLevel_CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++extern "C" bool __cdecl xrCampaignLevel_CheckpointSave(LPCSTR save_name, LPCSTR out_path);
++extern "C" bool __cdecl xrCampaignLevel_CheckpointServerCheck();
++extern "C" bool __cdecl xrCampaignLevel_CheckpointEnd(u32 ticks);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1270,6 +1273,10 @@ u32 g_campaign_activity_ticks = 3000;
+ // Tick budget for the combat fixture (S02-T06c): 3500 ticks are 70 s, more
+ // than its own online wait (20 s) plus engagement budget (45 s).
+ u32 g_campaign_combat_ticks = 3500;
++// Name of the checkpoint the smoke saves and restarts from (S02-T06d);
++// written to the run's $game_saves$ (.scop and .scoc). Lowercase: the Lua
++// storage manager lowercases the .scoc name it writes.
++LPCSTR g_campaign_checkpoint_name = "s02-t06d-checkpoint";
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -1884,6 +1891,74 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 18;
+                     }
+                 }
++                if (result == 0)
++                {
++                    // S02-T06d: native checkpoint. The fixture sends the
++                    // save request the console `save` command sends and
++                    // checks the written .scop/.scoc against the live state.
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s02-t06d-checkpoint.csv");
++                    if (xrCampaignLevel_CheckpointSave(g_campaign_checkpoint_name, capture))
++                        stage("campaign-checkpoint-saved");
++                    else
++                    {
++                        stage("campaign-checkpoint-save-failed");
++                        result = 19;
++                    }
++                }
++                if (result == 0)
++                {
++                    // S02-T06d: restart from the checkpoint the way the
++                    // engine reconnects (KERNEL:disconnect, KERNEL:start):
++                    // stop the level, start it from the written save, run
++                    // the server and client stages and the first ticks, and
++                    // compare with the state the checkpoint was written from.
++                    xrCampaignLevel_Stop();
++                    stage("campaign-stopped");
++                    string256 op_server;
++                    xr_sprintf(op_server, "%s/single/alife/load", g_campaign_checkpoint_name);
++                    bool ok = xrCampaignLevel_Start(op_server, "localhost");
++                    if (ok)
++                    {
++                        const int pumped = xrCampaignLevel_PumpServerStages(300000);
++                        ok = pumped == 0 && xrCampaignLevel_Report() && xrCampaignLevel_CheckpointServerCheck();
++                    }
++                    if (ok)
++                        stage("campaign-restart-server-ready");
++                    else
++                    {
++                        stage("campaign-restart-server-failed");
++                        result = 20;
++                    }
++                    if (ok)
++                    {
++                        const int pumped = xrCampaignLevel_PumpClientStages(300000);
++                        ok = pumped == 0 && xrCampaignLevel_ReportLoaded();
++                        if (ok)
++                            stage("campaign-restart-level-loaded");
++                        else
++                        {
++                            stage("campaign-restart-load-failed");
++                            result = 20;
++                        }
++                    }
++                    if (ok)
++                    {
++                        const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                        g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                        RunCampaignTicksTo(ticks_before + g_campaign_level_ticks);
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                        const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                        ok = xrCampaignLevel_ReportTicks(ran) && xrCampaignLevel_CheckpointEnd(ran);
++                        if (ok)
++                            stage("campaign-checkpoint-passed");
++                        else
++                        {
++                            stage("campaign-checkpoint-failed");
++                            result = 21;
++                        }
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrGame/CampaignCheckpoint.cpp b/src/xrGame/CampaignCheckpoint.cpp
+new file mode 100644
+index 0000000..5a84ad1
+--- /dev/null
++++ b/src/xrGame/CampaignCheckpoint.cpp
+@@ -0,0 +1,463 @@
++#include "pch_script.h"
++#include "CampaignCheckpoint.h"
++#include "CampaignActivityCapture.h"
++#include "CampaignCombatCapture.h"
++
++// S02-T06d: see CampaignCheckpoint.h. The fixture writes nothing into the
++// world: it sends the native save request, then reads the live level and the
++// ALife registries before and after the smoke driver restarts the level from
++// the written checkpoint.
++
++#include "Level.h"
++#include "xrServer.h"
++#include "Actor.h"
++#include "entity.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "alife_graph_registry.h"
++#include "alife_level_registry.h"
++#include "alife_time_manager.h"
++#include "game_graph.h"
++#include "saved_game_wrapper.h"
++#include "script_engine.h"
++#include "../xrServerEntities/xrServer_Objects_ALife.h"
++#include "../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
++#include "xrMessages.h"
++#include "../xrNetServer/NET_Messages.h"
++#include "../xrEngine/xr_object.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++#include <sys/types.h>
++#include <sys/stat.h>
++
++namespace
++{
++const u16 no_id = u16(-1);
++
++string_path g_out_path;
++string64 g_save_name;
++CheckpointSnapshot g_saved; // right after the save
++bool g_have_saved = false;
++
++// What CALifeObjectRegistry::save writes: top-level objects that can save
++// and are not redundant, and their children that can save, through the
++// parent chain.
++bool will_be_saved(const CALifeSimulator& alife, const CSE_ALifeDynamicObject* object)
++{
++	while (object)
++	{
++		if (!object->can_save())
++			return false;
++		if (object->ID_Parent == 0xffff)
++			return !object->redundant();
++		object = alife.objects().object(object->ID_Parent, true);
++	}
++	return false;
++}
++
++// An object id named on the command line (`<option> <id>`), or no_id.
++u16 command_line_id(LPCSTR option)
++{
++	LPCSTR found = strstr(Core.Params, option);
++	u32 id = 0;
++	if (found && sscanf_s(found + xr_strlen(option), "%u", &id) == 1 && id < no_id)
++		return u16(id);
++	return no_id;
++}
++
++void take(CheckpointSnapshot& s, LPCSTR label)
++{
++	ZeroMemory(&s, sizeof(s));
++	xr_strcpy(s.label, label);
++	// The fixtures name their stalker and monster when they ran in this
++	// process; 0 is the actor's id, so it means no activity fixture ran. The
++	// normal client loading a server checkpoint ran neither fixture and takes
++	// both ids from the command line (the server's after-save row names them).
++	s.npc_id = ActivityFixtureNpcId();
++	if (s.npc_id == 0)
++		s.npc_id = no_id;
++	if (s.npc_id == no_id)
++		s.npc_id = command_line_id("-s02-checkpoint-npc ");
++	s.monster_id = CombatFixtureMonsterId();
++	if (s.monster_id == no_id)
++		s.monster_id = command_line_id("-s02-checkpoint-monster ");
++	s.level_id = u32(-1);
++	xr_strcpy(s.marshal_version, "-");
++
++	const bool have_level = g_pGameLevel != nullptr;
++	const CALifeSimulator* alife = ai().get_alife();
++	if (alife)
++	{
++		const GameGraph::_LEVEL_ID level_id = alife->graph().level().level_id();
++		s.level_id = level_id;
++		xr_strcpy(s.level, ai().game_graph().header().level(level_id).name().c_str());
++		s.game_time = alife->time_manager().game_time();
++		s.alife_objects = u32(alife->objects().objects().size());
++		for (const auto& entry : alife->objects().objects())
++		{
++			if (entry.second->m_bOnline)
++				++s.online_objects;
++			if (will_be_saved(*alife, entry.second))
++				++s.alife_savable;
++		}
++		s.level_objects = u32(alife->graph().level().objects().size());
++		for (const auto& entry : alife->graph().level().objects())
++			if (will_be_saved(*alife, entry.second))
++				++s.level_savable;
++
++		const CSE_ALifeCreatureActor* se_actor = alife->graph().actor();
++		if (se_actor)
++		{
++			s.se_actor = true;
++			s.se_actor_pos = se_actor->o_Position;
++			s.se_actor_health = se_actor->get_health();
++			s.se_actor_graph = se_actor->m_tGraphID;
++			s.se_actor_node = se_actor->m_tNodeID;
++		}
++		if (s.npc_id != no_id)
++		{
++			const CSE_ALifeCreatureAbstract* npc =
++				smart_cast<const CSE_ALifeCreatureAbstract*>(alife->objects().object(s.npc_id, true));
++			if (npc)
++			{
++				s.npc_se = true;
++				s.npc_se_health = npc->get_health();
++				s.npc_se_pos = npc->o_Position;
++			}
++		}
++		if (s.monster_id != no_id)
++		{
++			const CSE_ALifeCreatureAbstract* monster =
++				smart_cast<const CSE_ALifeCreatureAbstract*>(alife->objects().object(s.monster_id, true));
++			if (monster)
++			{
++				s.monster_se = true;
++				s.monster_se_health = monster->get_health();
++				s.monster_se_online = monster->m_bOnline;
++			}
++		}
++	}
++	if (have_level)
++	{
++		CLevel& level = Level();
++		s.server_entities = level.Server ? level.Server->GetEntitiesNum() : 0;
++		s.client_objects = level.Objects.o_count();
++		if (g_actor)
++		{
++			CActor* actor = g_actor;
++			s.actor_live = true;
++			s.actor_alive = !!actor->g_Alive();
++			s.actor_pos = actor->Position();
++			s.actor_health = actor->GetfHealth();
++			s.binder = actor->object() != nullptr;
++		}
++		if (s.npc_id != no_id)
++		{
++			CEntity* npc = smart_cast<CEntity*>(level.Objects.net_Find(s.npc_id));
++			if (npc && !npc->getDestroy())
++			{
++				s.npc_live = true;
++				s.npc_alive = !!npc->g_Alive();
++				s.npc_health = npc->GetfHealth();
++			}
++		}
++		if (s.monster_id != no_id)
++		{
++			CObject* monster = level.Objects.net_Find(s.monster_id);
++			s.monster_live = monster && !monster->getDestroy();
++		}
++	}
++	// Lua: db.actor.afterFirstUpdate (bind_stalker.script) and the storage
++	// manager's marshal state (alife_storage_manager.get_state().GAME_VERSION,
++	// written by CALifeStorageManager_before_save and decoded from the .scoc
++	// by CALifeStorageManager_load).
++	{
++		luabind::object globals = luabind::get_globals(ai().script_engine().lua());
++		luabind::object db = globals["db"];
++		if (db.type() == LUA_TTABLE)
++		{
++			luabind::object lua_actor = db["actor"];
++			if (lua_actor.type() != LUA_TNIL)
++			{
++				luabind::object flag = lua_actor["afterFirstUpdate"];
++				s.after_first_update = flag.type() != LUA_TNIL && luabind::object_cast<bool>(flag);
++			}
++		}
++		::luabind::functor<::luabind::object> get_state;
++		if (ai().script_engine().functor("alife_storage_manager.get_state", get_state))
++		{
++			luabind::object state = get_state();
++			if (state.type() == LUA_TTABLE)
++			{
++				luabind::object version = state["GAME_VERSION"];
++				if (version.type() == LUA_TSTRING)
++					xr_strcpy(s.marshal_version, luabind::object_cast<LPCSTR>(version));
++				else
++					xr_strcpy(s.marshal_version, "nil");
++			}
++		}
++	}
++}
++
++void write_header(FILE* out)
++{
++	if (!out)
++		return;
++	fprintf(out,
++		"label,level,level_id,game_time,alife_objects,alife_savable,level_objects,level_savable,online,"
++		"server_entities,client_objects,actor_live,actor_alive,actor_x,actor_y,actor_z,actor_health,se_actor,"
++		"se_actor_x,se_actor_y,se_actor_z,se_actor_health,se_actor_graph,se_actor_node,npc_id,npc_se,"
++		"npc_se_health,npc_se_x,npc_se_y,npc_se_z,npc_live,npc_alive,npc_health,monster_id,monster_se,"
++		"monster_se_health,monster_se_online,monster_live,binder,after_first_update,marshal_version\n");
++}
++
++void write_row(FILE* out, const CheckpointSnapshot& s)
++{
++	if (!out)
++		return;
++	fprintf(out,
++		"%s,%s,%u,%I64u,%u,%u,%u,%u,%u,%u,%u,"
++		"%d,%d,%.3f,%.3f,%.3f,%.4f,%d,%.3f,%.3f,%.3f,%.4f,%u,%u,"
++		"%u,%d,%.4f,%.3f,%.3f,%.3f,%d,%d,%.4f,%u,%d,%.4f,%d,%d,%d,%d,%s\n",
++		s.label, s.level, s.level_id, s.game_time, s.alife_objects, s.alife_savable, s.level_objects,
++		s.level_savable, s.online_objects, s.server_entities, s.client_objects,
++		s.actor_live ? 1 : 0, s.actor_alive ? 1 : 0, VPUSH(s.actor_pos), s.actor_health, s.se_actor ? 1 : 0,
++		VPUSH(s.se_actor_pos), s.se_actor_health, s.se_actor_graph, s.se_actor_node,
++		u32(s.npc_id), s.npc_se ? 1 : 0, s.npc_se_health, VPUSH(s.npc_se_pos), s.npc_live ? 1 : 0,
++		s.npc_alive ? 1 : 0, s.npc_health, u32(s.monster_id), s.monster_se ? 1 : 0, s.monster_se_health,
++		s.monster_se_online ? 1 : 0, s.monster_live ? 1 : 0, s.binder ? 1 : 0, s.after_first_update ? 1 : 0,
++		s.marshal_version);
++	fflush(out);
++}
++
++void log_snapshot(const CheckpointSnapshot& s)
++{
++	Msg("S02-T06d %s level=%s(%u) game_time=%I64u alife_objects=%u savable=%u level_objects=%u level_savable=%u "
++		"online=%u server_entities=%u client_objects=%u",
++		s.label, s.level, s.level_id, s.game_time, s.alife_objects, s.alife_savable, s.level_objects,
++		s.level_savable, s.online_objects, s.server_entities, s.client_objects);
++	Msg("S02-T06d %s actor live=%d alive=%d pos=[%.3f,%.3f,%.3f] health=%.3f | alife=%d pos=[%.3f,%.3f,%.3f] "
++		"health=%.4f graph=%u node=%u",
++		s.label, s.actor_live ? 1 : 0, s.actor_alive ? 1 : 0, VPUSH(s.actor_pos), s.actor_health,
++		s.se_actor ? 1 : 0, VPUSH(s.se_actor_pos), s.se_actor_health, s.se_actor_graph, s.se_actor_node);
++	Msg("S02-T06d %s npc=%u alife=%d health=%.4f pos=[%.3f,%.3f,%.3f] live=%d alive=%d live_health=%.4f | "
++		"monster=%u alife=%d health=%.4f online=%d live=%d | binder=%d after_first_update=%d marshal_version=%s",
++		s.label, u32(s.npc_id), s.npc_se ? 1 : 0, s.npc_se_health, VPUSH(s.npc_se_pos), s.npc_live ? 1 : 0,
++		s.npc_alive ? 1 : 0, s.npc_health, u32(s.monster_id), s.monster_se ? 1 : 0, s.monster_se_health,
++		s.monster_se_online ? 1 : 0, s.monster_live ? 1 : 0, s.binder ? 1 : 0, s.after_first_update ? 1 : 0,
++		s.marshal_version);
++}
++
++FILE* open_out(LPCSTR mode)
++{
++	FILE* out = fopen(g_out_path, mode);
++	if (!out)
++		Msg("! S02-T06d cannot open %s", g_out_path);
++	return out;
++}
++
++bool rule(bool ok, LPCSTR what)
++{
++	Msg("S02-T06d rule %s: %s", ok ? "ok  " : "FAIL", what);
++	return ok;
++}
++
++// Plain file IO on purpose: the .scoc is written by the Lua storage manager
++// through io.open, which the engine's file registry (FS) never sees, and
++// CALifeStorageManager_load reads it back the same way.
++u32 file_size(LPCSTR alias, LPCSTR name)
++{
++	string_path path;
++	FS.update_path(path, alias, name);
++	struct _stat64 info;
++	if (_stat64(path, &info) != 0)
++		return 0;
++	return u32(info.st_size);
++}
++} // namespace
++
++extern "C" bool __cdecl xrCampaignLevel_CheckpointSave(LPCSTR save_name, LPCSTR out_path)
++{
++	xr_strcpy(g_out_path, out_path);
++	xr_strcpy(g_save_name, save_name);
++	g_have_saved = false;
++	if (!g_pGameLevel || !ai().get_alife() || !g_actor || !g_actor->g_Alive())
++	{
++		Msg("! S02-T06d checkpoint: no level, ALife or alive actor");
++		return false;
++	}
++	FILE* out = open_out("w");
++	write_header(out);
++
++	CheckpointSnapshot before;
++	take(before, "before-save");
++	log_snapshot(before);
++	write_row(out, before);
++
++	// The console `save <name>` request (CCC_ALifeSave): name and
++	// update_name=1; handled synchronously by the in-memory server.
++	CTimer timer;
++	timer.Start();
++	NET_Packet packet;
++	packet.w_begin(M_SAVE_GAME);
++	packet.w_stringZ(save_name);
++	packet.w_u8(1);
++	Level().Send(packet, net_flags(TRUE));
++	const u32 save_ms = timer.GetElapsed_ms();
++
++	take(g_saved, "after-save");
++	g_have_saved = true;
++	log_snapshot(g_saved);
++	write_row(out, g_saved);
++
++	string_path scop_name, scoc_name;
++	strconcat(sizeof(scop_name), scop_name, save_name, SAVE_EXTENSION);
++	strconcat(sizeof(scoc_name), scoc_name, save_name, ".scoc");
++	const u32 scop_bytes = file_size("$game_saves$", scop_name);
++	const u32 scoc_bytes = file_size("$game_saves$", scoc_name);
++	const bool exists = CSavedGameWrapper::saved_game_exist(save_name);
++	const bool valid = exists && CSavedGameWrapper::valid_saved_game(save_name);
++	u64 header_time = 0;
++	u32 header_level = u32(-1);
++	float header_health = -1.f;
++	string64 header_level_name = "";
++	if (valid)
++	{
++		CSavedGameWrapper wrapper(save_name);
++		header_time = wrapper.game_time();
++		header_level = u32(wrapper.level_id());
++		xr_strcpy(header_level_name, wrapper.level_name());
++		header_health = wrapper.actor_health();
++	}
++	Msg("S02-T06d save %s: %u ms, scop=%u bytes scoc=%u bytes exists=%d valid=%d header game_time=%I64u level=%s(%u) "
++		"actor_health=%.4f",
++		save_name, save_ms, scop_bytes, scoc_bytes, exists ? 1 : 0, valid ? 1 : 0, header_time, header_level_name,
++		header_level, header_health);
++	if (out)
++	{
++		fprintf(out, "save,%s,%u,%I64u,%u,%u,%u,%u,%d,%d,%.4f,%s\n", save_name, save_ms, header_time, header_level,
++			scop_bytes, scoc_bytes, 0u, exists ? 1 : 0, valid ? 1 : 0, header_health, header_level_name);
++		fclose(out);
++	}
++
++	bool ok = true;
++	ok = rule(exists && valid, "the .scop exists and has the ALife save header") && ok;
++	ok = rule(scoc_bytes != 0, "the .scoc exists (Lua CALifeStorageManager_before_save ran)") && ok;
++	ok = rule(valid && header_time == g_saved.game_time, "the saved game time is the live ALife time") && ok;
++	ok = rule(valid && _abs(header_health - g_saved.se_actor_health) < 1e-4f,
++			 "the saved actor health is the ALife actor's health") && ok;
++	ok = rule(header_level == u32(-1) || header_level == g_saved.level_id,
++			 "the saved level id is the current level (when the header resolves it)") && ok;
++	ok = rule(g_saved.actor_live && g_saved.actor_alive && g_saved.se_actor, "actor present before and after") && ok;
++	ok = rule(g_saved.alife_objects == before.alife_objects && g_saved.client_objects == before.client_objects,
++			 "the save changed no object count") && ok;
++	ok = rule(g_saved.se_actor_pos.distance_to(g_saved.actor_pos) < 0.01f,
++			 "the ALife actor position matches the live actor after the save's export") && ok;
++	return ok;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_CheckpointServerCheck()
++{
++	if (!g_have_saved)
++		return false;
++	CheckpointSnapshot loaded;
++	take(loaded, "reloaded-alife");
++	log_snapshot(loaded);
++	FILE* out = open_out("a");
++	write_row(out, loaded);
++	if (out)
++		fclose(out);
++
++	const CheckpointSnapshot& a = g_saved;
++	bool ok = true;
++	ok = rule(xr_strcmp(loaded.level, a.level) == 0 && loaded.level_id == a.level_id, "same level") && ok;
++	ok = rule(loaded.alife_objects == a.alife_savable,
++			 "ALife holds exactly the objects the checkpoint wrote") && ok;
++	ok = rule(loaded.level_objects == a.level_savable,
++			 "the level registry holds exactly the level objects the checkpoint wrote") && ok;
++	ok = rule(loaded.game_time >= a.game_time && loaded.game_time - a.game_time < 2000,
++			 "the ALife clock resumed from the saved time") && ok;
++	ok = rule(loaded.se_actor && loaded.se_actor_pos.distance_to(a.se_actor_pos) < 0.01f,
++			 "the ALife actor is where the checkpoint left it") && ok;
++	ok = rule(loaded.se_actor && _abs(loaded.se_actor_health - a.se_actor_health) < 1e-4f &&
++			 loaded.se_actor_graph == a.se_actor_graph && loaded.se_actor_node == a.se_actor_node,
++			 "the ALife actor's health, graph vertex and level vertex came back") && ok;
++	ok = rule(loaded.npc_se == a.npc_se &&
++			 (!a.npc_se || (_abs(loaded.npc_se_health - a.npc_se_health) < 1e-4f &&
++				 loaded.npc_se_pos.distance_to(a.npc_se_pos) < 0.01f)),
++			 "the fixture stalker's ALife health and position came back") && ok;
++	ok = rule(loaded.monster_se == a.monster_se &&
++			 (!a.monster_se || _abs(loaded.monster_se_health - a.monster_se_health) < 1e-4f),
++			 "the combat monster's ALife entity and health came back") && ok;
++	ok = rule(xr_strcmp(loaded.marshal_version, "1.5.3") == 0,
++			 "the Lua marshal state was decoded from the .scoc (GAME_VERSION)") && ok;
++	return ok;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_CheckpointEnd(u32 ticks)
++{
++	if (!g_have_saved)
++		return false;
++	CheckpointSnapshot after;
++	take(after, "reloaded-ticked");
++	log_snapshot(after);
++	FILE* out = open_out("a");
++	write_row(out, after);
++	if (out)
++		fclose(out);
++
++	const CheckpointSnapshot& a = g_saved;
++	const float actor_gap = after.actor_live ? after.actor_pos.distance_to(a.actor_pos) : -1.f;
++	Msg("S02-T06d after %u ticks: actor gap to the checkpoint %.3f m, health %.3f vs %.3f, client objects %u vs %u",
++		ticks, actor_gap, after.actor_health, a.actor_health, after.client_objects, a.client_objects);
++	bool ok = true;
++	ok = rule(after.actor_live && after.actor_alive, "the live actor spawned alive") && ok;
++	ok = rule(after.actor_live && actor_gap < 0.25f, "the live actor stands where the checkpoint left it") && ok;
++	ok = rule(after.actor_live && _abs(after.actor_health - a.actor_health) < 0.05f,
++			 "the live actor's health came back") && ok;
++	ok = rule(after.npc_live == a.npc_live && (!a.npc_live || (after.npc_alive == a.npc_alive &&
++				 _abs(after.npc_health - a.npc_health) < 0.05f)),
++			 "the fixture stalker is back online with its health") && ok;
++	ok = rule(after.se_actor && after.se_actor_pos.distance_to(after.actor_pos) < 0.25f,
++			 "the ALife actor follows the live actor again") && ok;
++	ok = rule(after.binder && after.after_first_update,
++			 "the actor's Lua binder completed its first update after the reload") && ok;
++	ok = rule(xr_strcmp(after.marshal_version, "1.5.3") == 0, "the Lua marshal state is still the loaded one") && ok;
++	ok = rule(after.client_objects != 0 && (after.client_objects > a.client_objects
++				 ? after.client_objects - a.client_objects : a.client_objects - after.client_objects) <=
++				 _max(10u, a.client_objects / 10),
++			 "the online object count is within a tenth of the checkpoint's") && ok;
++	return ok;
++}
++
++void ClientCheckpointCaptureOnFrame()
++{
++	static const bool requested = strstr(Core.Params, "-s02-checkpoint-capture") != nullptr;
++	static u32 since = 0;
++	static bool done = false;
++	if (!requested || done || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor || Device.dwPrecacheFrame)
++		return;
++	if (!since)
++	{
++		since = Device.dwTimeGlobal;
++		return;
++	}
++	// One second of device time after the actor spawned, like the other
++	// client captures; the actor's binder has run its first update by then.
++	if (Device.dwTimeGlobal - since < 1000)
++		return;
++	done = true;
++	FS.update_path(g_out_path, "$logs$", "s02-t06d-checkpoint.csv");
++	CheckpointSnapshot loaded;
++	take(loaded, "client-loaded");
++	log_snapshot(loaded);
++	FILE* out = open_out("w");
++	write_header(out);
++	write_row(out, loaded);
++	if (out)
++		fclose(out);
++	Msg("S02-T06d client checkpoint capture written to %s", g_out_path);
++	FlushLog();
++	Console->Execute("quit");
++}
+diff --git a/src/xrGame/CampaignCheckpoint.h b/src/xrGame/CampaignCheckpoint.h
+new file mode 100644
+index 0000000..4224e62
+--- /dev/null
++++ b/src/xrGame/CampaignCheckpoint.h
+@@ -0,0 +1,88 @@
++#pragma once
++
++// S02-T06d: native checkpoint round-trip on the campaign server.
++//
++// Save: the fixture sends the M_SAVE_GAME packet through CLevel::Send, which
++// is what the console `save` command (console_commands.cpp, CCC_ALifeSave)
++// and the autosave manager send; with the in-memory server the packet is
++// handled at once (xrServer::OnMessage → game_sv_Single::save_game →
++// CALifeStorageManager::save: ClientSend, ClientSave, the Lua
++// alife_storage_manager callbacks, then the .scop). The screenshot and the
++// "game saved" UI static the command adds are presentation and are not sent.
++//
++// Reload: the smoke driver stops the level (xrCampaignLevel_Stop, the
++// KERNEL:disconnect sequence) and starts it again from the written save
++// (xrCampaignLevel_Start, KERNEL:start), the way CLevel::MakeReconnect
++// restarts a game whose level differs; the same-level quick load
++// (Game:QuickLoad → restart_simulator) is not used so that the whole level
++// context is rebuilt from the checkpoint.
++//
++// The comparison is between a snapshot taken right after the save (the
++// state the checkpoint was written from) and snapshots taken after the ALife
++// of the restarted level loaded (before any tick) and after its first ticks.
++
++// Snapshot of the counters the smoke already reports plus the fixture
++// actors, taken from the live level and the ALife registries.
++struct CheckpointSnapshot
++{
++	string64 label;
++	string64 level;
++	u32 level_id;
++	u64 game_time;
++	u32 alife_objects;
++	u32 alife_savable; // what CALifeObjectRegistry::save will write
++	u32 level_objects;
++	u32 level_savable;
++	u32 online_objects;
++	u32 server_entities;
++	u32 client_objects;
++	// the live actor and its ALife entity
++	bool actor_live;
++	bool actor_alive;
++	Fvector actor_pos;
++	float actor_health;
++	bool se_actor;
++	Fvector se_actor_pos;
++	float se_actor_health;
++	u32 se_actor_graph;
++	u32 se_actor_node;
++	// the fixture stalker (activity/combat fixtures) and the combat monster
++	u16 npc_id;
++	bool npc_se;
++	float npc_se_health;
++	Fvector npc_se_pos;
++	bool npc_live;
++	bool npc_alive;
++	float npc_health;
++	u16 monster_id;
++	bool monster_se;
++	float monster_se_health;
++	bool monster_se_online;
++	bool monster_live;
++	// Lua: the actor binder's first update ran, and the marshal state the
++	// storage manager script keeps carries the game version it saved
++	bool binder;
++	bool after_first_update;
++	string64 marshal_version;
++};
++
++// Sends the save, checks the .scop and .scoc exist and the .scop header
++// (CSavedGameWrapper) matches the live state, writes the snapshot rows to
++// out_path and keeps the post-save snapshot for the comparison.
++extern "C" bool __cdecl xrCampaignLevel_CheckpointSave(LPCSTR save_name, LPCSTR out_path);
++// After the restarted level's server stages (ALife loaded, no tick yet):
++// the ALife registries must hold what the checkpoint wrote.
++extern "C" bool __cdecl xrCampaignLevel_CheckpointServerCheck();
++// After the restarted level's client stages and first ticks: the live
++// actors must be back where the checkpoint left them and the Lua state
++// must have come through the .scoc.
++extern "C" bool __cdecl xrCampaignLevel_CheckpointEnd(u32 ticks);
++
++// Normal client entry: with -s02-checkpoint-capture the client, started from
++// a checkpoint the campaign server wrote, takes the same snapshot one second
++// after its actor spawned (label client-loaded), writes it to
++// $logs$/s02-t06d-checkpoint.csv and quits. -s02-checkpoint-npc <id> and
++// -s02-checkpoint-monster <id> name the fixture stalker and the combat
++// monster the server's row refers to (the client ran neither fixture).
++// tools/compare-checkpoint-capture.py compares the rows.
++void ClientCheckpointCaptureOnFrame();
+diff --git a/src/xrGame/CampaignCombatCapture.cpp b/src/xrGame/CampaignCombatCapture.cpp
+index 757e355..b94aedc 100644
+--- a/src/xrGame/CampaignCombatCapture.cpp
++++ b/src/xrGame/CampaignCombatCapture.cpp
+@@ -526,6 +526,11 @@ void CombatTraceDeath(u16 victim, u16 killer)
+ static CombatFixtureSummary g_server_summary;
+ static string_path g_server_out;
+ 
++u16 CombatFixtureMonsterId()
++{
++	return g_server_summary.monster_id ? g_server_summary.monster_id : no_id;
++}
++
+ extern "C" bool __cdecl xrCampaignLevel_CombatFixtureBegin(LPCSTR out_path)
+ {
+ 	xr_strcpy(g_server_out, out_path);
+diff --git a/src/xrGame/CampaignCombatCapture.h b/src/xrGame/CampaignCombatCapture.h
+index 61498f0..ae254be 100644
+--- a/src/xrGame/CampaignCombatCapture.h
++++ b/src/xrGame/CampaignCombatCapture.h
+@@ -161,6 +161,10 @@ bool CombatFixtureDone();
+ // one of the two died.
+ bool CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, CombatFixtureSummary& summary);
+ 
++// The monster the server's fixture spawned (u16(-1) before it ran), for the
++// S02-T06d checkpoint comparison.
++u16 CombatFixtureMonsterId();
++
+ // Campaign server entries, used by the smoke after the actor position check.
+ extern "C" bool __cdecl xrCampaignLevel_CombatFixtureBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_CombatFixtureTick();
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index d027ce4..3eaa178 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -7,6 +7,7 @@
+ #include "CampaignPhysicsCapture.h"
+ #include "CampaignActivityCapture.h"
+ #include "CampaignCombatCapture.h"
++#include "CampaignCheckpoint.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -945,6 +946,8 @@ void CGamePersistent::OnFrame()
+ 	ClientActivityCaptureOnFrame();
+ 	// S02-T06c: opt-in combat fixture (spawn a monster, observe the fight), then quit.
+ 	ClientCombatCaptureOnFrame();
++	// S02-T06d: opt-in checkpoint capture (record the state loaded from a server checkpoint), then quit.
++	ClientCheckpointCaptureOnFrame();
+ }
+ 
+ void CGamePersistent::ImGui_OnRender(LPCSTR name)
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 86a6c79..e83a241 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2003,6 +2003,7 @@
+     <ClInclude Include="CampaignActivityPolicy.h" />
+     <ClInclude Include="CampaignHearingCapture.h" />
+     <ClInclude Include="CampaignCombatCapture.h" />
++    <ClInclude Include="CampaignCheckpoint.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4358,6 +4359,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignCheckpoint.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

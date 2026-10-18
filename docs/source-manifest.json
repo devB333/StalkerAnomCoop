@@ -81,6 +81,10 @@
     {
       "path": "patches/engine/0018-combat-fixture.patch",
       "sha256": "57404099ddc14c53531f695ad84591ee3c9e74b91cf2b83e9015bf306fa8c76a"
+    },
+    {
+      "path": "patches/engine/0019-checkpoint-round-trip.patch",
+      "sha256": "02d97fd50285f035ea3f499328741b6660747b53c8d7eecedf0140adf8250bdd"
     }
   ],
   "submodules": [

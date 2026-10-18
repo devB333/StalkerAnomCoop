@@ -34,7 +34,7 @@ but the campaign startup smoke exits 1 while loading `system.ltx` during
 - Client MSBuild log: success, 0 errors. Campaign MSBuild log: success, 0 errors.
   The campaign compile command carries `XR_CAMPAIGN_SERVER` with single-player
   and ALife code included. The first honest smoke result is failure at settings.
-- `docs/session-handoff-before-S02-T02.md` preserves the previous S02-T01
+- `docs/snapshot-before-S02-T02.md` preserves the previous S02-T01
   handoff. Root repository files remain uncommitted/untracked; preserve them.
 
 Stage 0/G00 and Stage 1/G01 remain accepted for development with the two

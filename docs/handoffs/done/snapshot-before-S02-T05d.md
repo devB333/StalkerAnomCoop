@@ -66,4 +66,4 @@ Preserve:
 - the saved-game fixture
 
 The two G01 waivers are unchanged.
-Previous handoff: [before S02-T05](session-handoff-before-S02-T05.md).
+Previous handoff: [before S02-T05](snapshot-before-S02-T05.md).

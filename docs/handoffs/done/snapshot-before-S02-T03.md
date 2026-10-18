@@ -54,4 +54,4 @@ The build wrapper now captures its own .NET process exit code reliably.
 
 Preserve the original installation, reference checkout, accepted source-client
 runtime, and saved-game fixture. G01's two explicit waivers remain unchanged.
-Previous handoff: [before settings fix](session-handoff-before-settings-fix.md).
+Previous handoff: [before settings fix](snapshot-before-settings-fix.md).

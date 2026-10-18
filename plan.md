@@ -893,7 +893,7 @@ End a session after a coherent milestone, a necessary focus change, or when cont
 
 ## G. Persistent session handoff
 
-`docs/handoffs/current/session-handoff.md` is the short entry point for the next session; this plan remains the authoritative roadmap. Archived handoffs stay in `docs/handoffs/current/` while the step they point at is open and move to `docs/handoffs/done/` once it is `Completed`. Update both at every future implementation-session end, including blocked sessions. The handoff must contain:
+`docs/handoffs/current/session-handoff.md` is the short entry point for the next session; this plan remains the authoritative roadmap. It is the only file in `docs/handoffs/current/`. Before it is rewritten, the old version is copied to `docs/handoffs/done/snapshot-before-<what-comes-next>.md`; snapshots are history only. Update both at every future implementation-session end, including blocked sessions. The handoff must contain:
 
 - Current milestone/gate, completed task IDs and any in-progress or blocked task IDs.
 - Files changed, root/engine revisions or reproducible patch locations, and pre-existing changes to preserve.

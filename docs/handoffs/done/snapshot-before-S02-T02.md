@@ -37,7 +37,7 @@ is read-only; Ghidra databases remain preserved.
 This session added the map, fixture manifest, validation report and verifier;
 updated `plan.md`, this handoff, README, AGENTS baseline status and the historical
 roadmap's current-status pointer. Previous handoff preserved verbatim in
-[session-handoff-before-S02-T01.md](session-handoff-before-S02-T01.md).
+[snapshot-before-S02-T01.md](snapshot-before-S02-T01.md).
 
 ## Next: S02-T02
 

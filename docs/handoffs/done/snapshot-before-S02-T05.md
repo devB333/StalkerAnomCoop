@@ -59,4 +59,4 @@ to the user for a manual run, so skip it.
 Preserve the original installation, reference checkout, accepted source-client
 runtime and saved-game fixture. The two G01 waivers are unchanged. Root files are
 still uncommitted.
-Previous handoff: [before S02-T03](session-handoff-before-S02-T03.md).
+Previous handoff: [before S02-T03](snapshot-before-S02-T03.md).

@@ -84,4 +84,4 @@ G02 is In Progress. Stage 2 status (details in `plan.md`):
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
-Previous handoff: [before the T04c client comparison](session-handoff-before-S02-T04c-walk.md).
+Previous snapshot: [before the T04c client comparison](../done/snapshot-before-S02-T04c-client-comparison.md).

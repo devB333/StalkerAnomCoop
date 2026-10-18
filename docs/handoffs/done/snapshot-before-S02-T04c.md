@@ -79,4 +79,4 @@ byte (`builds/logs/patch-reconstruction-12.json`). Next patch:
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
-Previous handoff: [before S02-T04b](session-handoff-before-S02-T04b.md).
+Previous handoff: [before S02-T04b](snapshot-before-S02-T04b.md).

@@ -80,4 +80,4 @@ Patches 0001–0009 rebuild all 44 changed files byte for byte. Use
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
-Previous handoff: [before S02-T05d](session-handoff-before-S02-T05d.md).
+Previous handoff: [before S02-T05d](snapshot-before-S02-T05d.md).

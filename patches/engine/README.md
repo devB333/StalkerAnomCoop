@@ -99,6 +99,17 @@ times (`SLevelFrameTiming`, measured on both products). The client is unchanged.
 actor position check: the actor is teleported 3 m as the script API does, 50
 ticks run, and the live and ALife positions are compared (stage
 `campaign-actor-position-passed`). Server smoke only; no behaviour changes.
+`0018-combat-fixture.patch` (S02-T06c) adds the shared combat fixture
+(`xrGame/CampaignCombatCapture.{h,cpp}`): one monster is spawned through the
+native ALife spawn path near the fixture stalker, the switch manager brings it
+online, the actor's god mode is set for the fixture's duration, and the fight
+is observed through new observation hooks (every bullet the bullet manager
+adds, every hit event it commits, every `CEntityAlive::Hit` and `Die`) plus
+the stalker's visual memory and enemy selection and the monster's enemy
+manager; by the campaign server after its actor position check (stage
+`campaign-combat-passed`) and by the normal client with the opt-in
+`-s02-combat-capture` flag. The hooks only count and record; no combat
+behaviour changes.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

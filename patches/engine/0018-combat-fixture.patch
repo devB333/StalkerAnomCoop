@@ -1,0 +1,989 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index e6d53e0..6319a19 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -996,6 +996,10 @@ extern "C" void __cdecl xrCampaignLevel_HearingFixtureTick();
+ extern "C" bool __cdecl xrCampaignLevel_HearingFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+ extern "C" bool __cdecl xrCampaignLevel_ActorPositionBegin(float offset_m);
+ extern "C" bool __cdecl xrCampaignLevel_ActorPositionEnd(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_CombatFixtureTick();
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureDone();
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1263,6 +1267,9 @@ u32 g_campaign_physics_ticks = 400;
+ // Tick budget for the activity fixture (S02-T04c): 3000 ticks are 60 s, more
+ // than its default 10 s observation plus 30 s walk.
+ u32 g_campaign_activity_ticks = 3000;
++// Tick budget for the combat fixture (S02-T06c): 3500 ticks are 70 s, more
++// than its own online wait (20 s) plus engagement budget (45 s).
++u32 g_campaign_combat_ticks = 3500;
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -1842,6 +1849,41 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 17;
+                     }
+                 }
++                if (result == 0)
++                {
++                    // S02-T06c: combat between NPCs. The fixture spawns one
++                    // monster near the fixture stalker through the native
++                    // ALife spawn, waits for it to switch online and records
++                    // vision, enemy selection, bullets, impacts, hits and
++                    // deaths until one of them dies or its budget runs out.
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s02-t06c-combat.csv");
++                    bool ok = xrCampaignLevel_CombatFixtureBegin(capture);
++                    if (ok)
++                    {
++                        const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                        const u32 wall_before = g_campaign_wall.GetElapsed_ms();
++                        g_campaign_clock->Resume(wall_before);
++                        while (!xrCampaignLevel_CombatFixtureDone() &&
++                            g_campaign_clock->Stats().ticks < ticks_before + g_campaign_combat_ticks)
++                        {
++                            RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                            xrCampaignLevel_CombatFixtureTick();
++                        }
++                        const u32 wall_after = g_campaign_wall.GetElapsed_ms();
++                        g_campaign_clock->Pause(wall_after);
++                        const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                        ok = xrCampaignLevel_CombatFixtureEnd(ran, ran * g_campaign_clock->TickMs(),
++                            wall_after - wall_before);
++                    }
++                    if (ok)
++                        stage("campaign-combat-passed");
++                    else
++                    {
++                        stage("campaign-combat-failed");
++                        result = 18;
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrGame/CampaignActivityCapture.cpp b/src/xrGame/CampaignActivityCapture.cpp
+index e3f831a..8bf3397 100644
+--- a/src/xrGame/CampaignActivityCapture.cpp
++++ b/src/xrGame/CampaignActivityCapture.cpp
+@@ -451,6 +451,11 @@ u16 ActivityFixtureNpcId()
+ 	return g_fixture.id;
+ }
+ 
++bool ActivityFixtureChooseVertex(u32 start, float distance, u32& dest, Fvector& position)
++{
++	return choose_destination(start, distance, dest, position);
++}
++
+ bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSummary& summary)
+ {
+ 	Fixture& f = g_fixture;
+diff --git a/src/xrGame/CampaignActivityCapture.h b/src/xrGame/CampaignActivityCapture.h
+index 69b8dba..e31299d 100644
+--- a/src/xrGame/CampaignActivityCapture.h
++++ b/src/xrGame/CampaignActivityCapture.h
+@@ -82,6 +82,10 @@ bool ActivityFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, ActivityFixtureSumm
+ // (0 observe, 1 walk) and the walked stalker's id.
+ int ActivityFixturePhase();
+ u16 ActivityFixtureNpcId();
++// S02-T06c: the fixture's breadth-first search over the level graph, for the
++// combat fixture's fallback spawn vertex: the first accessible vertex at least
++// `distance` m from `start`.
++bool ActivityFixtureChooseVertex(u32 start, float distance, u32& dest, Fvector& position);
+ 
+ // Campaign server entries, used by the smoke after the physics fixture.
+ extern "C" bool __cdecl xrCampaignLevel_ActivityFixtureBegin(LPCSTR out_path);
+diff --git a/src/xrGame/CampaignCombatCapture.cpp b/src/xrGame/CampaignCombatCapture.cpp
+new file mode 100644
+index 0000000..757e355
+--- /dev/null
++++ b/src/xrGame/CampaignCombatCapture.cpp
+@@ -0,0 +1,599 @@
++#include "pch_script.h"
++#include "CampaignCombatCapture.h"
++#include "CampaignActivityCapture.h"
++
++// S02-T06c: the only thing the fixture does to the world is spawn one
++// monster the way a script would (CALifeSimulatorBase::spawn_item) and set
++// the actor's god mode for its duration, so a stray bite cannot end the run
++// in a game-over. Seeing, selecting an enemy, shooting, flying, hitting and
++// dying are the engine's own: the hooks at the bottom of this file only
++// count and record what CBulletManager and CEntityAlive do.
++
++#include "Level.h"
++#include "Actor.h"
++#include "actor_flags.h"
++#include "ai/stalker/ai_stalker.h"
++#include "ai/monsters/basemonster/base_monster.h"
++#include "memory_manager.h"
++#include "enemy_manager.h"
++#include "visual_memory_manager.h"
++#include "stalker_planner.h"
++#include "ai_object_location.h"
++#include "ai_space.h"
++#include "level_graph.h"
++#include "alife_simulator.h"
++#include "alife_graph_registry.h"
++#include "../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
++#include "../xrEngine/xr_object.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++
++SCombatCounters g_combat_counters = {};
++SCombatTrace* g_combat_trace = nullptr;
++
++namespace
++{
++const u16 default_npc_id = 19409; // the activity fixture's stalker, 0.6 m from the saved actor
++// A boar: it charges, and it is a big enough target for the stalker's rifle
++// (smoke-77 put a dog_weak in front of the stalker, which fired 11 rounds
++// past it before the dog died of a physics strike against the stalker's
++// character controller).
++LPCSTR default_section = "boar_normal";
++const float default_distance = 12.f;
++const u32 default_budget_ms = 45000;
++const u32 default_online_wait_ms = 20000;
++const u16 no_id = u16(-1);
++
++struct Fixture
++{
++	FILE* out;
++	bool running;
++	u16 npc_id;
++	u16 monster_id;
++	string64 section;
++	float distance;
++	u32 budget_ms;
++	u32 online_wait_ms;
++	u32 begin_time;
++	u32 online_time;
++	u32 ticks;
++	int phase; // 0 waiting for the monster's client object, 1 engaged
++	SCombatCounters begin;
++	SCombatTrace trace;
++	float npc_health_begin;
++	float monster_health_begin;
++	float monster_health_min;
++	int online_tick, enemy_tick, seen_tick, monster_enemy_tick, shot_tick, impact_tick, hit_tick, death_tick;
++	u32 npc_bullets, monster_impacts, monster_hits, monster_fire_hits, npc_hits, deaths;
++	u16 dead_id, killer_id;
++	bool godmode_was;
++	bool finite;
++};
++
++Fixture g_fixture;
++
++u32 option_u32(LPCSTR name, u32 fallback)
++{
++	u32 value = fallback;
++	LPCSTR at = strstr(Core.Params, name);
++	if (at && sscanf_s(at + xr_strlen(name), "%u", &value) != 1)
++		value = fallback;
++	return value;
++}
++
++float option_float(LPCSTR name, float fallback)
++{
++	float value = fallback;
++	LPCSTR at = strstr(Core.Params, name);
++	if (at && sscanf_s(at + xr_strlen(name), "%f", &value) != 1)
++		value = fallback;
++	return value;
++}
++
++void option_string(LPCSTR name, LPCSTR fallback, string64& value)
++{
++	xr_strcpy(value, fallback);
++	LPCSTR at = strstr(Core.Params, name);
++	if (at)
++		sscanf_s(at + xr_strlen(name), "%63s", value, u32(sizeof(value)));
++}
++
++void check(float value)
++{
++	if (!_valid(value))
++		g_fixture.finite = false;
++}
++
++// The participants are looked up every tick: dead ones still exist until
++// the engine destroys them, and a destroyed one reads as absent.
++CAI_Stalker* find_stalker(u16 id)
++{
++	CObject* object = Level().Objects.net_Find(id);
++	return object && !object->getDestroy() ? smart_cast<CAI_Stalker*>(object) : nullptr;
++}
++
++CBaseMonster* find_monster(u16 id)
++{
++	CObject* object = Level().Objects.net_Find(id);
++	return object && !object->getDestroy() ? smart_cast<CBaseMonster*>(object) : nullptr;
++}
++
++int brain_action(CAI_Stalker* npc)
++{
++	return npc && npc->brain().initialized() ? int(npc->brain().current_action_id()) : -1;
++}
++
++u16 npc_enemy(CAI_Stalker* npc)
++{
++	const CEntityAlive* enemy = npc ? npc->memory().enemy().selected() : nullptr;
++	return enemy ? enemy->ID() : no_id;
++}
++
++u16 monster_enemy(CBaseMonster* monster)
++{
++	const CEntityAlive* enemy = monster ? monster->EnemyMan.get_enemy() : nullptr;
++	return enemy ? enemy->ID() : no_id;
++}
++
++void log_summary(LPCSTR prefix, const CombatFixtureSummary& s, bool ok, LPCSTR out)
++{
++	Msg("%s npc=%u monster=%u ticks=%u sim_ms=%u wall_ms=%u online_tick=%d enemy_tick=%d seen_tick=%d "
++		"monster_enemy_tick=%d shot_tick=%d impact_tick=%d hit_tick=%d death_tick=%d npc_bullets=%u "
++		"monster_impacts=%u monster_hits=%u monster_fire_hits=%u npc_hits=%u npc_health=%.3f monster_health=%.3f "
++		"deaths=%u dead=%u killer=%u finite=%d ok=%d out=%s",
++		prefix, u32(s.npc_id), u32(s.monster_id), s.ticks, s.sim_ms, s.wall_ms, s.online_tick, s.enemy_tick,
++		s.seen_tick, s.monster_enemy_tick, s.shot_tick, s.impact_tick, s.hit_tick, s.death_tick, s.npc_bullets,
++		s.monster_impacts, s.monster_hits, s.monster_fire_hits, s.npc_hits, s.npc_health, s.monster_health, s.deaths,
++		u32(s.dead_id), u32(s.killer_id), s.finite ? 1 : 0, ok ? 1 : 0, out);
++	if (!ok)
++		Msg("! %s missing: %s", prefix, s.missing);
++}
++
++// A level vertex about `distance` m from the stalker on the side away from
++// the actor: the position's own vertex when the AI map has one there,
++// otherwise the activity fixture's breadth-first search from the stalker's
++// vertex (reachable by construction, direction not guaranteed).
++bool choose_spawn_vertex(CAI_Stalker* npc, const Fvector& actor, float distance, u32& vertex, Fvector& position)
++{
++	const CLevelGraph& graph = ai().level_graph();
++	Fvector away;
++	away.sub(npc->Position(), actor);
++	away.y = 0.f;
++	if (away.magnitude() < 0.1f)
++		away.set(1.f, 0.f, 0.f);
++	away.normalize();
++	Fvector target;
++	target.mad(npc->Position(), away, distance);
++	if (graph.valid_vertex_position(target))
++	{
++		const u32 at = graph.vertex_id(target);
++		if (graph.valid_vertex_id(at) && graph.is_accessible(at))
++		{
++			vertex = at;
++			position = graph.vertex_position(at);
++			return true;
++		}
++	}
++	return ActivityFixtureChooseVertex(npc->ai_location().level_vertex_id(), distance, vertex, position);
++}
++} // namespace
++
++bool CombatFixtureBegin(LPCSTR out_path, CombatFixtureSummary& summary)
++{
++	ZeroMemory(&summary, sizeof(summary));
++	summary.finite = true;
++	summary.online_tick = summary.enemy_tick = summary.seen_tick = summary.monster_enemy_tick = -1;
++	summary.shot_tick = summary.impact_tick = summary.hit_tick = summary.death_tick = -1;
++	summary.dead_id = summary.killer_id = no_id;
++	Fixture& f = g_fixture;
++	f = Fixture();
++	f.finite = true;
++	f.online_tick = f.enemy_tick = f.seen_tick = f.monster_enemy_tick = -1;
++	f.shot_tick = f.impact_tick = f.hit_tick = f.death_tick = -1;
++	f.dead_id = f.killer_id = no_id;
++	f.monster_id = no_id;
++	f.npc_id = u16(option_u32("-s02-activity-npc ", default_npc_id));
++	option_string("-s02-combat-section ", default_section, f.section);
++	f.distance = option_float("-s02-combat-distance ", default_distance);
++	f.budget_ms = option_u32("-s02-combat-ms ", default_budget_ms);
++	f.online_wait_ms = option_u32("-s02-combat-online-ms ", default_online_wait_ms);
++	summary.npc_id = f.npc_id;
++
++	if (!g_pGameLevel || !g_pGameLevel->bReady || !ai().get_alife() || !ai().get_level_graph())
++	{
++		xr_strcpy(summary.missing, "no loaded level, ALife or level graph");
++		return false;
++	}
++	CActor* actor = g_actor;
++	const CSE_ALifeCreatureActor* se_actor = ai().alife().graph().actor();
++	if (!actor || !actor->g_Alive() || !se_actor)
++	{
++		xr_strcpy(summary.missing, "no alive actor or no ALife actor");
++		return false;
++	}
++	CAI_Stalker* npc = find_stalker(f.npc_id);
++	if (!npc || !npc->g_Alive())
++	{
++		xr_sprintf(summary.missing, "fixture stalker %u is not an alive stalker on the level", u32(f.npc_id));
++		return false;
++	}
++	if (!pSettings->section_exist(f.section) || !pSettings->line_exist(f.section, "class"))
++	{
++		xr_sprintf(summary.missing, "section %s does not exist or has no class", f.section);
++		return false;
++	}
++	u32 vertex = u32(-1);
++	Fvector position;
++	if (!choose_spawn_vertex(npc, actor->Position(), f.distance, vertex, position))
++	{
++		xr_sprintf(summary.missing, "no accessible level vertex %.1f m from stalker %u", f.distance, u32(f.npc_id));
++		return false;
++	}
++	FILE* out = fopen(out_path, "w");
++	if (!out)
++	{
++		xr_sprintf(summary.missing, "cannot write %s", out_path);
++		return false;
++	}
++
++	// The native spawn: a server entity on the level's game vertex, registered
++	// with ALife; the switch manager brings it online when it reaches it.
++	// ai_space hands out the simulator as const; the spawn mutates it the way
++	// the Lua alife() global (a mutable pointer to the same object) does.
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_Abstract* entity = alife->spawn_item(f.section, position, vertex, se_actor->m_tGraphID, no_id);
++	if (!entity || !smart_cast<CSE_ALifeMonsterBase*>(entity))
++	{
++		xr_sprintf(summary.missing, "section %s did not spawn a monster entity", f.section);
++		fclose(out);
++		return false;
++	}
++	f.monster_id = entity->ID;
++	summary.monster_id = f.monster_id;
++
++	f.out = out;
++	f.godmode_was = psActorFlags.test(AF_GODMODE);
++	psActorFlags.set(AF_GODMODE, TRUE);
++	f.begin = g_combat_counters;
++	g_combat_trace = &f.trace;
++	f.begin_time = Device.dwTimeGlobal;
++	f.npc_health_begin = npc->GetfHealth();
++	f.monster_health_begin = -1.f;
++	f.monster_health_min = -1.f;
++
++	fprintf(out, "meta,%u,%u,%s,%d,%u,%u,%s,%.6f,%.6f,%.6f,%.4f,%s,%u,%.6f,%.6f,%.6f,%u,%.2f,%u,%u,%d,%u,%u,%u,%u,%u\n",
++		Device.dwFrame, Device.dwTimeGlobal, *Level().name(), g_activity_policy.enabled ? 1 : 0,
++		u32(g_activity_policy.anchors.size()), u32(f.npc_id), npc->cName().c_str(), VPUSH(npc->Position()),
++		f.npc_health_begin, f.section, u32(f.monster_id), VPUSH(position), vertex,
++		npc->Position().distance_to(position), f.budget_ms, f.online_wait_ms, 1, f.begin.bullets,
++		f.begin.impacts_dynamic, f.begin.impacts_static, f.begin.hits, f.begin.deaths);
++	Msg("S02-T06c combat: spawned %s id=%u at [%.2f,%.2f,%.2f] vertex %u, %.2f m from stalker %u, actor godmode set",
++		f.section, u32(f.monster_id), VPUSH(position), vertex, npc->Position().distance_to(position), u32(f.npc_id));
++	f.running = true;
++	return true;
++}
++
++void CombatFixtureTick()
++{
++	Fixture& f = g_fixture;
++	if (!f.running)
++		return;
++	++f.ticks;
++	CAI_Stalker* npc = find_stalker(f.npc_id);
++	CBaseMonster* monster = find_monster(f.monster_id);
++
++	if (f.phase == 0 && monster)
++	{
++		f.phase = 1;
++		f.online_tick = int(f.ticks);
++		f.online_time = Device.dwTimeGlobal;
++		f.monster_health_begin = monster->GetfHealth();
++		f.monster_health_min = f.monster_health_begin;
++		Msg("S02-T06c combat: monster %u online at tick %u, health %.3f, %.2f m from stalker %u", u32(f.monster_id),
++			f.ticks, f.monster_health_begin, npc ? npc->Position().distance_to(monster->Position()) : -1.f,
++			u32(f.npc_id));
++	}
++
++	for (const CombatBulletRecord& r : f.trace.bullets)
++	{
++		if (r.sender == f.npc_id)
++		{
++			++f.npc_bullets;
++			if (f.shot_tick < 0)
++				f.shot_tick = int(f.ticks);
++		}
++		check(r.speed);
++		check(r.position.x);
++		check(r.position.y);
++		check(r.position.z);
++		fprintf(f.out, "bullet,%u,%d,%u,%u,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%d\n", f.ticks, f.phase, r.frame,
++			u32(r.sender), u32(r.weapon), VPUSH(r.position), VPUSH(r.direction), r.speed, r.hit_type);
++	}
++	for (const CombatImpactRecord& r : f.trace.impacts)
++	{
++		if (r.dynamic && r.target == f.monster_id)
++		{
++			++f.monster_impacts;
++			if (f.impact_tick < 0)
++				f.impact_tick = int(f.ticks);
++		}
++		fprintf(f.out, "impact,%u,%d,%u,%u,%u,%d,%u,%.6f,%.6f,%.6f\n", f.ticks, f.phase, r.frame, u32(r.sender),
++			u32(r.target), r.dynamic ? 1 : 0, u32(r.material), VPUSH(r.point));
++	}
++	for (const CombatHitRecord& r : f.trace.hits)
++	{
++		if (r.victim == f.monster_id)
++		{
++			++f.monster_hits;
++			if (r.who == f.npc_id && r.hit_type == int(ALife::eHitTypeFireWound))
++				++f.monster_fire_hits;
++			if (f.hit_tick < 0)
++				f.hit_tick = int(f.ticks);
++			if (r.health_after < f.monster_health_min)
++				f.monster_health_min = r.health_after;
++		}
++		else if (r.victim == f.npc_id)
++			++f.npc_hits;
++		check(r.power);
++		check(r.health_after);
++		fprintf(f.out, "hit,%u,%d,%u,%u,%u,%.4f,%d,%u,%.4f\n", f.ticks, f.phase, r.frame, u32(r.victim), u32(r.who),
++			r.power, r.hit_type, u32(r.bone), r.health_after);
++	}
++	for (const CombatDeathRecord& r : f.trace.deaths)
++	{
++		if (r.victim == f.monster_id || r.victim == f.npc_id)
++		{
++			++f.deaths;
++			if (f.death_tick < 0)
++			{
++				f.death_tick = int(f.ticks);
++				f.dead_id = r.victim;
++				f.killer_id = r.killer;
++			}
++		}
++		fprintf(f.out, "death,%u,%d,%u,%u,%u\n", f.ticks, f.phase, r.frame, u32(r.victim), u32(r.killer));
++	}
++	f.trace.bullets.clear();
++	f.trace.impacts.clear();
++	f.trace.hits.clear();
++	f.trace.deaths.clear();
++
++	const u16 enemy = npc_enemy(npc);
++	const bool sees = npc && monster && npc->memory().visual().visible_now(monster);
++	const u16 enemy_of_monster = monster_enemy(monster);
++	if (enemy == f.monster_id && f.enemy_tick < 0)
++		f.enemy_tick = int(f.ticks);
++	if (sees && f.seen_tick < 0)
++		f.seen_tick = int(f.ticks);
++	if (enemy_of_monster != no_id && f.monster_enemy_tick < 0)
++		f.monster_enemy_tick = int(f.ticks);
++	const float distance = npc && monster ? npc->Position().distance_to(monster->Position()) : -1.f;
++	check(distance);
++	const SCombatCounters& c = g_combat_counters;
++	fprintf(f.out, "tick,%u,%d,%u,%u,%d,%d,%.4f,%d,%.4f,%.3f,%u,%d,%u,%d,%u,%u,%u,%u,%u\n", f.ticks, f.phase,
++		Device.dwFrame, Device.dwTimeGlobal, monster ? 1 : 0, npc && npc->g_Alive() ? 1 : 0,
++		npc ? npc->GetfHealth() : -1.f, monster && monster->g_Alive() ? 1 : 0, monster ? monster->GetfHealth() : -1.f,
++		distance, u32(enemy), sees ? 1 : 0, u32(enemy_of_monster), brain_action(npc), c.bullets - f.begin.bullets,
++		c.impacts_dynamic - f.begin.impacts_dynamic, c.impacts_static - f.begin.impacts_static, c.hits - f.begin.hits,
++		c.deaths - f.begin.deaths);
++
++	if (f.phase == 0)
++	{
++		if (Device.dwTimeGlobal - f.begin_time >= f.online_wait_ms)
++			f.running = false;
++	}
++	else if (f.death_tick >= 0 || Device.dwTimeGlobal - f.online_time >= f.budget_ms)
++		f.running = false;
++}
++
++bool CombatFixtureDone()
++{
++	return !g_fixture.running;
++}
++
++bool CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, CombatFixtureSummary& summary)
++{
++	Fixture& f = g_fixture;
++	if (!f.out)
++	{
++		if (!summary.missing[0])
++			xr_strcpy(summary.missing, "fixture was not started");
++		return false;
++	}
++	f.running = false;
++	g_combat_trace = nullptr;
++	psActorFlags.set(AF_GODMODE, f.godmode_was);
++	CAI_Stalker* npc = find_stalker(f.npc_id);
++	CBaseMonster* monster = find_monster(f.monster_id);
++
++	summary.ticks = f.ticks;
++	summary.sim_ms = sim_ms;
++	summary.wall_ms = wall_ms;
++	summary.online_tick = f.online_tick;
++	summary.enemy_tick = f.enemy_tick;
++	summary.seen_tick = f.seen_tick;
++	summary.monster_enemy_tick = f.monster_enemy_tick;
++	summary.shot_tick = f.shot_tick;
++	summary.impact_tick = f.impact_tick;
++	summary.hit_tick = f.hit_tick;
++	summary.death_tick = f.death_tick;
++	summary.npc_bullets = f.npc_bullets;
++	summary.monster_impacts = f.monster_impacts;
++	summary.monster_hits = f.monster_hits;
++	summary.monster_fire_hits = f.monster_fire_hits;
++	summary.npc_hits = f.npc_hits;
++	summary.deaths = f.deaths;
++	summary.dead_id = f.dead_id;
++	summary.killer_id = f.killer_id;
++	summary.npc_health = npc ? npc->GetfHealth() : -1.f;
++	summary.monster_health = monster ? monster->GetfHealth() : -1.f;
++	summary.finite = f.finite;
++
++	if (f.online_tick < 0)
++		xr_sprintf(summary.missing, "monster %u (%s) never came online", u32(f.monster_id), f.section);
++	else if (f.enemy_tick < 0)
++		xr_sprintf(summary.missing, "stalker %u never selected monster %u as its enemy", u32(f.npc_id),
++			u32(f.monster_id));
++	else if (f.monster_enemy_tick < 0)
++		xr_sprintf(summary.missing, "monster %u never selected an enemy", u32(f.monster_id));
++	else if (!f.npc_bullets)
++		xr_sprintf(summary.missing, "stalker %u fired no bullet", u32(f.npc_id));
++	else if (!f.monster_impacts)
++		xr_sprintf(summary.missing, "no bullet impact on monster %u", u32(f.monster_id));
++	else if (!f.monster_fire_hits || f.monster_health_min >= f.monster_health_begin)
++		xr_sprintf(summary.missing,
++			"monster %u received %u hits (%u fire wounds from the stalker) and its health went %.3f -> %.3f",
++			u32(f.monster_id), f.monster_hits, f.monster_fire_hits, f.monster_health_begin, f.monster_health_min);
++	else if (f.death_tick < 0)
++		xr_strcpy(summary.missing, "neither the stalker nor the monster died within the budget");
++	else if (!summary.finite)
++		xr_strcpy(summary.missing, "a sampled value is not finite");
++	const bool ok = !summary.missing[0];
++	fprintf(f.out, "end,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%.4f,%.4f,%u,%u,%u,%d\n", f.ticks, sim_ms,
++		wall_ms, f.online_tick, f.enemy_tick, f.seen_tick, f.monster_enemy_tick, f.shot_tick, f.impact_tick,
++		f.hit_tick, f.death_tick, f.npc_bullets, f.monster_impacts, f.monster_hits, f.monster_fire_hits, f.npc_hits,
++		summary.npc_health, summary.monster_health, f.deaths, u32(f.dead_id), u32(f.killer_id), ok ? 1 : 0);
++	fclose(f.out);
++	f.out = nullptr;
++	(void)frames;
++	return ok;
++}
++
++// Observation hooks.
++void CombatTraceBullet(u16 sender, u16 weapon, const Fvector& position, const Fvector& direction, float speed,
++	int hit_type)
++{
++	++g_combat_counters.bullets;
++	if (!g_combat_trace)
++		return;
++	CombatBulletRecord r;
++	r.frame = Device.dwFrame;
++	r.sender = sender;
++	r.weapon = weapon;
++	r.position = position;
++	r.direction = direction;
++	r.speed = speed;
++	r.hit_type = hit_type;
++	g_combat_trace->bullets.push_back(r);
++}
++
++void CombatTraceImpact(u16 sender, u16 target, bool dynamic, u16 material, const Fvector& point)
++{
++	if (dynamic)
++		++g_combat_counters.impacts_dynamic;
++	else
++		++g_combat_counters.impacts_static;
++	if (!g_combat_trace)
++		return;
++	CombatImpactRecord r;
++	r.frame = Device.dwFrame;
++	r.sender = sender;
++	r.target = target;
++	r.dynamic = dynamic;
++	r.material = material;
++	r.point = point;
++	g_combat_trace->impacts.push_back(r);
++}
++
++void CombatTraceHit(u16 victim, u16 who, float power, int hit_type, u16 bone, float health_after)
++{
++	++g_combat_counters.hits;
++	if (!g_combat_trace)
++		return;
++	CombatHitRecord r;
++	r.frame = Device.dwFrame;
++	r.victim = victim;
++	r.who = who;
++	r.power = power;
++	r.hit_type = hit_type;
++	r.bone = bone;
++	r.health_after = health_after;
++	g_combat_trace->hits.push_back(r);
++}
++
++void CombatTraceDeath(u16 victim, u16 killer)
++{
++	++g_combat_counters.deaths;
++	if (!g_combat_trace)
++		return;
++	CombatDeathRecord r;
++	r.frame = Device.dwFrame;
++	r.victim = victim;
++	r.killer = killer;
++	g_combat_trace->deaths.push_back(r);
++}
++
++static CombatFixtureSummary g_server_summary;
++static string_path g_server_out;
++
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureBegin(LPCSTR out_path)
++{
++	xr_strcpy(g_server_out, out_path);
++	const bool ok = CombatFixtureBegin(out_path, g_server_summary);
++	if (!ok)
++		log_summary("S02-T06c combat", g_server_summary, false, out_path);
++	return ok;
++}
++
++extern "C" void __cdecl xrCampaignLevel_CombatFixtureTick()
++{
++	CombatFixtureTick();
++}
++
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureDone()
++{
++	return CombatFixtureDone();
++}
++
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms)
++{
++	const bool ok = CombatFixtureEnd(frames, sim_ms, wall_ms, g_server_summary);
++	log_summary("S02-T06c combat", g_server_summary, ok, g_server_out);
++	return ok;
++}
++
++void ClientCombatCaptureOnFrame()
++{
++	static const bool requested = strstr(Core.Params, "-s02-combat-capture") != nullptr;
++	static u32 since = 0;
++	static u32 begin_time = 0;
++	static u32 begin_frame = 0;
++	static bool started = false;
++	static bool done = false;
++	static CombatFixtureSummary summary;
++	static string_path out;
++	if (!requested || done || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor || Device.dwPrecacheFrame)
++		return;
++	if (!since)
++	{
++		since = Device.dwTimeGlobal;
++		return;
++	}
++	if (!started)
++	{
++		// One second of device time after the actor spawned, like the other
++		// captures; the server runs the fixture after its actor position check.
++		if (Device.dwTimeGlobal - since < 1000)
++			return;
++		started = true;
++		FS.update_path(out, "$logs$", "s02-t06c-combat.csv");
++		begin_time = Device.dwTimeGlobal;
++		begin_frame = Device.dwFrame;
++		if (CombatFixtureBegin(out, summary))
++			return;
++		done = true;
++		log_summary("S02-T06c client combat", summary, false, out);
++	}
++	else
++	{
++		CombatFixtureTick();
++		if (!CombatFixtureDone())
++			return;
++		done = true;
++		const u32 elapsed = Device.dwTimeGlobal - begin_time;
++		const bool ok = CombatFixtureEnd(Device.dwFrame - begin_frame, elapsed, elapsed, summary);
++		log_summary("S02-T06c client combat", summary, ok, out);
++	}
++	FlushLog();
++	Console->Execute("quit");
++}
+diff --git a/src/xrGame/CampaignCombatCapture.h b/src/xrGame/CampaignCombatCapture.h
+new file mode 100644
+index 0000000..61498f0
+--- /dev/null
++++ b/src/xrGame/CampaignCombatCapture.h
+@@ -0,0 +1,172 @@
++#pragma once
++
++// S02-T06c: combat between NPCs on the loaded level, headless. The fixture
++// spawns one hostile monster through the native ALife spawn path
++// (CALifeSimulatorBase::spawn_item, the call behind Lua's alife():create) a
++// few metres from the fixture stalker, lets the switch manager bring it
++// online, and then observes what the simulation does on its own: the
++// stalker's visual memory and enemy selection, the monster's enemy manager,
++// the bullets the stalker's weapon adds to the bullet manager, the impacts the
++// bullet manager registers, the hits the living entities receive and the
++// deaths. Nothing here shoots, aims or damages; the hooks below only record.
++// The campaign server and the normal client write the same CSV rows:
++//   meta,<frame>,<time_ms>,<level>,<policy>,<anchors>,<npc>,<npc_name>,<npx>,<npy>,<npz>,<npc_health>,
++//        <section>,<monster>,<sx>,<sy>,<sz>,<spawn_vertex>,<spawn_distance>,<budget_ms>,<online_wait_ms>,
++//        <godmode>,<bullets>,<impacts_dynamic>,<impacts_static>,<hits>,<deaths>
++//        (spawn_*: where the monster's server entity was created, on a level
++//         vertex `spawn_distance` m from the stalker on the side away from the
++//         actor; godmode: the actor's AF_GODMODE was set for the fixture; the
++//         counters are the cumulative values at the begin, later rows are
++//         relative to them)
++//   tick,<n>,<phase>,<frame>,<time_ms>,<monster_online>,<npc_alive>,<npc_health>,<monster_alive>,
++//        <monster_health>,<distance>,<npc_enemy>,<npc_sees>,<monster_enemy>,<npc_action>,<bullets>,
++//        <impacts_dynamic>,<impacts_static>,<hits>,<deaths>
++//        (phase 0: waiting for the monster's client object, 1: engaged; npc_enemy /
++//         monster_enemy: the id each side's enemy manager selected, 65535 for
++//         none; npc_sees: the stalker's visual memory holds the monster as
++//         visible now; npc_action: the stalker's planner action id; the counters
++//         are cumulative, every bullet / impact / hit / death on the level)
++//   bullet,<n>,<phase>,<frame>,<sender>,<weapon>,<px>,<py>,<pz>,<dx>,<dy>,<dz>,<speed>,<hit_type>
++//        (one per CBulletManager::AddBullet)
++//   impact,<n>,<phase>,<frame>,<sender>,<target>,<dynamic>,<material>,<px>,<py>,<pz>
++//        (one per bullet-manager hit event; target 65535 for the static level)
++//   hit,<n>,<phase>,<frame>,<victim>,<who>,<power>,<hit_type>,<bone>,<health_after>
++//        (one per CEntityAlive::Hit)
++//   death,<n>,<phase>,<frame>,<victim>,<killer>
++//        (one per CEntityAlive::Die)
++//   end,<ticks>,<sim_ms>,<wall_ms>,<online_tick>,<enemy_tick>,<seen_tick>,<monster_enemy_tick>,<shot_tick>,
++//        <impact_tick>,<hit_tick>,<death_tick>,<npc_bullets>,<monster_impacts>,<monster_hits>,<monster_fire_hits>,
++//        <npc_hits>,<npc_health>,<monster_health>,<deaths>,<dead>,<killer>,<ok>
++//        (the *_tick columns are the fixture tick at which each milestone first
++//         happened, -1 when it never did; npc_bullets: bullets whose sender is
++//         the stalker; monster_impacts / monster_hits: impacts and hits whose
++//         target is the monster; monster_fire_hits: those hits that are fire
++//         wounds from the stalker, i.e. its bullets; npc_hits: hits the stalker
++//         received; dead / killer: the first death's victim and killer ids)
++
++// Observation hooks, called by the bullet manager and the living entities on
++// both products. The counters always run (a few increments); the records are
++// kept only while a fixture holds the trace.
++struct CombatBulletRecord
++{
++	u32 frame;
++	u16 sender;
++	u16 weapon;
++	Fvector position;
++	Fvector direction;
++	float speed;
++	int hit_type;
++};
++
++struct CombatImpactRecord
++{
++	u32 frame;
++	u16 sender;
++	u16 target;
++	bool dynamic;
++	u16 material;
++	Fvector point;
++};
++
++struct CombatHitRecord
++{
++	u32 frame;
++	u16 victim;
++	u16 who;
++	float power;
++	int hit_type;
++	u16 bone;
++	float health_after;
++};
++
++struct CombatDeathRecord
++{
++	u32 frame;
++	u16 victim;
++	u16 killer;
++};
++
++struct SCombatCounters
++{
++	u32 bullets;
++	u32 impacts_dynamic;
++	u32 impacts_static;
++	u32 hits;
++	u32 deaths;
++};
++
++struct SCombatTrace
++{
++	xr_vector<CombatBulletRecord> bullets;
++	xr_vector<CombatImpactRecord> impacts;
++	xr_vector<CombatHitRecord> hits;
++	xr_vector<CombatDeathRecord> deaths;
++};
++
++extern SCombatCounters g_combat_counters;
++extern SCombatTrace* g_combat_trace;
++
++void CombatTraceBullet(u16 sender, u16 weapon, const Fvector& position, const Fvector& direction, float speed,
++	int hit_type);
++void CombatTraceImpact(u16 sender, u16 target, bool dynamic, u16 material, const Fvector& point);
++void CombatTraceHit(u16 victim, u16 who, float power, int hit_type, u16 bone, float health_after);
++void CombatTraceDeath(u16 victim, u16 killer);
++
++struct CombatFixtureSummary
++{
++	u16 npc_id;
++	u16 monster_id;
++	u32 ticks;
++	u32 sim_ms;
++	u32 wall_ms;
++	int online_tick;
++	int enemy_tick;
++	int seen_tick;
++	int monster_enemy_tick;
++	int shot_tick;
++	int impact_tick;
++	int hit_tick;
++	int death_tick;
++	u32 npc_bullets;
++	u32 monster_impacts;
++	u32 monster_hits;
++	u32 monster_fire_hits;
++	u32 npc_hits;
++	u32 deaths;
++	u16 dead_id;
++	u16 killer_id;
++	float npc_health;
++	float monster_health;
++	bool finite;
++	string256 missing; // first missing-data finding, empty when none
++};
++
++// Spawns the monster (option -s02-combat-section, default boar_normal) at
++// -s02-combat-distance m (default 12) from the fixture stalker
++// (-s02-activity-npc, default 19409), sets the actor's god mode, attaches the
++// trace and opens the CSV. Returns false and names the reason when there is
++// no loaded level, no ALife, no alive actor or no alive stalker.
++bool CombatFixtureBegin(LPCSTR out_path, CombatFixtureSummary& summary);
++// Called once after every frame: drains the trace, samples both NPCs and
++// writes the rows. The fixture stops at the first death or when
++// -s02-combat-ms (default 45000) of device time has passed since the monster
++// came online, or when it never came online within -s02-combat-online-ms
++// (default 20000).
++void CombatFixtureTick();
++bool CombatFixtureDone();
++// Detaches the trace, restores the actor's god mode, writes the end row and
++// evaluates: the monster came online, the stalker selected it as its enemy,
++// the monster selected an enemy, the stalker fired, a bullet impacted the
++// monster, a fire wound from the stalker reached it and it lost health, and
++// one of the two died.
++bool CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms, CombatFixtureSummary& summary);
++
++// Campaign server entries, used by the smoke after the actor position check.
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_CombatFixtureTick();
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureDone();
++extern "C" bool __cdecl xrCampaignLevel_CombatFixtureEnd(u32 frames, u32 sim_ms, u32 wall_ms);
++
++// Normal client entry: with -s02-combat-capture the fixture starts one second
++// after the actor spawned, runs on its own and quits the client at its end.
++void ClientCombatCaptureOnFrame();
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 8122abe..d027ce4 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -6,6 +6,7 @@
+ #include "CampaignCollisionCapture.h"
+ #include "CampaignPhysicsCapture.h"
+ #include "CampaignActivityCapture.h"
++#include "CampaignCombatCapture.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -942,6 +943,8 @@ void CGamePersistent::OnFrame()
+ 	ClientPhysicsCaptureOnFrame();
+ 	// S02-T04c: opt-in activity fixture (observe, then walk a stalker), then quit.
+ 	ClientActivityCaptureOnFrame();
++	// S02-T06c: opt-in combat fixture (spawn a monster, observe the fight), then quit.
++	ClientCombatCaptureOnFrame();
+ }
+ 
+ void CGamePersistent::ImGui_OnRender(LPCSTR name)
+diff --git a/src/xrGame/Level_Bullet_Manager.cpp b/src/xrGame/Level_Bullet_Manager.cpp
+index 8a55446..950bd19 100644
+--- a/src/xrGame/Level_Bullet_Manager.cpp
++++ b/src/xrGame/Level_Bullet_Manager.cpp
+@@ -14,6 +14,7 @@
+ #include "reward_event_generator.h"
+ #include "material_manager.h"
+ #include "Weapon.h"
++#include "CampaignCombatCapture.h"
+ 
+ #include "../Include/xrRender/UIRender.h"
+ #include "../Include/xrRender/Kinematics.h"
+@@ -280,6 +281,9 @@ void CBulletManager::AddBullet(const Fvector& position,
+ 	            e_hit_type, maximum_distance, cartridge, air_resistance_factor, SendHit, iShotNum);
+ 	//	bullet.frame_num			= Device.dwFrame;
+ 	bullet.flags.aim_bullet = AimBullet;
++	// S02-T06c: observation only (the combat fixture's bullet trace).
++	CombatTraceBullet(sender_id, sendersweapon_id, position, direction, starting_speed * cartridge.param_s.kBulletSpeed,
++		int(e_hit_type));
+ 
+ 	// demonized - bullet on init callback
+ 	::luabind::functor<void> funct;
+@@ -1272,6 +1276,10 @@ void CBulletManager::CommitEvents() // @ the start of frame
+ 					funct(table);
+ 				}
+ 
++				// S02-T06c: observation only (the combat fixture's impact trace).
++				CombatTraceImpact(bullet->parent_id, E.dynamic && E.R.O ? E.R.O->ID() : u16(-1), E.dynamic ? true : false,
++					E.tgt_material, end_point);
++
+ 				if (E.dynamic) DynamicObjectHit(E);
+ 				else StaticObjectHit(E);
+ 			}
+diff --git a/src/xrGame/entity_alive.cpp b/src/xrGame/entity_alive.cpp
+index 4181598..b07fc34 100644
+--- a/src/xrGame/entity_alive.cpp
++++ b/src/xrGame/entity_alive.cpp
+@@ -14,6 +14,7 @@
+ #include "entitycondition.h"
+ #include "script_game_object.h"
+ #include "hit.h"
++#include "CampaignCombatCapture.h"
+ #include "PHDestroyable.h"
+ #include "CharacterPhysicsSupport.h"
+ #include "script_callback_ex.h"
+@@ -301,6 +302,9 @@ void CEntityAlive::Hit(SHit* pHDS)
+ 	conditions().SetConditionDeltaTime(0);
+ 	//-------------------------------------------
+ 	inherited::Hit(&HDS);
++	// S02-T06c: observation only (the combat fixture's hit trace).
++	CombatTraceHit(ID(), HDS.who ? HDS.who->ID() : HDS.whoID, HDS.damage(), int(HDS.hit_type), HDS.boneID,
++		GetfHealth());
+ 
+ 	if (g_Alive() && IsGameTypeSingle())
+ 	{
+@@ -320,6 +324,8 @@ void CEntityAlive::OnEvent(NET_Packet& P, u16 type)
+ 
+ void CEntityAlive::Die(CObject* who)
+ {
++	// S02-T06c: observation only (the combat fixture's death trace).
++	CombatTraceDeath(ID(), who ? who->ID() : u16(-1));
+ 	if (IsGameTypeSingle())
+ 		RELATION_REGISTRY().Action(smart_cast<CEntityAlive*>(who), this, RELATION_REGISTRY::KILL);
+ 	inherited::Die(who);
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index d2a2945..86a6c79 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2002,6 +2002,7 @@
+     <ClInclude Include="CampaignActivityCapture.h" />
+     <ClInclude Include="CampaignActivityPolicy.h" />
+     <ClInclude Include="CampaignHearingCapture.h" />
++    <ClInclude Include="CampaignCombatCapture.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4353,6 +4354,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignCombatCapture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

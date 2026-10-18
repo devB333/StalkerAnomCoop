@@ -77,6 +77,10 @@
     {
       "path": "patches/engine/0017-alife-actor-position-check.patch",
       "sha256": "3242b7fddeb77709e5ea38b7b4813d46957356ead65a986953ef4703f6daaaa6"
+    },
+    {
+      "path": "patches/engine/0018-combat-fixture.patch",
+      "sha256": "57404099ddc14c53531f695ad84591ee3c9e74b91cf2b83e9015bf306fa8c76a"
     }
   ],
   "submodules": [

@@ -87,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -125,6 +125,13 @@ $result.hearing_capture_present = Test-Path $hearingPath
 if ($result.hearing_capture_present) {
     Copy-Item $hearingPath (Join-Path $logDir 'server-hearing.csv')
     $result.hearing_capture_sha256 = (Get-FileHash $hearingPath -Algorithm SHA256).Hash.ToLower()
+}
+# S02-T06c: the server's combat capture (spawned monster, vision, bullets, impacts, hits, deaths).
+$combatPath = Join-Path $runtime 'appdata\logs\s02-t06c-combat.csv'
+$result.combat_capture_present = Test-Path $combatPath
+if ($result.combat_capture_present) {
+    Copy-Item $combatPath (Join-Path $logDir 'server-combat.csv')
+    $result.combat_capture_sha256 = (Get-FileHash $combatPath -Algorithm SHA256).Hash.ToLower()
 }
 $result.stages = $observedStages
 $result.expected_stages = $expectedStages

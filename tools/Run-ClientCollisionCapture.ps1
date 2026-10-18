@@ -7,19 +7,21 @@
 # (-s02-physics-capture); prepare the runtime with task S02-T04b. With -Capture activity
 # (S02-T04c) it observes the level and walks a stalker (-s02-activity-capture); task S02-T04c.
 # With -Capture hearing (S02-T05c) it runs the same walk and records sound emitters, AI sound
-# events and NPC hearing (-s02-hearing-capture); task S02-T05c.
+# events and NPC hearing (-s02-hearing-capture); task S02-T05c. With -Capture combat (S02-T06c)
+# it spawns a monster near the stalker and records vision, bullets, impacts, hits and deaths
+# (-s02-combat-capture); task S02-T06c.
 # The accepted source-client runtime is only read: its bin DLLs, user settings and
 # shader cache are copied, and the archives are read in place through fsgame.ltx.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
-    [ValidateSet('collision', 'physics', 'activity', 'hearing')][string]$Capture = 'collision',
+    [ValidateSet('collision', 'physics', 'activity', 'hearing', 'combat')][string]$Capture = 'collision',
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
-$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } 'hearing' { 'S02-T05c' } default { 'S02-T03d' } }
-$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } 'hearing' { '-s02-hearing-capture' } default { '-s02-collision-capture' } }
-$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } 'hearing' { 's02-t05c-hearing.csv' } default { 's02-t03d-collision.csv' } }
+$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } 'hearing' { 'S02-T05c' } 'combat' { 'S02-T06c' } default { 'S02-T03d' } }
+$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } 'hearing' { '-s02-hearing-capture' } 'combat' { '-s02-combat-capture' } default { '-s02-collision-capture' } }
+$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } 'hearing' { 's02-t05c-hearing.csv' } 'combat' { 's02-t06c-combat.csv' } default { 's02-t03d-collision.csv' } }
 $runtime = Join-Path $workspace "builds\stage2\test-install\$task\$Run"
 $fixture = Join-Path $runtime 'fixture.json'
 if (-not (Test-Path $fixture)) { throw "Prepare the isolated runtime first (prepare-stage2-smoke.py <run> $task)." }

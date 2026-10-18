@@ -1,0 +1,8 @@
+# Lint config for project-owned Python tools (tools/*.py).
+# Run: builds/tools/ruff-0.16.9/ruff check tools/
+target-version = "py314"
+line-length = 120
+extend-exclude = ["engine", "builds", "reverse-engineering"]
+
+[lint]
+select = ["E", "F", "W", "B", "I"]

@@ -1,0 +1,90 @@
+{
+  "module": "AnomalyDX11.exe",
+  "binary_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+  "source_revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+  "provider": "native Ghidra 12.1.4, saved project",
+  "project": "Anomaly153-c857b6f49d32",
+  "mode": "-process AnomalyDX11.exe -noanalysis -readOnly",
+  "original_function_count": 49494,
+  "findings": [
+    {
+      "id": "GH-A01",
+      "source_correspondence": "Actor",
+      "static_va": "0x1400fb2e0",
+      "rva": "0xfb2e0",
+      "seed_xref_from": "0x1400fb316",
+      "seed_string_va": "0x140a62178",
+      "raw_output": "reverse-engineering/logs/architecture-actor-alife.txt",
+      "raw_output_sha256": "81b41d899c259157706daf80e38bc4b3930099a7e9078da0dd7bd9939521e557",
+      "source": "src/xrGame/Actor_Network.cpp:58-67",
+      "confidence": "high function-purpose correspondence; parameter types and full class layout unverified"
+    },
+    {
+      "id": "GH-A02",
+      "source_correspondence": "CALifeGraphRegistry::update",
+      "static_va": "0x140386670",
+      "rva": "0x386670",
+      "seed_xref_from": "0x1403866e7",
+      "seed_string_va": "0x140af0708",
+      "raw_output": "reverse-engineering/logs/architecture-actor-alife.txt",
+      "raw_output_sha256": "81b41d899c259157706daf80e38bc4b3930099a7e9078da0dd7bd9939521e557",
+      "source": "src/xrGame/alife_graph_registry.cpp:49-66",
+      "confidence": "high function-purpose correspondence; parameter types and full class layout unverified"
+    },
+    {
+      "id": "GH-A03",
+      "source_correspondence": "xrServer::Process_update",
+      "static_va": "0x14071ef80",
+      "rva": "0x71ef80",
+      "seed_xref_from": "0x14071efd0",
+      "seed_string_va": "0x140b4cea8",
+      "raw_output": "reverse-engineering/logs/architecture-server-level.txt",
+      "raw_output_sha256": "4aa603ff8b10b8c42bc38c8f148c775a49786085f0337a24a637e6f2da522be0",
+      "source": "src/xrGame/xrServer_process_update.cpp:7-58",
+      "confidence": "high function-purpose correspondence; parameter types and full class layout unverified"
+    },
+    {
+      "id": "GH-A04",
+      "source_correspondence": "xrServer::Process_save",
+      "static_va": "0x14071edd0",
+      "rva": "0x71edd0",
+      "seed_xref_from": "0x14071ee20",
+      "seed_string_va": "0x140b4cf60",
+      "raw_output": "reverse-engineering/logs/architecture-server-level.txt",
+      "raw_output_sha256": "4aa603ff8b10b8c42bc38c8f148c775a49786085f0337a24a637e6f2da522be0",
+      "source": "src/xrGame/xrServer_process_update.cpp:60-95",
+      "confidence": "high function-purpose correspondence; parameter types and full class layout unverified"
+    },
+    {
+      "id": "GH-A05",
+      "source_correspondence": "CALifeGraphRegistry::setup_current_level",
+      "static_va": "0x140386100",
+      "rva": "0x386100",
+      "seed_xref_from": "0x1403865b1",
+      "seed_string_va": "0x140af0750",
+      "raw_output": "reverse-engineering/logs/architecture-server-level.txt",
+      "raw_output_sha256": "4aa603ff8b10b8c42bc38c8f148c775a49786085f0337a24a637e6f2da522be0",
+      "source": "src/xrGame/alife_graph_registry.cpp:68-96",
+      "confidence": "high function-purpose correspondence; parameter types and full class layout unverified"
+    },
+    {
+      "id": "GH-A06",
+      "source_correspondence": "CObject::net_Spawn",
+      "static_va": "0x140072650",
+      "rva": "0x72650",
+      "seed_xref_from": "0x140072867",
+      "seed_string_va": "0x140a570f8",
+      "raw_output": "reverse-engineering/logs/architecture-object-spawn.txt",
+      "raw_output_sha256": "1335500d14f897cda475ac18c986775a3fa91e52e9c8049cfe29b920445284d7",
+      "source": "src/xrEngine/xr_object.cpp:255-280",
+      "confidence": "high function-purpose correspondence; parameter types and full class layout unverified"
+    }
+  ],
+  "limitations": [
+    "Local evidence identifiers, not REA MCP Evidence IDs",
+    "Static decompiler output, not runtime observation",
+    "No class layout or callable ABI verified",
+    "Only six selected functions inspected; no full-project reanalysis",
+    "Missing PDB and original automatic-analysis warnings remain applicable"
+  ]
+}

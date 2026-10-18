@@ -1,0 +1,14 @@
+[
+  {
+    "text": "Actor() method invokation must be only in Single Player game!",
+    "offset": 10883960,
+    "rva": "0xa62178",
+    "static_va": "0x140a62178"
+  },
+  {
+    "text": "Invalid flag M_SPAWN_OBJECT_ASPLAYER for non-actor object!",
+    "offset": 11467016,
+    "rva": "0xaf0708",
+    "static_va": "0x140af0708"
+  }
+]

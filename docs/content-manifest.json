@@ -1,0 +1,525 @@
+{
+  "schema_version": 1,
+  "original": "/mnt/c/Users/djb20/StalkerAnom",
+  "fixture": "/mnt/c/Users/djb20/StalkerAnomCoop/builds/test-install/baseline",
+  "fixture_windows": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline",
+  "copied_files": 79,
+  "copied_bytes": 17200963716,
+  "files": [
+    {
+      "path": "bin/AnomalyDX11.exe",
+      "bytes": 16138752,
+      "source_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+      "copy_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e"
+    },
+    {
+      "path": "bin/alsoft.ini",
+      "bytes": 20127,
+      "source_sha256": "3a9b04d2da63dd80877319754df9ad6b52a2ff6f84d1ed3cc049eb2b7a6e0341",
+      "copy_sha256": "3a9b04d2da63dd80877319754df9ad6b52a2ff6f84d1ed3cc049eb2b7a6e0341"
+    },
+    {
+      "path": "bin/discord_game_sdk.dll",
+      "bytes": 3876152,
+      "source_sha256": "fcf6a965fa6e85d816fd0d128619dd62f0fd11b0f2f2169a8c861ef60f336e67",
+      "copy_sha256": "fcf6a965fa6e85d816fd0d128619dd62f0fd11b0f2f2169a8c861ef60f336e67"
+    },
+    {
+      "path": "bin/icudt65.dll",
+      "bytes": 27980288,
+      "source_sha256": "40cbf615b25a4275fbea640bc05aef8086385e2794afe3c57aaed9077481ca1b",
+      "copy_sha256": "40cbf615b25a4275fbea640bc05aef8086385e2794afe3c57aaed9077481ca1b"
+    },
+    {
+      "path": "bin/icuuc65.dll",
+      "bytes": 1890816,
+      "source_sha256": "0e3bfa71eec8d4419ab15e828d222b98046a8310e5bb85141571493318016dbb",
+      "copy_sha256": "0e3bfa71eec8d4419ab15e828d222b98046a8310e5bb85141571493318016dbb"
+    },
+    {
+      "path": "bin/soft_oal.dll",
+      "bytes": 998912,
+      "source_sha256": "14256d3228dfa3af57011c723da1768575e013d126c5ef5c428ecaee1079e836",
+      "copy_sha256": "14256d3228dfa3af57011c723da1768575e013d126c5ef5c428ecaee1079e836"
+    },
+    {
+      "path": "bin/tbb.dll",
+      "bytes": 391040,
+      "source_sha256": "325f009b65cb1af24fb0a31753712989ee6e836b9ba0f5185fda3eaad0ab5a5f",
+      "copy_sha256": "325f009b65cb1af24fb0a31753712989ee6e836b9ba0f5185fda3eaad0ab5a5f"
+    },
+    {
+      "path": "changes151to152.txt",
+      "bytes": 14659,
+      "source_sha256": "94f2bd5e3b23250cb30b53b5df3326ed66a18a2714a7392f1913cd889c592563",
+      "copy_sha256": "94f2bd5e3b23250cb30b53b5df3326ed66a18a2714a7392f1913cd889c592563"
+    },
+    {
+      "path": "changes152to153.txt",
+      "bytes": 5453,
+      "source_sha256": "d195f353ff4ce48781fedcd275eac29a8f5d54439540cc2fc8c93b24db8307e0",
+      "copy_sha256": "d195f353ff4ce48781fedcd275eac29a8f5d54439540cc2fc8c93b24db8307e0"
+    },
+    {
+      "path": "db/configs/ai.db0",
+      "bytes": 14937,
+      "source_sha256": "1b0186b0681d59fc4451279f90083336bc96064faef6660d9623e551ac561156",
+      "copy_sha256": "1b0186b0681d59fc4451279f90083336bc96064faef6660d9623e551ac561156"
+    },
+    {
+      "path": "db/configs/configs.db0",
+      "bytes": 6466242,
+      "source_sha256": "982300de3e0298f336ce43876a2e83bcc78f9ec0113a808e25cddb08a2f34722",
+      "copy_sha256": "982300de3e0298f336ce43876a2e83bcc78f9ec0113a808e25cddb08a2f34722"
+    },
+    {
+      "path": "db/configs/scripts.db0",
+      "bytes": 1664911,
+      "source_sha256": "a6e61429c1c726bc15b48bef175e6db707a2ae3cb5079fc94b0ef0606487056b",
+      "copy_sha256": "a6e61429c1c726bc15b48bef175e6db707a2ae3cb5079fc94b0ef0606487056b"
+    },
+    {
+      "path": "db/configs/spawns.db0",
+      "bytes": 17406321,
+      "source_sha256": "e15e90d55bc3c968ba7996ea3ab28f3e923242672acfa69df54ca2aa1036f167",
+      "copy_sha256": "e15e90d55bc3c968ba7996ea3ab28f3e923242672acfa69df54ca2aa1036f167"
+    },
+    {
+      "path": "db/files.db0",
+      "bytes": 390057,
+      "source_sha256": "a83b6b51af87d7a7648f97704ec800e8488e5108bbbbe8ca25be06452860a101",
+      "copy_sha256": "a83b6b51af87d7a7648f97704ec800e8488e5108bbbbe8ca25be06452860a101"
+    },
+    {
+      "path": "db/levels/level_jupiter.db0",
+      "bytes": 427449955,
+      "source_sha256": "3c04c1bc43c7e5f5ddfa571159a5773d610a52bedbc91f8b1dde9f0ad9f84fd5",
+      "copy_sha256": "3c04c1bc43c7e5f5ddfa571159a5773d610a52bedbc91f8b1dde9f0ad9f84fd5"
+    },
+    {
+      "path": "db/levels/level_jupiter_underground.db0",
+      "bytes": 65005822,
+      "source_sha256": "fc0694f6d8fc844f9077f670114222d51cc3d0d449a79e4c10d7796323b25135",
+      "copy_sha256": "fc0694f6d8fc844f9077f670114222d51cc3d0d449a79e4c10d7796323b25135"
+    },
+    {
+      "path": "db/levels/level_k00_marsh.db0",
+      "bytes": 332049798,
+      "source_sha256": "3d63465230a13011e26b608d00a93c54b21f981823d09fe5936ef753e0229369",
+      "copy_sha256": "3d63465230a13011e26b608d00a93c54b21f981823d09fe5936ef753e0229369"
+    },
+    {
+      "path": "db/levels/level_k01_darkscape.db0",
+      "bytes": 171999551,
+      "source_sha256": "c395e667cc0791f0adfc5a8089adc412cf48fa8d54f13ac6f7443947f9a8e932",
+      "copy_sha256": "c395e667cc0791f0adfc5a8089adc412cf48fa8d54f13ac6f7443947f9a8e932"
+    },
+    {
+      "path": "db/levels/level_k02_trucks_cemetery.db0",
+      "bytes": 376391954,
+      "source_sha256": "ad0a8b40bf79a72bd38a1719c8e3af14a9ef3736dfd6f4a12561280dac95712c",
+      "copy_sha256": "ad0a8b40bf79a72bd38a1719c8e3af14a9ef3736dfd6f4a12561280dac95712c"
+    },
+    {
+      "path": "db/levels/level_l01_escape.db0",
+      "bytes": 295730493,
+      "source_sha256": "9a93beb69091a68ddc190b37158f0c1c5cb52d4e92fe679df229426e835df316",
+      "copy_sha256": "9a93beb69091a68ddc190b37158f0c1c5cb52d4e92fe679df229426e835df316"
+    },
+    {
+      "path": "db/levels/level_l02_garbage.db0",
+      "bytes": 220411030,
+      "source_sha256": "f052263dde95f56c17d47db0db08ee8756d02c5b9f2c0c20f34abca68cfce52f",
+      "copy_sha256": "f052263dde95f56c17d47db0db08ee8756d02c5b9f2c0c20f34abca68cfce52f"
+    },
+    {
+      "path": "db/levels/level_l03_agroprom.db0",
+      "bytes": 249862144,
+      "source_sha256": "cc700d949b028f636d3c6b63c60057011cbfaffdca6fb67bf79ef6844441ab98",
+      "copy_sha256": "cc700d949b028f636d3c6b63c60057011cbfaffdca6fb67bf79ef6844441ab98"
+    },
+    {
+      "path": "db/levels/level_l03u_agr_underground.db0",
+      "bytes": 110766688,
+      "source_sha256": "ba4b08ac366953d3e2eb3d951dbffe961392172087631eabf53a04ce93e3a199",
+      "copy_sha256": "ba4b08ac366953d3e2eb3d951dbffe961392172087631eabf53a04ce93e3a199"
+    },
+    {
+      "path": "db/levels/level_l04_darkvalley.db0",
+      "bytes": 335378504,
+      "source_sha256": "9a8f300c52d8cab4b0e6e52cb03de383910ff44db7bf27a0f2261d0296f8338f",
+      "copy_sha256": "9a8f300c52d8cab4b0e6e52cb03de383910ff44db7bf27a0f2261d0296f8338f"
+    },
+    {
+      "path": "db/levels/level_l04u_labx18.db0",
+      "bytes": 61116596,
+      "source_sha256": "abda82cd1ed286205af107c17ffb78cce92640b2ac939004e5bfa2bfc48d5e9c",
+      "copy_sha256": "abda82cd1ed286205af107c17ffb78cce92640b2ac939004e5bfa2bfc48d5e9c"
+    },
+    {
+      "path": "db/levels/level_l05_bar.db0",
+      "bytes": 215019282,
+      "source_sha256": "c40488363b5adaf087f62e98b8c21652bc386a7b078b26f8ab2092a9bca6be7f",
+      "copy_sha256": "c40488363b5adaf087f62e98b8c21652bc386a7b078b26f8ab2092a9bca6be7f"
+    },
+    {
+      "path": "db/levels/level_l06_rostok.db0",
+      "bytes": 180603017,
+      "source_sha256": "19fa0d2f134dcac883416148a6b5062c825c3275c063e4351302e05ee96e6f67",
+      "copy_sha256": "19fa0d2f134dcac883416148a6b5062c825c3275c063e4351302e05ee96e6f67"
+    },
+    {
+      "path": "db/levels/level_l07_military.db0",
+      "bytes": 288550402,
+      "source_sha256": "1a4a88fb26002e9f3a2a5e44d2c5b42734f738a939e02c270b82df3d19f61908",
+      "copy_sha256": "1a4a88fb26002e9f3a2a5e44d2c5b42734f738a939e02c270b82df3d19f61908"
+    },
+    {
+      "path": "db/levels/level_l08_yantar.db0",
+      "bytes": 190028662,
+      "source_sha256": "0697cee0307ec39f66c30e75959856d3f531acd224983a5c2db348a93fa1a6a5",
+      "copy_sha256": "0697cee0307ec39f66c30e75959856d3f531acd224983a5c2db348a93fa1a6a5"
+    },
+    {
+      "path": "db/levels/level_l08u_brainlab.db0",
+      "bytes": 50297830,
+      "source_sha256": "814eac8b7ea1700b1ede1c4d772a55e8784cf9e555f393ff70244583d9f204cf",
+      "copy_sha256": "814eac8b7ea1700b1ede1c4d772a55e8784cf9e555f393ff70244583d9f204cf"
+    },
+    {
+      "path": "db/levels/level_l09_deadcity.db0",
+      "bytes": 224399959,
+      "source_sha256": "773aeda3cd614d9988723c67ac0d918f6f381c1a5072d73de04ac2c2e89210b0",
+      "copy_sha256": "773aeda3cd614d9988723c67ac0d918f6f381c1a5072d73de04ac2c2e89210b0"
+    },
+    {
+      "path": "db/levels/level_l10_limansk.db0",
+      "bytes": 229729833,
+      "source_sha256": "d367b259c89c74c5cdeadd3a0f9861ac7424f254ba22a2cefacd31817e173600",
+      "copy_sha256": "d367b259c89c74c5cdeadd3a0f9861ac7424f254ba22a2cefacd31817e173600"
+    },
+    {
+      "path": "db/levels/level_l10_radar.db0",
+      "bytes": 229228761,
+      "source_sha256": "415557d911cef266440eabc2a854ef0262cc985a6b65feb2b631e4b47ad0817c",
+      "copy_sha256": "415557d911cef266440eabc2a854ef0262cc985a6b65feb2b631e4b47ad0817c"
+    },
+    {
+      "path": "db/levels/level_l10_red_forest.db0",
+      "bytes": 169327434,
+      "source_sha256": "faa03c57f8b30bc9257baaa9ec587556124f379d8f88ff84ca92722ec0d51602",
+      "copy_sha256": "faa03c57f8b30bc9257baaa9ec587556124f379d8f88ff84ca92722ec0d51602"
+    },
+    {
+      "path": "db/levels/level_l10u_bunker.db0",
+      "bytes": 81461341,
+      "source_sha256": "4691beb8684834170ef5aceb68bc53820cac09685c6752c895dc5a965d5d5135",
+      "copy_sha256": "4691beb8684834170ef5aceb68bc53820cac09685c6752c895dc5a965d5d5135"
+    },
+    {
+      "path": "db/levels/level_l11_hospital.db0",
+      "bytes": 52178368,
+      "source_sha256": "75eb9a639ddd8dc1e076fb7b5ccb3b740501c50c166f1d5b1774d7f81e5fe682",
+      "copy_sha256": "75eb9a639ddd8dc1e076fb7b5ccb3b740501c50c166f1d5b1774d7f81e5fe682"
+    },
+    {
+      "path": "db/levels/level_l11_pripyat.db0",
+      "bytes": 305606337,
+      "source_sha256": "7e63de90f82de7443e08d82f9efa8aafd8f3214040b599731fb15af5cd24e260",
+      "copy_sha256": "7e63de90f82de7443e08d82f9efa8aafd8f3214040b599731fb15af5cd24e260"
+    },
+    {
+      "path": "db/levels/level_l12_stancia.db0",
+      "bytes": 237300894,
+      "source_sha256": "4f87b00aac24df7da21e2d85c5af1a8379c460606fc44162573b4b8d01ec0e72",
+      "copy_sha256": "4f87b00aac24df7da21e2d85c5af1a8379c460606fc44162573b4b8d01ec0e72"
+    },
+    {
+      "path": "db/levels/level_l12_stancia_2.db0",
+      "bytes": 364282852,
+      "source_sha256": "4e7a8565261d636e7ce49f14e99237210121a2e6def71e80b2b9eeb8b1a4e9d3",
+      "copy_sha256": "4e7a8565261d636e7ce49f14e99237210121a2e6def71e80b2b9eeb8b1a4e9d3"
+    },
+    {
+      "path": "db/levels/level_l12u_control_monolith.db0",
+      "bytes": 43363947,
+      "source_sha256": "03ba104653a97d4351d416c7db9566a9f013cbf7e8d3aea3c93bd99ca93a7938",
+      "copy_sha256": "03ba104653a97d4351d416c7db9566a9f013cbf7e8d3aea3c93bd99ca93a7938"
+    },
+    {
+      "path": "db/levels/level_l12u_sarcofag.db0",
+      "bytes": 118121868,
+      "source_sha256": "ebd4a481006b40e4494b1d66f7f2d3bbd9a03611bddea9cf9a9871f3072e4a75",
+      "copy_sha256": "ebd4a481006b40e4494b1d66f7f2d3bbd9a03611bddea9cf9a9871f3072e4a75"
+    },
+    {
+      "path": "db/levels/level_l13_generators.db0",
+      "bytes": 344962236,
+      "source_sha256": "b4f58b6641324275100a27284895d000e04bf3659bdf5461caf1ef32d93fa1ed",
+      "copy_sha256": "b4f58b6641324275100a27284895d000e04bf3659bdf5461caf1ef32d93fa1ed"
+    },
+    {
+      "path": "db/levels/level_l13u_warlab.db0",
+      "bytes": 94203759,
+      "source_sha256": "03c68acb6e5d3a375a337c0debf3521f7956c582204b1044bb2548300bc202d2",
+      "copy_sha256": "03c68acb6e5d3a375a337c0debf3521f7956c582204b1044bb2548300bc202d2"
+    },
+    {
+      "path": "db/levels/level_labx8.db0",
+      "bytes": 26563606,
+      "source_sha256": "dec4f62786feb2bfb88d363e007019347037e9d4df4198d7d71d23d4e4f68381",
+      "copy_sha256": "dec4f62786feb2bfb88d363e007019347037e9d4df4198d7d71d23d4e4f68381"
+    },
+    {
+      "path": "db/levels/level_pripyat.db0",
+      "bytes": 508998195,
+      "source_sha256": "f060b5da4276d7a281d7374adba25c59bb9b2bc72a6cc1da34b6292bbb526c83",
+      "copy_sha256": "f060b5da4276d7a281d7374adba25c59bb9b2bc72a6cc1da34b6292bbb526c83"
+    },
+    {
+      "path": "db/levels/level_y04_pole.db0",
+      "bytes": 141332401,
+      "source_sha256": "3adc47e07c494bea0acb2ea951369bad93a57a0d9d35cd50c53d1950237f4dc0",
+      "copy_sha256": "3adc47e07c494bea0acb2ea951369bad93a57a0d9d35cd50c53d1950237f4dc0"
+    },
+    {
+      "path": "db/levels/level_zaton.db0",
+      "bytes": 415301142,
+      "source_sha256": "d0471ebc4f40b50e32747a00e8cd85938e8a5495d3176cf08e95f1ffcddb6e23",
+      "copy_sha256": "d0471ebc4f40b50e32747a00e8cd85938e8a5495d3176cf08e95f1ffcddb6e23"
+    },
+    {
+      "path": "db/levels/levels.db0",
+      "bytes": 2120877,
+      "source_sha256": "c6bc4c57f18a34ebc5fd0b6b46ca485469e810b821609369ab1d5b4a0c07aba8",
+      "copy_sha256": "c6bc4c57f18a34ebc5fd0b6b46ca485469e810b821609369ab1d5b4a0c07aba8"
+    },
+    {
+      "path": "db/meshes/anims.db0",
+      "bytes": 1278817,
+      "source_sha256": "c0d8f420406b58fbee50c9b23312a67c0cd98267a4bce8906391e25dc9a6eb68",
+      "copy_sha256": "c0d8f420406b58fbee50c9b23312a67c0cd98267a4bce8906391e25dc9a6eb68"
+    },
+    {
+      "path": "db/meshes/meshes.db0",
+      "bytes": 105828115,
+      "source_sha256": "907e28db58a51b84bfea53cc01d11db1140cf9b74a268e5f73a24eccf97aac98",
+      "copy_sha256": "907e28db58a51b84bfea53cc01d11db1140cf9b74a268e5f73a24eccf97aac98"
+    },
+    {
+      "path": "db/meshes/meshes_actors.db0",
+      "bytes": 424776457,
+      "source_sha256": "68c9daefb7d06aefd6bbdb384f4f114829daa9eeacc3e3052224faae94cd4773",
+      "copy_sha256": "68c9daefb7d06aefd6bbdb384f4f114829daa9eeacc3e3052224faae94cd4773"
+    },
+    {
+      "path": "db/meshes/meshes_dynamics.db0",
+      "bytes": 444009913,
+      "source_sha256": "12b06a1a7fedf07d2a3164055a07f4b24c8fa269144daa1d10c252ab223432e5",
+      "copy_sha256": "12b06a1a7fedf07d2a3164055a07f4b24c8fa269144daa1d10c252ab223432e5"
+    },
+    {
+      "path": "db/meshes/meshes_weapons.db0",
+      "bytes": 462575032,
+      "source_sha256": "ee391fdcb417f5ac00ba6f9cb12e36943fd656e6655065adf623d638e539e331",
+      "copy_sha256": "ee391fdcb417f5ac00ba6f9cb12e36943fd656e6655065adf623d638e539e331"
+    },
+    {
+      "path": "db/shaders.db0",
+      "bytes": 935729,
+      "source_sha256": "f18413b82890ea43bc55ec50df2c6477d451c8dabfe09cc4b5c040f0ee8de669",
+      "copy_sha256": "f18413b82890ea43bc55ec50df2c6477d451c8dabfe09cc4b5c040f0ee8de669"
+    },
+    {
+      "path": "db/sounds/sounds.db0",
+      "bytes": 195156921,
+      "source_sha256": "7e3bc73ceba6670d5703e2afbf70f407898813a56d28a4d5aa0799284dd1a4d7",
+      "copy_sha256": "7e3bc73ceba6670d5703e2afbf70f407898813a56d28a4d5aa0799284dd1a4d7"
+    },
+    {
+      "path": "db/sounds/sounds_ambient.db0",
+      "bytes": 132901583,
+      "source_sha256": "1693bd0a8d283e077dbc45fe3967e29d222acba9e7583268574587e17e711ce7",
+      "copy_sha256": "1693bd0a8d283e077dbc45fe3967e29d222acba9e7583268574587e17e711ce7"
+    },
+    {
+      "path": "db/sounds/sounds_music.db0",
+      "bytes": 400590793,
+      "source_sha256": "9f32f96eb90c6c61e6bc434f864b88b330e1bfce917cae8ffb4c1f5c6b2fc4ce",
+      "copy_sha256": "9f32f96eb90c6c61e6bc434f864b88b330e1bfce917cae8ffb4c1f5c6b2fc4ce"
+    },
+    {
+      "path": "db/sounds/sounds_voices.db0",
+      "bytes": 362236244,
+      "source_sha256": "9c9a0c4bfd97b5e33b803c0dc78fd3025459756751fa743c231a84319f4f37cc",
+      "copy_sha256": "9c9a0c4bfd97b5e33b803c0dc78fd3025459756751fa743c231a84319f4f37cc"
+    },
+    {
+      "path": "db/textures/textures.db0",
+      "bytes": 536936846,
+      "source_sha256": "b1dbd2cf23a372e4346a8da2da9684377ba86eed8a30b885596ffe45000fd5bf",
+      "copy_sha256": "b1dbd2cf23a372e4346a8da2da9684377ba86eed8a30b885596ffe45000fd5bf"
+    },
+    {
+      "path": "db/textures/textures.db1",
+      "bytes": 537372991,
+      "source_sha256": "454b0f8558ca0b60c4f6ce79f7adca4ab254167d419778f5a5e6e4afd067378a",
+      "copy_sha256": "454b0f8558ca0b60c4f6ce79f7adca4ab254167d419778f5a5e6e4afd067378a"
+    },
+    {
+      "path": "db/textures/textures.db2",
+      "bytes": 538265858,
+      "source_sha256": "190990ed559d231086f16a4d7adfe0cb7bcbe1c831d952a582ac90d333110192",
+      "copy_sha256": "190990ed559d231086f16a4d7adfe0cb7bcbe1c831d952a582ac90d333110192"
+    },
+    {
+      "path": "db/textures/textures.db3",
+      "bytes": 537144601,
+      "source_sha256": "0efc89eb42018c4a7dadf67ad0e9d5cf7e77b904916b4903ca4bf3e89110e137",
+      "copy_sha256": "0efc89eb42018c4a7dadf67ad0e9d5cf7e77b904916b4903ca4bf3e89110e137"
+    },
+    {
+      "path": "db/textures/textures.db4",
+      "bytes": 421714604,
+      "source_sha256": "55de6ff6039093396260cbcb9e7b982d9396cdb5d85af9a6c9ce2be6b3278068",
+      "copy_sha256": "55de6ff6039093396260cbcb9e7b982d9396cdb5d85af9a6c9ce2be6b3278068"
+    },
+    {
+      "path": "db/textures/textures_actors.db0",
+      "bytes": 537119289,
+      "source_sha256": "f6be15db88e40742bea8dc4de1f295a4fa8f08fd1aaeadbd848f61ae1150a5de",
+      "copy_sha256": "f6be15db88e40742bea8dc4de1f295a4fa8f08fd1aaeadbd848f61ae1150a5de"
+    },
+    {
+      "path": "db/textures/textures_actors.db1",
+      "bytes": 387798266,
+      "source_sha256": "9444c748f5ce9e0b0955157f388c1cbda1bd3bc928949f76a8173f60b0602de4",
+      "copy_sha256": "9444c748f5ce9e0b0955157f388c1cbda1bd3bc928949f76a8173f60b0602de4"
+    },
+    {
+      "path": "db/textures/textures_concrete.db0",
+      "bytes": 537279792,
+      "source_sha256": "db737380c888521f0bd8938a81141a733848b99745a00c8909ab6392a68bd631",
+      "copy_sha256": "db737380c888521f0bd8938a81141a733848b99745a00c8909ab6392a68bd631"
+    },
+    {
+      "path": "db/textures/textures_concrete.db1",
+      "bytes": 38354230,
+      "source_sha256": "d579bcbaac1b60485bfc2bbf4c4cf543cf8658b4f6623a1f470b10b1dac96515",
+      "copy_sha256": "d579bcbaac1b60485bfc2bbf4c4cf543cf8658b4f6623a1f470b10b1dac96515"
+    },
+    {
+      "path": "db/textures/textures_detail.db0",
+      "bytes": 513288641,
+      "source_sha256": "5fc72266b05ba452015636720f48c4c1bb369c219e3ad996624d4a5b8d45a0af",
+      "copy_sha256": "5fc72266b05ba452015636720f48c4c1bb369c219e3ad996624d4a5b8d45a0af"
+    },
+    {
+      "path": "db/textures/textures_metal.db0",
+      "bytes": 538861081,
+      "source_sha256": "58b6428f524476c8d5ff3146c4d997f2c9319d986ce2e6db6328b905e46f75bd",
+      "copy_sha256": "58b6428f524476c8d5ff3146c4d997f2c9319d986ce2e6db6328b905e46f75bd"
+    },
+    {
+      "path": "db/textures/textures_metal.db1",
+      "bytes": 104489345,
+      "source_sha256": "e4edb71c60e94de9082be45fa4cb778a6ff9856c3ef1fc01cc9a91534010bc94",
+      "copy_sha256": "e4edb71c60e94de9082be45fa4cb778a6ff9856c3ef1fc01cc9a91534010bc94"
+    },
+    {
+      "path": "db/textures/textures_sky.db0",
+      "bytes": 298048856,
+      "source_sha256": "61d9e390bfb9266470117ba95e19c13b8482a875987d7ec09dfe15d8fa47b694",
+      "copy_sha256": "61d9e390bfb9266470117ba95e19c13b8482a875987d7ec09dfe15d8fa47b694"
+    },
+    {
+      "path": "db/textures/textures_stone.db0",
+      "bytes": 478670177,
+      "source_sha256": "b3fc03d92004cc1c6ac08ce9bf9e27ccde823263b771b742bcdbcf4cf08067e7",
+      "copy_sha256": "b3fc03d92004cc1c6ac08ce9bf9e27ccde823263b771b742bcdbcf4cf08067e7"
+    },
+    {
+      "path": "db/textures/textures_ui.db0",
+      "bytes": 66704429,
+      "source_sha256": "04b87e5ca2fc9f51a3d360b9f585124df507f9eb758461007579b6b5d19b0422",
+      "copy_sha256": "04b87e5ca2fc9f51a3d360b9f585124df507f9eb758461007579b6b5d19b0422"
+    },
+    {
+      "path": "db/textures/textures_weapons.db0",
+      "bytes": 536981947,
+      "source_sha256": "b68122ab2e90285cd608ee0b96f595f2642df46df626738af0051e2a41d64e03",
+      "copy_sha256": "b68122ab2e90285cd608ee0b96f595f2642df46df626738af0051e2a41d64e03"
+    },
+    {
+      "path": "db/textures/textures_weapons.db1",
+      "bytes": 539409018,
+      "source_sha256": "1b69a88d15da0e0a972c4bc2c7455ce77bcf943d75b5ca9e7a8d1ade5040faaa",
+      "copy_sha256": "1b69a88d15da0e0a972c4bc2c7455ce77bcf943d75b5ca9e7a8d1ade5040faaa"
+    },
+    {
+      "path": "db/textures/textures_weapons.db2",
+      "bytes": 285666626,
+      "source_sha256": "c0c2a743f54b54b1decbb2c90533c56341bfee0f0cc271960c127e4ca4031761",
+      "copy_sha256": "c0c2a743f54b54b1decbb2c90533c56341bfee0f0cc271960c127e4ca4031761"
+    },
+    {
+      "path": "default-44100.mhr",
+      "bytes": 80354,
+      "source_sha256": "2f4fac6d172a3cb68ebb63f325caa3b193df3c5330cbf10998a1cd70842621b2",
+      "copy_sha256": "2f4fac6d172a3cb68ebb63f325caa3b193df3c5330cbf10998a1cd70842621b2"
+    },
+    {
+      "path": "default-48000.mhr",
+      "bytes": 80354,
+      "source_sha256": "3dcc7b744a666cfd72212d490eb377121b3a69b071bd19fe7f5ddb14786f40c9",
+      "copy_sha256": "3dcc7b744a666cfd72212d490eb377121b3a69b071bd19fe7f5ddb14786f40c9"
+    },
+    {
+      "path": "fsgame.ltx",
+      "bytes": 2602,
+      "source_sha256": "6ad36594a36076efa16545278ecb540ede7ae1eece1942d450a5431ba4d5fa30",
+      "copy_sha256": "6ad36594a36076efa16545278ecb540ede7ae1eece1942d450a5431ba4d5fa30"
+    }
+  ],
+  "filesystem_aliases": {
+    "$fs_root$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline",
+    "$app_data_root$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\appdata",
+    "$arch_dir$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db",
+    "$arch_dir_configs$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\configs",
+    "$arch_dir_maps$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\levels",
+    "$arch_dir_meshes$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\meshes",
+    "$arch_dir_sounds$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\sounds",
+    "$arch_dir_textures$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\textures",
+    "$arch_dir_resource$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\mods",
+    "$arch_dir_patches$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\patches",
+    "$arch_dir_addons$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\db\\addons",
+    "$game_data$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata",
+    "$game_ai$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\ai",
+    "$game_spawn$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\spawns",
+    "$game_levels$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\levels",
+    "$game_meshes$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\meshes",
+    "$game_anims$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\anims",
+    "$game_dm$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\meshes",
+    "$game_shaders$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\shaders",
+    "$game_particles$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\particles",
+    "$game_sounds$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\sounds",
+    "$game_textures$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\textures",
+    "$game_config$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\configs",
+    "$game_addons$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\addons",
+    "$game_weathers$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\configs\\environment\\weathers",
+    "$game_weather_effects$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\configs\\environment\\weather_effects",
+    "$textures$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\textures",
+    "$level$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\levels",
+    "$game_scripts$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\scripts",
+    "$logs$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\appdata\\logs",
+    "$screenshots$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\appdata\\screenshots",
+    "$game_saves$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\appdata\\savedgames",
+    "$downloads$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\appdata",
+    "$game_text$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\configs\\text",
+    "$textures_ui$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\textures\\ui",
+    "$warfare_presets$": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\test-install\\baseline\\gamedata\\configs\\warfare_presets"
+  },
+  "modified_fsgame_sha256": "b6a7fae78331c53ba7a208b5a6251227f25c8a99f07fd1e73dd9d25862b68521",
+  "verification": "Independent copies; each source/copy SHA-256 matched before fsgame routing edit.",
+  "runtime_validation": "Not run"
+}

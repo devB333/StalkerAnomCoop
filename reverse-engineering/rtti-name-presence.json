@@ -1,0 +1,26 @@
+[
+  {
+    "rtti_name_candidate": ".?AVCActor@@",
+    "file_offset": 13699968
+  },
+  {
+    "rtti_name_candidate": ".?AVCActorMP@@",
+    "file_offset": 13726552
+  },
+  {
+    "rtti_name_candidate": ".?AVCSE_ActorMP@@",
+    "file_offset": 13725864
+  },
+  {
+    "rtti_name_candidate": ".?AVCALifeSimulator@@",
+    "file_offset": 13734360
+  },
+  {
+    "rtti_name_candidate": ".?AVxrServer@@",
+    "file_offset": 13719440
+  },
+  {
+    "rtti_name_candidate": ".?AVgame_sv_Deathmatch@@",
+    "file_offset": 13683320
+  }
+]

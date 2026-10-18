@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "recorded": "2026-10-15",
+  "candidate_status": "unvalidated",
+  "upstream": "https://github.com/themrdemonized/xray-monolith.git",
+  "revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+  "reference_directory": "engine/xray-monolith",
+  "reference_dirty": false,
+  "working_directory": "builds/build_1/engine-work",
+  "ownership": "Root-versioned ordered patches in patches/engine/series; preserve reference checkout",
+  "patch_series": "patches/engine/series",
+  "patches": [
+    {
+      "path": "patches/engine/0001-campaign-server-startup.patch",
+      "sha256": "da2990afd431cd592d7e060274719806fc2ec2882ea3419d036a0fba244de149"
+    },
+    {
+      "path": "patches/engine/0002-campaign-core-smoke.patch",
+      "sha256": "2e5bd39bfecf4872cac44f12c2724e596941128b9bfe420706c1408fb5cab72a"
+    },
+    {
+      "path": "patches/engine/0003-campaign-services-smoke.patch",
+      "sha256": "449a85f513ff5df65b3e6f5770bdb8eb923dec6af178aee221e47938586fa68b"
+    }
+  ],
+  "submodules": [
+    {
+      "path": "src/3rd party/optick-git",
+      "url": "https://github.com/bombomby/optick.git",
+      "revision": "8abd28dee1a4034c973a3d32cd1777118e72df7e",
+      "initialized": false,
+      "working_copy_initialized": true,
+      "working_copy_dirty": false
+    }
+  ],
+  "toolchain": {
+    "required_family": "VS2022 v143 x64, MFC/ATL, Windows SDK 10.0",
+    "exact_versions": {
+      "visual_studio_version": "17.14.37806.7",
+      "visual_studio_display_version": "17.14.42",
+      "msvc_tools_version": "14.44.35207",
+      "msbuild_version": "17.14.60.43110",
+      "windows_sdk_version": "10.0.26100.0"
+    },
+    "status": "Installed and verified; all 33 DX11|x64 projects evaluated with pinned versions",
+    "installer_script": "tools/Install-Stage1Toolchain.ps1",
+    "inventory_script": "tools/Get-Stage1Toolchain.ps1",
+    "bootstrapper_url": "https://aka.ms/vs/17/release/vs_buildtools.exe",
+    "bootstrapper_sha256": "2a6aa7d94e38d457a4eb3930fc60056ecab06865b2eb925e5275b8473a017583",
+    "identity_manifest": "docs/toolchain-manifest.json"
+  },
+  "configuration": "DX11|x64",
+  "baseline_binary_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e"
+}

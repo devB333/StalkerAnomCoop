@@ -1,0 +1,268 @@
+diff --git a/src/CampaignServer.targets b/src/CampaignServer.targets
+new file mode 100644
+index 0000000..231a1c8
+--- /dev/null
++++ b/src/CampaignServer.targets
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'xrEngine' and '$(Configuration)|$(Platform)' == 'ReleaseR4|x64'">
++    <CampaignServerRole>true</CampaignServerRole>
++  </PropertyGroup>
++  <Target Name="ValidateCampaignServerBuild" BeforeTargets="ClCompile" Condition="'$(MSBuildProjectName)' == 'xrEngine' and '$(Configuration)|$(Platform)' == 'ReleaseR4|x64'">
++    <Error Condition="'$(XR_CampaignServer)' != 'true' or '$(TargetName)' != 'AnomalyCampaignServer'" Text="Campaign target name and role must be configured together." />
++  </Target>
++</Project>
+diff --git a/src/xrEngine/EngineAPI.cpp b/src/xrEngine/EngineAPI.cpp
+index 2913943..a9525b0 100644
+--- a/src/xrEngine/EngineAPI.cpp
++++ b/src/xrEngine/EngineAPI.cpp
+@@ -94,6 +94,7 @@ CEngineAPI::CEngineAPI()
+ 	hTuner = 0;
+ 	pCreate = 0;
+ 	pDestroy = 0;
++	renderer_attached = false;
+ 	tune_pause = dummy;
+ 	tune_resume = dummy;
+ }
+@@ -220,6 +221,7 @@ void CEngineAPI::Initialize(void)
+ 
+ #ifndef DEDICATED_SERVER
+ 	InitializeNotDedicated();
++	renderer_attached = true;
+ #endif // DEDICATED_SERVER
+ 
+ #ifdef STATIC_RENDERER_R1
+@@ -233,6 +235,7 @@ void CEngineAPI::Initialize(void)
+ 
+         Log("Loading DLL:", r1_name);
+ 		DllMainXrRenderR1(NULL, DLL_PROCESS_ATTACH, NULL);
++		renderer_attached = true;
+ 		//hRender = LoadLibrary(r1_name);
+ 	//if (0 == hRender) R_CHK(GetLastError());
+         //R_ASSERT(hRender);
+@@ -241,22 +244,7 @@ void CEngineAPI::Initialize(void)
+ #endif
+ 
+ 	Device.ConnectToRender();
+-
+-	// game
+-	{
+-		LPCSTR g_name = "xrGame.dll";
+-		Log("Loading DLL:", g_name);
+-		//hGame = LoadLibrary(g_name);
+-		DllMainXrGame(NULL, DLL_PROCESS_ATTACH, NULL);
+-		//if (0 == hGame) R_CHK(GetLastError());
+-		//R_ASSERT2(hGame, "Game DLL raised exception during loading or there is no game DLL at all");
+-		//pCreate = (Factory_Create*)GetProcAddress(hGame, "xrFactory_Create");
+-		pCreate = xrFactory_Create;
+-		R_ASSERT(pCreate);
+-		//pDestroy = (Factory_Destroy*)GetProcAddress(hGame, "xrFactory_Destroy");
+-		pDestroy = xrFactory_Destroy;
+-		R_ASSERT(pDestroy);
+-	}
++	InitializeGameFactory();
+ 
+ 	//////////////////////////////////////////////////////////////////////////
+ 	// vTune
+@@ -277,12 +265,35 @@ void CEngineAPI::Initialize(void)
+ 	}
+ }
+ 
++void CEngineAPI::InitializeGameFactory()
++{
++	// game
++	{
++		LPCSTR g_name = "xrGame.dll";
++		Log("Loading DLL:", g_name);
++		//hGame = LoadLibrary(g_name);
++		DllMainXrGame(NULL, DLL_PROCESS_ATTACH, NULL);
++		//if (0 == hGame) R_CHK(GetLastError());
++		//R_ASSERT2(hGame, "Game DLL raised exception during loading or there is no game DLL at all");
++		//pCreate = (Factory_Create*)GetProcAddress(hGame, "xrFactory_Create");
++		pCreate = xrFactory_Create;
++		R_ASSERT(pCreate);
++		//pDestroy = (Factory_Destroy*)GetProcAddress(hGame, "xrFactory_Destroy");
++		pDestroy = xrFactory_Destroy;
++		R_ASSERT(pDestroy);
++	}
++
++}
++
+ void CEngineAPI::Destroy(void)
+ {
+ 	//if (hGame) { FreeLibrary(hGame); hGame = 0; }
+-	DllMainXrGame(NULL, DLL_PROCESS_DETACH, NULL);
++	if (pCreate)
++		DllMainXrGame(NULL, DLL_PROCESS_DETACH, NULL);
+ 	//if (hRender) { FreeLibrary(hRender); hRender = 0; }
+-	DLL_MAIN_RENDERER(NULL, DLL_PROCESS_DETACH, NULL);
++	if (renderer_attached)
++		DLL_MAIN_RENDERER(NULL, DLL_PROCESS_DETACH, NULL);
++	renderer_attached = false;
+ 	pCreate = 0;
+ 	pDestroy = 0;
+ 	Engine.Event._destroy();
+diff --git a/src/xrEngine/EngineAPI.h b/src/xrEngine/EngineAPI.h
+index 1f699f6..a709e47 100644
+--- a/src/xrEngine/EngineAPI.h
++++ b/src/xrEngine/EngineAPI.h
+@@ -46,9 +46,11 @@ public:
+ 	Factory_Create* pCreate;
+ 	Factory_Destroy* pDestroy;
+ 	BOOL tune_enabled;
++	bool renderer_attached;
+ 	VTPause* tune_pause;
+ 	VTResume* tune_resume;
+ 	void Initialize();
++	void InitializeGameFactory();
+ 
+ #ifndef DEDICATED_SERVER
+ 	void InitializeNotDedicated();
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 64bdf6a..3d1b9f2 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -12,6 +12,7 @@
+ #include "dedicated_server_only.h"
+ #include "no_single.h"
+ #include "../xrNetServer/NET_AuthCheck.h"
++#include "../xrServerEntities/clsid_game.h"
+ 
+ #include "xr_input.h"
+ #include "xr_ioconsole.h"
+@@ -950,6 +951,66 @@ void foo()
+ #endif // 0
+ 
+ ENGINE_API bool g_dedicated_server = false;
++ENGINE_API bool g_campaign_server = false;
++
++#ifdef XR_CAMPAIGN_SERVER
++#if defined(NO_SINGLE) || defined(DEDICATED_SERVER_ONLY) || defined(DEDICATED_SERVER)
++#error Campaign server requires single-player campaign services and a distinct runtime role.
++#endif
++
++// This smoke path exercises core/settings, console commands and the native
++// game factory before level/render separation is implemented.
++static int RunCampaignServerSmoke(LPCSTR command_line)
++{
++    LPCSTR option = strstr(command_line, "-fsltx ");
++    if (!option || !strstr(command_line, "-campaign-smoke"))
++    {
++        fprintf(stderr, "S02-T02: -campaign-smoke and absolute -fsltx are required.\n");
++        return 2;
++    }
++
++    string_path filesystem_config = {};
++    if (sscanf_s(option + 7, "%259s", filesystem_config,
++            static_cast<unsigned>(_countof(filesystem_config))) != 1 ||
++        filesystem_config[1] != ':' ||
++        (filesystem_config[2] != '\\' && filesystem_config[2] != '/'))
++    {
++        fprintf(stderr, "S02-T02: invalid absolute filesystem configuration.\n");
++        return 2;
++    }
++
++    g_campaign_server = true;
++    printf("S02-T02 stage=core-start\n");
++    compute_build_id();
++    Core._initialize("xray-campaign-server", NULL, TRUE, filesystem_config);
++    printf("S02-T02 stage=core-ready\n");
++    InitSettings();
++    printf("S02-T02 stage=settings-ready\n");
++    Engine.Initialize();
++    printf("S02-T02 stage=scheduler-ready\n");
++    Console = xr_new<CConsole>();
++    Console->Initialize();
++    printf("S02-T02 stage=console-ready\n");
++    Engine.External.InitializeGameFactory();
++    printf("S02-T02 stage=game-factory-ready\n");
++    DLL_Pure* game = Engine.External.pCreate(CLSID_CL_GAME_SINGLE);
++    R_ASSERT2(game, "Campaign game_cl_Single factory is unavailable");
++    Engine.External.pDestroy(game);
++    printf("S02-T02 stage=campaign-client-state-ready\n");
++
++    // S02-T03/T05 will supply CPU models and a renderer-free level loader.
++    printf("S02-T02 next=level-context-requires-cpu-model-services\n");
++    Engine.Destroy();
++    Console->Destroy();
++    xr_delete(Console);
++    destroySettings();
++    Core._destroy();
++    g_campaign_server = false;
++    printf("S02-T02 stage=shutdown-complete\n");
++    return 0;
++}
++#endif
++
+ 
+ #ifndef DEDICATED_SERVER
+ 
+@@ -966,6 +1027,10 @@ int APIENTRY WinMain_impl(HINSTANCE hInstance,
+ 	Debug._initialize(false);
+ #endif // DEDICATED_SERVER
+ 
++#ifdef XR_CAMPAIGN_SERVER
++    return RunCampaignServerSmoke(lpCmdLine);
++#endif
++
+ 	if (!IsDebuggerPresent())
+ 	{
+ 		HMODULE const kernel32 = LoadLibrary("kernel32.dll");
+@@ -1292,9 +1357,10 @@ int APIENTRY WinMain(HINSTANCE hInstance,
+ 
+ 	DllMainXrCore(NULL, DLL_THREAD_ATTACH, NULL);
+ 
++    int result = 0;
+ 	__try
+ 	{
+-		WinMain_impl(hInstance, hPrevInstance, lpCmdLine, nCmdShow);
++		result = WinMain_impl(hInstance, hPrevInstance, lpCmdLine, nCmdShow);
+ 	}
+ 	__except (stack_overflow_exception_filter(GetExceptionCode()))
+ 	{
+@@ -1306,7 +1372,7 @@ int APIENTRY WinMain(HINSTANCE hInstance,
+ 	DllMainXrCore(NULL, DLL_PROCESS_DETACH, NULL);
+ 	//DllMainOpenAL32(NULL, DLL_PROCESS_DETACH, NULL);
+ 
+-	return (0);
++	return result;
+ }
+ 
+ LPCSTR _GetFontTexName(LPCSTR section) { return GetFontTextureName(section); }
+diff --git a/src/xrEngine/x_ray.h b/src/xrEngine/x_ray.h
+index 4d9e580..3d0bf2c 100644
+--- a/src/xrEngine/x_ray.h
++++ b/src/xrEngine/x_ray.h
+@@ -74,6 +74,7 @@ public:
+ };
+ 
+ extern ENGINE_API CApplication* pApp;
++extern ENGINE_API bool g_campaign_server;
+ 
+ //Discord
+ struct rpc_info
+diff --git a/src/xrEngine/xrEngine.vcxproj b/src/xrEngine/xrEngine.vcxproj
+index 5a3ec5e..a6681c8 100644
+--- a/src/xrEngine/xrEngine.vcxproj
++++ b/src/xrEngine/xrEngine.vcxproj
+@@ -224,7 +224,8 @@
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseR4|x64'">
+     <OutDir>$(xrGameDir)bin_dbg\</OutDir>
+-    <TargetName>AnomalyDX11</TargetName>
++    <TargetName Condition="'$(XR_CampaignServer)' != 'true'">AnomalyDX11</TargetName>
++    <TargetName Condition="'$(XR_CampaignServer)' == 'true'">AnomalyCampaignServer</TargetName>
+     <IntDir>$(xrIntDir)$(ProjectName)\</IntDir>
+     <LinkIncremental>false</LinkIncremental>
+   </PropertyGroup>
+@@ -373,7 +374,8 @@
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseR4|x64'">
+     <ClCompile>
+       <AdditionalIncludeDirectories>.;$(SolutionDir)3rd party\imgui\;$(SolutionDir)3rd party\luajit-2\src\;$(SolutionDir)3rd party\luabind\;$(SolutionDir)3rd party\giflib\;$(XRAY_16X_LIBS)OpenAutomate\inc;$(XRAY_16X_LIBS)libogg-1.1.4\include;$(XRAY_16X_LIBS)libtheora-1.1.1\include;$(xrSdkDir)include;$(xrSdkDir)include\OpenAutomate;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+-      <PreprocessorDefinitions>STATIC_RENDERER_R4;NDEBUG;WIN32;_WINDOWS;ENGINE_BUILD;_SECURE_SCL=0;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions Condition="'$(XR_CampaignServer)' != 'true'">STATIC_RENDERER_R4;NDEBUG;WIN32;_WINDOWS;ENGINE_BUILD;_SECURE_SCL=0;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions Condition="'$(XR_CampaignServer)' == 'true'">XR_CAMPAIGN_SERVER;STATIC_RENDERER_R4;NDEBUG;WIN32;_WINDOWS;ENGINE_BUILD;_SECURE_SCL=0;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <ExceptionHandling>false</ExceptionHandling>
+       <EnableEnhancedInstructionSet>NotSet</EnableEnhancedInstructionSet>
+       <PrecompiledHeader>Use</PrecompiledHeader>

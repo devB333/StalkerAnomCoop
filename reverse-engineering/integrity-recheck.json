@@ -1,0 +1,47 @@
+[
+  {
+    "name": "AnomalyDX10.exe",
+    "initial_sha256": "fbfdb568030596af766a6514f897501fc0882b742d49c1be53729a0c9cc57101",
+    "final_sha256": "fbfdb568030596af766a6514f897501fc0882b742d49c1be53729a0c9cc57101"
+  },
+  {
+    "name": "AnomalyDX10AVX.exe",
+    "initial_sha256": "62b3bf2163d6fd22a68c11ff9748a8b0f8f50cb59dda57be2b214f2e02ddf922",
+    "final_sha256": "62b3bf2163d6fd22a68c11ff9748a8b0f8f50cb59dda57be2b214f2e02ddf922"
+  },
+  {
+    "name": "AnomalyDX11.exe",
+    "initial_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+    "final_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e"
+  },
+  {
+    "name": "AnomalyDX11AVX.exe",
+    "initial_sha256": "2032acfc041e215508692ef4079ef504c7bbabf1793d5668084099f734b92f12",
+    "final_sha256": "2032acfc041e215508692ef4079ef504c7bbabf1793d5668084099f734b92f12"
+  },
+  {
+    "name": "AnomalyDX8.exe",
+    "initial_sha256": "4c316cce7cc9383ff7cefbc5540c68fd39e6395d0a186614192cdfd632256dfa",
+    "final_sha256": "4c316cce7cc9383ff7cefbc5540c68fd39e6395d0a186614192cdfd632256dfa"
+  },
+  {
+    "name": "AnomalyDX8AVX.exe",
+    "initial_sha256": "ca494fbb39e864c9361fea2ff1192fee50f50d409ba88f6c9fd215745305d153",
+    "final_sha256": "ca494fbb39e864c9361fea2ff1192fee50f50d409ba88f6c9fd215745305d153"
+  },
+  {
+    "name": "AnomalyDX9.exe",
+    "initial_sha256": "265c6bd61829b1f9905441beb4e47fc5eb5d6c2008d748fa808a4405c56dbfd5",
+    "final_sha256": "265c6bd61829b1f9905441beb4e47fc5eb5d6c2008d748fa808a4405c56dbfd5"
+  },
+  {
+    "name": "AnomalyDX9AVX.exe",
+    "initial_sha256": "1aa637aa274822aaf1581b89a19616a9ae56082ac03067f53a9d2b459601f7c4",
+    "final_sha256": "1aa637aa274822aaf1581b89a19616a9ae56082ac03067f53a9d2b459601f7c4"
+  },
+  {
+    "name": "VerifiedDX11.exe",
+    "initial_sha256": "26a9cab95de4a4ef3766fb6f8f23e2e69626b9992396a3417e05eee10656aae9",
+    "final_sha256": "26a9cab95de4a4ef3766fb6f8f23e2e69626b9992396a3417e05eee10656aae9"
+  }
+]

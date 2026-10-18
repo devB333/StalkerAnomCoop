@@ -1,0 +1,78 @@
+[
+  {
+    "text": "Process_update client not found",
+    "locations": [
+      {
+        "offset": 11845800,
+        "rva": "0xb4cea8",
+        "static_va": "0x140b4cea8"
+      }
+    ]
+  },
+  {
+    "text": "Process_save client not found",
+    "locations": [
+      {
+        "offset": 11845984,
+        "rva": "0xb4cf60",
+        "static_va": "0x140b4cf60"
+      }
+    ]
+  },
+  {
+    "text": "CLevel::OnFrame",
+    "locations": []
+  },
+  {
+    "text": "CRenderDevice::on_idle",
+    "locations": []
+  },
+  {
+    "text": "CRenderDevice::FrameMove",
+    "locations": []
+  },
+  {
+    "text": "CLevel::net_Start",
+    "locations": []
+  },
+  {
+    "text": "CALifeGraphRegistry::setup_current_level",
+    "locations": [
+      {
+        "offset": 11467088,
+        "rva": "0xaf0750",
+        "static_va": "0x140af0750"
+      }
+    ]
+  },
+  {
+    "text": "CALifeStorageManager::prepare_objects_for_save",
+    "locations": []
+  },
+  {
+    "text": "CPHWorld::FrameStep",
+    "locations": []
+  },
+  {
+    "text": "CPHWorld::Create",
+    "locations": []
+  },
+  {
+    "text": "IGame_Level::OnFrame",
+    "locations": []
+  },
+  {
+    "text": "CActor::net_Spawn",
+    "locations": []
+  },
+  {
+    "text": "Model isn't assigned for object, but cform requisted",
+    "locations": [
+      {
+        "offset": 10838776,
+        "rva": "0xa570f8",
+        "static_va": "0x140a570f8"
+      }
+    ]
+  }
+]

@@ -1,0 +1,182 @@
+diff --git a/src/xrEngine/XR_IOConsole.cpp b/src/xrEngine/XR_IOConsole.cpp
+index 1aabaab..f9e5649 100644
+--- a/src/xrEngine/XR_IOConsole.cpp
++++ b/src/xrEngine/XR_IOConsole.cpp
+@@ -55,6 +55,7 @@ char const* const ch_cursor = "_";
+ 
+ text_editor::line_edit_control& CConsole::ec()
+ {
++	R_ASSERT2(m_editor, "Command-only console has no interactive editor");
+ 	return m_editor->control();
+ }
+ 
+@@ -140,14 +141,17 @@ bool CConsole::is_mark(Console_mark type)
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+-CConsole::CConsole()
++CConsole::CConsole(bool interactive)
+ 	: m_hShader_back(NULL)
+ {
+-	m_editor = xr_new<text_editor::line_editor>((u32)CONSOLE_BUF_SIZE);
++	m_editor = interactive ? xr_new<text_editor::line_editor>((u32)CONSOLE_BUF_SIZE) : nullptr;
+ 	m_cmd_history_max = cmd_history_max;
+ 	m_disable_tips = false;
+-	Register_callbacks();
+-	Device.seqResolutionChanged.Add(this);
++	if (interactive)
++	{
++		Register_callbacks();
++		Device.seqResolutionChanged.Add(this);
++	}
+ }
+ 
+ void CConsole::Initialize()
+@@ -178,15 +182,18 @@ void CConsole::Initialize()
+ 	// Commands
+ 	extern void CCC_Register();
+ 	CCC_Register();
+-	Debug.set_crashhandler(&DumpConsoleVariablesOnCrash);
++	// Dumping presentation command values requires the interactive services.
++	if (m_editor)
++		Debug.set_crashhandler(&DumpConsoleVariablesOnCrash);
+ }
+ 
+ CConsole::~CConsole()
+ {
++	if (m_editor)
++		Device.seqResolutionChanged.Remove(this);
+ 	xr_delete(m_hShader_back);
+ 	xr_delete(m_editor);
+ 	Destroy();
+-	Device.seqResolutionChanged.Remove(this);
+ }
+ 
+ void CConsole::Destroy()
+@@ -665,7 +672,8 @@ void CConsole::ExecuteCommand(LPCSTR cmd_str, bool record_cmd)
+ 
+ 	if (record_cmd)
+ 	{
+-		ec().clear_states();
++		if (m_editor)
++			ec().clear_states();
+ 	}
+ }
+ 
+@@ -673,7 +681,7 @@ void CConsole::Show()
+ {
+ 	//SECUROM_MARKER_HIGH_SECURITY_ON(11)
+ 
+-	if (bVisible)
++	if (bVisible || !m_editor)
+ 	{
+ 		return;
+ 	}
+diff --git a/src/xrEngine/XR_IOConsole.h b/src/xrEngine/XR_IOConsole.h
+index d052325..1270614 100644
+--- a/src/xrEngine/XR_IOConsole.h
++++ b/src/xrEngine/XR_IOConsole.h
+@@ -132,7 +132,7 @@ private:
+ 	u32 m_prev_length_str;
+ 
+ public:
+-	CConsole();
++	explicit CConsole(bool interactive = true);
+ 	virtual ~CConsole();
+ 	virtual void Initialize();
+ 	virtual void Destroy();
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 3d1b9f2..de5a75f 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -962,10 +962,11 @@ ENGINE_API bool g_campaign_server = false;
+ // game factory before level/render separation is implemented.
+ static int RunCampaignServerSmoke(LPCSTR command_line)
+ {
++    const bool core_only = strstr(command_line, "-campaign-core-smoke") != nullptr;
+     LPCSTR option = strstr(command_line, "-fsltx ");
+-    if (!option || !strstr(command_line, "-campaign-smoke"))
++    if (!option || (!core_only && !strstr(command_line, "-campaign-smoke")))
+     {
+-        fprintf(stderr, "S02-T02: -campaign-smoke and absolute -fsltx are required.\n");
++        fprintf(stderr, "S02-T02: a campaign smoke scope and absolute -fsltx are required.\n");
+         return 2;
+     }
+ 
+@@ -983,31 +984,63 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+     printf("S02-T02 stage=core-start\n");
+     compute_build_id();
+     Core._initialize("xray-campaign-server", NULL, TRUE, filesystem_config);
+-    printf("S02-T02 stage=core-ready\n");
++    string_path stage_path;
++    FS.update_path(stage_path, "$logs$", "campaign-smoke-stages.log");
++    FILE* stages = fopen(stage_path, "w");
++    R_ASSERT2(stages, "Cannot open campaign smoke stage log");
++    auto stage = [stages](LPCSTR name)
++    {
++        fprintf(stages, "S02-T02 stage=%s\n", name);
++        fflush(stages);
++        Msg("S02-T02 stage=%s", name);
++        FlushLog();
++    };
++    stage("core-ready");
+     InitSettings();
+-    printf("S02-T02 stage=settings-ready\n");
++    stage("settings-ready");
+     Engine.Initialize();
+-    printf("S02-T02 stage=scheduler-ready\n");
+-    Console = xr_new<CConsole>();
++    stage("scheduler-ready");
++    Console = xr_new<CConsole>(false);
+     Console->Initialize();
+-    printf("S02-T02 stage=console-ready\n");
++    stage("console-ready");
+     Engine.External.InitializeGameFactory();
+-    printf("S02-T02 stage=game-factory-ready\n");
+-    DLL_Pure* game = Engine.External.pCreate(CLSID_CL_GAME_SINGLE);
+-    R_ASSERT2(game, "Campaign game_cl_Single factory is unavailable");
+-    Engine.External.pDestroy(game);
+-    printf("S02-T02 stage=campaign-client-state-ready\n");
++    stage("game-factory-ready");
++    R_ASSERT2(!Device.m_hWnd && !Device.m_pRender && !Device.b_is_Ready && !Render && !pInput,
++        "Campaign startup unexpectedly initialized graphics, a window or input");
++    stage("graphics-window-input-absent");
++
++    int result = 0;
++    if (!core_only)
++    {
++        // Native game_GameState reads CLevel's clock in its constructor.
++        // The level must be supplied by the later CPU-model/level lifecycle.
++        if (!g_pGameLevel)
++        {
++            stage("level-context-required");
++            result = 3;
++        }
++        else
++        {
++            DLL_Pure* game = Engine.External.pCreate(CLSID_CL_GAME_SINGLE);
++            R_ASSERT2(game, "Campaign game_cl_Single factory is unavailable");
++            Engine.External.pDestroy(game);
++            stage("campaign-client-state-ready");
++        }
++    }
+ 
+     // S02-T03/T05 will supply CPU models and a renderer-free level loader.
+-    printf("S02-T02 next=level-context-requires-cpu-model-services\n");
++    Msg("S02-T02 next=level-context-requires-cpu-model-services");
+     Engine.Destroy();
++    stage("engine-stopped");
+     Console->Destroy();
+     xr_delete(Console);
+     destroySettings();
++    stage("settings-stopped");
+     Core._destroy();
+     g_campaign_server = false;
+-    printf("S02-T02 stage=shutdown-complete\n");
+-    return 0;
++    fprintf(stages, "S02-T02 stage=shutdown-complete\n");
++    fclose(stages);
++    return result;
+ }
+ #endif
+ 

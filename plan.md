@@ -1,0 +1,930 @@
+# S.T.A.L.K.E.R. Anomaly Co-op — Engineering Roadmap
+
+Planning baseline: 2026-10-15. **The original planning execution authorized no implementation; the user authorized roadmap execution on 2026-10-15 by requesting that work begin.** This document is the authoritative development order; the older [implementation roadmap](docs/implementation-roadmap.md) remains historical evidence. The user's approved D1–D8 below supersede pending-decision wording in earlier reports. Preserve those reports rather than treating their older proposals as new decisions.
+
+## Roadmap at a glance
+
+| Stage | Outcome | Completion gate | Status |
+|---|---|---|---|
+| 0 | Safe workspace, preserved evidence, reproducible source ownership | G00 | Completed |
+| 1 | Compatible unmodified Windows client, isolated content validation | G01 | Completed |
+| 2 | Genuine headless native campaign simulation | G02 | In Progress |
+| 3 | Two explicit participants and server authority | G03 | Not Started |
+| 4 | Validated transport, protocol and sessions | G04 | Not Started |
+| 5 | Two clients observe the same actors and world | G05 | Not Started |
+| 6 | Server movement, reconciliation and combat | G06 | Not Started |
+| 7 | Recoverable checkpoints, durable critical outcomes and resynchronization | G07 | Not Started |
+| 8 | Durable inventory and one complete shared quest | G08 | Not Started |
+| 9 | Confirmed party travel with failure recovery | G09 | Not Started |
+| 10 | Broader campaign and simulation coverage | G10 | Not Started |
+| 11 | Reliability, performance, regression and release qualification | G11 | Not Started |
+
+Engineering tasks were initially unchecked; current statuses and validation links below record execution. Prior source investigation and Ghidra persistence verification are reusable evidence, **not completed implementation gates**. Stage 0 is complete. S01-T01 toolchain readiness and S01-T02 isolated content preparation have passed; two unmodified DX11 builds passed (0 errors each). Artifact comparison and scoped gameplay acceptance passed on 2026-10-17. The user explicitly waived completed-quest/reward and original-client comparison for G01; those remain untested risks. Exact commands and evidence are recorded in the current task reports. S02-T01 source mapping is complete; [headless service boundary](docs/headless-service-boundary.md) and [fixture specification](docs/headless-fixture.json) define the implementation work. S02-T02 is complete: both products rebuild; Core and Services (spatial DBs, script engine, character registries) startup/shutdown smokes pass with partial-start unwind checked; the [internal context](docs/campaign-server-context.md) is defined. By user decision on 2026-10-18, real game-state/ALife construction (H02) moved to S02-T05/T06; its renderer/presentation blockers are recorded. G02 is In Progress; no headless gameplay has been validated.
+
+## A. Project objective
+
+Build exactly two active players initially into one persistent Anomaly 1.5.3 campaign, using matched Windows clients and a dedicated authoritative Monolith process. The server owns world simulation, canonical players, quests, combat, inventory and recovery. Clients provide input and presentation, with bounded prediction and reconciliation. Both players occupy one online level, with offline ALife retained and coordinated travel. Preserve single-player behavior where practical; never use a player's process as authority.
+
+All work, test installations, generated logs, temporary files and databases stay under `/mnt/c/Users/djb20/StalkerAnomCoop` (the current lowercase WSL workspace resolves to the same directory). `/mnt/c/Users/djb20/StalkerAnom` is strictly read-only. Never launch from, patch, or route configuration/saves/output into the original installation. Verify Windows paths explicitly when invoking Windows tools from WSL.
+
+## B. Approved architecture and evidence baseline
+
+### Accepted decisions
+
+| Decision | Binding direction | Engineering validation still required |
+|---|---|---|
+| D1 — Authoritative Monolith runtime | Keep backend-owned `CLevel`, necessary `game_cl_Single`, `xrServer`, lifecycle, scheduler, physics, AI and ALife. Separate gameplay from presentation. Do not move all simulation into `xrServer` or create a permanent artificial global player. | Startup, execution order and actor-independent services must actually run. A private internal state bridge must never confer authority on a remote client. |
+| D2 — Genuine headless operation | Remove GPU/UI/presentation dependencies while retaining CPU models, skeletons, animation transforms, collision, hit detection, physics, AI, quests and inventory. A hidden window is diagnostic only. | Prove no GPU device or draw submission is needed; blanket no-op render/model interfaces are not acceptable if they remove gameplay. |
+| D3 — Validated matched builds | Pin an Anomaly 1.5.3-compatible revision and Windows MSVC/SDK configuration; build the unmodified client first and run against a separate test installation. Validate assets, installed scripts, quests, save/load and core play before major multiplayer changes. Build both products from the accepted baseline thereafter. **User-approved 2026-10-17 G01 exception:** completed-quest/reward and copied original-client comparison are waived for Stage 2 entry; record them as untested and revisit on related failures or release qualification. | [G01](docs/validation/G01.md) accepts a bounded development baseline, not full campaign compatibility. Do not claim untested quest rewards or original-client equivalence. |
+| D4 — Explicit participants | Both actors are campaign participants with explicit player/party/entity contexts. Retain useful actor replication and native campaign services, not competitive MP as a campaign replacement. Each rendering client retains its local view actor. | Replace implicit native/Lua global-actor mutations and show independent health, equipment, inputs and contributions. Player 2 cannot be merely a companion visual. |
+| D5 — Same-level party travel | One detailed online simulation initially. Server validates requests, notifies both players and initially requires both confirmations. Suspend or order mutations, load both clients, restore and synchronize authoritative state, then resume. | Specify consent expiry, cancellation, timeout, disconnect and failed-load recovery. No automatic unconfirmed teleport. Independent online levels remain outside scope without unnecessarily hard-coding them out of identifiers/protocol. |
+| D6 — Transport adapter | Provisionally use GameNetworkingSockets, isolated behind a C++ adapter; preserve useful native serializers. Reliable critical events and discardable high-frequency snapshots have separate policies. Server validates intentions. | Isolated Windows toolchain, connectivity and reliable/unreliable tests precede acceptance. No custom reliable UDP. A demonstrated incompatibility requires evidence and approval before substituting transport. |
+| D7 — Recoverable authority | Native checkpoints plus a durable journal of validated effects; stable player/entity/item IDs; checkpoint generations, revisions and duplicate-safe outcomes. Commit critical progression durably before acknowledging permanent success. Clients discard stale state and resynchronize after recovery. | Prove critical quest/inventory/reward/ownership outcomes survive documented crash boundaries. Transient physics/projectiles/precise NPC positions may roll back. Perfect deterministic replay and zero data loss are not assumed. The native simulation, not storage, remains authority. |
+| D8 — One backend process | Simulation, networking, campaign and persistence use modular interfaces inside one dedicated Monolith process. | Thread/queue and persistence latency must be measured. Separate networking, persistence or campaign services require a demonstrated limitation and approval. |
+
+### Evidence to reuse, not re-investigate by default
+
+Read [architecture](docs/architecture.md), [engine investigation](docs/engine-investigation.md), [feasibility](docs/multiplayer-feasibility.md), [state ownership](docs/state-ownership.md), [protocol](docs/network-protocol.md), [binary evidence](docs/reverse-engineering-evidence.md) and `AGENTS.md`. Evidence references E01–E12 below abbreviate specific existing findings; source paths are relative to `engine/xray-monolith/src/` at **`c57fe5b9fab4fe0506659db03137c52d2500eb2f`**. Remap locations if the accepted source changes; do not assume line numbers persist.
+
+| Ref | Confirmed source behavior / location | Existing binary corroboration, when available |
+|---|---|---|
+| E01 | `Actor_Network.cpp` under `xrGame`, 58–67 and 511–550: global `Actor()` and spawn assignment; `Actor.h:74–79,727–733`, `InventoryOwner.cpp:37,90–92`: per-instance state. | GH-A01, RVA `0xfb2e0`, global return and SP assertion; independent participant behavior untested. |
+| E02 | `xrGame/alife_graph_registry.cpp:49–96`, `alife_dynamic_object.cpp:160–183`: one selected actor/level and actor-distance activation. | GH-A02 `0x386670`, GH-A05 `0x386100`: selected actor and one level registry; distance behavior source-only. |
+| E03 | `xrGame/Level_start.cpp:217–230`, `Level_network_start_client.cpp:134–164`; `xrServer.cpp:213–263`; `xrEngine/IGame_Level.cpp:191–200`: simulation spans internal client/world and server. | No binary mapping claimed. `xrServer` alone is not the online simulation loop. |
+| E04 | `xrGame/xrServer_process_update.cpp:7–95`, `Level_network.cpp:294–312`, `xrServer.cpp:797–812,890–917,1040–1048`: privileged local-state import/direct dispatch. | GH-A03 `0x71ef80`, GH-A04 `0x71edd0`: local assertions and state import/save paths. Not evidence of a remote exploit. |
+| E05 | `xrEngine/no_single.h:1–7`, `xrGame/game_sv_single.cpp:26–33`, `Level.cpp:1034–1053,1142–1169`: dedicated flags suppress required ALife/tasks/scripts. | Source-only. Existing dedicated switches are not a working campaign-server configuration. |
+| E06 | `xrEngine/device.cpp:401–580,694–754`, `EngineAPI.cpp:215–240,311–323`, `x_ray.cpp:1559–1576`; `xrGame/Level_load.cpp:50–96`, `GamePersistent.cpp:703–735`: loop/load/UI/render coupling. | Source-only. Headless startup has not been run. |
+| E07 | `xrEngine/xr_object.cpp:70–85,255–280`, `xrGame/CharacterPhysicsSupport.cpp:184–205`: visual/model data, skeleton collision and CPU bone/physics requirements. | GH-A06 `0x72650`: model/cform spawn correspondence; ABI and full layouts unverified. |
+| E08 | `xrPhysics/PHWorld.cpp:185–200,280–295,506–556`; `xrGame/alife_update_manager.cpp:58–78,92–140`, `GamePersistent.cpp:817–824`; stalker and base-monster scheduled updates. | Source-only: physics, scheduler and AI need deliberate tick ownership; no measured runtime yet. |
+| E09 | `xrEngine/xr_object.cpp:379–406`, `xr_object_list.cpp:198–266`; `xrGame/Level_Bullet_Manager.cpp:1225–1236`: camera-dependent scheduling; `CommitRenderSet` launches ballistics work. | Source-only. Render-named functions may perform essential simulation. |
+| E10 | `xrNetServer/NET_Server.cpp:245–443,614–658`; `xrServerEntities/object_factory_register.cpp:193–240`; `xrGame/Actor_Network.cpp:88–158,290–350`, `actor_mp_client_import.cpp:11–80`: legacy transport/factories/replication. | Installed MP class metadata exists; working multiplayer and campaign authority are not demonstrated. |
+| E11 | `xrEngine/IGame_Level.cpp:20–26`, `xrPhysics/PHWorld.cpp:40–60`, `xrGame/ai_space.h:38–41`, `alife_update_manager.cpp:159–240`: singular online world/physics/AI level and actor-based travel. | GH-A02/A05 corroborate ALife portion only. Offline ALife does not establish multi-level online play. |
+| E12 | `xrGame/alife_storage_manager.cpp:46–123,245–250`, `GameTask.cpp:40–60,137–209`, `GametaskManager.cpp:47–68`, `PhraseDialog.cpp:85–129`, `PhraseScript.cpp:156–166,234–270`; reusable u16 IDs in `xrServerEntities/xrServer_Object_Base.h:71–77`, `xrGame/xrServer.h:145–155`. | GH-A04 corroborates receiving save-state path, not complete durability. Native and Lua mutations need adapters; native IDs are insufficient persistent identities. |
+
+The existing `AnomalyDX11.exe` SHA-256 is `c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e`; installed metadata indicates Monolith 1.5.3, September 2024, whereas the candidate source is newer. Correspondence is partial, not exact-source proof. Persistent project: `reverse-engineering/ghidra/Anomaly153-c857b6f49d32.gpr` with its `.rep` directory. [Persistence verification](reverse-engineering/persistence-verification.json) records a successful no-analysis reopen with matching hash, **49,494 functions and 258,577 symbols**. [Architecture function map](reverse-engineering/architecture-function-map.json) records GH-A01–A06. Reuse these results. Do not reimport, delete, overwrite or run whole-binary autoanalysis again. Only a specific unresolved implementation question justifies a targeted saved-project read; new analysis must preserve existing databases and record exact identity/RVA/confidence.
+
+**Unverified beyond scoped G01 acceptance:** full campaign compatibility, headless gameplay, two campaign participants, transport integration, native checkpoint completeness, recovery guarantees and installed campaign Lua behavior. Packed installed scripts have not yet been audited. G01 accepted user-observed gameplay with two explicit waivers; S02-T01 is source mapping only, with no headless or multiplayer runtime pass.
+
+## C. Development roadmap
+
+### Task conventions and common completion contract
+
+Each task below includes its required fields. References to `server/`, `client/`, `protocol/`, `tests/`, test installations and validation reports are **planned artifacts**, not claims they already exist. Existing engine files are identified through the evidence catalog and named subsystems. Follow surrounding C++ conventions and keep gameplay changes modular and reversible. Keep original SP configuration available for regression.
+
+For every task, write a concise `docs/validation/<task-ID>.md` (or link an existing report containing the same evidence), recording source/dependency revisions, configuration, exact commands, fixture identities, expected and observed results, limitations, and relevant source lines. Keep large logs/dumps/builds in ignored workspace directories, for example `builds/logs/<task-ID>/`; never commit proprietary assets or Ghidra databases. Record code commit/patch location and reversion instructions when code changes. A test command must actually run to count. Compilation alone does not satisfy behavioral acceptance. Failure or unavailable Windows/runtime access leaves the task **Blocked**, with a concrete next step.
+
+A stage's first task requires the previous stage gate; other prerequisites below include necessary same-stage tasks. A gate depends on **all tasks in its stage**, not only its final task. Complexity estimates describe scope, not duration. Split a task into stable suffix IDs before starting if its chosen fixture or dependency is too large for a focused session; retain the parent and evidence links.
+
+### Stage 0 — Workspace and project baseline
+
+#### S00-T01 — Verify safety and preserve investigation context
+
+- [x] **Status: Completed** · **Reasoning effort: Medium** · **Complexity: Low**
+- **Evidence:** [Validation report](docs/validation/S00-T01.md).
+- **Purpose:** Establish a trustworthy starting point without repeating RE.
+- **Prerequisites:** None; roadmap execution authorization.
+- **Relevant files/subsystems:** AGENTS.md; root and engine Git repositories; evidence ledger; persistence-verification.json.
+- **Actions:** Resolve both paths and writable roots; check original existence, workspace separation, nested Git status and planned output routes. Check saved-project files and recorded identities; reuse prior reopen verification unless corruption or missing files is detected.
+- **Outputs:** Workspace/evidence manifest and preservation notes. Plus the common task evidence record.
+- **Acceptance:** Original lies outside writable roots; all output paths are in workspace; existing changes and persistent evidence are accounted for.
+- **Validation:** Read-only path/Git/manifest checks; if persistence is genuinely suspect, bounded native no-analysis reopen with output paths explicit.
+- **Risks/blockers:** Case aliases, independent MCP permissions, missing databases; stop on unsafe writable-root configuration.
+
+#### S00-T02 — Establish reproducible source and artifact ownership
+
+- [x] **Status: Completed** · **Reasoning effort: Medium** · **Complexity: Moderate**
+- **Evidence:** [Validation report](docs/validation/S00-T02.md).
+- **Purpose:** Prevent changes disappearing in the ignored reference checkout.
+- **Prerequisites:** S00-T01.
+- **Relevant files/subsystems:** Root .gitignore; engine/xray-monolith/.git; build and validation directories.
+- **Actions:** Record reference SHA/remotes/dirty state; choose a separately versioned working fork or reproducible patch series in workspace. Preserve reference tree; document how root revision identifies exact engine revision and dependency lock data. Audit ignores for binaries/assets/databases.
+- **Outputs:** Source manifest, working-copy/versioning procedure and artifact layout. Plus the common task evidence record.
+- **Acceptance:** A future engine change has a clear tracked home and reconstructible baseline without adding game assets to Git.
+- **Validation:** Reconstruct manifest references read-only; inspect ignore rules and repository boundaries.
+- **Risks/blockers:** Nested ignored repositories can hide work; do not reset or overwrite existing changes.
+
+#### S00-T03 — Define Windows test environment and compatibility fixtures
+
+- [x] **Status: Completed** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Evidence:** [Validation report](docs/validation/S00-T03.md).
+- **Purpose:** Make Stage 1 tests repeatable and safe.
+- **Prerequisites:** S00-T02.
+- **Relevant files/subsystems:** src/engine-vs2022.sln; docs/engine-investigation.md; planned builds/test-install and fixtures.
+- **Actions:** Inventory available MSVC/SDK/build dependencies without assuming WSL compilers suffice. Define isolated installation layout, config/save/log/temp routing and minimal asset-copy strategy. Select representative start/save/load/quest/combat fixtures and expected outcomes; record access gaps.
+- **Outputs:** Tool inventory, test-layout specification and baseline acceptance checklist. Plus the common task evidence record.
+- **Acceptance:** Every planned launch writes only in workspace; representative compatibility checks and Windows access requirements are explicit.
+- **Validation:** Check WSL-to-Windows path conversion, config routing and available tools; no launch from original.
+- **Risks/blockers:** Windows interaction/toolchain may require user environment access; writable hardlinks into original are forbidden.
+
+### Stage 1 — Source compatibility validation
+
+#### S01-T01 — Select and pin the candidate source and toolchain
+
+- [x] **Status: Completed** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Evidence:** [Validation report](docs/validation/S01-T01.md).
+- **Purpose:** Turn the reference fork into a reproducible candidate.
+- **Prerequisites:** G00.
+- **Relevant files/subsystems:** Source manifest; src/engine-vs2022.sln; xrEngine project files.
+- **Actions:** Compare recorded candidate requirements with Anomaly 1.5.3 content; select one revision, exact MSVC/SDK/configuration and dependency versions. Document drift and bounded fallback candidates; preserve pristine source identity.
+- **Outputs:** Pinned candidate/build manifest and exact proposed build command. Plus the common task evidence record.
+- **Acceptance:** Candidate and all build inputs are identified; no claim of binary equivalence or compatibility yet.
+- **Validation:** Inspect project/dependency settings and resolve compiler/runtime availability.
+- **Risks/blockers:** 2026 source versus 2024 installed binary; unresolved dependency downloads or SDK mismatch.
+
+#### S01-T02 — Prepare the isolated Anomaly test installation
+
+- [x] **Status: Completed** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Evidence:** [Validation report](docs/validation/S01-T02.md).
+- **Purpose:** Protect original files while testing realistic content.
+- **Prerequisites:** S01-T01.
+- **Relevant files/subsystems:** Planned builds/test-install; content and config manifest.
+- **Actions:** Copy only required content into a separate writable installation; record hashes/versions and filesystem mappings. Avoid unnecessary archive copies, writable hardlinks and original-path output. Establish separate test saves and logs; verify paths before launch.
+- **Outputs:** Runnable isolated content layout and reproducible setup instructions. Plus the common task evidence record.
+- **Acceptance:** Original remains unchanged; saves/config/logs and engine outputs cannot target original.
+- **Validation:** Compare selected asset hashes; inspect resolved paths, permissions and launcher/config settings.
+- **Risks/blockers:** Disk space, redirected app-data paths, modded content or incomplete content provenance.
+
+#### S01-T03 — Compile the unmodified client reproducibly
+
+- [x] **Status: Completed** · **Reasoning effort: High** · **Complexity: High**
+- **Evidence:** [Validation report](docs/validation/S01-T03.md).
+- **Purpose:** Prove the selected source can be built before modifying gameplay.
+- **Prerequisites:** S01-T01; S01-T02.
+- **Relevant files/subsystems:** Pristine working source; Windows solution and dependencies.
+- **Actions:** Build unmodified client in declared configuration. Capture toolchain versions, dependency resolution, output hashes and warnings. Repeat from clean build outputs using same pinned inputs; investigate failures in a separate branch.
+- **Outputs:** Build recipe, two successful build records and executable identity manifest. Plus the common task evidence record.
+- **Acceptance:** Unmodified pinned source compiles using documented reproducible steps; repeat outputs have explained differences if not byte-identical.
+- **Validation:** Run exact recorded MSBuild or verified equivalent commands on Windows; verify source diff is empty.
+- **Risks/blockers:** Required source fixes invalidate the unmodified-candidate claim; select another compatible revision or request an explicit baseline-gate amendment.
+
+#### S01-T04 — Validate assets, scripts and core gameplay
+
+- [x] **Status: Completed** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Prove practical Anomaly 1.5.3 compatibility.
+- **Prerequisites:** S01-T03.
+- **Relevant files/subsystems:** Isolated installation; candidate client; installed Lua/config archives.
+- **Actions:** Run new campaign and representative level, NPC/mutant encounter, inventory/equipment, dialogue, one quest, world-time behavior, save/reload and level travel. Compare expected fixture outcomes and inspect script/asset errors. Extract only scripts needed for failures into ignored workspace artifacts.
+- **Outputs:** Compatibility matrix, runtime logs and defect list tied to build/content hashes. Plus the common task evidence record.
+- **Acceptance:** Representative observed fixtures pass with no unexplained critical Lua/asset regressions. The user-approved G01 exception waives completed-quest/reward and copied original-client comparison; neither is a passed test. See [G01](docs/validation/G01.md).
+- **Validation:** Actual Windows gameplay observations plus save round-trip state comparisons; retain evidence, not merely launch screenshots.
+- **Risks/blockers:** A successful main menu does not validate campaign compatibility; unavailable interactive execution blocks acceptance.
+
+#### S01-T05 — Accept and freeze the tested baseline
+
+- [x] **Status: Completed** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Purpose:** Prevent multiplayer work on an unvalidated fork.
+- **Prerequisites:** S01-T04.
+- **Relevant files/subsystems:** Compatibility matrix; source/build/content manifests.
+- **Actions:** Resolve or explicitly classify nonblocking defects; freeze exact accepted source and configurations, preserve reproducible SP build, and publish commands and limitations. If mandatory failures persist, return to candidate selection without broad multiplayer changes.
+- **Outputs:** G01 acceptance report and baseline revision references. Plus the common task evidence record.
+- **Acceptance:** Unmodified clean builds and the user-approved scoped runtime checks pass; source/content/toolchain identities are frozen. Waived fixtures remain explicit risks in [G01](docs/validation/G01.md).
+- **Validation:** Review build/runtime evidence against S00 checklist; require a rerun only for affected changed inputs.
+- **Risks/blockers:** Representative tests are not full-campaign certification; record bounded coverage.
+
+### Stage 2 — Headless simulation foundation
+
+#### S02-T01 — Map the minimum headless service boundary
+
+- [x] **Status: Completed** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Evidence:** [Validation report](docs/validation/S02-T01.md), [service boundary](docs/headless-service-boundary.md), and [fixture identity/assertions](docs/headless-fixture.json).
+- **Purpose:** Bound changes before touching the loop.
+- **Prerequisites:** G01.
+- **Relevant files/subsystems:** E03; E05–E09; Level_start; game_cl_Single; Device; GamePersistent.
+- **Actions:** Trace only startup-to-first-tick dependencies in accepted source. Classify CPU gameplay versus GPU/UI/audio presentation and mixed functions. Specify service seams, initialization/shutdown order and minimal real campaign fixture with no external clients.
+- **Outputs:** Headless dependency map and fixture assertions. Plus the common task evidence record.
+- **Acceptance:** Plan covers scheduler, physics, AI, ALife, scripts, bones, collision and ballistics; no permanent dummy actor or blanket model no-op.
+- **Validation:** Targeted source inspection against existing evidence; targeted binary read only for a named unresolved mismatch.
+- **Risks/blockers:** Campaign bootstrap may require explicit actor context earlier than Stage 3; move only minimum prerequisite work with documented dependency.
+
+#### S02-T02 — Add a campaign-preserving dedicated configuration
+
+- [x] **Status: Completed** · **Reasoning effort: High** · **Complexity: High**
+- **Evidence:** [Context and services validation](docs/validation/S02-T02-context.md) and [internal context definition](docs/campaign-server-context.md); earlier [resumed validation](docs/validation/S02-T02-resume.md). `campaign-07`/`client-04` build with 0 errors; Core, Services and injected-failure unwind smokes behave as expected; GameState stops at `persistent-context-required` (exit 3, not a pass).
+- **Scope decision (user, 2026-10-18):** Completed on its acceptance criteria. Real `game_sv_Single`/ALife/`CLevel`/`game_cl_Single` construction (H02) moved to S02-T05/T06; blockers are material-pair media, the persistent render factory, ALife's main-menu reset and `CLevel` player HUD models.
+- **Purpose:** Avoid existing dedicated flags disabling campaign services.
+- **Prerequisites:** S02-T01.
+- **Relevant files/subsystems:** E03; E05; engine project configuration; game_sv_single; Level initialization.
+- **Actions:** Add a separate dedicated target/role that retains CLevel, required game_cl_Single and ALife. Define server-owned internal context, explicit configuration roots and lifecycle teardown; preserve SP target.
+- **Outputs:** Dedicated build configuration and initialization smoke harness. Plus the common task evidence record.
+- **Acceptance:** Dedicated target compiles with required campaign code included; no NO_SINGLE-induced loss of ALife/tasks.
+- **Validation:** Build both configurations; inspect effective macros and exercise initialization/shutdown as far as currently supported.
+- **Risks/blockers:** This intermediate target may still have graphics dependencies and does not satisfy G02.
+
+#### S02-T03 — Preserve CPU model, animation and collision services
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Keep gameplay fidelity while removing GPU model requirements.
+- **Prerequisites:** S02-T02.
+- **Relevant files/subsystems:** E07; xr_object; CharacterPhysicsSupport; IKinematics/model loaders.
+- **Actions:** Separate CPU asset loading and bone evaluation from GPU resource creation for one actor/NPC fixture. Retain skeleton collision, animation-driven transforms and physics-shell setup; define ownership/lifetime. Split the material library's CPU physics data from its pair sounds and wallmark arrays so the campaign server can load it ([context blocker 1](docs/campaign-server-context.md)).
+- **Outputs:** CPU model service boundary and headless asset fixture tests. Plus the common task evidence record.
+- **Acceptance:** Fixture produces valid bones/collision/hit transforms without GPU resources; missing data fails explicitly.
+- **Validation:** Compare representative transforms, collision queries and shell creation with baseline within documented tolerances.
+- **Risks/blockers:** Renderer interfaces may own substantial CPU loaders; asset lifetime or animation callbacks can remain coupled.
+
+#### S02-T04 — Drive time, scheduling and physics explicitly
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Make server progression independent of rendering.
+- **Prerequisites:** S02-T02.
+- **Relevant files/subsystems:** E06; E08; Device time; GamePersistent; PHWorld; scheduler.
+- **Actions:** Introduce server clock/frame driver with documented order and native physics substeps. Drive objects, scheduler, AI and ALife; replace camera-derived simulation prioritization with server activity policy for the fixture. Define pause and bounded catch-up behavior.
+- **Outputs:** Dedicated tick driver and counters/trace fixture. Plus the common task evidence record.
+- **Acceptance:** Simulation time, physics and scheduled entities advance without render callbacks or local input.
+- **Validation:** Assert frame/order counters, falling-body collision, AI scheduled work and bounded long-frame handling.
+- **Risks/blockers:** Do not replace native physics step with an arbitrary network tick or let unfocused-window pause freeze authority.
+
+#### S02-T05 — Remove remaining presentation startup dependencies
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Reach real renderer-free level initialization.
+- **Prerequisites:** S02-T03; S02-T04.
+- **Relevant files/subsystems:** E06; E09; EngineAPI; Level_load; IGame_Level; GamePersistent; Level_Bullet_Manager.
+- **Actions:** Separate loading progress, HUD/menu, particles and presentation audio from gameplay hooks. Keep required sound stimuli as simulation data. Retain bullet workload outside rendering; load selected campaign level with no graphics device or view actor requirement. Construct persistent campaign state, `CLevel`, `xrServer`/`game_sv_Single`/ALife and `game_cl_Single` in native order (H02, moved from S02-T02; [context blockers 2–5](docs/campaign-server-context.md)) and extend the GameState smoke until it passes.
+- **Outputs:** Renderer-free boot/load path and headless execution logs. Plus the common task evidence record.
+- **Acceptance:** No GPU initialization/draw calls or interactive camera required; objects, collision and simple ballistics still update.
+- **Validation:** Launch dedicated executable in a noninteractive/no-GPU test environment where available; instrument graphics creation paths and gameplay counters.
+- **Risks/blockers:** Hidden-window-only success is insufficient; disabling sound/particles must not remove AI stimuli or gameplay callbacks.
+
+#### S02-T06 — Validate native campaign simulation and checkpoint round-trip
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Prove headless viability before implementing multiplayer.
+- **Prerequisites:** S02-T05.
+- **Relevant files/subsystems:** E02; E05; E08; E12; ALife; native task/Lua services; storage manager.
+- **Actions:** Run bounded campaign fixture with no external clients; supply real entity/context data explicitly where necessary, never a permanent fake global player. Exercise AI, physics, time, Lua/task execution and native save/reload. Record missing actor-context work for Stage 3.
+- **Outputs:** Headless integration fixture, native save comparison and G02 evidence. Plus the common task evidence record.
+- **Acceptance:** Relevant CPU services advance and restore without renderer, UI or human client; campaign services do not depend on a permanent global placeholder actor.
+- **Validation:** Observe counters and fixture outcomes across load/run/save/restart; SP smoke regression on matched source.
+- **Risks/blockers:** Native checkpoint here has no journal/crash guarantee; unresolved fundamental actor requirement blocks G02 rather than being hidden by a dummy actor.
+
+### Stage 3 — Actor and authority model
+
+#### S03-T01 — Define stable participants and authoritative contexts
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Separate persistent identity from engine slots and views.
+- **Prerequisites:** G02.
+- **Relevant files/subsystems:** E01; E04; E12; state-ownership.md; planned server participant registry.
+- **Actions:** Define campaign/player/party/entity/item IDs and generation-aware engine-ID mapping. Implement runtime participant registry with two active slots as policy, explicit action context and server/client role boundaries. Persistence comes in Stage 7.
+- **Outputs:** Identity/context interfaces and ownership table. Plus the common task evidence record.
+- **Acceptance:** Two identities cannot alias through recycled u16 IDs; no client-supplied identity becomes authority by assertion.
+- **Validation:** Unit fixtures for slot reuse, disconnect identity retention and role/context misuse.
+- **Risks/blockers:** Existing script and save formats may expose numeric engine IDs; map rather than silently replace wire/native formats.
+
+#### S03-T02 — Separate local view access from gameplay authority
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Keep cameras local without global actor mutations.
+- **Prerequisites:** S03-T01.
+- **Relevant files/subsystems:** E01; E04; Actor.cpp; Actor_Network; game_cl_single; Level_network.
+- **Actions:** Introduce explicit actor/context lookup for core gameplay; retain local-view access on clients only. Restrict privileged internal state-import bridge to server runtime; enumerate and reject remote outcome paths.
+- **Outputs:** Core actor access adapters and authority-boundary tests. Plus the common task evidence record.
+- **Acceptance:** Server gameplay can operate without client view Actor(); remote state imports cannot set health/inventory/world state.
+- **Validation:** Negative role tests; exercise two actor contexts and server with no rendering client.
+- **Risks/blockers:** A global-access compatibility wrapper must not silently choose Player 1 for authoritative mutations.
+
+#### S03-T03 — Instantiate two independent native actors
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Prove representation before networking integration.
+- **Prerequisites:** S03-T02.
+- **Relevant files/subsystems:** E01; E10; actor factories; Actor_Network; InventoryOwner.
+- **Actions:** Use controlled server harness to create two genuine campaign actors; bind identities and independent input/control contexts. Verify condition, equipment, inventory containers, death and lifecycle independently.
+- **Outputs:** Two-actor native fixture and lifecycle evidence. Plus the common task evidence record.
+- **Acceptance:** Both are participants, independently addressable with distinct state; destroying one does not invalidate the other or global services.
+- **Validation:** Scripted native commands exercise each actor, lifecycle/slot reuse and save-ready identity mapping.
+- **Risks/blockers:** Legacy MP actor representation may assume competitive rules; reuse representation without replacing campaign mode.
+
+#### S03-T04 — Adapt ALife activation and basic AI to both participants
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Prevent one actor from defining the whole active world.
+- **Prerequisites:** S03-T03.
+- **Relevant files/subsystems:** E02; E08; enemy_manager; ALife graph and online/offline switch.
+- **Actions:** Keep one active level but use participant set for activation/deactivation policy. Validate generic enemy selection and awareness for either player; record special global-Actor abilities for Stage 10.
+- **Outputs:** Participant-aware activation and basic NPC targeting fixture. Plus the common task evidence record.
+- **Acceptance:** Entities needed near either player remain online; NPC can detect/target either; one disconnect does not destroy level context.
+- **Validation:** Move two fixture actors to separated areas of same level and inspect activation and target changes.
+- **Risks/blockers:** Activation union increases simulation load; special mutant abilities remain explicitly uncovered until later.
+
+#### S03-T05 — Establish native and Lua participant context contract
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Make later quest work possible without implicit Player 1.
+- **Prerequisites:** S03-T03; S03-T04.
+- **Relevant files/subsystems:** E05; E12; script bindings; native task/dialogue services; installed relevant scripts.
+- **Actions:** Inventory only entry points required by initial fixtures; define server-authoritative mutation bindings with explicit participant/party context and client presentation callbacks. Test a harmless contextual script action for both actors; defer full quest implementation.
+- **Outputs:** Context API, bounded script audit and G03 fixture. Plus the common task evidence record.
+- **Acceptance:** Native and Lua fixture identifies the correct actor/party; no arbitrary global fallback; both contexts coexist.
+- **Validation:** Run same script fixture for both participants and invalid/missing-context cases; SP compatibility smoke.
+- **Risks/blockers:** Installed campaign scripts are not equivalent to repository addons; defer broad audit but document unresolved calls.
+
+### Stage 4 — Networking foundation
+
+#### S04-T01 — Validate GameNetworkingSockets in isolation
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Purpose:** Accept transport only after Windows compatibility evidence.
+- **Prerequisites:** G03.
+- **Relevant files/subsystems:** Planned tools/network-probe; protocol adapter contract; pinned Windows toolchain.
+- **Actions:** Pin library/dependencies/license; build isolated dedicated listener and two peers. Test connect, disconnect, reliable ordering and unreliable delivery under induced loss; record threading and packaging needs.
+- **Outputs:** Transport probe, exact build/run commands and acceptance decision. Plus the common task evidence record.
+- **Acceptance:** Works with accepted compiler/runtime; reliable traffic survives loss and stale transient data can be discarded without blocking critical traffic.
+- **Validation:** Local and separate-machine connections where available; controlled loss/reordering and reconnect traces.
+- **Risks/blockers:** NAT/deployment expectations must be stated; failure requires evidence before an approved fallback, not custom UDP.
+
+#### S04-T02 — Implement a bounded transport adapter
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Contain library-specific code and thread interactions.
+- **Prerequisites:** S04-T01.
+- **Relevant files/subsystems:** Planned protocol transport interface; server/client adapters; native networking integration points E10.
+- **Actions:** Wrap listen/connect/send/poll/close; define separate delivery classes, bounded queues and ownership. Marshal received intents to simulation thread; keep native serializers behind explicit boundaries.
+- **Outputs:** Transport adapter and fake-transport tests. Plus the common task evidence record.
+- **Acceptance:** Gameplay code does not depend on library API; network callbacks cannot mutate world directly; overload has explicit policy.
+- **Validation:** Loopback adapter tests, shutdown races and queue-limit stress.
+- **Risks/blockers:** Transport ordering is not global gameplay ordering; unreliable stream sequence still needs application policy.
+
+#### S04-T03 — Define and validate the initial protocol codec
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Reject malformed and incompatible inputs early.
+- **Prerequisites:** S04-T02.
+- **Relevant files/subsystems:** docs/network-protocol.md; planned protocol codecs; E12 ID mapping.
+- **Actions:** Specify version/content compatibility, campaign/session/epoch IDs, stream sequences, ticks, lengths and stable IDs. Implement hello, input/action envelopes, result, entity lifecycle, snapshot/baseline ack and resync framing with bounded decoding.
+- **Outputs:** Versioned protocol schema, codecs and malformed-packet fixtures. Plus the common task evidence record.
+- **Acceptance:** Length/count/version/identity bounds enforced; obsolete epochs and recycled entity generations rejected.
+- **Validation:** Round-trip and truncation/oversize/fuzz fixtures; unknown version/type handling.
+- **Risks/blockers:** Native serializers may assume trusted packets and unstable layouts; never expose unchecked deserialization.
+
+#### S04-T04 — Bind authenticated sessions to canonical players
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Make two connections safe participants rather than trusted state writers.
+- **Prerequisites:** S04-T03.
+- **Relevant files/subsystems:** Server session manager; participant registry; adapter; protocol handshake.
+- **Actions:** Define initial deployment/authentication and credential storage; bind reconnect credentials to stable player IDs. Enforce two active slots, build/content match and rate limits; external peers receive no privileged local-client role.
+- **Outputs:** Join/session state machine and rejection tests. Plus the common task evidence record.
+- **Acceptance:** Spoofed player IDs, third active client and incompatible builds cannot enter authority; two legitimate peers receive distinct identities.
+- **Validation:** Positive two-peer joins plus impersonation, replay, excessive requests and mismatch tests.
+- **Risks/blockers:** Do not confuse transport encryption with application identity; do not log tokens or commit credentials.
+
+#### S04-T05 — Handle liveness and in-memory reconnect
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Purpose:** Establish session lifecycle before world replication.
+- **Prerequisites:** S04-T04.
+- **Relevant files/subsystems:** Session manager; disconnect policy; docs/network-protocol.md.
+- **Actions:** Implement measured/configurable heartbeats, bounded timeout policy, token rotation and same-process resume. Define actor behavior while disconnected; stage later durable recovery separately.
+- **Outputs:** Lifecycle tests, operational settings and G04 report. Plus the common task evidence record.
+- **Acceptance:** Disconnect detected; stale session cannot keep submitting; reconnect restores same participant without duplicate slots.
+- **Validation:** Dropped connection, delayed old messages, repeated reconnect and server shutdown tests.
+- **Risks/blockers:** No cross-restart recovery claim yet; timeout defaults must be documented as provisional.
+
+### Stage 5 — First playable two-player session
+
+#### S05-T01 — Integrate matched client and dedicated roles
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Connect real Monolith clients to server-owned campaign simulation.
+- **Prerequisites:** G04.
+- **Relevant files/subsystems:** E03; E04; E10; client/server startup; game_cl_single.
+- **Actions:** Route external clients through adapter and retain backend-owned native simulation. Disable client authority over shared AI/ALife/campaign mutations while preserving rendering, input and local presentation. Add safe isolated launch profiles.
+- **Outputs:** One-server/two-client launch recipe and role guards. Plus the common task evidence record.
+- **Acceptance:** All three matched executables start and connect; only server advances canonical shared gameplay.
+- **Validation:** Process logs and deliberate client outcome injection; verify server runs without either client.
+- **Risks/blockers:** Client native world may accidentally execute scripts/AI with side effects; role guards must precede replication.
+
+#### S05-T02 — Replicate entity lifecycle and initial world snapshot
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Give clients one consistent world identity graph.
+- **Prerequisites:** S05-T01.
+- **Relevant files/subsystems:** Object factories; native serializers E10; identity map; snapshot protocol.
+- **Actions:** Implement server spawn/despawn/tombstones and initial snapshot at a revision watermark. Buffer dependent events during join; map stable IDs to local engine objects with generations. Bound snapshot chunks and restart when baseline invalidates.
+- **Outputs:** Lifecycle replication and join snapshot integration tests. Plus the common task evidence record.
+- **Acceptance:** Both clients have matching authoritative entity identities; late join cannot resurrect destroyed entities or miss in-flight changes.
+- **Validation:** Join during spawn/despawn; reorder lifecycle versus snapshots; compare canonical ID/state summaries.
+- **Risks/blockers:** Local creation and server creation can duplicate objects; copied saves must not overwrite authority.
+
+#### S05-T03 — Display both participants with separate local views
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Complete visible two-player representation.
+- **Prerequisites:** S05-T02.
+- **Relevant files/subsystems:** CActor/CActorMP representation; Actor_Network; actor_mp_client_import; cameras/HUD.
+- **Actions:** Bind each client view to its own authoritative participant. Render remote actor equipment/pose using reusable replication interfaces; preserve independent input collection and local UI.
+- **Outputs:** Two-client actor/view demonstration and regression fixtures. Plus the common task evidence record.
+- **Acceptance:** Each player sees both distinct actors and controls only its own input context; client camera choice never changes server participant.
+- **Validation:** Simultaneous two-client observation and independent camera/input checks with recorded build IDs.
+- **Risks/blockers:** Basic display is not validated movement prediction or full combat; those remain Stage 6.
+
+#### S05-T04 — Verify a bounded shared-world session
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Purpose:** Make the first playable gate observable.
+- **Prerequisites:** S05-T03.
+- **Relevant files/subsystems:** Two-client test harness; lifecycle snapshots; dedicated logs.
+- **Actions:** Run small same-level fixture with two joins, both actors visible, server-controlled entity change, late join and disconnect/rejoin. Publish exact supported interactions and state comparison results.
+- **Outputs:** G05 report and repeatable minimal session scenario. Plus the common task evidence record.
+- **Acceptance:** Two real modified clients observe both players and the same server-owned entity changes without duplicate simulation authority.
+- **Validation:** Run all three processes; compare server/client canonical subsets and observe both viewpoints.
+- **Risks/blockers:** Do not label the whole campaign playable; movement/combat and durability are incomplete.
+
+### Stage 6 — Authoritative movement and combat
+
+#### S06-T01 — Process validated movement inputs on the server
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Replace client-reported positions with native authoritative movement.
+- **Prerequisites:** G05.
+- **Relevant files/subsystems:** Actor movement/controller; physics; input protocol; authority guards.
+- **Actions:** Sequence input batches per player; bound time windows and queue sizes; validate identity, movement modes, speed/stamina and collision. Drive native controller on server; reject teleport/outcome packets.
+- **Outputs:** Authoritative input path and movement validation fixtures. Plus the common task evidence record.
+- **Acceptance:** Server movement obeys collision and constraints; duplicates/stale inputs cannot double-advance; spoofed outcomes cannot move actors.
+- **Validation:** Two actors moving against obstacles; malformed/time-shifted input and impossible-speed tests.
+- **Risks/blockers:** Native movement may depend on camera orientation or client timestep; translate intention explicitly.
+
+#### S06-T02 — Implement snapshots, interpolation and baselines
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Provide timely state without reliable-stream backlog.
+- **Prerequisites:** S06-T01.
+- **Relevant files/subsystems:** Protocol snapshots; server replication; client interpolation.
+- **Actions:** Add ticked full/delta snapshots, acknowledged baselines, entity generations and state revisions. Interpolate remote motion; discard obsolete state; cap bandwidth/interest to active relevant entities. Preserve critical lifecycle causality.
+- **Outputs:** Snapshot pipeline and loss/baseline tests. Plus the common task evidence record.
+- **Acceptance:** Missing baseline triggers bounded full resync; old snapshots never overwrite newer state; reliable events are not blocked by obsolete motion.
+- **Validation:** Loss/reordering/baseline eviction tests plus bandwidth measurements.
+- **Risks/blockers:** Use provisional 30 Hz simulation and 15–20 Hz replication only as measured candidates; native physics step remains independently preserved.
+
+#### S06-T03 — Predict and reconcile the local actor
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Maintain responsiveness while accepting server correction.
+- **Prerequisites:** S06-T02.
+- **Relevant files/subsystems:** Local actor prediction; input acknowledgement; native movement controller.
+- **Actions:** Buffer bounded unacknowledged inputs; reconcile authoritative state and replay only supported movement prediction. Separate visual smoothing from collision state; reset buffers on epoch/teleport/transition.
+- **Outputs:** Prediction/reconciliation implementation and correction metrics. Plus the common task evidence record.
+- **Acceptance:** Deliberately wrong local predictions converge to server state; old input cannot affect a new epoch.
+- **Validation:** Latency/loss tests and forced correction scenarios; measure error and smoothing limits.
+- **Risks/blockers:** Do not replay inventory, quests or authoritative damage as movement prediction side effects.
+
+#### S06-T04 — Implement one authoritative weapon/combat slice
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Prove the server resolves hits, ammo and damage.
+- **Prerequisites:** S06-T01; S06-T02.
+- **Relevant files/subsystems:** Level_Bullet_Manager E09; weapon/fire logic; actor health; event dispatch E04.
+- **Actions:** Choose one native weapon and simple target; validate equip/ammo/fire cadence and input timing. Resolve native trajectory/raycast, hit and health on server; replicate outcomes and presentation separately. Start with server-present-time hit tests.
+- **Outputs:** Weapon encounter fixture and attack-validation tests. Plus the common task evidence record.
+- **Acceptance:** Clients cannot report damage/hits/rewards as truth; server ammo/health outcomes agree on both clients.
+- **Validation:** Simultaneous shots, empty ammo, forged damage, repeated fire and movement-while-firing tests.
+- **Risks/blockers:** Render-coupled ballistics and animation hitboxes; historical rewind only if measured playability justifies a separately scoped task.
+
+#### S06-T05 — Validate basic NPC combat and stage convergence
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Include an actual authoritative opponent and close the movement gate.
+- **Prerequisites:** S06-T03; S06-T04.
+- **Relevant files/subsystems:** AI targeting E08; NPC health/death; two-client harness.
+- **Actions:** Extend fixture to one NPC encounter targeting either participant. Replicate health/death and tested interactions; verify client prediction cannot overturn outcomes. Measure provisional simulation/replication rates and failure limits.
+- **Outputs:** G06 report, encounter test and rate/bandwidth observations. Plus the common task evidence record.
+- **Acceptance:** Two clients converge after corrections and NPC/player damage/death under declared network conditions.
+- **Validation:** Repeat encounter with controlled latency/loss and forged outcomes; SP combat regression.
+- **Risks/blockers:** Critical deaths are only in-memory here; do not claim persistent campaign success until Stage 7 adapters cover them.
+
+### Stage 7 — Persistence infrastructure
+
+#### S07-T01 — Specify recoverable state and critical transaction boundaries
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Make durable guarantees precise before implementing storage.
+- **Prerequisites:** G06.
+- **Relevant files/subsystems:** E12; state-ownership.md; native saves; proposed journal interfaces.
+- **Actions:** Inventory checkpoint contents and gaps for two actors, stable IDs, scripts and world. Classify critical effects versus transient rollback; define ordered transaction/revision/operation IDs and schema compatibility. Specify prepare/validate/durable commit/apply/ack phases and recovery behavior.
+- **Outputs:** Persistence schema/guarantee matrix and synthetic critical-effect fixture. Plus the common task evidence record.
+- **Acceptance:** Every acknowledged critical effect has a reconstructible representation; transaction bundles and failure windows are explicit.
+- **Validation:** Review against inventory/quest/reward/death/ownership examples; simulate each crash boundary on paper with expected recovery states.
+- **Risks/blockers:** Native saves may omit second actor/script state; opaque side effects cannot be called durably recoverable.
+
+#### S07-T02 — Create consistent authoritative checkpoint generations
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Replace client-dependent saves with recoverable server checkpoints.
+- **Prerequisites:** S07-T01.
+- **Relevant files/subsystems:** alife_storage_manager; Process_save E04; actor/identity registries.
+- **Actions:** Capture native world plus supplemental participant/ID/schema state at a consistent revision. Publish generations with checksums/manifests and crash-safe temporary-write/flush/rename semantics verified on Windows; retain previous valid checkpoint and referenced journal.
+- **Outputs:** Checkpoint adapter and corrupt/partial checkpoint tests. Plus the common task evidence record.
+- **Acceptance:** Restore a consistent checkpoint without trusting client saves; incomplete new generation does not destroy last recoverable one.
+- **Validation:** Round-trip two actors/world; interrupt each publication boundary; inspect actual filesystem guarantees.
+- **Risks/blockers:** Native save hooks may mutate world or gather client state; snapshot barrier must cover these effects.
+
+#### S07-T03 — Implement durable critical outcome journal
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Ensure permanent success is acknowledged only after durability.
+- **Prerequisites:** S07-T01.
+- **Relevant files/subsystems:** Planned server journal/transaction module; simulation command queue.
+- **Actions:** Select local journal format/storage with justified durability semantics. Serialize validated resolved effects, identities, expected revisions and deduplication outcomes. Commit critical bundle before success; apply exactly once in logical outcome, fail closed on storage failure, and retain unresolved committed effects for recovery.
+- **Outputs:** Journal module, synthetic mutation adapter and operation-result index. Plus the common task evidence record.
+- **Acceptance:** Duplicate IDs return same outcome; conflicting revision fails; acknowledged synthetic critical effects survive process termination.
+- **Validation:** Fault injection before/after append, flush, apply and acknowledgement; disk-full/write-failure tests.
+- **Risks/blockers:** An fsync-equivalent claim must match Windows implementation; simulation must not continue inconsistently after commit/apply failure.
+
+#### S07-T04 — Recover checkpoints and committed effects safely
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Restore critical outcomes without deterministic simulation replay.
+- **Prerequisites:** S07-T02; S07-T03.
+- **Relevant files/subsystems:** Recovery coordinator; native load; journal adapters; stable-ID map.
+- **Actions:** Load highest valid checkpoint generation and replay only committed effects after watermark using schema-aware idempotent adapters. Include definitions/tombstones for durable entities created or destroyed after checkpoint. Reject incompatible content; define journal retention and safe truncation.
+- **Outputs:** Recovery pipeline and checkpoint-plus-tail fixtures. Plus the common task evidence record.
+- **Acceptance:** Committed critical effects survive while transients may roll back; no duplicate entities or effects; corrupt/incompatible data is detected without silent reset.
+- **Validation:** Kill/restart across checkpoint/journal interleavings, torn trailing records, duplicate outcomes and ID reuse.
+- **Risks/blockers:** Raw event re-execution may repeat Lua side effects or random rewards; restore resolved effects rather than rerunning gameplay scripts.
+
+#### S07-T05 — Resynchronize clients after restored authority
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Fence stale sessions and incompatible prediction state.
+- **Prerequisites:** S07-T04.
+- **Relevant files/subsystems:** Session manager; authority epoch; snapshots; action-result queries.
+- **Actions:** Issue new authority epoch after restart; bind campaign generation/revision to snapshots. Reject old input/events, clear predictions and stale local world, and supply full or validated partial resync plus durable operation outcomes.
+- **Outputs:** Crash reconnect/resync path and convergence tests. Plus the common task evidence record.
+- **Acceptance:** Both clients converge to restored server state; lost acknowledgements do not cause duplicate mutations; stale world cannot continue playing.
+- **Validation:** Restart while clients remain running; deliver delayed packets and retry operation IDs before/after reconnect.
+- **Risks/blockers:** Resuming token alone cannot establish snapshot compatibility; explicit revision handshake is required.
+
+#### S07-T06 — Qualify the persistence contract before inventory and quests
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Make D7 an observed guarantee within stated limits.
+- **Prerequisites:** S07-T05.
+- **Relevant files/subsystems:** Synthetic effects; checkpoint/journal fault harness; docs guarantee matrix.
+- **Actions:** Run deliberate termination matrix covering every commit/apply/ack/checkpoint boundary and simultaneous client retries. Add representative durable NPC-death/state adapter from Stage 6; record permitted transient rollback and storage limitations.
+- **Outputs:** G07 report with recovery matrix and durable-effect coverage. Plus the common task evidence record.
+- **Acceptance:** No acknowledged tested critical outcome disappears or applies twice; world/clients converge; publication failure retains recovery path.
+- **Validation:** Automated failpoints plus external forced process termination; distinguish process-crash tests from untested power-loss guarantees.
+- **Risks/blockers:** Synthetic tests alone do not certify future inventory/quest adapters; those need Stage 8 crash tests.
+
+### Stage 8 — Inventory and campaign synchronization
+
+#### S08-T01 — Implement durable authoritative item pickup
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Resolve the first real ownership conflict atomically.
+- **Prerequisites:** G07.
+- **Relevant files/subsystems:** InventoryOwner; ownership events; stable item IDs; journal adapters.
+- **Actions:** Validate actor/range/level/alive/item availability/capacity. Commit one ownership transfer with preconditions and revision, then replicate one outcome. Persist item definition when necessary for post-checkpoint reconstruction.
+- **Outputs:** Pickup transaction and concurrent-claim fixture. Plus the common task evidence record.
+- **Acceptance:** Exactly one player wins competing pickup; one stable item has one owner before and after restart.
+- **Validation:** Both clients request same item concurrently; retry same/different op IDs; kill before/after commit/ack.
+- **Risks/blockers:** Native callbacks may independently grant/remove items; all effects must be contained in transaction adapter.
+
+#### S08-T02 — Add transfers and ownership invariants
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Generalize one transaction without duplicating containers.
+- **Prerequisites:** S08-T01.
+- **Relevant files/subsystems:** Inventory containers; transfer/equip/ammo paths; journal outcomes.
+- **Actions:** Implement bounded player/container transfer slice with source/destination versions, capacity and ownership checks. Define disconnect and conflicting operations; atomically persist all affected containers and unique-item constraints.
+- **Outputs:** Transfer transaction and invariant checker. Plus the common task evidence record.
+- **Acceptance:** No item exists in two owners or vanishes on a committed transfer; client mutations cannot bypass server checks.
+- **Validation:** Concurrent pickup/transfer/equip, disconnect mid-operation and capacity/revision failures.
+- **Risks/blockers:** Nested containers/ammo stacks require explicitly tested semantics; unsupported variants must fail clearly.
+
+#### S08-T03 — Verify inventory recovery and reconnect
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Close persistence gaps before adding quest rewards.
+- **Prerequisites:** S08-T02.
+- **Relevant files/subsystems:** Inventory adapters; S07 fault harness; client UI reconciliation.
+- **Actions:** Test full transaction windows with duplicate/delayed messages, server termination and lost acknowledgements. Restore ownership graph and reconcile both inventories/UI from server state.
+- **Outputs:** Inventory crash matrix and accepted durable schema. Plus the common task evidence record.
+- **Acceptance:** All acknowledged ownership changes survive; retries return original outcomes; both clients agree after recovery.
+- **Validation:** External kills and deterministic failpoints on pickup/transfers; compare canonical item graph hashes.
+- **Risks/blockers:** A passing journal test is insufficient if native inventory callbacks leave unrecorded effects.
+
+#### S08-T04 — Select and adapt one shared quest end to end
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Bound native/Lua integration to a real campaign slice.
+- **Prerequisites:** S08-T03.
+- **Relevant files/subsystems:** E12; GameTask/GametaskManager; PhraseDialog/PhraseScript; installed quest scripts.
+- **Actions:** Select one installed quest with observable prerequisites, objective contributions and rewards. Map native/Lua mutations and define global/party/player ownership and repeat-instance IDs. Route mutations through explicit server contexts and journal-ready resolved effects; clients present dialogue/task state.
+- **Outputs:** Quest-specific authority adapters and coverage map. Plus the common task evidence record.
+- **Acceptance:** Both players are eligible genuine contributors; no client callback can complete or reward the quest independently.
+- **Validation:** Exercise prerequisites and actions from each participant; invalid client completion/script calls rejected.
+- **Risks/blockers:** Quest may assume only one actor/info registry; split adapters by actual dependency rather than rewriting every script.
+
+#### S08-T05 — Commit shared objectives and rewards once
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Make quest completion atomic and conflict-safe.
+- **Prerequisites:** S08-T04.
+- **Relevant files/subsystems:** Quest adapters; inventory transactions; dialogue consequences; operation registry.
+- **Actions:** Define canonical ordering for two contributions, simultaneous completion and NPC death during dialogue. Commit objective/completion/reward/unique-item effects as consistent bundles, with repeat-instance identity and explicit reward ownership policy.
+- **Outputs:** Quest transaction implementation and race fixtures. Plus the common task evidence record.
+- **Acceptance:** Both can advance same quest; completion/rewards occur once per intended instance; death invalidates pending dialogue when required.
+- **Validation:** Simultaneous actions, repeated delivery, conflicting choices, disconnected contributor and quest-NPC death tests.
+- **Risks/blockers:** Do not acknowledge quest completion before durable rewards/flags; content-specific rewards need documented policy.
+
+#### S08-T06 — Qualify the durable shared quest slice
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Demonstrate real campaign progress survives failures.
+- **Prerequisites:** S08-T05.
+- **Relevant files/subsystems:** Two-client quest fixture; native save/journal recovery; UI presentation.
+- **Actions:** Run full quest from prerequisites through rewards with each player contributing. Restart at objective/completion/reward windows, reconnect clients and compare quest/inventory state. Record tested content and remaining unsupported systems.
+- **Outputs:** G08 report and replayable quest test recipe. Plus the common task evidence record.
+- **Acceptance:** Complete tested quest and inventory slice survive retries/reconnect/crash without duplicate completion or lost critical rewards.
+- **Validation:** Two real clients plus failure harness; compare server canonical quest/item state and both views.
+- **Risks/blockers:** One quest does not prove broad story compatibility; expansion remains Stage 10.
+
+### Stage 9 — Coordinated same-level transitions
+
+#### S09-T01 — Implement request and two-player consent
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Make party travel explicit and server-controlled.
+- **Prerequisites:** G08.
+- **Relevant files/subsystems:** E11; level changer interaction; session/party state; transition protocol.
+- **Actions:** Define transition ID, destination preconditions and state machine. Server validates request, notifies both and requires both confirmations with expiry. Specify refusal, cancellation, combat restrictions and disconnect policy without automatic teleport.
+- **Outputs:** Transition contract and consent handling. Plus the common task evidence record.
+- **Acceptance:** No load begins from one player intent alone; duplicate/stale confirmations cannot approve a different transition.
+- **Validation:** Both accept, one refuses, timeout, disconnect and replayed confirmation scenarios.
+- **Risks/blockers:** Policy cannot silently substitute one-player consent after disconnect; changed policy needs user approval.
+
+#### S09-T02 — Prepare authoritative travel state and load destination
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Preserve one canonical world through native level migration.
+- **Prerequisites:** S09-T01.
+- **Relevant files/subsystems:** alife_update_manager::change_level; native save; checkpoint/journal coordinator.
+- **Actions:** Quiesce or order gameplay at a transition barrier; durably record source recovery generation and participant/entity travel state. Adapt native change_level for both identities and one online world; prepare destination state with explicit commit point.
+- **Outputs:** Server travel coordinator and source/destination recovery records. Plus the common task evidence record.
+- **Acceptance:** No mutation is lost across barrier; both actors and offline ALife map consistently to prepared destination.
+- **Validation:** Native transition fixture with two actors, inventory/quest state and queued conflicting actions.
+- **Risks/blockers:** Native one-actor migration and save hooks may assume global Actor(); define rollback before commit and roll-forward after it.
+
+#### S09-T03 — Synchronize both clients before resuming
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Prevent gameplay against mixed level states.
+- **Prerequisites:** S09-T02.
+- **Relevant files/subsystems:** Client loader; transition prepare/ready/commit messages; snapshot/resync.
+- **Actions:** Send destination/content generation; load both clients and deliver authoritative snapshots. Require validated readiness for the same transition/revision before resuming; reject pre-transition inputs and reset prediction/baselines.
+- **Outputs:** Coordinated load/resume path. Plus the common task evidence record.
+- **Acceptance:** Both clients resume in same level with canonical actors/items/quests; neither can act against old level state.
+- **Validation:** Different client load durations, delayed ready/commit, packet duplication and wrong destination revision.
+- **Risks/blockers:** UI readiness alone is insufficient; snapshot application and identity binding must be acknowledged.
+
+#### S09-T04 — Handle cancellation, failed load and interrupted travel
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Make travel recoverable rather than a permanent split.
+- **Prerequisites:** S09-T03.
+- **Relevant files/subsystems:** Transition state machine; disconnect manager; recovery coordinator.
+- **Actions:** Implement documented precommit cancellation/rollback and postcommit destination recovery. Define timeout behavior, disconnected participant pending state and reconnect rejoin; never let clients resume different levels.
+- **Outputs:** Failure policy implementation and G09 report. Plus the common task evidence record.
+- **Acceptance:** Failure leaves a recoverable consistent source or destination; no unilateral unconfirmed teleport or lost durable progress.
+- **Validation:** Kill server at each transition state; fail one client load; disconnect before/after consent/commit; retry and recover.
+- **Risks/blockers:** Long load can hold world paused; timeout policy must be explicit and tested, not silently degrade consent rules.
+
+### Stage 10 — Broader simulation compatibility
+
+#### S10-T01 — Build a bounded campaign coverage matrix
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: Moderate**
+- **Purpose:** Expand by evidence rather than claiming universal script support.
+- **Prerequisites:** G09.
+- **Relevant files/subsystems:** Installed scripts/configs; E01–E12; prior special-actor audit.
+- **Actions:** Inventory systems and representative content families: stalkers, mutant abilities, offline ALife, dialogue, factions, traders/stashes, time/emissions and story chains. Rank remaining global-Actor mutations; create fixture-specific child tasks before broad implementation.
+- **Outputs:** Coverage matrix with stable child IDs, required release scope and exclusions. Plus the common task evidence record.
+- **Acceptance:** Every targeted family has owner/context policy, test fixture and acceptance evidence requirement; untested content is labeled.
+- **Validation:** Targeted source/script search using existing references; no whole-binary analysis or indiscriminate extraction.
+- **Risks/blockers:** Large campaign scope may need many sessions; this task plans batches rather than claiming to fix all content.
+
+#### S10-T02 — Expand NPC and mutant authoritative behavior
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High; execute as fixture-sized children**
+- **Purpose:** Remove remaining participant-specific combat assumptions.
+- **Prerequisites:** S10-T01.
+- **Relevant files/subsystems:** AI stalker/base monster; poltergeist_telekinesis; anti_aim_ability; monster_aura; E08.
+- **Actions:** For each selected family, execute separately scoped child tasks adapting targeting, special attacks, animation hit logic and death/loot outcomes for both actors. Preserve server decisions and relevant critical persistence.
+- **Outputs:** Per-family changes/tests and coverage entries. Plus the common task evidence record.
+- **Acceptance:** Each required family targets either participant and converges under reconnect; untested abilities remain explicitly blocked from release claims.
+- **Validation:** Two-position actor fixtures, special attacks, AI authority rejection and restart around death/loot.
+- **Risks/blockers:** Global Actor() specials can bypass generic enemy manager; never infer all mutants pass from one NPC test.
+
+#### S10-T03 — Expand offline ALife, spawning and world time
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Keep one online world consistent with persistent offline simulation.
+- **Prerequisites:** S10-T01.
+- **Relevant files/subsystems:** ALife scheduler/registries; online/offline switching; spawn/despawn; time services.
+- **Actions:** Adapt participant-union activation across travel/disconnect; synchronize canonical spawn/death identities and offline updates. Define persistent time/random-state requirements and emission-relevant scheduling; test identity reuse and checkpoint boundaries.
+- **Outputs:** ALife/time adapters and offline-online fixtures. Plus the common task evidence record.
+- **Acceptance:** No duplicate spawn or resurrection on offline/online transitions; both players observe one canonical time/world state.
+- **Validation:** Leave/reenter activation zones, travel and restart with offline entities; compare canonical identities and outcomes.
+- **Risks/blockers:** Offline simulation uses engine assumptions beyond actor distance; performance scales with union of active areas.
+
+#### S10-T04 — Expand dialogue, factions and economy transactions
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
+- **Purpose:** Cover shared consequences beyond the first quest.
+- **Prerequisites:** S10-T01.
+- **Relevant files/subsystems:** PhraseDialog/PhraseScript; reputation; traders; stashes; inventory journal.
+- **Actions:** Use separate content-sized child tasks for dialogue locks/cancellation, faction/reputation scope, trader stock/money and stash/unique ownership. Resolve effects on server and commit multi-entity economy/progression bundles.
+- **Outputs:** Context/persistence adapters and conflict tests per selected subsystem. Plus the common task evidence record.
+- **Acceptance:** Required consequences are shared or player-specific as explicitly defined; no duplicate money/items or conflicting dialogue commits.
+- **Validation:** Concurrent purchase/dialogue, NPC death, reconnect and crash before/after durable success.
+- **Risks/blockers:** Reputation and rewards may be per-player in some content; choose and document policies before migration.
+
+#### S10-T05 — Expand emissions and shared story progression
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High; execute as story/event-sized children**
+- **Purpose:** Prove campaign systems work beyond a single side quest.
+- **Prerequisites:** S10-T02; S10-T03; S10-T04.
+- **Relevant files/subsystems:** World event/emission scripts; story flags; native tasks; campaign matrix.
+- **Actions:** Implement selected world-event and story-chain child slices with explicit participant safety/progression context. Test prerequisites, repeatable tasks, time-driven events and rewards across travel and recovery.
+- **Outputs:** Story/event coverage evidence and G10 report. Plus the common task evidence record.
+- **Acceptance:** Every declared release-required family/chain passes its matrix; both participants can contribute; unsupported content is not represented as compatible.
+- **Validation:** Two-client chained playthrough fixtures, emission with separated same-level actors, repeated tasks and crash/reconnect checkpoints.
+- **Risks/blockers:** Content coverage may reveal new authority paths; expand bounded tasks without bypassing G07/G08 guarantees.
+
+### Stage 11 — Reliability, performance and release validation
+
+#### S11-T01 — Run integrated adverse-network qualification
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Verify interactions under realistic network failures.
+- **Prerequisites:** G10.
+- **Relevant files/subsystems:** Two-client automation; transport fault injection; protocol/replication.
+- **Actions:** Define supported latency/loss/reordering/bandwidth profiles and acceptance limits. Run movement, combat, quest, inventory and travel scenarios together; include bounded rate/queue abuse and malformed input.
+- **Outputs:** Network qualification matrix and defects with reproduction commands. Plus the common task evidence record.
+- **Acceptance:** All supported profiles meet declared convergence/playability limits; no authority violation or unbounded backlog.
+- **Validation:** Automated network faults plus real client observations; compare final authoritative state and latency/error metrics.
+- **Risks/blockers:** Profiles are release claims only after measurement; local-loopback-only evidence is insufficient.
+
+#### S11-T02 — Run integrated crash and recovery qualification
+
+- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Purpose:** Validate durability across subsystem boundaries.
+- **Prerequisites:** S11-T01.
+- **Relevant files/subsystems:** Checkpoint/journal harness; quest/economy/travel operations; reconnect.
+- **Actions:** Expand forced server/client termination and lost-ack/duplicate cases across all required durable adapters. Exercise corrupt latest checkpoint fallback, failed writes, incompatible version and repeated restarts.
+- **Outputs:** Recovery qualification matrix and documented rollback guarantees. Plus the common task evidence record.
+- **Acceptance:** No acknowledged covered critical outcome is lost/duplicated; clients converge or stop explicitly on unrecoverable incompatibility.
+- **Validation:** Failpoints plus external process kills with independent state invariant checks.
+- **Risks/blockers:** Do not claim power-loss durability or zero data loss beyond observed storage guarantees.
+
+#### S11-T03 — Measure long-session stability and resource budgets
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Make performance claims on declared hardware.
+- **Prerequisites:** S11-T02.
+- **Relevant files/subsystems:** Dedicated profiler/counters; Windows runtime; coverage fixtures.
+- **Actions:** Set hardware/content/network profiles and acceptance budgets before soak. Measure CPU, memory, tick overruns, journal/checkpoint latency and bandwidth through extended combat/travel/reconnect sessions; fix measured bottlenecks only.
+- **Outputs:** Soak logs, resource report and reproducible performance scenarios. Plus the common task evidence record.
+- **Acceptance:** No unbounded memory/queue/journal growth; declared tick and interaction budgets hold for required workload and soak duration.
+- **Validation:** Recorded long gameplay runs and before/after profiles for fixes; repeat only affected scenarios.
+- **Risks/blockers:** No defensible budget exists yet; define duration and thresholds from measured target environment, not invented universal limits.
+
+#### S11-T04 — Qualify single-player and matched-build regression
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Preserve original mode and prevent configuration drift.
+- **Prerequisites:** S11-T03.
+- **Relevant files/subsystems:** Accepted SP fixtures; client/server build manifest; installed content.
+- **Actions:** Run Stage 1 compatibility suite against final SP configuration and matched coop products. Recheck assets/Lua/quests/save/load and native movement/combat after shared engine changes; classify deliberate coop-only differences.
+- **Outputs:** SP regression matrix and matched-build identity report. Plus the common task evidence record.
+- **Acceptance:** Mandatory SP fixtures pass; matched products use identical accepted engine/protocol/content revisions.
+- **Validation:** Clean builds and representative SP plus coop runtime regression; inspect configuration guards.
+- **Risks/blockers:** Headless/authority changes can leak into SP through shared globals and macros.
+
+#### S11-T05 — Package a reproducible distribution and verify clean setup
+
+- [ ] **Status: Not Started** · **Reasoning effort: High** · **Complexity: High**
+- **Purpose:** Make tested binaries installable without proprietary content or original edits.
+- **Prerequisites:** S11-T04.
+- **Relevant files/subsystems:** Build automation; manifests; license/dependency inventory; planned release staging.
+- **Actions:** Document clean Windows build and separate-install deployment; package matched products/configs with hashes and licenses, exclude game archives/secrets/Ghidra databases. Test installation and rollback in a fresh workspace profile, then review all gates and limitations.
+- **Outputs:** Release candidate artifacts, setup/rollback guide and G11 acceptance report. Plus the common task evidence record.
+- **Acceptance:** Fresh setup reproduces two-client session and recovery smoke; distribution contains only permitted project/dependency artifacts; all release claims have evidence.
+- **Validation:** Clean-environment build/install/run verification and archive manifest inspection; no install into original.
+- **Risks/blockers:** Publication, original-directory installation or architecture/scope expansion require separate authorization; packaging is not permission to publish.
+
+## D. Stage completion gates
+
+Every gate requires **all tasks and required child tasks in its stage** to pass, evidence linked in the progress ledger, and no unresolved defect that invalidates the stage's guarantee. A blocked gate blocks downstream implementation even if some code compiles. Historical evidence can satisfy investigation prerequisites; it cannot substitute for the new runtime checks below. A later regression reopens the affected gate and invalidates dependent release claims until repaired.
+
+| Gate | Required observed evidence before the next stage |
+|---|---|
+| G00 | Resolved safe paths and output routes; existing changes/repositories preserved; source/artifact ownership documented; saved Ghidra verification and artifacts accounted for; Windows access and baseline fixture requirements recorded. Missing build tools may be a Stage 1 blocker, but must be explicit. |
+| G01 | Pinned **unmodified** source compiles with recorded Windows toolchain/dependencies and repeatable commands. Separate test installation runs representative asset, Lua, gameplay and save/load fixtures with no unexplained critical compatibility defect. **2026-10-17 user exception:** completed-quest/reward and copied original-client comparison are waived for Stage 2 entry, recorded as untested risks in [G01](docs/validation/G01.md). Mere launch or matching strings is insufficient. |
+| G02 | Dedicated process loads and advances selected native campaign fixture with no external client and no GPU initialization/draw dependency. Physics/collision, CPU bones, object updates, scheduler, AI, ALife, world time, relevant script/task execution and native save/reload are observed. No permanent artificial global player; hidden rendering window does not pass. |
+| G03 | Two independent genuine actor identities, conditions/equipment/input contexts; explicit native/Lua participant access; server gameplay independent of client view actor; basic AI and activation work near either actor; remote paths cannot access private state-writer privileges. |
+| G04 | Isolated GNS test passes on accepted toolchain; adapter, bounded/versioned codec, authenticated two-player sessions, rejection tests, liveness and in-memory reconnect work. No implication of crash persistence yet. |
+| G05 | One dedicated process and two real matched clients run simultaneously. Each sees both actors and the same server-controlled entity changes. Initial snapshot, lifecycle, late join and rejoin converge; no client owns shared simulation. |
+| G06 | Native server movement, validated input, snapshots, interpolation/reconciliation and one NPC combat encounter converge on both clients under declared network conditions. Forged movement/damage outcomes are rejected. Rates and limitations measured. |
+| G07 | Consistent native-plus-supplemental checkpoints, stable identities, journal outcomes and epoch fencing restore tested critical effects. Forced termination around commit/apply/ack/publication shows no acknowledged tested critical effect lost or duplicated. Clients discard stale state and converge; transient rollback and untested storage failure guarantees are explicit. |
+| G08 | Concurrent item pickup/transfers preserve one ownership graph. Both players contribute to one complete shared quest; completion and reward effects commit once. Actual inventory and quest adapters pass duplicate, lost-ack, disconnect and crash/recovery tests. |
+| G09 | Both explicitly confirm travel, authoritative mutation barrier and migration preserve state, both load/synchronize before resume. Refusal, cancellation, timeout, failed load, client disconnect and server crash leave a recoverable consistent source or destination. |
+| G10 | Declared required NPC/mutant, offline ALife, dialogue/economy/reputation, world-event and story slices pass their coverage matrix and durable-effect tests. Required child tasks complete; untested content is clearly excluded, not implicitly compatible. |
+| G11 | Integrated network/crash/duplicate/conflict/transition matrices pass; measured long-session resource budgets hold; SP regression passes; clean matched builds and fresh separate-install distribution smoke succeed. Release scope and known limitations match evidence. |
+
+Stage 2 may need a minimal real campaign actor/context to exercise native systems; **no connected human client** does not mean **no actor entity**. Explicit context plumbing needed for the headless fixture may move forward from Stage 3 with recorded evidence. This does not authorize a permanent global placeholder, skipping G02, or implementing full multiplayer early. If correct native initialization cannot meet D1/D2 without a prohibited workaround, stop at that blocker and request an architecture decision with evidence.
+
+## E. Dependencies and critical path
+
+The main critical path is:
+
+`S00-T01 → G00 → G01 → G02 → G03 → G04 → G05 → G06 → G07 → G08 → G09 → G10 → G11`
+
+Within a stage, the prerequisites on each task define the graph; all tasks collectively satisfy its gate. Useful sibling work after shared prerequisites includes S02-T03/T04 (CPU model services and frame driver), S06-T03/T04 (reconciliation and the combat slice), S07-T02/T03 (checkpoint and journal modules), and S10-T02/T03/T04 (bounded content families). These are dependency opportunities, not instructions to spawn agents or start simultaneous risky modifications. Keep integration/tests sequential where shared world or files require it.
+
+Critical uncertainties and their earliest resolving tasks:
+
+1. **Source/content compatibility — S01-T01–T05.** Current partial binary/source correspondence cannot prove compatibility. Failed mandatory baseline tests prevent multiplayer changes; avoid building a large fork before resolving them.
+2. **CPU gameplay extraction and actor-independent boot — S02-T01–T06.** GPU model ownership, render-driven ballistics and macro-disabled campaign services are known source blockers. If native simulation cannot run correctly without prohibited global-player scaffolding, G02 stays blocked.
+3. **Explicit two-participant semantics — S03-T01–T05.** Reused remote actors must retain campaign capabilities. ALife activation and scripts must not silently choose the first player.
+4. **Transport/toolchain fit — S04-T01.** Provisional selection is not proof of an integrable Windows dependency. Complete the isolated test before embedding it throughout networking code.
+5. **Recoverable critical effects — S07-T01–T06.** Native save completeness, supplemental state and journal apply semantics determine whether progression can be durable. Inventory/quest adapters must not get ahead of G07.
+6. **Campaign side-effect coverage — S08 and S10.** An undocumented native/Lua mutation can bypass both authority and durability. Expand by tested slices, not by assuming one successful quest covers all campaign scripts.
+7. **Consistent travel — S09.** Native one-actor change-level and world globals need two-participant migration and failure fencing. Multi-level online simulation is not a fallback within approved scope.
+
+Do not schedule downstream implementation as if these gates have already passed. A source-location mismatch alone calls for bounded investigation, not a new architecture. For an actual impossible or materially different dependency, record the failure, proposed options, impact on gates and D1–D8, then seek approval before changing an accepted decision. Move only evidenced prerequisites; retain original task IDs and add `superseded by` links where necessary.
+
+## F. Flexible session execution strategy
+
+At the start of a development session:
+
+1. Read `AGENTS.md`, this plan's summary/current gate, and [session handoff](docs/session-handoff.md). Then read only evidence and source needed for the selected task. Confirm workspace/repository state before editing; preserve pre-existing changes.
+2. Pick a clear primary objective from the next unblocked stage. State its acceptance test and required inputs. Verify that implementation has been authorized for the requested milestone; this planning run itself changes no engine code.
+3. Use existing source references and saved Ghidra evidence. Inspect targeted functions if line mappings changed or a specific uncertainty matters. Do not repeat whole-binary analysis or reopen persistence work merely because a new session started.
+4. Establish the smallest executable fixture that can resolve the task. Run isolated transport/storage/service checks before major integration. Keep native gameplay behavior rather than replacing difficult dependencies with unverified no-ops.
+
+During a session, complete multiple related tasks when their prerequisites pass, or split a milestone across sessions. Investigate newly discovered dependencies, refactor code directly needed by the objective and run additional correctness tests as warranted. Task IDs are continuity tools, not rigid session boundaries. Large content families in Stage 10 must be split into explicitly tracked fixture-sized child tasks before implementation; do not let those parent tasks become unbounded work.
+
+Do not skip gates, start unrelated stages without a documented dependency, reopen approved architecture without new evidence, or perform speculative cleanup. Avoid unnecessary repeated builds after unchanged passing tests; rerun affected checks after relevant code/content/configuration changes. New tool/library documentation should be consulted when implementation needs it, with actual versions pinned; this plan does not assert current library API details.
+
+End a session after a coherent milestone, a necessary focus change, or when context grows unwieldy. Before stopping, update task statuses, gate evidence and the handoff. A blocked task needs the smallest next diagnostic/action, not another broad investigation. Preserve an incomplete but reproducible working state; never mark an untested change completed to tidy the ledger. Do not install into the original directory or publish artifacts without separate explicit authorization.
+
+## G. Persistent session handoff
+
+`docs/session-handoff.md` is the short entry point for the next session; this plan remains the authoritative roadmap. Update both at every future implementation-session end, including blocked sessions. The handoff must contain:
+
+- Current milestone/gate, completed task IDs and any in-progress or blocked task IDs.
+- Files changed, root/engine revisions or reproducible patch locations, and pre-existing changes to preserve.
+- Confirmed results and exact build/test command or concise validation-report link, including failures and unrun checks.
+- Current blockers and their evidence; source functions/revision or binary hash/RVA when relevant.
+- Remaining work and the next recommended task with a concrete first action.
+- Any proposed ordering/scope changes; approved D1–D8 remain binding unless user approval is recorded.
+
+Use links to `docs/validation/<ID>.md` rather than pasting long logs. Record where ignored binaries/logs/fixtures live, and retain sanitized evidence sufficient to distinguish observed results from claims. Keep completed history in task reports/progress ledger so the handoff stays short. During future implementation, update legacy `docs/implementation-roadmap.md` only as needed to link current evidence per `AGENTS.md`; do not maintain contradictory milestone orders. This planning execution intentionally preserves it unchanged.
+
+## H. Decision and risk register
+
+Accepted choices are not proof of working capabilities. The following register identifies implementation choices and approval boundaries; normal choices within D1–D8 can be made and documented without repeatedly asking permission.
+
+| ID / priority | Unresolved question or risk | Recommended next action / decision owner | Gate and approval boundary |
+|---|---|---|---|
+| R01 / Critical | Candidate source may not run installed 1.5.3 content; toolchain unavailable. | Engineer: pin candidate/toolchain, use representative real fixtures and record incompatibilities. Prefer a compatible source revision over speculative patches to a mismatched fork. | G01. A proposal to waive unmodified-client/runtime validation or change target platform/content baseline requires user approval. |
+| R02 / Critical | Renderer supplies CPU assets; flags remove campaign; local actor assumptions obstruct boot. | Engineer: preserve native CPU services and introduce explicit context and frame ownership. Use hidden window only to diagnose. | G02/G03. Permanent artificial actor, GPU-required final server, independent simulation rewrite or service split changes D1/D2/D8 and requires approval. |
+| R03 / High | Ignored source repository or dirty workspace could lose implementation history. | Engineer: maintain explicit working-fork/patch ownership and source manifest before editing. Never reset existing changes. | G00 and every session. Destructive cleanup or database overwrite is not authorized. |
+| R04 / High | Installed Lua and native tasks use global player state. | Engineer: audit fixture-specific mutations; explicit actor/party contexts and resolved authoritative effects; expand coverage in bounded batches. | G03/G08/G10. Reducing Player 2 to a companion or replacing campaign mode changes D4 and requires approval. |
+| R05 / High | GNS compiler/dependency/deployment constraints. | Engineer: isolated pinned build, two-peer test and deployment requirements. Reuse serializers selectively; adapter protects engine from library choice. | G04. Evidence-backed transport replacement needs approval of D6 amendment; do not silently implement custom UDP. |
+| R06 / High | Initial authentication and connectivity expectations unspecified. | Engineer: document supported deployment and authenticated identity binding before accepting real sessions; use maintained transport security facilities where appropriate, keep credentials private. | G04/G11. Paid/hosted identity/relay services or expanded public service deployment need explicit scope approval. No claim of internet reachability based only on LAN tests. |
+| R07 / Critical | Native checkpoint omits critical participant/script state; replay repeats effects. | Engineer: contents matrix, supplemental records, resolved effect journal, idempotent adapters and fail-closed durable commit; retain prior generation. | G07/G08. Weakening acknowledged critical progression durability requires approval; no silent loss or deterministic replay promise. |
+| R08 / High | Storage choice, flush/atomic rename guarantees and compaction need validation on Windows. | Engineer: select smallest in-process durable journal implementation with tested crash semantics; record process-crash versus power-loss limits, checksums and schema compatibility. | G07/G11. Separate persistence service changes D8; unsupported zero-loss claims are prohibited. |
+| R09 / High | Shared rewards, faction/reputation and conflicting dialogue policies vary by content. | Engineer: classify globally shared, party-shared, authoritative per-player and client-local state. Recommend once-per-party quest completion with explicit content-specific reward allocation; keep identity/health/inventory per player. | G08/G10. Present materially gameplay-changing reward/story policies for user approval before implementing them; do not conflate approval of shared campaign with approval of every reward rule. |
+| R10 / High | Travel failure can strand clients or discard progress. | Engineer: both-player confirmation, durable transition identity/barrier, rollback before commit and destination recovery after commit; reconnect must sync before playing. | G09. One-player consent, automatic teleport or independent online levels changes D5 and requires approval. |
+| R11 / High | View-driven optimization and participant-union activation increase CPU load. | Engineer: measure representative worlds; preserve gameplay work and tune scheduling/interest rather than silently disabling simulation. Select network rates from evidence. | G02/G06/G11. Simulation-fidelity reduction or multi-process expansion that changes D1/D8 requires approval. |
+| R12 / High | A successful slice may hide unsupported campaign branches. | Engineer: publish required content coverage matrix and explicit exclusions; add child tasks before new systems. | G10/G11. Materially reducing promised release campaign scope requires user agreement; one quest is a milestone, not the final objective. |
+| R13 / Medium | Existing binary and accepted source may drift further. | Engineer: record accepted SHA and remap evidence selectively. Keep reference binary and Ghidra project identities distinct from source-built binaries. | All gates. New binary versions get separate hash-keyed databases only when necessary; never overwrite saved analysis. |
+| R14 / High | Core physics/hit logic diverges under prediction or lag. | Engineer: authoritative native movement/combat and measured correction errors; start without rewind, add bounded historical collision only if evidence warrants a separate task. | G06/G11. Do not accept client damage as a shortcut; major changes to gameplay fidelity require review. |
+
+Architecture fallback comparison remains the existing [architecture report](docs/architecture.md): an independent backend reconstructs native simulation at substantial fidelity/maintenance cost; a separate-service hybrid adds IPC and recovery complexity without removing headless blockers. **Neither is a parallel implementation track.** Approved D1/D8 selects the single dedicated native runtime. Revisit only if a new concrete blocker establishes why the chosen approach cannot meet requirements.
+
+## I. Progress tracking
+
+Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Completed**. Keep task checkboxes unchecked for the first three; check only after acceptance and validation evidence exist. Mark gates separately; checking all tasks without their behavioral evidence does not pass a gate. When findings invalidate a completed task, reopen it and explain why. Do not renumber existing IDs; use suffix IDs for scoped children and list their dependencies.
+
+| Record | Current state | Evidence / next action |
+|---|---|---|
+| Planning deliverables | Completed | This roadmap and `docs/session-handoff.md`; documentation-only execution. |
+| Prior architectural investigation | Existing evidence available | E01–E12 and linked reports; not a runtime implementation gate. |
+| Prior persistent Ghidra save/reopen | Existing verification available | `reverse-engineering/persistence-verification.json`; preserve and reuse. |
+| Stage 0 tasks | Completed | S00-T01–T03; see [G00](docs/validation/G00.md). |
+| S01-T01 | Completed | [Pinned installed toolchain and 33 evaluated projects](docs/validation/S01-T01.md). |
+| S01-T02 | Completed | [79 independent content files verified; output aliases isolated](docs/validation/S01-T02.md). |
+| S01-T03 | Completed | [Two clean builds and artifact comparison](docs/validation/S01-T03.md); user-tested third build identity matched source output. |
+| S01-T04 | Completed | [Observed gameplay and explicit untested quest/reward and original-client comparison](docs/validation/S01-T04.md). |
+| S01-T05 | Completed | [Frozen development baseline](docs/validation/S01-T05.md) and [G01 acceptance](docs/validation/G01.md). |
+| G00 / G01 | Completed | [Readiness](docs/validation/G00.md); [scoped development baseline acceptance](docs/validation/G01.md). G02 In Progress; G03–G11 Not Started. |
+| S02-T01 | Completed | [Source map and pinned fixture specification](docs/validation/S02-T01.md); static verification passed, no engine changes or runtime test. |
+| S02-T02 | Completed | [Context and services validation](docs/validation/S02-T02-context.md): Core/Services pass, unwind checked; H02 construction moved to S02-T05/T06 by user decision. |
+
+As work progresses, replace the aggregate engineering/gate rows with compact current-stage status plus completed-gate links; detailed results remain in task reports. Keep the stage summary at the top synchronized. The next engineering objectives are S02-T03 (CPU models, including the material library's CPU/media split) and S02-T04 (explicit clock and frame driver); S02-T05/T06 own real persistent, `CLevel`, ALife and game-state construction. The Services smoke pass does not satisfy any gameplay requirement. G02 requires S02-T02–T06 and their behavioral evidence.

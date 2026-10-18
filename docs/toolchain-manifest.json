@@ -1,0 +1,148 @@
+{
+  "recorded_utc": "2026-10-16T00:13:53.8369237Z",
+  "visual_studio_version": "17.14.37806.7",
+  "visual_studio_display_version": "17.14.42",
+  "installation_path": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\vs2022",
+  "platform_toolset": "v143",
+  "msvc_tools_version": "14.44.35207",
+  "msbuild_version": "17.14.60.43110",
+  "windows_sdk_version": "10.0.26100.0",
+  "windows_sdk_root": "C:\\Program Files (x86)\\Windows Kits\\10\\",
+  "files": {
+    "compiler": {
+      "path": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\vs2022\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+      "file_version": "19.44.35229.0",
+      "sha256": "fe251ef50a1545b1b0835ee17b1e785459712b38d79e45b5c1d3d28970a36619"
+    },
+    "linker": {
+      "path": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\vs2022\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\link.exe",
+      "file_version": "14.44.35229.0",
+      "sha256": "a364af801a8539e4324d9489313dbf001d959128451fc99a27b24676bbac058f"
+    },
+    "msbuild": {
+      "path": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\vs2022\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
+      "file_version": "17.14.60.43110",
+      "sha256": "7da5f86d7dfa627c4071edc9563fda7ace7ec0aaadd8b2aaccb92d2a823535c0"
+    },
+    "atl_header": {
+      "path": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\vs2022\\VC\\Tools\\MSVC\\14.44.35207\\atlmfc\\include\\atlbase.h",
+      "file_version": null,
+      "sha256": "9334afff859a11c56c4a2265d2cafbe958ba1da23d3ff6faf9b09ae4046d8d5b"
+    },
+    "mfc_header": {
+      "path": "C:\\Users\\djb20\\StalkerAnomCoop\\builds\\vs2022\\VC\\Tools\\MSVC\\14.44.35207\\atlmfc\\include\\afxwin.h",
+      "file_version": null,
+      "sha256": "1345f8610fb9e36a3e832e515f6d14b86c87f9fdff82dd6d339a6d342db0f1ab"
+    },
+    "sdk_windows_header": {
+      "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um\\Windows.h",
+      "file_version": null,
+      "sha256": "b337d661d03a4abefb7b86a2742ce1ad5d19b57cd8b858bd13e7bbcc1dbeeaaa"
+    },
+    "sdk_kernel_library": {
+      "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64\\kernel32.lib",
+      "file_version": null,
+      "sha256": "341c7d56125a03b458e4d5093e4c79b33123ccfdfd610fe236937b8e6f3134bb"
+    },
+    "sdk_ucrt_library": {
+      "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64\\ucrt.lib",
+      "file_version": null,
+      "sha256": "7ef4eac926bf597d2f243f16cdfed7e0db22cb3ca34a1d7e088a84c994a03d66"
+    },
+    "sdk_resource_compiler": {
+      "path": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\rc.exe",
+      "file_version": "10.0.26100.7705 (WinBuild.160101.0800)",
+      "sha256": "43da1503c262c30894c851589bf0155f8365d77e63a5f7bc13982320e3a6b42d"
+    }
+  },
+  "installer_state": {
+    "path": "builds/vscache/_Instances/ce49025c/state.json",
+    "sha256": "28480e6ee09e7d1a3df8fe7dbbfe6f9fa020c4b3baeccc6b2c8c334409b80238"
+  },
+  "installer_catalog": {
+    "path": "builds/vscache/_Instances/ce49025c/catalog.json",
+    "sha256": "99dda859c4ae3c446eb25620d1a6237bb135d95d14d55cd1d30a15340bb39d80"
+  },
+  "selected_components": [
+    {
+      "id": "Microsoft.VisualStudio.Component.Roslyn.Compiler",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.Component.MSBuild",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.CoreBuildTools",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Workload.MSBuildTools",
+      "version": "17.14.36015.10",
+      "type": "Workload"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.Windows10SDK",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.VC.CoreBuildTools",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.VC.Redist.14.Latest",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.Windows11SDK.26100",
+      "version": "17.14.37011.9",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.VC.ATL",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.VC.ATLMFC",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.TextTemplating",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Component.VC.CoreIde",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core",
+      "version": "17.14.36510.44",
+      "type": "Component"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Workload.VCTools",
+      "version": "17.14.36331.10",
+      "type": "Workload"
+    },
+    {
+      "id": "Microsoft.VisualStudio.Product.BuildTools",
+      "version": "17.14.37806.7",
+      "type": "Product"
+    }
+  ]
+}

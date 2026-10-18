@@ -1,0 +1,74 @@
+[
+  {
+    "name": "AnomalyDX10.exe",
+    "size": 16039424,
+    "sha256": "fbfdb568030596af766a6514f897501fc0882b742d49c1be53729a0c9cc57101",
+    "machine": "0x8664",
+    "timestamp": 1727079936,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX10AVX.exe",
+    "size": 15967744,
+    "sha256": "62b3bf2163d6fd22a68c11ff9748a8b0f8f50cb59dda57be2b214f2e02ddf922",
+    "machine": "0x8664",
+    "timestamp": 1727079564,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX11.exe",
+    "size": 16138752,
+    "sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+    "machine": "0x8664",
+    "timestamp": 1727078916,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX11AVX.exe",
+    "size": 16066560,
+    "sha256": "2032acfc041e215508692ef4079ef504c7bbabf1793d5668084099f734b92f12",
+    "machine": "0x8664",
+    "timestamp": 1727077251,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX8.exe",
+    "size": 15639040,
+    "sha256": "4c316cce7cc9383ff7cefbc5540c68fd39e6395d0a186614192cdfd632256dfa",
+    "machine": "0x8664",
+    "timestamp": 1727076916,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX8AVX.exe",
+    "size": 15577600,
+    "sha256": "ca494fbb39e864c9361fea2ff1192fee50f50d409ba88f6c9fd215745305d153",
+    "machine": "0x8664",
+    "timestamp": 1727076186,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX9.exe",
+    "size": 15867392,
+    "sha256": "265c6bd61829b1f9905441beb4e47fc5eb5d6c2008d748fa808a4405c56dbfd5",
+    "machine": "0x8664",
+    "timestamp": 1727075943,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "AnomalyDX9AVX.exe",
+    "size": 15795200,
+    "sha256": "1aa637aa274822aaf1581b89a19616a9ae56082ac03067f53a9d2b459601f7c4",
+    "machine": "0x8664",
+    "timestamp": 1727075620,
+    "imagebase": "0x140000000"
+  },
+  {
+    "name": "VerifiedDX11.exe",
+    "size": 44763648,
+    "sha256": "26a9cab95de4a4ef3766fb6f8f23e2e69626b9992396a3417e05eee10656aae9",
+    "machine": "0x8664",
+    "timestamp": 1727054637,
+    "imagebase": "0x140000000"
+  }
+]

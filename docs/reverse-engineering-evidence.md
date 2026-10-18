@@ -1,0 +1,73 @@
+# Reverse-engineering evidence ledger
+
+Investigation date 2026-10-15. Distinguish source facts, binary static observations, runtime observations and design hypotheses. No game execution occurred. Native Ghidra static analysis is not runtime evidence.
+
+## Identity and immutable input
+
+Original module `/mnt/c/Users/djb20/StalkerAnom/bin/AnomalyDX11.exe`; analysis copy `reverse-engineering/artifacts/AnomalyDX11.exe`. SHA-256 `c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e`; 16,138,752 bytes. PE32+, AMD64 (`0x8664`), preferred image base `0x140000000`. This base is a static preferred address, not an observed ASLR runtime address.
+
+[Binary manifest](../reverse-engineering/binary-manifest.json) records all nine engine executables. [PE identity](../reverse-engineering/pe-identity.json) records section mappings, version data and strings. Local PE decoding found Windows file/product version 1.0.5.6; embedded engine string identifies Monolith v1.5.3 and build string Sep 23 2024. PE timestamp is 2024-09-23 08:08:36 UTC. Metadata is not authenticated release provenance.
+
+| Binary observation | File offset | RVA | Confidence / limitation |
+|---|---:|---:|---|
+| `X-Ray Monolith v1.5.3` | 10841008 | 0xa579b0 | Confirmed bytes; not exact source revision |
+| `Sep 23 2024` | 10840304 | 0xa576f0 | Confirmed string; not independently verified build date |
+| Embedded `H:\Anomaly\engine\_build\_game\bin_dbg\AnomalyDX11.pdb` | 12715076 | 0xc21244 | Confirmed string; PDB unavailable, path alone does not prove debug configuration |
+| Actor singleton assertion text | 10883960 | 0xa62178 | Confirmed bytes; source candidate Actor_Network.cpp:62; string alone does not prove call flow |
+| Invalid ASPLAYER non-actor assertion | 11467016 | 0xaf0708 | Confirmed bytes; source candidate alife_graph_registry.cpp:57; structure offsets/signatures unverified |
+
+[Function seeds](../reverse-engineering/function-seeds.json) preserve the last two strings and static addresses for focused native reference inspection. No guessed offsets or parameter types should be used for hooks.
+
+## REA evidence
+
+REA MCP 6.5.0 `binary_session` responded with no open target and Ghidra 12.1.4 available on Linux x64 with Java 21.0.12. Full response retained in [rea-session.json](../reverse-engineering/rea-session.json). This establishes connected MCP and successful provider prerequisite checks, not completed provider decompilation.
+
+`inspect_pe_resources` was called on the workspace copy without execution or a native session. Evidence ID: `ev_ac8fe06b7530150eacaa7007b1a7e6fccee653a9ec923d0666fa226c77ff2cb3`. [Complete returned evidence](../reverse-engineering/rea-pe-resources.json). Coverage: 34 examined entries, 14 resources; RT_VERSION payload file offset 15932688, 816 bytes, RVA 16345872, SHA-256 `d24979d1df8b4504c1bbb47cdb03732e223da37549f7c2173c2767d5d3f89024`. REA leaves that payload opaque; its version decoding above was a separate local byte inspection. No runtime icon/resource loading was observed.
+
+No REA native session was opened: sufficient source exists for the first architectural assessment, and the MCP open schema has no explicit temporary-root argument. Installed REA Ghidra code selects its root from inherited OS temporary directory (`GhidraSessionRoot.js`); this investigation did not change MCP configuration. Future targeted REA deep analysis must verify the server's inherited TMPDIR points within the workspace or use a separately configured CLI process. Do not assume Codex sandbox controls the MCP filesystem. Do not repeat full binary analysis simply to reproduce native persistent results.
+
+## Persistent native Ghidra project
+
+Project root: `/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/ghidra`.
+Project name: `Anomaly153-c857b6f49d32`. Imported program: `AnomalyDX11.exe` from the hashed workspace copy. The project directory was empty before import; no existing database was overwritten. Native `analyzeHeadless` uses Linux paths and Linux Java/decompiler, not Windows interoperability.
+
+Invocation uses `JAVA_TOOL_OPTIONS` with `-Duser.home=/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/ghidra-user` and `-Djava.io.tmpdir=/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/tmp`; explicit `-log` and `-scriptlog` point to `reverse-engineering/logs`. No `-deleteProject` or `-overwrite` flag is used. Default automatic analysis is requested once for this selected executable, not an indiscriminate installation import. Imported dependent DLL count was zero; Windows system imports remain unresolved in the project.
+
+Logs: `reverse-engineering/logs/ghidra-console.log`, `ghidra-import.log`, `ghidra-script.log` (ignored generated artifacts). Reported limitations include missing PDB and warnings around decompilation of 0x1400d3040; these warnings are not confirmed gameplay functions or crash observations. The bounded [FocusedEvidence.java](../tools/FocusedEvidence.java) analysis helper reads selected string references and at most four referring functions, writes inferred signatures/pseudocode, and does not patch executable bytes or rename symbols.
+
+**Persistence verified.** The initial `analyzeHeadless` run reported `Analysis succeeded`, `Save succeeded for: /AnomalyDX11.exe`, and `Import succeeded`; its reported automatic analysis time was 1,417 seconds. The saved project is about 259 MiB. A second, separate `analyzeHeadless` invocation opened the existing project with `-process AnomalyDX11.exe -noanalysis` and ran [VerifySavedProject.java](../tools/VerifySavedProject.java), a read-only metadata check. It exited with status 0. The reopened Program reported SHA-256 `c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e`, preferred image base `0x140000000`, `49,494` retained functions, `258,577` symbols, and language `x86:LE:64:default`. This confirms saved analysis state could be reopened without rerunning automatic analysis. Counts measure Ghidra's analyzed database; they do not prove every function or symbol is correct.
+
+The first run's save message is in `reverse-engineering/logs/ghidra-console.log`; the reopen message and script result are in `reverse-engineering/logs/ghidra-reopen-console.log` and `ghidra-reopen.txt`. Generated logs remain excluded from Git. Stable metadata is retained in [persistence-verification.json](../reverse-engineering/persistence-verification.json). No additional function decompilation was performed while the save was unverified. The focused helper remains available for a later targeted session; it was not run in this first execution.
+
+## Evidence boundaries and next targets
+
+Confirmed source facts are in [actor](actor-findings.md), [simulation](simulation-findings.md), and [network](network-findings.md) ledgers at `c57fe5b9fab4fe0506659db03137c52d2500eb2f`. Exact source/binary equivalence remains unresolved. No verified function ABI, C++ memory layout, server runtime behavior or binary patch exists from the source review.
+
+The architecture review below has now mapped the singleton Actor accessor, ASPLAYER registry update/current-level setup, local-client `Process_update/Process_save`, and object spawn model/collision path. Reuse GH-A01–06 rather than decompiling them again. Remaining binary-specific questions include dedicated task/script guards and device startup only where their installed-build behavior would affect a decision. PDB/symbol recovery or a historical build comparison could improve correspondence. Reuse the persistent program with `-process AnomalyDX11.exe -noanalysis -readOnly` for targeted reads after verifying its executable hash; never reimport over it without permission.
+
+## Additional bounded binary identity evidence
+
+Raw RTTI-like names for `CActor`, `CActorMP`, `CSE_ActorMP`, `CALifeSimulator`, `xrServer`, and `game_sv_Deathmatch` occur in the installed DX11 bytes; exact file offsets are retained in [rtti-name-presence.json](../reverse-engineering/rtti-name-presence.json). This corroborates presence of legacy class metadata in this binary, but does not establish functional networking, instantiated objects, class layout or working two-player gameplay.
+
+All nine original engine executable hashes were rechecked against the initial manifest with no changes: [integrity-recheck.json](../reverse-engineering/integrity-recheck.json). This verifies those executables, not an exhaustive whole-installation integrity scan.
+
+## Architecture review: six targeted functions from the saved project
+
+Review date: 2026-10-15. The persistence gate above was already satisfied. Three sequential native Ghidra invocations reused that same project with `-process AnomalyDX11.exe -noanalysis -readOnly`. They all exited 0, reported the expected binary hash and 49,494 functions, and performed **no import, automatic reanalysis, database annotation, or executable modification**. Only six selected functions were decompiled. Existing files/database were preserved. No new REA native session or temporary REA database was created.
+
+`GH-A01` through `GH-A06` below are local evidence identifiers, not REA MCP Evidence IDs. [architecture-function-map.json](../reverse-engineering/architecture-function-map.json) records function/source mapping, seed and referring instruction addresses, raw-output paths and SHA-256 digests. Raw pseudocode is retained under ignored `reverse-engineering/logs/architecture-*.txt`, rather than copied wholesale into documentation. Source references use `c57fe5b9fab4fe0506659db03137c52d2500eb2f` and are relative to its `src/` directory. All addresses are preferred static VAs/RVAs, not observed runtime addresses.
+
+| Evidence / source correspondence | Static VA / RVA | Confirmed static finding and supporting relationship | Confidence and remaining limits |
+|---|---|---|---|
+| GH-A01 — `Actor()`; `xrGame/Actor_Network.cpp:58-67` | `0x1400fb2e0` / `0xfb2e0` | Assertion-string xref at `0x1400fb316`; body tests a game-ID result against 1, invokes the SP assertion path, and returns `DAT_140d5bf30` (global slot RVA `0xd5bf30`). Embedded diagnostic names `Actor_Network.cpp`, line 62, and `Actor`. | High correspondence to global accessor; returned CActor* type inferred from source, not a recovered PDB type. Ghidra displays `undefined8 ... (void)`; global pointer value and runtime callers unobserved. |
+| GH-A02 — `CALifeGraphRegistry::update`; `xrGame/alife_graph_registry.cpp:49-66` | `0x140386670` / `0x386670` | Xref `0x1403866e7`; checks a direct-control byte, tests spawn flag, RTTI-casts dynamic object to `CSE_ALifeCreatureActor`, writes one actor slot, and calls `0x140386100` if actor exists and level slot is null. | High function/flow correspondence; decompiler has two `longlong` parameters, inferred as registry `this` and object. Actor/level writes at inferred instance offsets `0x6028`/`0x6020` are observations for this build only, not a validated reusable class layout. |
+| GH-A03 — `xrServer::Process_update`; `xrGame/xrServer_process_update.cpp:7-58` | `0x14071ef80` / `0x71ef80` | Xref `0x14071efd0`; client lookup `0x140936bb0`, `CL->flags.bLocal` assertion, packet record loop, entity lookup `0x1405416b0`, readiness write and indirect state-read call. Diagnostic names function/source and expected packet-size mismatch. | High flow correspondence. Three decompiler arguments (`undefined8, undefined8, undefined4`) align with source this/packet/sender; complete ABI unverified. Virtual target's `UPDATE_Read` identity is source correspondence; individual dynamic callees were not resolved. This is a trusted local-state path, not proof remote clients bypass checks. |
+| GH-A04 — `xrServer::Process_save`; `xrGame/xrServer_process_update.cpp:60-95` | `0x14071edd0` / `0x71edd0` | Xref `0x14071ee20`; same client lookup, local-client assertion, two 16-bit record reads, entity lookup/readiness write, indirect load and length correction. | High flow correspondence. Same three inferred argument categories as GH-A03; virtual load targets and precise packet layout not independently verified. |
+| GH-A05 — `CALifeGraphRegistry::setup_current_level`; `xrGame/alife_graph_registry.cpp:68-96` | `0x140386100` / `0x386100` | Xrefs `0x1403865b1` and `0x1403865b8`; directly called by GH-A02. Reads actor graph data, allocates an object assigned `CALifeLevelRegistry::vftable`, writes the singular level slot, selects matching graph objects, and invokes level-selection/load-shaped calls. Embedded diagnostic names function/source. | High correspondence for one actor-selected registry. Calls `0x140077130` and `0x1400e76b0` correspond to source `pApp->Level_ID` and `ai().load`, but were not separately decompiled; semantic naming of those calls is inferred. One registry is not proof that no alternative context could ever be implemented. |
+| GH-A06 — `CObject::net_Spawn`; `xrEngine/xr_object.cpp:255-280` | `0x140072650` / `0x72650` | Xref `0x140072867`; reads `visual` setting and calls `0x140071cf0`; reads `cform`, checks `*NameVisual`, allocates collision data, then registers spatial/scheduler work. Embedded diagnostic identifies `CObject::net_Spawn`. | High source-shape correspondence; model-name setter and skeleton-collision constructor names inferred from source, callees not decompiled. Ghidra recovers only one pointer parameter and warns of removed unreachable blocks; do not infer the original method lacks its source-level spawn parameter. |
+
+The diagnostic line for GH-A06's model assertion is 241 in the binary versus 268 in this source. This explicitly demonstrates source-line drift; matched functions do not establish exact source-build equivalence. For GH-A01–05, embedded diagnostic names and matching control flow strengthen correspondence beyond raw string presence.
+
+No runtime behavior was observed. Dedicated rendering guards, current source lifecycle wiring, physics scheduling, task/Lua disabling and the `DEDICATED_SERVER_ONLY` → `NO_SINGLE` relationship remain **source-confirmed only**, unless a separate binary mapping is later recorded. Exact searches for selected full names such as `CLevel::OnFrame` found no NUL-terminated name in the copied binary; this bounded search does not establish absence of the function. See [architecture-string-seeds.json](../reverse-engineering/architecture-string-seeds.json).
+
+Stop condition reached: these mappings corroborate the actor/level singularity, trusted internal state flow and spawn/model dependency sufficiently for architecture decisions. The broader source/binary comparison, named virtual targets and headless runtime remain unresolved. Read [architecture decisions](architecture.md) before authorizing further engineering.

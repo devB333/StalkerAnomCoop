@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "fixture_id": "H02-F01",
+  "status": "Specified; not implemented or run",
+  "source_revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+  "source_checkout": "builds/build_1/engine-work",
+  "dependency_revision": {
+    "optick": "8abd28dee1a4034c973a3d32cd1777118e72df7e"
+  },
+  "accepted_baseline": "docs/accepted-baseline.json",
+  "content_manifest": "builds/build_2/validation-evidence/content-archives.json",
+  "overlay_manifest": "builds/build_2/repair-backups/20261017T055847Z/repair-manifest.json",
+  "snapshot_manifest": "builds/build_2/validation-evidence/20261017-user-gameplay/evidence.json",
+  "save_basename": "player - autosave",
+  "inputs": [
+    {
+      "path": "builds/build_2/validation-evidence/20261017-user-gameplay/savedgames/player - autosave.scop",
+      "sha256": "65b77402db466e2b69b80b9ad40a00ee15e562e82af55c71dc5c67dca63f01ef"
+    },
+    {
+      "path": "builds/build_2/validation-evidence/20261017-user-gameplay/savedgames/player - autosave.scoc",
+      "sha256": "14fb5affbb2fb70298b153a12144b0555d3051f2f9373a91c03dea86b3996748"
+    },
+    {
+      "path": "builds/build_2/validation-evidence/20261017-user-gameplay/logs/xray_djb20.log",
+      "sha256": "b7d77448b560fc3ea54016c7805df50fdf4a58b5f98becd3e624cc0a1849222c"
+    }
+  ],
+  "candidate_level": "k00_marsh",
+  "level_identity_status": "Inferred from snapshot log; verify save graph and loaded level at runtime",
+  "run_root_template": "builds/stage2/test-install/H02-F01/<run>",
+  "external_clients": 0,
+  "actor_policy": "Real saved campaign actor with explicit simulation context; no artificial global actor or presentation view required",
+  "advancing_frames": 300,
+  "startup_watchdog_seconds": 300,
+  "run_watchdog_seconds": 60,
+  "assertion_specification": "docs/headless-service-boundary.md",
+  "runtime_parameters_pending": [
+    "loaded actor and online NPC identity and initial state",
+    "model and motion identities and matched client CPU capture",
+    "native shell, floor, bone and material query setup",
+    "shot source, weapon, target and initial state",
+    "contextual script probe, task condition and persisted state",
+    "measured clock budget and catch-up policy"
+  ]
+}

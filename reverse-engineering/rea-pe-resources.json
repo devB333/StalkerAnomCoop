@@ -1,0 +1,1116 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"evidence_id\":\"ev_ac8fe06b7530150eacaa7007b1a7e6fccee653a9ec923d0666fa226c77ff2cb3\",\"subject\":{\"name\":\"AnomalyDX11.exe\",\"digest\":{\"sha256\":\"c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e\"},\"local_path\":\"/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe\",\"format\":\"pe\",\"architecture\":null},\"provider\":{\"id\":\"rea-pe-resources\",\"name\":\"REA PE resource parser\",\"version\":\"1\"},\"analysis_profile\":null,\"predicate_type\":\"rea.analysis\",\"operation\":\"inspect_pe_resources\",\"parameters\":{\"path\":\"/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe\",\"max_file_bytes\":67108864,\"max_entries\":16384},\"raw_result\":null,\"normalized_result\":{\"artifact\":{\"path\":\"/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe\",\"sha256\":\"c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e\",\"bytes\":16138752},\"format\":\"pe32-plus\",\"machine\":34404,\"directory\":{\"rva\":15540224,\"location\":{\"offset\":15127040,\"bytes\":807120},\"data_directory_location\":{\"offset\":496,\"bytes\":8}},\"directories\":[{\"location\":{\"offset\":15127040,\"bytes\":64},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":6},{\"location\":{\"offset\":15127104,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127312,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127128,\"bytes\":88},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":9},{\"location\":{\"offset\":15127336,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127360,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127384,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127408,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127432,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127456,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127480,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127504,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127528,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127216,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127552,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127240,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127576,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127264,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127600,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127288,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1},{\"location\":{\"offset\":15127624,\"bytes\":24},\"characteristics\":0,\"timestamp\":0,\"major_version\":0,\"minor_version\":0,\"named_entries\":0,\"id_entries\":1}],\"resources\":[{\"index\":0,\"type\":{\"kind\":\"id\",\"id\":2},\"name\":{\"kind\":\"id\",\"id\":123},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127056,\"bytes\":8},{\"offset\":15127120,\"bytes\":8},{\"offset\":15127328,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127648,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15943832,\"location\":{\"offset\":15530648,\"bytes\":402040},\"sha256\":\"02b42147db3014c7632ef91df3b6502529c68603a469a720c970f25524c06beb\"}},{\"index\":1,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":1},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127144,\"bytes\":8},{\"offset\":15127352,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127664,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15541056,\"location\":{\"offset\":15127872,\"bytes\":1128},\"sha256\":\"421ff83e5ae1d16a66fcf2ba66f1c83c054207b62cdcd6c9fb8a89617bf64de3\"}},{\"index\":2,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":2},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127152,\"bytes\":8},{\"offset\":15127376,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127680,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15542184,\"location\":{\"offset\":15129000,\"bytes\":2440},\"sha256\":\"efcb0a736411a79b60f7da289a052ef7696682838c6063260a40681ea7128d10\"}},{\"index\":3,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":3},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127160,\"bytes\":8},{\"offset\":15127400,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127696,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15544624,\"location\":{\"offset\":15131440,\"bytes\":4264},\"sha256\":\"b2a1877eeabd548ca4b161038a5fe043eef3a1ef1b6bf33516d727e9f0540342\"}},{\"index\":4,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":4},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127168,\"bytes\":8},{\"offset\":15127424,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127712,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15548888,\"location\":{\"offset\":15135704,\"bytes\":9640},\"sha256\":\"26c355aad7c708d1242f45cd8b46dad6ef809801643b5114e915257beaf83eb1\"}},{\"index\":5,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":5},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127176,\"bytes\":8},{\"offset\":15127448,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127728,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15558528,\"location\":{\"offset\":15145344,\"bytes\":16936},\"sha256\":\"f3334b6ef194457bf9babcc92db4e7d94cde1630f146e526d3e288e194f84b12\"}},{\"index\":6,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":6},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127184,\"bytes\":8},{\"offset\":15127472,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127744,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15575464,\"location\":{\"offset\":15162280,\"bytes\":38056},\"sha256\":\"bd12ed079fe1c8f368386bb8ef82506ef3b6e63b662fb672155bfd9dfd3ea938\"}},{\"index\":7,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":7},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127192,\"bytes\":8},{\"offset\":15127496,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127760,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15613520,\"location\":{\"offset\":15200336,\"bytes\":67624},\"sha256\":\"6b46ccff14fd9f696a1aa665ce45bdfae09eb71beb5eb514705fe5d981cf2f3d\"}},{\"index\":8,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":8},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127200,\"bytes\":8},{\"offset\":15127520,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127776,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15681144,\"location\":{\"offset\":15267960,\"bytes\":152104},\"sha256\":\"13452faf336224e2a39ed61ce72da80ad2d2ded7b79e0f499715b88b2eda3db9\"}},{\"index\":9,\"type\":{\"kind\":\"id\",\"id\":3},\"name\":{\"kind\":\"id\",\"id\":9},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127064,\"bytes\":8},{\"offset\":15127208,\"bytes\":8},{\"offset\":15127544,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127792,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15833248,\"location\":{\"offset\":15420064,\"bytes\":110441},\"sha256\":\"3569b0f889c673411495013d44833b742bda624c95e0b823fbc291023586a533\"}},{\"index\":10,\"type\":{\"kind\":\"id\",\"id\":5},\"name\":{\"kind\":\"id\",\"id\":106},\"language\":{\"kind\":\"id\",\"id\":1033},\"entry_locations\":[{\"offset\":15127072,\"bytes\":8},{\"offset\":15127232,\"bytes\":8},{\"offset\":15127568,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127808,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":16346688,\"location\":{\"offset\":15933504,\"bytes\":102},\"sha256\":\"b7abd720b14a72ed4c8c421457376cb8b080d489a8971a15eb30d4484cc1e180\"}},{\"index\":11,\"type\":{\"kind\":\"id\",\"id\":14},\"name\":{\"kind\":\"id\",\"id\":111},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127080,\"bytes\":8},{\"offset\":15127256,\"bytes\":8},{\"offset\":15127592,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127824,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":15943696,\"location\":{\"offset\":15530512,\"bytes\":132},\"sha256\":\"b04823501bdfaa1a922bf311c5fbc46adab4b75b2a0ee9e5681dca08a7ce3dbf\"}},{\"index\":12,\"type\":{\"kind\":\"id\",\"id\":16},\"name\":{\"kind\":\"id\",\"id\":1},\"language\":{\"kind\":\"id\",\"id\":1049},\"entry_locations\":[{\"offset\":15127088,\"bytes\":8},{\"offset\":15127280,\"bytes\":8},{\"offset\":15127616,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127840,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":16345872,\"location\":{\"offset\":15932688,\"bytes\":816},\"sha256\":\"d24979d1df8b4504c1bbb47cdb03732e223da37549f7c2173c2767d5d3f89024\"}},{\"index\":13,\"type\":{\"kind\":\"id\",\"id\":24},\"name\":{\"kind\":\"id\",\"id\":1},\"language\":{\"kind\":\"id\",\"id\":1033},\"entry_locations\":[{\"offset\":15127096,\"bytes\":8},{\"offset\":15127304,\"bytes\":8},{\"offset\":15127640,\"bytes\":8}],\"data_entry_location\":{\"offset\":15127856,\"bytes\":16},\"code_page\":0,\"reserved\":0,\"payload\":{\"rva\":16346792,\"location\":{\"offset\":15933608,\"bytes\":548},\"sha256\":\"eefc2e6bbbf6d18368ffc552a822e3c16cec597e547fdeadc773f7f0b9f507cf\"}}],\"icon_groups\":[{\"resource_index\":11,\"images\":[{\"location\":{\"offset\":15530518,\"bytes\":14},\"width\":16,\"height\":16,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":1128,\"resource_id\":1,\"candidate_resource_indices\":[1],\"same_language_resource_index\":1,\"size_matches\":true},{\"location\":{\"offset\":15530532,\"bytes\":14},\"width\":24,\"height\":24,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":2440,\"resource_id\":2,\"candidate_resource_indices\":[2],\"same_language_resource_index\":2,\"size_matches\":true},{\"location\":{\"offset\":15530546,\"bytes\":14},\"width\":32,\"height\":32,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":4264,\"resource_id\":3,\"candidate_resource_indices\":[3],\"same_language_resource_index\":3,\"size_matches\":true},{\"location\":{\"offset\":15530560,\"bytes\":14},\"width\":48,\"height\":48,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":9640,\"resource_id\":4,\"candidate_resource_indices\":[4],\"same_language_resource_index\":4,\"size_matches\":true},{\"location\":{\"offset\":15530574,\"bytes\":14},\"width\":64,\"height\":64,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":16936,\"resource_id\":5,\"candidate_resource_indices\":[5],\"same_language_resource_index\":5,\"size_matches\":true},{\"location\":{\"offset\":15530588,\"bytes\":14},\"width\":96,\"height\":96,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":38056,\"resource_id\":6,\"candidate_resource_indices\":[6],\"same_language_resource_index\":6,\"size_matches\":true},{\"location\":{\"offset\":15530602,\"bytes\":14},\"width\":128,\"height\":128,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":67624,\"resource_id\":7,\"candidate_resource_indices\":[7],\"same_language_resource_index\":7,\"size_matches\":true},{\"location\":{\"offset\":15530616,\"bytes\":14},\"width\":192,\"height\":192,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":152104,\"resource_id\":8,\"candidate_resource_indices\":[8],\"same_language_resource_index\":8,\"size_matches\":true},{\"location\":{\"offset\":15530630,\"bytes\":14},\"width\":0,\"height\":0,\"color_count\":0,\"reserved\":0,\"planes\":1,\"bit_count\":32,\"declared_bytes\":110441,\"resource_id\":9,\"candidate_resource_indices\":[9],\"same_language_resource_index\":9,\"size_matches\":true}]}],\"coverage\":{\"status\":\"complete\",\"examined_entries\":34,\"resources\":14},\"limitations\":[\"Static PE32/PE32+ type/name/language resource inventory; payloads other than RT_GROUP_ICON remain opaque.\",\"Icon candidates are resource-table relationships. Language fallback, image decoding and actual shell/window loading are not observed.\",\"Exact shared byte ranges are retained; non-identical overlapping resource structures or payloads are rejected.\"]},\"confidence\":\"observed\",\"authority\":\"shipped-artifact\",\"environment\":null,\"limitations\":[\"Static PE32/PE32+ type/name/language resource inventory; payloads other than RT_GROUP_ICON remain opaque.\",\"Icon candidates are resource-table relationships. Language fallback, image decoding and actual shell/window loading are not observed.\",\"Exact shared byte ranges are retained; non-identical overlapping resource structures or payloads are rejected.\"],\"relationship_coverage\":null,\"locations\":[{\"kind\":\"artifact-path\",\"path\":\"/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe\"}],\"evidence_links\":[]}"
+    }
+  ],
+  "structuredContent": {
+    "evidence_id": "ev_ac8fe06b7530150eacaa7007b1a7e6fccee653a9ec923d0666fa226c77ff2cb3",
+    "subject": {
+      "name": "AnomalyDX11.exe",
+      "digest": {
+        "sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e"
+      },
+      "local_path": "/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe",
+      "format": "pe",
+      "architecture": null
+    },
+    "provider": {
+      "id": "rea-pe-resources",
+      "name": "REA PE resource parser",
+      "version": "1"
+    },
+    "analysis_profile": null,
+    "predicate_type": "rea.analysis",
+    "operation": "inspect_pe_resources",
+    "parameters": {
+      "path": "/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe",
+      "max_file_bytes": 67108864,
+      "max_entries": 16384
+    },
+    "raw_result": null,
+    "normalized_result": {
+      "artifact": {
+        "path": "/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe",
+        "sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+        "bytes": 16138752
+      },
+      "format": "pe32-plus",
+      "machine": 34404,
+      "directory": {
+        "rva": 15540224,
+        "location": {
+          "offset": 15127040,
+          "bytes": 807120
+        },
+        "data_directory_location": {
+          "offset": 496,
+          "bytes": 8
+        }
+      },
+      "directories": [
+        {
+          "location": {
+            "offset": 15127040,
+            "bytes": 64
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 6
+        },
+        {
+          "location": {
+            "offset": 15127104,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127312,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127128,
+            "bytes": 88
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 9
+        },
+        {
+          "location": {
+            "offset": 15127336,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127360,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127384,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127408,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127432,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127456,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127480,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127504,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127528,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127216,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127552,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127240,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127576,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127264,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127600,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127288,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        },
+        {
+          "location": {
+            "offset": 15127624,
+            "bytes": 24
+          },
+          "characteristics": 0,
+          "timestamp": 0,
+          "major_version": 0,
+          "minor_version": 0,
+          "named_entries": 0,
+          "id_entries": 1
+        }
+      ],
+      "resources": [
+        {
+          "index": 0,
+          "type": {
+            "kind": "id",
+            "id": 2
+          },
+          "name": {
+            "kind": "id",
+            "id": 123
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127056,
+              "bytes": 8
+            },
+            {
+              "offset": 15127120,
+              "bytes": 8
+            },
+            {
+              "offset": 15127328,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127648,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15943832,
+            "location": {
+              "offset": 15530648,
+              "bytes": 402040
+            },
+            "sha256": "02b42147db3014c7632ef91df3b6502529c68603a469a720c970f25524c06beb"
+          }
+        },
+        {
+          "index": 1,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 1
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127144,
+              "bytes": 8
+            },
+            {
+              "offset": 15127352,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127664,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15541056,
+            "location": {
+              "offset": 15127872,
+              "bytes": 1128
+            },
+            "sha256": "421ff83e5ae1d16a66fcf2ba66f1c83c054207b62cdcd6c9fb8a89617bf64de3"
+          }
+        },
+        {
+          "index": 2,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 2
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127152,
+              "bytes": 8
+            },
+            {
+              "offset": 15127376,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127680,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15542184,
+            "location": {
+              "offset": 15129000,
+              "bytes": 2440
+            },
+            "sha256": "efcb0a736411a79b60f7da289a052ef7696682838c6063260a40681ea7128d10"
+          }
+        },
+        {
+          "index": 3,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 3
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127160,
+              "bytes": 8
+            },
+            {
+              "offset": 15127400,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127696,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15544624,
+            "location": {
+              "offset": 15131440,
+              "bytes": 4264
+            },
+            "sha256": "b2a1877eeabd548ca4b161038a5fe043eef3a1ef1b6bf33516d727e9f0540342"
+          }
+        },
+        {
+          "index": 4,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 4
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127168,
+              "bytes": 8
+            },
+            {
+              "offset": 15127424,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127712,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15548888,
+            "location": {
+              "offset": 15135704,
+              "bytes": 9640
+            },
+            "sha256": "26c355aad7c708d1242f45cd8b46dad6ef809801643b5114e915257beaf83eb1"
+          }
+        },
+        {
+          "index": 5,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 5
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127176,
+              "bytes": 8
+            },
+            {
+              "offset": 15127448,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127728,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15558528,
+            "location": {
+              "offset": 15145344,
+              "bytes": 16936
+            },
+            "sha256": "f3334b6ef194457bf9babcc92db4e7d94cde1630f146e526d3e288e194f84b12"
+          }
+        },
+        {
+          "index": 6,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 6
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127184,
+              "bytes": 8
+            },
+            {
+              "offset": 15127472,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127744,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15575464,
+            "location": {
+              "offset": 15162280,
+              "bytes": 38056
+            },
+            "sha256": "bd12ed079fe1c8f368386bb8ef82506ef3b6e63b662fb672155bfd9dfd3ea938"
+          }
+        },
+        {
+          "index": 7,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 7
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127192,
+              "bytes": 8
+            },
+            {
+              "offset": 15127496,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127760,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15613520,
+            "location": {
+              "offset": 15200336,
+              "bytes": 67624
+            },
+            "sha256": "6b46ccff14fd9f696a1aa665ce45bdfae09eb71beb5eb514705fe5d981cf2f3d"
+          }
+        },
+        {
+          "index": 8,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 8
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127200,
+              "bytes": 8
+            },
+            {
+              "offset": 15127520,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127776,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15681144,
+            "location": {
+              "offset": 15267960,
+              "bytes": 152104
+            },
+            "sha256": "13452faf336224e2a39ed61ce72da80ad2d2ded7b79e0f499715b88b2eda3db9"
+          }
+        },
+        {
+          "index": 9,
+          "type": {
+            "kind": "id",
+            "id": 3
+          },
+          "name": {
+            "kind": "id",
+            "id": 9
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127064,
+              "bytes": 8
+            },
+            {
+              "offset": 15127208,
+              "bytes": 8
+            },
+            {
+              "offset": 15127544,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127792,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15833248,
+            "location": {
+              "offset": 15420064,
+              "bytes": 110441
+            },
+            "sha256": "3569b0f889c673411495013d44833b742bda624c95e0b823fbc291023586a533"
+          }
+        },
+        {
+          "index": 10,
+          "type": {
+            "kind": "id",
+            "id": 5
+          },
+          "name": {
+            "kind": "id",
+            "id": 106
+          },
+          "language": {
+            "kind": "id",
+            "id": 1033
+          },
+          "entry_locations": [
+            {
+              "offset": 15127072,
+              "bytes": 8
+            },
+            {
+              "offset": 15127232,
+              "bytes": 8
+            },
+            {
+              "offset": 15127568,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127808,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 16346688,
+            "location": {
+              "offset": 15933504,
+              "bytes": 102
+            },
+            "sha256": "b7abd720b14a72ed4c8c421457376cb8b080d489a8971a15eb30d4484cc1e180"
+          }
+        },
+        {
+          "index": 11,
+          "type": {
+            "kind": "id",
+            "id": 14
+          },
+          "name": {
+            "kind": "id",
+            "id": 111
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127080,
+              "bytes": 8
+            },
+            {
+              "offset": 15127256,
+              "bytes": 8
+            },
+            {
+              "offset": 15127592,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127824,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 15943696,
+            "location": {
+              "offset": 15530512,
+              "bytes": 132
+            },
+            "sha256": "b04823501bdfaa1a922bf311c5fbc46adab4b75b2a0ee9e5681dca08a7ce3dbf"
+          }
+        },
+        {
+          "index": 12,
+          "type": {
+            "kind": "id",
+            "id": 16
+          },
+          "name": {
+            "kind": "id",
+            "id": 1
+          },
+          "language": {
+            "kind": "id",
+            "id": 1049
+          },
+          "entry_locations": [
+            {
+              "offset": 15127088,
+              "bytes": 8
+            },
+            {
+              "offset": 15127280,
+              "bytes": 8
+            },
+            {
+              "offset": 15127616,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127840,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 16345872,
+            "location": {
+              "offset": 15932688,
+              "bytes": 816
+            },
+            "sha256": "d24979d1df8b4504c1bbb47cdb03732e223da37549f7c2173c2767d5d3f89024"
+          }
+        },
+        {
+          "index": 13,
+          "type": {
+            "kind": "id",
+            "id": 24
+          },
+          "name": {
+            "kind": "id",
+            "id": 1
+          },
+          "language": {
+            "kind": "id",
+            "id": 1033
+          },
+          "entry_locations": [
+            {
+              "offset": 15127096,
+              "bytes": 8
+            },
+            {
+              "offset": 15127304,
+              "bytes": 8
+            },
+            {
+              "offset": 15127640,
+              "bytes": 8
+            }
+          ],
+          "data_entry_location": {
+            "offset": 15127856,
+            "bytes": 16
+          },
+          "code_page": 0,
+          "reserved": 0,
+          "payload": {
+            "rva": 16346792,
+            "location": {
+              "offset": 15933608,
+              "bytes": 548
+            },
+            "sha256": "eefc2e6bbbf6d18368ffc552a822e3c16cec597e547fdeadc773f7f0b9f507cf"
+          }
+        }
+      ],
+      "icon_groups": [
+        {
+          "resource_index": 11,
+          "images": [
+            {
+              "location": {
+                "offset": 15530518,
+                "bytes": 14
+              },
+              "width": 16,
+              "height": 16,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 1128,
+              "resource_id": 1,
+              "candidate_resource_indices": [
+                1
+              ],
+              "same_language_resource_index": 1,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530532,
+                "bytes": 14
+              },
+              "width": 24,
+              "height": 24,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 2440,
+              "resource_id": 2,
+              "candidate_resource_indices": [
+                2
+              ],
+              "same_language_resource_index": 2,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530546,
+                "bytes": 14
+              },
+              "width": 32,
+              "height": 32,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 4264,
+              "resource_id": 3,
+              "candidate_resource_indices": [
+                3
+              ],
+              "same_language_resource_index": 3,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530560,
+                "bytes": 14
+              },
+              "width": 48,
+              "height": 48,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 9640,
+              "resource_id": 4,
+              "candidate_resource_indices": [
+                4
+              ],
+              "same_language_resource_index": 4,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530574,
+                "bytes": 14
+              },
+              "width": 64,
+              "height": 64,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 16936,
+              "resource_id": 5,
+              "candidate_resource_indices": [
+                5
+              ],
+              "same_language_resource_index": 5,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530588,
+                "bytes": 14
+              },
+              "width": 96,
+              "height": 96,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 38056,
+              "resource_id": 6,
+              "candidate_resource_indices": [
+                6
+              ],
+              "same_language_resource_index": 6,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530602,
+                "bytes": 14
+              },
+              "width": 128,
+              "height": 128,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 67624,
+              "resource_id": 7,
+              "candidate_resource_indices": [
+                7
+              ],
+              "same_language_resource_index": 7,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530616,
+                "bytes": 14
+              },
+              "width": 192,
+              "height": 192,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 152104,
+              "resource_id": 8,
+              "candidate_resource_indices": [
+                8
+              ],
+              "same_language_resource_index": 8,
+              "size_matches": true
+            },
+            {
+              "location": {
+                "offset": 15530630,
+                "bytes": 14
+              },
+              "width": 0,
+              "height": 0,
+              "color_count": 0,
+              "reserved": 0,
+              "planes": 1,
+              "bit_count": 32,
+              "declared_bytes": 110441,
+              "resource_id": 9,
+              "candidate_resource_indices": [
+                9
+              ],
+              "same_language_resource_index": 9,
+              "size_matches": true
+            }
+          ]
+        }
+      ],
+      "coverage": {
+        "status": "complete",
+        "examined_entries": 34,
+        "resources": 14
+      },
+      "limitations": [
+        "Static PE32/PE32+ type/name/language resource inventory; payloads other than RT_GROUP_ICON remain opaque.",
+        "Icon candidates are resource-table relationships. Language fallback, image decoding and actual shell/window loading are not observed.",
+        "Exact shared byte ranges are retained; non-identical overlapping resource structures or payloads are rejected."
+      ]
+    },
+    "confidence": "observed",
+    "authority": "shipped-artifact",
+    "environment": null,
+    "limitations": [
+      "Static PE32/PE32+ type/name/language resource inventory; payloads other than RT_GROUP_ICON remain opaque.",
+      "Icon candidates are resource-table relationships. Language fallback, image decoding and actual shell/window loading are not observed.",
+      "Exact shared byte ranges are retained; non-identical overlapping resource structures or payloads are rejected."
+    ],
+    "relationship_coverage": null,
+    "locations": [
+      {
+        "kind": "artifact-path",
+        "path": "/mnt/c/Users/djb20/StalkerAnomCoop/reverse-engineering/artifacts/AnomalyDX11.exe"
+      }
+    ],
+    "evidence_links": []
+  }
+}

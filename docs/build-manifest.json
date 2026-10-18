@@ -1,0 +1,106 @@
+{
+  "source_revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+  "configuration": "DX11|x64",
+  "build_result": "builds/build_1/logs/S01-T03/build-1/result.json",
+  "errors": 0,
+  "warnings": 1379,
+  "msbuild_elapsed": "00:09:23.64",
+  "outputs": [
+    {
+      "path": "builds/build_1/engine-work/_build/_game/bin_dbg/AnomalyDX11.exe",
+      "bytes": 26680832,
+      "sha256": "4bf2c693ee06c5e1f620a161e000956ceaaa63b6fcce311edf4838ad938c3141"
+    },
+    {
+      "path": "builds/build_1/engine-work/_build/_game/bin_dbg/AnomalyDX11.pdb",
+      "bytes": 215281664,
+      "sha256": "713a5e84322e9d1c464086cb53f5907dc3e69293500752efda560b847f0f3f2c"
+    }
+  ],
+  "repeat_clean_build": {
+    "result": "builds/build_1/logs/S01-T03/build-2/result.json",
+    "inputs": "builds/build_1/logs/S01-T03/build-2-clean-inputs.json",
+    "comparison": "builds/build_1/logs/S01-T03/build-comparison.json",
+    "errors": 0,
+    "warnings": 1379,
+    "msbuild_elapsed": "00:10:02.46",
+    "outputs": [
+      {
+        "path": "builds/build_1/engine-repeat/_build/_game/bin_dbg/AnomalyDX11.exe",
+        "bytes": 26681344,
+        "sha256": "6ea7df7f84f986f4faef69fa01b382f5da439e3a196a13a60e34cb22bbb87a32",
+        "pe_timestamp_utc": "2026-10-16T04:56:29+00:00",
+        "embedded_build_dates": [
+          "Oct 16 2026"
+        ],
+        "sections": [
+          {
+            "name": ".text",
+            "virtual_size": 18525915,
+            "raw_size": 18526208,
+            "sha256": "11e5df0d47f230679dd4a7d757b0dd6fe996f453c7eb55b14bc6d42465ec66bf"
+          },
+          {
+            "name": ".rdata",
+            "virtual_size": 5093162,
+            "raw_size": 5093376,
+            "sha256": "9078cd1852b16ceb6db9c0a55a09892976dff63e6489e703d988d848f4ccce70"
+          },
+          {
+            "name": ".data",
+            "virtual_size": 2493217,
+            "raw_size": 1565696,
+            "sha256": "0856488c083dd9df1f216a08ad9f0c7800f0e65532c5c40f75dcacee922b148f"
+          },
+          {
+            "name": ".pdata",
+            "virtual_size": 686604,
+            "raw_size": 687104,
+            "sha256": "1ab5e8e74d72b1b9fbcfe551b45a4a6b89290a817dfb2e6d712e828ff5cfc49f"
+          },
+          {
+            "name": "_RDATA",
+            "virtual_size": 48,
+            "raw_size": 512,
+            "sha256": "463b156b15235f34a672fff591e896c5b4b17db848808623ea222a9e2c523f71"
+          },
+          {
+            "name": ".rsrc",
+            "virtual_size": 807120,
+            "raw_size": 807424,
+            "sha256": "3047eb3f6a4c1c8034a7b7089bfdf478d9679919335448c30e43645de6d13c5c"
+          }
+        ]
+      },
+      {
+        "path": "builds/build_1/engine-repeat/_build/_game/bin_dbg/AnomalyDX11.pdb",
+        "bytes": 215478272,
+        "sha256": "5f7899234dbc3b09b1f5e25d74920d62a462edae06dd5953f585c3d00251198a"
+      }
+    ],
+    "byte_identical": false,
+    "difference_explanation": "Different checkout path and local compile dates (Oct 15 versus Oct 16); source revision and pinned toolchain-manifest hash match. PE .rsrc and _RDATA sections are identical; other sections differ."
+  },
+  "user_tested_build": {
+    "build_log": "engine/xray-monolith/src/build_2.log",
+    "source_revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+    "build_command": "msbuild .\\engine-vs2022.sln /t:Rebuild /p:Configuration=DX11 /p:Platform=x64 /m /v:minimal /fl /flp:\"logfile=build_2.log;verbosity=detailed\"",
+    "build_utc": "2026-10-17T04:16:01Z to 2026-10-17T04:21:45Z",
+    "errors": 0,
+    "warnings": 1392,
+    "msbuild_elapsed": "00:05:43.16",
+    "visual_studio": "2022 Community, MSVC 14.44.35207, Windows SDK 10.0.26100.0",
+    "executable": {
+      "path": "builds/build_2/test-install/source-client/bin/AnomalyDX11.exe",
+      "bytes": 26681344,
+      "sha256": "5b9b0719f196b7e86ee140a37ef8f0caa2561558bfd0d5b1e247a085e1363603"
+    },
+    "pdb": {
+      "path": "builds/build_2/test-install/source-client/bin/AnomalyDX11.pdb",
+      "bytes": 215478272,
+      "sha256": "7054d6766c4be9b30f6c10121b055538b5b121e799a7cd6562a50346cea49151"
+    },
+    "identity_verified_against_source_checkout_outputs": true,
+    "post_build_source_status": "Reference checkout later became dirty: DLL-copy AfterTargets target added after EXE timestamp; Optick status changes are line-ending-only under git diff --ignore-space-at-eol. Preserve user changes. Stage 2 uses clean build_1/engine-work checkout."
+  }
+}

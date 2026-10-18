@@ -1,0 +1,292 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index de5a75f..548c325 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -958,13 +958,56 @@ ENGINE_API bool g_campaign_server = false;
+ #error Campaign server requires single-player campaign services and a distinct runtime role.
+ #endif
+ 
+-// This smoke path exercises core/settings, console commands and the native
+-// game factory before level/render separation is implemented.
++extern "C" void __cdecl xrCampaignGameGlobals_Initialize();
++extern "C" bool __cdecl xrCampaignScriptEngine_Initialize();
++extern "C" void __cdecl xrCampaignScriptEngine_Destroy();
++extern "C" void __cdecl xrCampaignGameGlobals_Destroy();
++
++namespace
++{
++enum class CampaignSmokeScope
++{
++    Core,
++    Services,
++    GameState
++};
++
++// A started campaign service and the stage logged after it stops. Services
++// stop in reverse start order, so a failed start unwinds only what exists.
++struct CampaignServiceOwner
++{
++    LPCSTR stopped_stage;
++    void (*stop)();
++};
++
++void StopCampaignSpatialDatabases()
++{
++    xr_delete(g_SpatialSpacePhysic);
++    xr_delete(g_SpatialSpace);
++}
++}
++
++// This smoke path exercises core/settings, console commands, the native game
++// factory and the renderer-free CPU campaign services (spatial databases,
++// character registries and the script engine). The material library, persistent
++// state, CLevel and ALife still need the later CPU-model and presentation split:
++// material pairs create sounds and render wallmark arrays when they load.
+ static int RunCampaignServerSmoke(LPCSTR command_line)
+ {
+-    const bool core_only = strstr(command_line, "-campaign-core-smoke") != nullptr;
++    CampaignSmokeScope scope;
++    if (strstr(command_line, "-campaign-core-smoke"))
++        scope = CampaignSmokeScope::Core;
++    else if (strstr(command_line, "-campaign-services-smoke"))
++        scope = CampaignSmokeScope::Services;
++    else if (strstr(command_line, "-campaign-smoke"))
++        scope = CampaignSmokeScope::GameState;
++    else
++    {
++        fprintf(stderr, "S02-T02: a campaign smoke scope and absolute -fsltx are required.\n");
++        return 2;
++    }
+     LPCSTR option = strstr(command_line, "-fsltx ");
+-    if (!option || (!core_only && !strstr(command_line, "-campaign-smoke")))
++    if (!option)
+     {
+         fprintf(stderr, "S02-T02: a campaign smoke scope and absolute -fsltx are required.\n");
+         return 2;
+@@ -980,6 +1023,19 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         return 2;
+     }
+ 
++    // Test-only: report the named service as failed before it starts, to
++    // exercise the partial-start unwind.
++    string64 injected_failure = {};
++    if (LPCSTR fail_option = strstr(command_line, "-campaign-fail-at "))
++    {
++        if (sscanf_s(fail_option + 18, "%63s", injected_failure,
++                static_cast<unsigned>(_countof(injected_failure))) != 1)
++        {
++            fprintf(stderr, "S02-T02: -campaign-fail-at requires a service name.\n");
++            return 2;
++        }
++    }
++
+     g_campaign_server = true;
+     printf("S02-T02 stage=core-start\n");
+     compute_build_id();
+@@ -995,6 +1051,10 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         Msg("S02-T02 stage=%s", name);
+         FlushLog();
+     };
++    auto graphics_absent = []()
++    {
++        return !Device.m_hWnd && !Device.m_pRender && !Device.b_is_Ready && !Render && !pInput;
++    };
+     stage("core-ready");
+     InitSettings();
+     stage("settings-ready");
+@@ -1005,31 +1065,102 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+     stage("console-ready");
+     Engine.External.InitializeGameFactory();
+     stage("game-factory-ready");
+-    R_ASSERT2(!Device.m_hWnd && !Device.m_pRender && !Device.b_is_Ready && !Render && !pInput,
+-        "Campaign startup unexpectedly initialized graphics, a window or input");
++    R_ASSERT2(graphics_absent(), "Campaign startup unexpectedly initialized graphics, a window or input");
+     stage("graphics-window-input-absent");
+ 
+     int result = 0;
+-    if (!core_only)
++    xr_vector<CampaignServiceOwner> owners;
++    // Starts one service; on failure logs "<name>-failed" and returns false.
++    auto start = [&](LPCSTR name, bool (*start_service)(), CampaignServiceOwner owner)
++    {
++        if (!xr_strcmp(injected_failure, name) || !start_service())
++        {
++            string128 failed;
++            xr_sprintf(failed, "%s-failed", name);
++            stage(failed);
++            result = 4;
++            return false;
++        }
++        owners.push_back(owner);
++        string128 ready;
++        xr_sprintf(ready, "%s-ready", name);
++        stage(ready);
++        return true;
++    };
++
++    if (scope != CampaignSmokeScope::Core)
+     {
+-        // Native game_GameState reads CLevel's clock in its constructor.
+-        // The level must be supplied by the later CPU-model/level lifecycle.
+-        if (!g_pGameLevel)
++        // Native order: spatial databases follow persistent construction;
++        // persistent app start then loads game globals (after materials, which
++        // the campaign server cannot load yet).
++        const bool services_ready =
++            start("spatial-db",
++                []()
++                {
++                    g_SpatialSpace = xr_new<ISpatial_DB>();
++                    g_SpatialSpacePhysic = xr_new<ISpatial_DB>();
++                    return true;
++                },
++                {"spatial-db-stopped", &StopCampaignSpatialDatabases}) &&
++            // Every CXml load calls Lua _G.COnXmlRead through the script
++            // engine (XMLLuaCallback), so it must exist before the registries.
++            start("script-engine", &xrCampaignScriptEngine_Initialize,
++                {"script-engine-stopped", &xrCampaignScriptEngine_Destroy}) &&
++            start("campaign-registries",
++                []()
++                {
++                    xrCampaignGameGlobals_Initialize();
++                    return true;
++                },
++                {"campaign-registries-stopped", &xrCampaignGameGlobals_Destroy});
++
++        if (services_ready)
+         {
+-            stage("level-context-required");
+-            result = 3;
++            R_ASSERT2(graphics_absent(), "Campaign services unexpectedly initialized graphics, a window or input");
++            stage("services-graphics-window-input-absent");
+         }
+-        else
++
++        if (services_ready && scope == CampaignSmokeScope::GameState)
+         {
+-            DLL_Pure* game = Engine.External.pCreate(CLSID_CL_GAME_SINGLE);
+-            R_ASSERT2(game, "Campaign game_cl_Single factory is unavailable");
+-            Engine.External.pDestroy(game);
+-            stage("campaign-client-state-ready");
++            // Native game_sv_Single/ALife read persistent game parameters, and
++            // ALife restart_all() uses the persistent main menu. Persistent
++            // construction needs the renderer factory (CEnvironment), and
++            // CLevel construction loads player HUD models through Render.
++            if (!g_pGamePersistent)
++            {
++                Msg("S02-T02 blocker=persistent: CEnvironment::OnDeviceCreate needs the render factory");
++                stage("persistent-context-required");
++                result = 3;
++            }
++            else if (!g_pGameLevel)
++            {
++                Msg("S02-T02 blocker=level: player_hud::load_default needs Render->model_Create");
++                stage("level-context-required");
++                result = 3;
++            }
++            else
++            {
++                DLL_Pure* game = Engine.External.pCreate(CLSID_CL_GAME_SINGLE);
++                R_ASSERT2(game, "Campaign game_cl_Single factory is unavailable");
++                Engine.External.pDestroy(game);
++                stage("campaign-client-state-ready");
++            }
+         }
+     }
+ 
+-    // S02-T03/T05 will supply CPU models and a renderer-free level loader.
+-    Msg("S02-T02 next=level-context-requires-cpu-model-services");
++    if (injected_failure[0] && result != 4)
++    {
++        stage("injected-failure-unmatched");
++        result = 2;
++    }
++
++    for (auto owner = owners.rbegin(); owner != owners.rend(); ++owner)
++    {
++        owner->stop();
++        stage(owner->stopped_stage);
++    }
++    owners.clear();
++
+     Engine.Destroy();
+     stage("engine-stopped");
+     Console->Destroy();
+diff --git a/src/xrGame/xrgame_dll_detach.cpp b/src/xrGame/xrgame_dll_detach.cpp
+index 7861a93..8959c2a 100644
+--- a/src/xrGame/xrgame_dll_detach.cpp
++++ b/src/xrGame/xrgame_dll_detach.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "ai_space.h"
++#include "script_engine.h"
+ #include "object_factory.h"
+ #include "ai/monsters/ai_monster_squad_manager.h"
+ #include "string_table.h"
+@@ -135,3 +136,66 @@ void clean_game_globals()
+ 	xr_delete(pWpnScopeXml);
+ 	CUITextureMaster::FreeTexInfo();
+ }
++
++// S02-T02 campaign server: server-owned CPU subset of init_game_globals and
++// clean_game_globals. UI geometry, inventory shaders, HUD sound settings,
++// wallmarks and UI window lists stay with the client. The normal client
++// keeps calling the two functions above unchanged.
++extern LPCSTR alife_section;
++
++extern "C" void __cdecl xrCampaignGameGlobals_Initialize()
++{
++	CPhraseDialog::InitInternal();
++	CCharacterInfo::InitInternal();
++	CSpecificCharacter::InitInternal();
++	CHARACTER_COMMUNITY::InitInternal();
++	CHARACTER_RANK::InitInternal();
++	CHARACTER_REPUTATION::InitInternal();
++	MONSTER_COMMUNITY::InitInternal();
++}
++
++// Creates the AI space and its script engine with the installed scripts.
++// Returns false if the ALife start callback cannot be resolved. The callback
++// is only resolved here; ALife construction calls it before loading a save.
++extern "C" bool __cdecl xrCampaignScriptEngine_Initialize()
++{
++	LPCSTR start_game_callback = pSettings->r_string(alife_section, "start_game_callback");
++	::luabind::functor<void> functor;
++	const bool resolved = ai().script_engine().functor(start_game_callback, functor);
++	Msg("S02-T02 script-engine start_game_callback=%s resolved=%d", start_game_callback, resolved ? 1 : 0);
++	return resolved;
++}
++
++// The script engine and the objects it creates. The campaign server stops it
++// after the registries, the reverse of its start order; clean_game_globals
++// deletes it first, which is equivalent because registry teardown is data-only.
++extern "C" void __cdecl xrCampaignScriptEngine_Destroy()
++{
++	destroy_lua_wpn_params();
++	xr_delete(g_ai_space);
++	xr_delete(g_object_factory);
++	xr_delete(g_monster_squad);
++
++	story_ids.clear();
++	spawn_story_ids.clear();
++}
++
++extern "C" void __cdecl xrCampaignGameGlobals_Destroy()
++{
++	CPhraseDialog::DeleteSharedData();
++	CPhraseDialog::DeleteIdToIndexData();
++	CCharacterInfo::DeleteSharedData();
++	CCharacterInfo::DeleteIdToIndexData();
++	CSpecificCharacter::DeleteSharedData();
++	CSpecificCharacter::DeleteIdToIndexData();
++	CHARACTER_COMMUNITY::DeleteIdToIndexData();
++	CHARACTER_RANK::DeleteIdToIndexData();
++	CHARACTER_REPUTATION::DeleteIdToIndexData();
++	MONSTER_COMMUNITY::DeleteIdToIndexData();
++
++	CStringTable::Destroy();
++	CUIXmlInit::DeleteColorDefs();
++	InventoryUtilities::ClearCharacterInfoStrings();
++	xr_delete(g_sound_collection_storage);
++	RELATION_REGISTRY::clear_relation_registry();
++}

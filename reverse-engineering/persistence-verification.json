@@ -1,0 +1,17 @@
+{
+  "project_directory": "/mnt/c/users/djb20/stalkeranomcoop/reverse-engineering/ghidra",
+  "project_name": "Anomaly153-c857b6f49d32",
+  "program_name": "AnomalyDX11.exe",
+  "binary_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+  "initial_import_result": "analysis, save and import succeeded",
+  "initial_auto_analysis_seconds_reported": 1417,
+  "reopen_mode": "existing project, -process AnomalyDX11.exe -noanalysis",
+  "reopen_exit_code": 0,
+  "reopened_program_sha256": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+  "reopened_image_base": "0x140000000",
+  "reopened_function_count": 49494,
+  "reopened_symbol_count": 258577,
+  "reopened_language": "x86:LE:64:default",
+  "verification_script": "tools/VerifySavedProject.java",
+  "analysis_rerun_on_reopen": false
+}

@@ -1,0 +1,33 @@
+{
+  "workspace": "/mnt/c/users/djb20/stalkeranomcoop",
+  "windows_workspace": "C:\\users\\djb20\\stalkeranomcoop",
+  "original": "/mnt/c/Users/djb20/StalkerAnom",
+  "workspace_alias_same": true,
+  "original_separate": true,
+  "evidence": {
+    "reverse-engineering/ghidra/Anomaly153-c857b6f49d32.gpr": {
+      "exists": true,
+      "size": 0
+    },
+    "reverse-engineering/ghidra/Anomaly153-c857b6f49d32.rep": {
+      "exists": true,
+      "size": 4096
+    },
+    "reverse-engineering/persistence-verification.json": {
+      "exists": true,
+      "size": 823
+    },
+    "reverse-engineering/architecture-function-map.json": {
+      "exists": true,
+      "size": 4157
+    }
+  },
+  "binary_hashes": {
+    "/mnt/c/Users/djb20/StalkerAnom/bin/AnomalyDX11.exe": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e",
+    "/mnt/c/users/djb20/stalkeranomcoop/reverse-engineering/artifacts/AnomalyDX11.exe": "c857b6f49d32c62245611b26106862a773185533856e8b858a7d7e849ed2fb4e"
+  },
+  "root_status": "?? .gitignore\n?? AGENTS.md\n?? README.md\n?? docs/\n?? plan.md\n?? reverse-engineering/\n?? tools/\n",
+  "reference_revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+  "reference_status": "",
+  "ghidra_reopened": false
+}

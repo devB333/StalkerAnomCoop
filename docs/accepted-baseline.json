@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "accepted_utc": "2026-10-17T06:41:08.918521+00:00",
+  "status": "Accepted for Stage 2 development with user-approved G01 fixture waivers; not a release compatibility certification",
+  "source_revision": "c57fe5b9fab4fe0506659db03137c52d2500eb2f",
+  "clean_working_source": "builds/build_1/engine-work",
+  "user_tested_build_log": "engine/xray-monolith/src/build_2.log",
+  "build_records": [
+    "builds/build_1/logs/S01-T03/build-1/result.json",
+    "builds/build_1/logs/S01-T03/build-2/result.json"
+  ],
+  "build_comparison": "builds/build_1/logs/S01-T03/build-comparison.json",
+  "tested_executable": {
+    "path": "builds/build_2/test-install/source-client/bin/AnomalyDX11.exe",
+    "bytes": 26681344,
+    "sha256": "5b9b0719f196b7e86ee140a37ef8f0caa2561558bfd0d5b1e247a085e1363603"
+  },
+  "tested_pdb": {
+    "path": "builds/build_2/test-install/source-client/bin/AnomalyDX11.pdb",
+    "bytes": 215478272,
+    "sha256": "7054d6766c4be9b30f6c10121b055538b5b121e799a7cd6562a50346cea49151"
+  },
+  "runtime": {
+    "root": "builds/build_2/test-install/source-client",
+    "launcher": "builds/build_2/test-install/source-client/Launch-Anomaly.cmd",
+    "filesystem_config": {
+      "path": "builds/build_2/test-install/source-client/fsgame.ltx",
+      "sha256": "ea2f86fb97f825faa2557321b0f83ff34485d175d69aa8e73a88318c464bf4c2"
+    },
+    "content_archives": "builds/build_2/validation-evidence/content-archives.json",
+    "archives_verified": 67,
+    "archives_bytes_verified": 17149484207,
+    "overlay_repair_manifest": "builds/build_2/repair-backups/20261017T055847Z/repair-manifest.json",
+    "overlay_files_verified": 161,
+    "appdata": "builds/build_2/test-install/source-client/appdata"
+  },
+  "runtime_observations": "docs/validation/S01-T04.md",
+  "user_approved_waivers": [
+    {
+      "fixture": "completed quest and reward persistence",
+      "status": "waived for G01 on 2026-10-17",
+      "risk": "Native/Lua task completion, reward grant and persistence remain untested; cannot claim these work."
+    },
+    {
+      "fixture": "copied original-client behavior comparison",
+      "status": "waived for G01 on 2026-10-17",
+      "risk": "Behavioral drift from the installed client remains unmeasured."
+    }
+  ],
+  "reference_checkout_note": "User built tested EXE from engine/xray-monolith; it now has post-build DLL-copy project change and Optick line-ending changes. Preserve it. Stage 2 changes belong in clean builds/build_1/engine-work plus root-owned patch series.",
+  "no_engine_gameplay_patch_in_accepted_source": true,
+  "not_verified": [
+    "quest completion/reward persistence",
+    "installed-client comparison",
+    "full campaign compatibility",
+    "user-observation numeric before/after state values"
+  ]
+}

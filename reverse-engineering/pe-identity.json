@@ -1,0 +1,101 @@
+{
+  "timestamp_utc": "2024-09-23T08:08:36+00:00",
+  "sections": [
+    [
+      ".text",
+      4096,
+      10796033,
+      1024,
+      10796544
+    ],
+    [
+      ".rdata",
+      10801152,
+      2714424,
+      10797568,
+      2714624
+    ],
+    [
+      ".data",
+      13516800,
+      735400,
+      13512192,
+      341504
+    ],
+    [
+      ".pdata",
+      14254080,
+      671892,
+      13853696,
+      672256
+    ],
+    [
+      ".tls",
+      14929920,
+      589857,
+      14525952,
+      590336
+    ],
+    [
+      ".gfids",
+      15523840,
+      48,
+      15116288,
+      512
+    ],
+    [
+      "_RDATA",
+      15527936,
+      9808,
+      15116800,
+      10240
+    ],
+    [
+      ".rsrc",
+      15540224,
+      807120,
+      15127040,
+      807424
+    ],
+    [
+      ".reloc",
+      16351232,
+      203944,
+      15934464,
+      204288
+    ]
+  ],
+  "strings": [
+    {
+      "text": "X-Ray Monolith v1.5.3",
+      "offset": 10841008,
+      "rva": "0xa579b0"
+    },
+    {
+      "text": "Sep 23 2024",
+      "offset": 10840304,
+      "rva": "0xa576f0"
+    },
+    {
+      "text": "H:\\Anomaly\\engine\\_build\\_game\\bin_dbg\\AnomalyDX11.pdb",
+      "offset": 12715076,
+      "rva": "0xc21244"
+    }
+  ],
+  "version_fixed_info": [
+    4277077181,
+    65536,
+    65536,
+    327686,
+    65536,
+    327686,
+    23,
+    0,
+    4,
+    1,
+    0,
+    0,
+    0
+  ],
+  "version_utf16": "\u03304\u0000VS_VERSION_INFO\u0000\u0000\u04bd\ufeef\u0000\u0001\u0000\u0001\u0006\u0005\u0000\u0001\u0006\u0005\u0017\u0000\u0000\u0000\u0004\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0290\u0000\u0001StringFileInfo\u0000\u026c\u0000\u0001000004b0\u0000:\r\u0001CompanyName\u0000\u0000Anomaly Team\u0000\u0000T\u0016\u0001FileDescription\u0000\u0000X-Ray Monolith Engine\u00000\b\u0001FileVersion\u0000\u00001.0.5.6\u0000@\u0010\u0001InternalName\u0000Monolith Engine\u0000\u00906\u0001LegalCopyright\u0000Copyright 2009 GSC Game World, 2018-2024 Anomaly Team\u0000@\f\u0001OriginalFilename\u0000Anomaly.exe\u0000P\u0018\u0001ProductName\u0000\u0000S.T.A.L.K.E.R.: Anomaly\u00004\b\u0001ProductVersion\u00001.0.5.6\u0000D\u0000\u0001VarFileInfo\u0000\u0000$\u0004\u0000Translation\u0000\u0000\u0000\u04b0"
+}

@@ -1,80 +1,82 @@
-# Session handoff — S02-T05d complete; next S02-T03d (skeleton collision, hit picking, physics shell)
+# Session handoff — S02-T03 complete (T03d collision); next S02-T04b (physics stepping, falling body)
 
-## Next session: start S02-T03d
+## Next session: start S02-T04b
 
-The campaign server now loads the level and runs server ticks with no device, so
-the level-dependent tasks are unblocked. Start with S02-T03d (plan.md task
-entry): skeleton collision, hit picking and physics-shell setup for one
-actor/NPC fixture on the loaded level. S02-T04b (physics stepping, falling body)
-and S02-T04c (objects, AI, ALife, activity policy) follow; S02-T05c (CPU sound
-stimulus layer, B18) is still In Progress and owns the open sound finding below.
+S02-T03d is done and the parent S02-T03 is Completed, so the CPU model,
+animation and collision services are all in place. Start S02-T04b (plan.md task
+entry): native physics stepping and a falling-body collision fixture on the
+loaded level (H06: pin one movable shell and a level floor query, observe gravity,
+collision and settling; compare with a client capture). The physics world already
+steps during the first ticks (372–418 steps in 50 ticks) and 247 item and
+physic-object shells exist, so the fixture is a matter of choosing and driving one
+shell, not of creating the world. S02-T04c (objects, AI, ALife, activity policy)
+follows; S02-T05c (CPU sound stimuli, B18) still owns the open sound finding.
 Keep the rhythm: one step, export the patch, record the result, commit.
 
-G02 is In Progress. Renderer-free load, spawn and first ticks are done; no
-gameplay behaviour (hit, AI decision, ALife offline switch, task, save) has
-been checked headless. Stage 2 status (details in `plan.md`):
+G02 is In Progress. Stage 2 status (details in `plan.md`):
 
 | Task | Status | Evidence |
 |---|---|---|
-| S02-T03a/b/c | Completed | patches 0004, 0005, 0007 |
+| S02-T03a–d | **Completed** (parent Completed) | patches 0004, 0005, 0007, 0011; [T03d](validation/S02-T03d.md) |
 | S02-T04a server clock and frame driver | Completed | patch 0006 |
-| S02-T05a/b persistent, level, server, ALife | Completed | patches 0008, 0009 |
+| S02-T05a/b/d persistent, level, server, ALife, spawn, first ticks | Completed | patches 0008, 0009, 0010 |
 | S02-T05c CPU particles and sound stimuli | In Progress | particles done; sound is the `-nosound` stand-in |
-| S02-T05d renderer-free level load, spawn, first ticks | Completed | [S02-T05d](validation/S02-T05d.md), patch 0010 |
-| S02-T03d, S02-T04b, S02-T04c | Not Started | prerequisites now met |
+| S02-T04b, S02-T04c | Not Started | prerequisites met |
 
-## What the server does today (campaign-32, exe `39dd62ec…`)
+## What S02-T03d showed (campaign-35 / client-15, smoke-54, capture-03)
 
-`smoke-52 -Scope GameState` **passed** (exit 0, every stage in order):
-- nine services, four fixtures, server stages from the fixture save (level
-  `k00_marsh`, ALife, 1,074 entities) as in S02-T05b
-- client stages in 2.2 s: direct in-process connection, CFORM (3,077,895
-  triangles), physics world, `game_cl_Single`, level script process; HUD,
-  render-level load, texture upload and precache skipped; `level.som` is
-  absent from this level's content
-- 50 server ticks (1 s of simulation): all 1,090 server entities spawned
-  client-side (saved actor, 20 stalkers, 14 monsters, 374 zones, 120 items),
-  370 physics steps, no current/view/control entity; then a clean teardown
-  with no leaked object
+`smoke-54 -Scope GameState` **passed** (exit 0) with the new stage
+`campaign-collision-passed`. On the loaded level, with no device: 491 skeleton
+collision forms with 1,780 elements, 36 alive entities all with a physics
+character, 247 shells with 264 elements; the actor's picks hit `bip01_head`
+from above, `bip01_spine1` from the front and the ground 0.5 m below its feet.
+The normal client on the same save (`capture-03`) builds **identical structure
+for every common object**; the actor's trunk hit boxes agree within 2.3 cm.
+Compare: `compare-03-smoke-54.json` and `compare-03-smoke-53.json` in
+`builds/logs/S02-T03d/`, both `match`. No engine behaviour changed: patch 0011
+is the capture itself. Patches 0001–0011 rebuild all 61 changed files byte for
+byte (`builds/logs/patch-reconstruction-12.json`). Next patch:
+`python3 tools/export-engine-patch.py <name> 13`.
 
-Patches 0001–0010 rebuild all 59 changed files byte for byte
-(`builds/logs/patch-reconstruction-11.json`). Next patch:
-`python3 tools/export-engine-patch.py <name> 12`.
+## Findings that shape the next tasks
 
-## Decisions and findings that shape the next tasks
-
-- **No control or view entity.** `g_sv_Spawn` and the stalker spawn fallback
-  (`ai_stalker.cpp:739`) adopt nothing on the campaign server. The saved actor
-  is a real, enabled, local object and `g_actor`. Its first-eye camera and the
-  single-actor `Actor()` assumptions are Stage 3 (G03) items. Code that reads
-  `CurrentControlEntity()` or `CurrentViewEntity()` must null-check; anomaly
-  zones stay scheduled (no fast mode) without one, and the activity policy is
-  S02-T04c.
-- **Map locations keep data, no spot widgets**; the actor stores its PDA task
-  filters (`CActor::m_pda_task_filters`) so save/load needs no HUD.
-- **Open: NPC voice sounds reported missing.** `sound_theme.init_npc_sound`
-  logged 1,002 `Couldnt find sounds … characters_voice\…` errors in smoke-52;
-  the accepted client's log has none, and both mount 67 archives. The Lua
-  check is in archive-only scripts (`xr_sound`/`sound_theme`); likely the
-  `-nosound` manager (no sound handle) or a lookup difference. Owned by S02-T05c.
-- **Spawn tick is long.** The first `CLevel::OnFrame` spawns everything; the
-  clock drops ~0.7 s of simulation twice (bounded catch-up, counted).
-- **Crash loop method.** Each crash leaves a stack trace in
-  `appdata/logs/*.log`; when the line looks impossible, disassemble the fault
-  address with `dumpbin /DISASM /RANGE:` from `builds/build_1/vs2022` (used to
-  find the stalker fallback). A crashed process is held by the crash handler
-  until the 420 s watchdog; stopping it by hand is safe.
+- **Pose differs only where the client has what the server lacks.** The
+  actor's arms and `front` pick differ (client holds the HUD weapon, torso
+  follows the camera): G03 items, reported not asserted. NPC poses differ
+  because the client's AI runs in real time. Lamp 10736's light bone differs
+  by random flicker state.
+- **Hand/toe hit boxes far from the body, on both sides.** Some stalkers'
+  hand, finger and toe elements lie 3–56 m from their origin at the sampled
+  frame on the server (12 objects) and on the client (13 objects, different
+  ones). Native callback-driven bones (IK legs, stalker bone callbacks); not a
+  CPU-only regression. Recorded for S02-T04c/G03.
+- **Script spawns vary per run.** 1,090 / 1,095 / 1,094 / 1,097 objects across
+  smoke-52/53/54 and the client (crows, bolts). The compare tool reports IDs
+  present on one side only instead of failing.
+- **Sound finding confirmed server-side.** The server logs 1,002
+  `Couldnt find sounds … characters_voice\…` errors while NPCs spawn; the client
+  run of the same save logs none. The cause is the server's `-nosound` stand-in
+  or lookup (S02-T05c), not the content.
+- Earlier decisions stand: no control/view entity on the server; map
+  locations keep data without spot widgets; the spawn tick is long (bounded
+  catch-up, counted). Crash loop method: stack trace in `appdata/logs/*.log`,
+  `dumpbin /DISASM /RANGE:` from `builds/build_1/vs2022` when needed.
 
 ## Tools and runs
 
-- **Last run names:** `campaign-32`, `client-14`, `smoke-52`, `capture-02`
-  (`smoke-20` was reserved for the user). Check `builds/logs/S02-T02/`.
+- **Last run names:** `campaign-35`, `client-15`, `smoke-54`, `capture-03`
+  (`campaign-33` failed to compile; `smoke-20` reserved for the user). Next:
+  `campaign-36`, `client-16`, `smoke-55`, `capture-04`. Check `builds/logs/S02-T02/`.
 - **Smoke:** `python3 tools/prepare-stage2-smoke.py <run>`, then
-  `Run-Stage2Smoke.ps1 -Run <run> -Scope Core|Services|GameState`. GameState
-  now passes with exit 0; `-campaign-ticks N` (default 50) sets the tick count.
+  `Run-Stage2Smoke.ps1 -Run <run> -Scope Core|Services|GameState`; GameState now
+  expects `campaign-collision-passed` and copies `server-collision.csv` into the run log.
+- **Client collision capture:** `python3 tools/prepare-stage2-smoke.py <run> S02-T03d`,
+  then `Run-ClientCollisionCapture.ps1 -Run <run>` (opens an 800×600 window,
+  about a minute); compare with
+  `python3 tools/compare-collision-capture.py <server.csv> <client.csv>`.
 - **Build:** `Build-Stage2.ps1 -Run <name> -Product Campaign|Client`.
-- **Smart App Control** is off (user, 2026-10-17).
+- Smart App Control is off (user, 2026-10-17).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers are unchanged.
-Previous handoff: [before S02-T03d](session-handoff-before-S02-T03d.md).
+Previous handoff: [before S02-T04b](session-handoff-before-S02-T04b.md).

@@ -87,7 +87,7 @@ if ($Scope -ne 'Core') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-collision-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -97,6 +97,13 @@ $observedStages = @()
 if (Test-Path $stagePath) {
     $observedStages = @(Get-Content $stagePath | ForEach-Object { $_ -replace '^S02-T02 stage=', '' })
     Copy-Item $stagePath (Join-Path $logDir 'stages.log')
+}
+# S02-T03d: the server's collision capture, kept beside the stage log.
+$capturePath = Join-Path $runtime 'appdata\logs\s02-t03d-collision.csv'
+$result.collision_capture_present = Test-Path $capturePath
+if ($result.collision_capture_present) {
+    Copy-Item $capturePath (Join-Path $logDir 'server-collision.csv')
+    $result.collision_capture_sha256 = (Get-FileHash $capturePath -Algorithm SHA256).Hash.ToLower()
 }
 $result.stages = $observedStages
 $result.expected_stages = $expectedStages

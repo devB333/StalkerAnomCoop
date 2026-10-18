@@ -212,12 +212,12 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S02-T03 — Preserve CPU model, animation and collision services
 
-- [ ] **Status: In Progress** · **Reasoning effort: Extra High** · **Complexity: High**
-- **Suffix tasks (split 2026-10-18; the parent completes when all four do):**
+- [x] **Status: Completed** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Suffix tasks (split 2026-10-18; all four completed 2026-10-18):**
   - **S02-T03a — Material library without presentation media: Completed.** [Validation](docs/validation/S02-T03a.md). Patch 0004.
   - **S02-T03b — CPU-only model pool and real model load: Completed.** [Validation](docs/validation/S02-T03b.md). Patch 0005. The renderer module is attached with no device, and only the model pool exists. Shader, geometry and GPU buffer creation are skipped and counted. Bone materials are registered without the persistent object. Real actor, NPC and HUD models load with their bones, motions and CPU skin data, and a missing model fails explicitly. Prerequisite: S02-T03a.
   - **S02-T03c — Bone and animation evaluation against a matched client capture: Completed.** [Validation](docs/validation/S02-T03c.md). Patch 0007. The server's bones are bit-identical to the client's over 50 steps. Evaluating bones needs an advancing device clock (`CalculateBones` returns early while `dwTimeGlobal` equals `UCalc_Time`), and camera throttling must be removed. Prerequisites: S02-T03b and S02-T04a (available).
-  - **S02-T03d — Skeleton collision, hit picking and physics shell: Not Started.** Prerequisites: S02-T03c and S02-T05's level load (physics world). Reordered on 2026-10-18 by user decision.
+  - **S02-T03d — Skeleton collision, hit picking and physics shell: Completed.** [Validation](docs/validation/S02-T03d.md). Patch 0011 (capture only; the native spawn already builds everything without the renderer). On the loaded level every alive entity has a skeleton collision form and a physics character; 491 skeleton forms, 1,780 elements and 247 shells exist; the actor's picks hit head, chest and ground. The client on the same save builds identical structure for every common object; the actor's trunk hit boxes agree within 2.3 cm. Limb pose differs where the client has a view entity (G03). Prerequisites: S02-T03c and S02-T05d.
 - **Purpose:** Keep gameplay fidelity while removing GPU model requirements.
 - **Prerequisites:** S02-T02.
 - **Relevant files/subsystems:** E07; xr_object; CharacterPhysicsSupport; IKinematics/model loaders.
@@ -945,8 +945,8 @@ Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Comple
 | G00 / G01 | Completed | [Readiness](docs/validation/G00.md); [scoped development baseline acceptance](docs/validation/G01.md). G02 In Progress; G03–G11 Not Started. |
 | S02-T01 | Completed | [Source map and pinned fixture specification](docs/validation/S02-T01.md); static verification passed, no engine changes or runtime test. |
 | S02-T02 | Completed | [Context and services validation](docs/validation/S02-T02-context.md): Core/Services pass, unwind checked; H02 construction moved to S02-T05/T06 by user decision. |
-| S02-T03 | In Progress | Split into T03a–d. [T03a](docs/validation/S02-T03a.md), [T03b](docs/validation/S02-T03b.md) and [T03c bones](docs/validation/S02-T03c.md) Completed; T03d's physics world now exists (S02-T05d). |
+| S02-T03 | Completed | Split into T03a–d, all Completed: [T03a](docs/validation/S02-T03a.md), [T03b](docs/validation/S02-T03b.md), [T03c bones](docs/validation/S02-T03c.md), [T03d collision](docs/validation/S02-T03d.md) (structure identical to the client on the same save). |
 | S02-T04 | In Progress | Split into T04a–c. [T04a clock/frame driver](docs/validation/S02-T04a.md) Completed; T04b/c's level and ALife context now exist (S02-T05d). |
 | S02-T05 | In Progress | Split into T05a–d. [T05a persistent](docs/validation/S02-T05a.md), [T05b level/server/ALife](docs/validation/S02-T05b.md) and [T05d level load, spawn, first ticks](docs/validation/S02-T05d.md) Completed; T05c particles done, sound interim (CPU stimulus layer remains). |
 
-As work progresses, replace the aggregate engineering/gate rows with compact current-stage status plus completed-gate links; detailed results remain in task reports. Keep the stage summary at the top synchronized. The next engineering objectives are S02-T03 (CPU models, including the material library's CPU/media split) and S02-T04 (explicit clock and frame driver); S02-T05/T06 own real persistent, `CLevel`, ALife and game-state construction. The Services smoke pass does not satisfy any gameplay requirement. G02 requires S02-T02–T06 and their behavioral evidence.
+As work progresses, replace the aggregate engineering/gate rows with compact current-stage status plus completed-gate links; detailed results remain in task reports. Keep the stage summary at the top synchronized. S02-T03 is complete. The next engineering objectives are S02-T04b/c (native physics stepping, objects, AI, ALife and the server activity policy) and S02-T05c (CPU sound stimuli); S02-T06 owns the native campaign simulation and checkpoint round-trip. The Services smoke pass does not satisfy any gameplay requirement. G02 requires S02-T02–T06 and their behavioral evidence.

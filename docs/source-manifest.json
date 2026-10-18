@@ -49,6 +49,10 @@
     {
       "path": "patches/engine/0010-campaign-level-load.patch",
       "sha256": "83a288b799ba51e4dd23119cb0221b2e50cc437361312b68c8fb5715cb688804"
+    },
+    {
+      "path": "patches/engine/0011-collision-capture.patch",
+      "sha256": "c6b88dca14a4fdaad60914b5e7f362b5864198df42b33e15a34ec05d4cb6d518"
     }
   ],
   "submodules": [

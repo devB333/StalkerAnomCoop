@@ -1,0 +1,490 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 8596b77..2bcb2a3 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -983,6 +983,7 @@ extern "C" bool __cdecl xrCampaignLevel_Report();
+ extern "C" int __cdecl xrCampaignLevel_PumpClientStages(u32 deadline_ms);
+ extern "C" bool __cdecl xrCampaignLevel_ReportLoaded();
+ extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks);
++extern "C" bool __cdecl xrCampaignLevel_CaptureCollision(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1703,6 +1704,21 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     result = 12;
+                 }
+             }
++            if (result == 0)
++            {
++                // S02-T03d: the skeleton collision forms, character controllers
++                // and physics shells the spawn created, plus hit picks through
++                // the object space, captured for comparison with the client.
++                string_path capture;
++                FS.update_path(capture, "$logs$", "s02-t03d-collision.csv");
++                if (xrCampaignLevel_CaptureCollision(capture))
++                    stage("campaign-collision-passed");
++                else
++                {
++                    stage("campaign-collision-failed");
++                    result = 13;
++                }
++            }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+         }
+diff --git a/src/xrGame/CampaignCollisionCapture.cpp b/src/xrGame/CampaignCollisionCapture.cpp
+new file mode 100644
+index 0000000..97bf46d
+--- /dev/null
++++ b/src/xrGame/CampaignCollisionCapture.cpp
+@@ -0,0 +1,352 @@
++#include "pch_script.h"
++#include "CampaignCollisionCapture.h"
++
++// S02-T03d: skeleton collision, hit picking and physics shells on the loaded
++// level, captured the same way by the campaign server and the normal client.
++// Nothing here changes the level: the capture only reads the collision forms
++// and shells the native spawn created, and casts rays through the object
++// space as a bullet trace would (CObjectSpace::RayPick, CCF_Skeleton::_RayQuery).
++
++#include "Level.h"
++#include "Actor.h"
++#include "entity_alive.h"
++#include "ai/stalker/ai_stalker.h"
++#include "ai/monsters/basemonster/base_monster.h"
++#include "PhysicsShellHolder.h"
++#include "CharacterPhysicsSupport.h"
++#include "PHMovementControl.h"
++#include "PhysicObject.h"
++#include "../xrphysics/PhysicsShell.h"
++#include "../xrphysics/PHCharacter.h"
++#include "../xrEngine/xr_collide_form.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++#include "../Include/xrRender/Kinematics.h"
++#include "../Include/xrRender/RenderVisual.h"
++
++namespace
++{
++struct Capture
++{
++	FILE* out;
++	CollisionCaptureSummary& summary;
++
++	Capture(FILE* file, CollisionCaptureSummary& s) : out(file), summary(s)
++	{
++	}
++
++	void check(float value)
++	{
++		if (!_valid(value))
++			summary.finite = false;
++	}
++
++	void check(const Fvector& v)
++	{
++		check(v.x);
++		check(v.y);
++		check(v.z);
++	}
++
++	void missing(LPCSTR format, ...)
++	{
++		if (summary.missing[0])
++			return;
++		va_list args;
++		va_start(args, format);
++		vsnprintf(summary.missing, sizeof(summary.missing), format, args);
++		va_end(args);
++	}
++};
++
++bool by_id(CObject* a, CObject* b)
++{
++	return a->ID() < b->ID();
++}
++
++LPCSTR kind_of(CObject* object)
++{
++	if (smart_cast<CActor*>(object))
++		return "actor";
++	if (smart_cast<CAI_Stalker*>(object))
++		return "stalker";
++	if (smart_cast<CBaseMonster*>(object))
++		return "monster";
++	if (smart_cast<CPhysicObject*>(object))
++		return "physic";
++	return "other";
++}
++
++LPCSTR bone_name(CObject* object, int bone)
++{
++	IKinematics* k = object && object->Visual() ? object->Visual()->dcast_PKinematics() : nullptr;
++	if (!k || bone < 0 || bone >= int(k->LL_BoneCount()))
++		return "";
++	return k->LL_BoneName_dbg(u16(bone));
++}
++
++// One world pick, as CObjectSpace::RayPick resolves it for the bullet manager:
++// the nearest static triangle or skeleton element along the ray.
++void pick(Capture& c, CObject* object, LPCSTR name, const Fvector& start, const Fvector& dir, float range,
++	collide::rq_target target, bool& hit_self, bool& hit_static)
++{
++	collide::rq_result R;
++	const BOOL hit = Level().ObjectSpace.RayPick(start, dir, range, target, R, (CObject*)nullptr);
++	LPCSTR what = "none";
++	if (hit && R.O == object)
++		what = "self";
++	else if (hit && R.O)
++		what = "object";
++	else if (hit)
++		what = "static";
++	hit_self = hit && R.O == object;
++	hit_static = hit && !R.O;
++	const float hit_range = hit ? R.range : 0.f;
++	c.check(hit_range);
++	fprintf(c.out, "ray,%u,%s,%d,%s,%d,%d,%s,%.6f\n", object->ID(), name, hit ? 1 : 0, what,
++		hit && R.O ? int(R.O->ID()) : -1, hit ? R.element : -1, hit && R.O ? bone_name(R.O, R.element) : "", hit_range);
++	++c.summary.rays;
++}
++
++void capture_skeleton(Capture& c, CObject* object, CCF_Skeleton* skeleton, LPCSTR kind, bool alive)
++{
++	IKinematics* k = object->Visual() ? object->Visual()->dcast_PKinematics() : nullptr;
++	if (!k)
++	{
++		c.missing("object %u (%s) has a skeleton collision form without kinematics", object->ID(), *object->cNameSect());
++		return;
++	}
++
++	// The vertical line through the bounding sphere's centre, from above: it
++	// builds the skeleton's state for this frame and is the "top" pick.
++	Fsphere sphere = skeleton->getSphere();
++	Fvector centre;
++	object->XFORM().transform_tiny(centre, sphere.P);
++	const Fvector down = {0.f, -1.f, 0.f};
++	Fvector top;
++	top.set(centre.x, centre.y + sphere.R + 2.f, centre.z);
++	const float top_range = 2.f * sphere.R + 4.f;
++	collide::ray_defs rd(top, down, top_range, CDB::OPT_CULL | CDB::OPT_ONLYNEAREST, collide::rqtObject);
++	collide::rq_results results;
++	const BOOL self_hit = Level().ObjectSpace.RayQuery(results, skeleton, rd);
++	const int self_bone = self_hit ? results.r_begin()->element : -1;
++	const float self_range = self_hit ? results.r_begin()->range : 0.f;
++	c.check(self_range);
++	if (self_hit)
++		++c.summary.self_hits;
++
++	const CCF_Skeleton::ElementVec& elements = skeleton->_GetElements();
++	u32 valid = 0;
++	for (const auto& e : elements)
++		if (e.valid())
++			++valid;
++
++	CPhysicsShellHolder* holder = smart_cast<CPhysicsShellHolder*>(object);
++	CCharacterPhysicsSupport* support = holder ? holder->character_physics_support() : nullptr;
++	CPHMovementControl* movement = support ? support->movement() : nullptr;
++	const bool character = movement && movement->CharacterExist();
++	const float foot = character ? movement->FootRadius() : 0.f;
++	Fvector box_size = {0.f, 0.f, 0.f};
++	if (character)
++		movement->Box().getsize(box_size);
++	const float mass = character && movement->PHCharacter() ? movement->PHCharacter()->Mass() : 0.f;
++	c.check(foot);
++	c.check(box_size);
++	c.check(mass);
++	c.check(object->Position());
++
++	fprintf(c.out, "skeleton,%u,%s,%s,%s,%d,%u,%016I64x,%u,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", object->ID(),
++		*object->cNameSect(), *object->cNameVisual(), kind, alive ? 1 : 0, u32(k->LL_BoneCount()),
++		k->LL_GetBonesVisible(), valid, character ? 1 : 0, foot, box_size.x, box_size.y, box_size.z, mass,
++		VPUSH(object->Position()));
++	fprintf(c.out, "self,%u,%d,%d,%s,%.6f\n", object->ID(), self_hit ? 1 : 0, self_bone, bone_name(object, self_bone),
++		self_range);
++	++c.summary.skeletons;
++	c.summary.elements += valid;
++
++	Fmatrix to_local;
++	to_local.invert(object->XFORM());
++	for (const auto& e : elements)
++	{
++		if (!e.valid())
++			continue;
++		const SBoneShape& shape = k->LL_GetData(e.elem_id).shape;
++		float p[3] = {0.f, 0.f, 0.f};
++		switch (e.type)
++		{
++		case SBoneShape::stBox:
++			p[0] = shape.box.m_halfsize.x;
++			p[1] = shape.box.m_halfsize.y;
++			p[2] = shape.box.m_halfsize.z;
++			break;
++		case SBoneShape::stSphere:
++			p[0] = shape.sphere.R;
++			break;
++		case SBoneShape::stCylinder:
++			p[0] = shape.cylinder.m_height;
++			p[1] = shape.cylinder.m_radius;
++			break;
++		}
++		Fvector world, local;
++		e.center(world);
++		to_local.transform_tiny(local, world);
++		c.check(local);
++		for (float value : p)
++			c.check(value);
++		fprintf(c.out, "element,%u,%u,%s,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", object->ID(), u32(e.elem_id),
++			k->LL_BoneName_dbg(e.elem_id), u32(e.type), p[0], p[1], p[2], VPUSH(local));
++	}
++
++	if (alive)
++	{
++		++c.summary.alive;
++		if (character)
++			++c.summary.characters;
++		if (!valid)
++			c.missing("alive %s %u (%s) has no skeleton collision element", kind, object->ID(), *object->cNameSect());
++		else if (!character)
++			c.missing("alive %s %u (%s) has no physics character", kind, object->ID(), *object->cNameSect());
++	}
++
++	bool self = false, is_static = false;
++	pick(c, object, "top", top, down, top_range, collide::rqtBoth, self, is_static);
++	if (smart_cast<CActor*>(object))
++	{
++		// Chest height from two metres in front, and the ground under the feet.
++		const Fmatrix& xform = object->XFORM();
++		Fvector front, back, ground;
++		front.mad(object->Position(), xform.k, 2.f);
++		front.y += 1.3f;
++		back.invert(xform.k);
++		bool front_self = false, front_static = false, ground_self = false, ground_static = false;
++		pick(c, object, "front", front, back, 4.f, collide::rqtBoth, front_self, front_static);
++		ground.set(object->Position());
++		ground.y += 0.5f;
++		pick(c, object, "ground", ground, down, 5.f, collide::rqtStatic, ground_self, ground_static);
++		c.summary.actor = valid != 0 && character && self && front_self && ground_static;
++		if (!c.summary.actor)
++			c.missing("actor %u: elements=%u character=%d top_self=%d front_self=%d ground_static=%d", object->ID(),
++				valid, character ? 1 : 0, self ? 1 : 0, front_self ? 1 : 0, ground_static ? 1 : 0);
++	}
++}
++
++void capture_shell(Capture& c, CObject* object, CPhysicsShell* shell)
++{
++	const u16 count = shell->get_ElementsNumber();
++	u32 geoms = 0;
++	for (u16 i = 0; i < count; ++i)
++		geoms += shell->get_ElementByStoreOrder(i)->numberOfGeoms();
++	const float mass = shell->getMass();
++	c.check(mass);
++	c.check(object->Position());
++	fprintf(c.out, "shell,%u,%s,%s,%u,%u,%.6f,%d,%d,%.6f,%.6f,%.6f\n", object->ID(), *object->cNameSect(),
++		*object->cNameVisual(), u32(count), geoms, mass, shell->isActive() ? 1 : 0, shell->isEnabled() ? 1 : 0,
++		VPUSH(object->Position()));
++	for (u16 i = 0; i < count; ++i)
++	{
++		CPhysicsElement* element = shell->get_ElementByStoreOrder(i);
++		const float element_mass = element->getMass();
++		c.check(element_mass);
++		fprintf(c.out, "shell_element,%u,%u,%u,%s,%u,%.6f\n", object->ID(), u32(i), u32(element->m_SelfID),
++			bone_name(object, element->m_SelfID), u32(element->numberOfGeoms()), element_mass);
++	}
++	++c.summary.shells;
++	c.summary.shell_elements += count;
++	if (!count)
++		c.missing("shell of %u (%s) has no element", object->ID(), *object->cNameSect());
++	else if (!(mass > 0.f))
++		++c.summary.zero_mass_shells;
++}
++} // namespace
++
++bool CaptureLevelCollision(LPCSTR out_path, CollisionCaptureSummary& summary)
++{
++	ZeroMemory(&summary, sizeof(summary));
++	summary.finite = true;
++	if (!g_pGameLevel || !g_pGameLevel->bReady)
++	{
++		xr_strcpy(summary.missing, "no loaded level");
++		return false;
++	}
++	FILE* out = fopen(out_path, "w");
++	if (!out)
++	{
++		xr_sprintf(summary.missing, "cannot write %s", out_path);
++		return false;
++	}
++	Capture c(out, summary);
++
++	CLevel& level = Level();
++	xr_vector<CObject*> objects;
++	objects.reserve(level.Objects.o_count());
++	for (u32 i = 0; i < level.Objects.o_count(); ++i)
++		objects.push_back(level.Objects.o_get_by_iterator(i));
++	std::sort(objects.begin(), objects.end(), by_id);
++	summary.objects = u32(objects.size());
++	fprintf(out, "meta,%u,%u,%u,%s\n", Device.dwFrame, Device.dwTimeGlobal, summary.objects, *level.name());
++
++	for (CObject* object : objects)
++	{
++		if (object->getDestroy())
++			continue;
++		CEntityAlive* entity = smart_cast<CEntityAlive*>(object);
++		const bool alive = entity && entity->g_Alive();
++		LPCSTR kind = kind_of(object);
++		CCF_Skeleton* skeleton = smart_cast<CCF_Skeleton*>(object->collidable.model);
++		if (skeleton)
++			capture_skeleton(c, object, skeleton, kind, alive);
++		else if (alive)
++			c.missing("alive %s %u (%s) has no skeleton collision form", kind, object->ID(), *object->cNameSect());
++		CPhysicsShellHolder* holder = smart_cast<CPhysicsShellHolder*>(object);
++		if (holder && holder->PPhysicsShell())
++			capture_shell(c, object, holder->PPhysicsShell());
++	}
++	fclose(out);
++	if (!summary.actor && !summary.missing[0])
++		xr_strcpy(summary.missing, "no actor with a skeleton collision form");
++	return summary.actor && summary.finite && !summary.missing[0];
++}
++
++static void LogCollisionSummary(LPCSTR prefix, const CollisionCaptureSummary& s, bool ok, LPCSTR out)
++{
++	Msg("%s objects=%u skeletons=%u elements=%u alive=%u characters=%u shells=%u shell_elements=%u "
++		"zero_mass_shells=%u rays=%u self_hits=%u actor=%d finite=%d ok=%d out=%s",
++		prefix, s.objects, s.skeletons, s.elements, s.alive, s.characters, s.shells, s.shell_elements,
++		s.zero_mass_shells, s.rays, s.self_hits, s.actor ? 1 : 0, s.finite ? 1 : 0, ok ? 1 : 0, out);
++	if (s.missing[0])
++		Msg("! %s missing: %s", prefix, s.missing);
++}
++
++extern "C" bool __cdecl xrCampaignLevel_CaptureCollision(LPCSTR out_path)
++{
++	CollisionCaptureSummary summary;
++	const bool ok = CaptureLevelCollision(out_path, summary);
++	LogCollisionSummary("S02-T03d collision", summary, ok, out_path);
++	return ok;
++}
++
++void ClientCollisionCaptureOnFrame()
++{
++	static const bool requested = strstr(Core.Params, "-s02-collision-capture") != nullptr;
++	static u32 since = 0;
++	static bool done = false;
++	if (!requested || done || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor || Device.dwPrecacheFrame)
++		return;
++	if (!since)
++	{
++		since = Device.dwTimeGlobal;
++		return;
++	}
++	// The server captures after 50 ticks of 20 ms; the client after one second
++	// of its own device time.
++	if (Device.dwTimeGlobal - since < 1000)
++		return;
++	done = true;
++	string_path out;
++	FS.update_path(out, "$logs$", "s02-t03d-collision.csv");
++	CollisionCaptureSummary summary;
++	const bool ok = CaptureLevelCollision(out, summary);
++	LogCollisionSummary("S02-T03d client collision", summary, ok, out);
++	FlushLog();
++	Console->Execute("quit");
++}
+diff --git a/src/xrGame/CampaignCollisionCapture.h b/src/xrGame/CampaignCollisionCapture.h
+new file mode 100644
+index 0000000..46196cf
+--- /dev/null
++++ b/src/xrGame/CampaignCollisionCapture.h
+@@ -0,0 +1,48 @@
++#pragma once
++
++// S02-T03d: captures the skeleton collision forms, character controllers,
++// physics shells and a few hit picks of every object on the loaded level, so
++// the campaign server (no device) can be compared with the normal client on
++// the same saved game. Both processes write the same CSV rows:
++//   meta,<frame>,<time_ms>,<objects>,<level>
++//   skeleton,<id>,<section>,<visual>,<kind>,<alive>,<bones>,<visible_mask>,<elements>,
++//            <character>,<foot_radius>,<box_x>,<box_y>,<box_z>,<mass>,<px>,<py>,<pz>
++//   element,<id>,<bone>,<bone_name>,<type>,<p0>,<p1>,<p2>,<lx>,<ly>,<lz>
++//            (p0..p2: box half size, or sphere radius, or cylinder height and
++//             radius; lx..lz: element centre in the owner's local space)
++//   ray,<id>,<name>,<hit>,<target>,<hit_id>,<bone>,<bone_name>,<range>
++//   shell,<id>,<section>,<visual>,<elements>,<geoms>,<mass>,<active>,<enabled>,<px>,<py>,<pz>
++//   shell_element,<id>,<index>,<bone>,<bone_name>,<geoms>,<mass>
++// Rows are ordered by object ID, then by store order.
++struct CollisionCaptureSummary
++{
++	u32 objects;
++	u32 skeletons; // objects with a CCF_Skeleton collision form
++	u32 elements; // skeleton elements over all skeletons
++	u32 alive; // alive entities (actor, stalkers, monsters)
++	u32 characters; // alive entities with a physics character controller
++	u32 shells; // objects with a physics shell
++	u32 shell_elements;
++	u32 zero_mass_shells; // shells whose elements carry no geometry and no mass (model data)
++	u32 rays;
++	u32 self_hits; // top rays that hit their own object
++	bool actor; // the actor has a skeleton, a character and its three rays hit
++	bool finite;
++	string256 missing; // first missing-data finding, empty when none
++};
++
++// Writes the capture and returns true when the level's collision data is
++// complete and valid: every alive entity has a skeleton with elements and a
++// character controller, the actor's rays hit, every shell has an element, and
++// every value is finite. A shell with no mass is counted, not failed: a physic
++// object whose bones carry no physics shape builds a root element with no
++// geometry (CPhysicObject::CreateBody, epotSkeleton). The first missing item is
++// named in summary.missing and logged.
++bool CaptureLevelCollision(LPCSTR out_path, CollisionCaptureSummary& summary);
++
++// Campaign server entry: capture to $logs$ after the first server ticks.
++extern "C" bool __cdecl xrCampaignLevel_CaptureCollision(LPCSTR out_path);
++
++// Normal client, with -s02-collision-capture and a -start command: one second
++// of device time after the actor spawned, capture, log and quit.
++void ClientCollisionCaptureOnFrame();
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 0654662..9c0f2ef 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -3,6 +3,7 @@
+ #include "../xrEngine/fmesh.h"
+ #include "../xrEngine/xr_ioconsole.h"
+ #include "../xrEngine/CampaignBoneCapture.h"
++#include "CampaignCollisionCapture.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -917,6 +918,8 @@ void CGamePersistent::OnFrame()
+         profiler().clear();
+ #endif
+ 	UpdateDof();
++	// S02-T03d: opt-in collision capture on the loaded level, then quit.
++	ClientCollisionCaptureOnFrame();
+ }
+ 
+ void CGamePersistent::ImGui_OnRender(LPCSTR name)
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 1c5bfcf..29b0e60 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -1997,6 +1997,7 @@
+     <ClInclude Include="xrClientsPool.h" />
+     <ClInclude Include="xrGameSpyServer.h" />
+     <ClInclude Include="xrGameSpyServer_callbacks.h" />
++    <ClInclude Include="CampaignCollisionCapture.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+     <ClInclude Include="xrServer_info.h" />
+@@ -4332,6 +4333,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignCollisionCapture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

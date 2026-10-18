@@ -1,0 +1,280 @@
+diff --git a/src/Layers/xrRender/SkeletonRigid.cpp b/src/Layers/xrRender/SkeletonRigid.cpp
+index 00a54c7..600ee3b 100644
+--- a/src/Layers/xrRender/SkeletonRigid.cpp
++++ b/src/Layers/xrRender/SkeletonRigid.cpp
+@@ -3,6 +3,7 @@
+ #pragma hdrstop
+ 
+ #include 	"SkeletonCustom.h"
++#include "CpuOnlyResources.h"
+ 
+ #include "../../xrCore/profiler.h"
+ 
+@@ -34,7 +35,9 @@ void CKinematics::CalculateBones(BOOL bForceExact)
+ 	float update_rate_k = 1.f;
+ 
+ #ifdef OPTIMIZE_CALCULATE_BONES
+-	if (g_bootComplete)
++	// A CPU-only process (campaign server) has no view, so view distance,
++	// screen area and frustum cannot throttle its gameplay bones (S02-T03c).
++	if (g_bootComplete && !CpuOnlyResources::Enabled())
+ 	{
+ 		if (spatialParent)
+ 		{
+diff --git a/src/xrEngine/CampaignBoneCapture.cpp b/src/xrEngine/CampaignBoneCapture.cpp
+new file mode 100644
+index 0000000..7ad819f
+--- /dev/null
++++ b/src/xrEngine/CampaignBoneCapture.cpp
+@@ -0,0 +1,90 @@
++#include "stdafx.h"
++#include "CampaignBoneCapture.h"
++
++#include "Render.h"
++#include "SkeletonMotions.h"
++#include "../Include/xrRender/Kinematics.h"
++#include "../Include/xrRender/KinematicsAnimated.h"
++#include "../Include/xrRender/RenderVisual.h"
++
++bool CaptureModelBones(LPCSTR model, u32 steps, void (*advance)(void* context), void* context,
++	LPCSTR out_path, BoneCaptureSummary& summary)
++{
++	ZeroMemory(&summary, sizeof(summary));
++	IRenderVisual* visual = ::Render->model_Create(model);
++	IKinematics* kinematics = visual ? visual->dcast_PKinematics() : nullptr;
++	IKinematicsAnimated* animated = visual ? visual->dcast_PKinematicsAnimated() : nullptr;
++	FILE* out = nullptr;
++	bool ok = kinematics && animated && animated->LL_MotionsSlotCount() != 0;
++
++	// The first cycle, by slot then name, that is not an editor placeholder
++	// such as "$editor".
++	MotionID motion;
++	if (ok)
++	{
++		for (u16 slot = 0; slot < animated->LL_MotionsSlotCount() && !motion.valid(); ++slot)
++		{
++			accel_map* cycles = const_cast<shared_motions&>(animated->LL_MotionsSlot(slot)).cycle();
++			if (!cycles)
++				continue;
++			for (const auto& cycle : *cycles)
++			{
++				LPCSTR name = cycle.first.c_str();
++				if (name && name[0] && name[0] != '$')
++				{
++					xr_strcpy(summary.motion, *cycle.first);
++					motion = animated->ID_Cycle_Safe(summary.motion);
++					break;
++				}
++			}
++		}
++		ok = motion.valid();
++	}
++	if (ok)
++	{
++		out = fopen(out_path, "w");
++		ok = out != nullptr;
++	}
++
++	if (ok)
++	{
++		animated->PlayCycle(motion, FALSE);
++		const u16 bones = kinematics->LL_BoneCount();
++		xr_vector<Fvector> first;
++		first.resize(bones);
++		summary.finite = true;
++		fprintf(out, "step,bone,name,ix,iy,iz,jx,jy,jz,kx,ky,kz,cx,cy,cz\n");
++		for (u32 step = 1; step <= steps; ++step)
++		{
++			advance(context);
++			kinematics->CalculateBones(TRUE);
++			for (u16 bone = 0; bone < bones; ++bone)
++			{
++				const Fmatrix& m = kinematics->LL_GetTransform(bone);
++				const float values[12] = {m.i.x, m.i.y, m.i.z, m.j.x, m.j.y, m.j.z,
++					m.k.x, m.k.y, m.k.z, m.c.x, m.c.y, m.c.z};
++				fprintf(out, "%u,%u,%s", step, bone, kinematics->LL_BoneName_dbg(bone));
++				for (float value : values)
++				{
++					fprintf(out, ",%.9g", value);
++					if (!_valid(value))
++						summary.finite = false;
++				}
++				fprintf(out, "\n");
++				if (step == 1)
++					first[bone] = m.c;
++				else
++					summary.max_translation = _max(summary.max_translation, first[bone].distance_to(m.c));
++			}
++		}
++		summary.bones = bones;
++		summary.steps = steps;
++	}
++
++	if (out)
++		fclose(out);
++	if (visual)
++		::Render->model_Delete(visual);
++	// A capture must be finite and actually animated.
++	return ok && summary.finite && summary.max_translation > 1e-3f;
++}
+diff --git a/src/xrEngine/CampaignBoneCapture.h b/src/xrEngine/CampaignBoneCapture.h
+new file mode 100644
+index 0000000..60d65db
+--- /dev/null
++++ b/src/xrEngine/CampaignBoneCapture.h
+@@ -0,0 +1,21 @@
++#pragma once
++
++// S02-T03c: evaluates one model's bones while it plays one cycle, so the
++// campaign server's CPU-only models can be compared with the normal client.
++// Both processes call this with the same model, the same motion rule (the
++// first non-placeholder cycle by slot, then name) and the same step count; only
++// the time source differs. Each step advances time through `advance`, then
++// calculates bones
++// exactly. Rows are "step,bone,name" plus the 12 values of the bone's model
++// transform (rotation rows i, j, k and translation c).
++struct ENGINE_API BoneCaptureSummary
++{
++	u32 bones;
++	u32 steps;
++	string128 motion;
++	float max_translation; // largest bone translation change from step 1
++	bool finite;
++};
++
++ENGINE_API bool CaptureModelBones(LPCSTR model, u32 steps, void (*advance)(void* context), void* context,
++	LPCSTR out_path, BoneCaptureSummary& summary);
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index f95f729..e8466b6 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -961,6 +961,7 @@ ENGINE_API bool g_campaign_server = false;
+ #include "GameMtlLib.h"
+ #include "Render.h"
+ #include "CampaignServerClock.h"
++#include "CampaignBoneCapture.h"
+ #include "ISheduled.h"
+ #include "EnnumerateVertices.h"
+ #include "../Include/xrRender/Kinematics.h"
+@@ -1313,6 +1314,27 @@ bool RunCampaignFrameDriverFixture()
+         c.dropped_ms == stall_dropped;
+ }
+ 
++// S02-T03c: evaluate the neutral stalker's bones over 50 server ticks. The
++// normal client runs the same capture with -s02-bone-capture.
++void AdvanceCampaignClockOneTick(void*)
++{
++    R_ASSERT2(g_campaign_clock->Advance(g_campaign_clock->NextTickWallMs()) == 1,
++        "Bone capture expects exactly one server tick per step");
++}
++
++bool RunCampaignBoneCapture()
++{
++    string_path out;
++    FS.update_path(out, "$logs$", "s02-t03c-bones.csv");
++    BoneCaptureSummary summary;
++    const bool ok = CaptureModelBones("actors\\stalker_neutral\\stalker_neutral_1", 50,
++        &AdvanceCampaignClockOneTick, nullptr, out, summary);
++    Msg("S02-T03c bones model=actors\\stalker_neutral\\stalker_neutral_1 motion=%s bones=%u steps=%u "
++        "max_translation=%.6f finite=%d out=%s",
++        summary.motion, summary.bones, summary.steps, summary.max_translation, summary.finite ? 1 : 0, out);
++    return ok;
++}
++
+ // A failed check after loading still owns the loaded library.
+ bool StartCampaignMaterialsOrUnload()
+ {
+@@ -1487,6 +1509,13 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             if (!fixture_ready)
+                 result = 6;
+         }
++        if (fixture_ready)
++        {
++            fixture_ready = RunCampaignBoneCapture();
++            stage(fixture_ready ? "bone-capture-passed" : "bone-capture-failed");
++            if (!fixture_ready)
++                result = 7;
++        }
+ 
+         if (fixture_ready)
+         {
+diff --git a/src/xrEngine/xrEngine.vcxproj b/src/xrEngine/xrEngine.vcxproj
+index 7ebcdd3..528e1e7 100644
+--- a/src/xrEngine/xrEngine.vcxproj
++++ b/src/xrEngine/xrEngine.vcxproj
+@@ -935,6 +935,7 @@
+     <ClInclude Include="xrSASH.h" />
+     <ClInclude Include="xrSheduler.h" />
+     <ClInclude Include="CampaignServerClock.h" />
++    <ClInclude Include="CampaignBoneCapture.h" />
+     <ClInclude Include="xrTheora_Stream.h" />
+     <ClInclude Include="xrTheora_Surface.h" />
+     <ClInclude Include="xrTheora_Surface_mmx.h" />
+@@ -1054,6 +1055,7 @@
+     <ClCompile Include="xrSASH.cpp" />
+     <ClCompile Include="xrSheduler.cpp" />
+     <ClCompile Include="CampaignServerClock.cpp" />
++    <ClCompile Include="CampaignBoneCapture.cpp" />
+     <ClCompile Include="xrTheora_Stream.cpp" />
+     <ClCompile Include="xrTheora_Surface.cpp" />
+     <ClCompile Include="xrTheora_Surface_mmx.cpp" />
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 3f263c2..d19ea23 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -2,6 +2,7 @@
+ #include "gamepersistent.h"
+ #include "../xrEngine/fmesh.h"
+ #include "../xrEngine/xr_ioconsole.h"
++#include "../xrEngine/CampaignBoneCapture.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -160,6 +161,38 @@ void CGamePersistent::RegisterModel(IRenderVisual* V)
+ extern void clean_game_globals();
+ extern void init_game_globals();
+ 
++// S02-T03c: with -s02-bone-capture the normal client evaluates the same model
++// as the campaign server, in 20 ms steps of its own device time, then quits.
++static void AdvanceClientCaptureTime(void*)
++{
++	Device.dwFrame++;
++	Device.dwTimeDelta = 20;
++	Device.dwTimeGlobal += 20;
++	Device.fTimeDelta = 0.02f;
++	Device.fTimeGlobal = float(Device.dwTimeGlobal) / 1000.f;
++}
++
++static void RunClientBoneCapture()
++{
++	const u32 frame = Device.dwFrame, time = Device.dwTimeGlobal, delta = Device.dwTimeDelta;
++	const float ftime = Device.fTimeGlobal, fdelta = Device.fTimeDelta;
++	string_path out;
++	FS.update_path(out, "$logs$", "s02-t03c-bones.csv");
++	BoneCaptureSummary summary;
++	const bool ok = CaptureModelBones("actors\\stalker_neutral\\stalker_neutral_1", 50,
++		&AdvanceClientCaptureTime, nullptr, out, summary);
++	Msg("S02-T03c client bones motion=%s bones=%u steps=%u max_translation=%.6f finite=%d ok=%d out=%s",
++		summary.motion, summary.bones, summary.steps, summary.max_translation, summary.finite ? 1 : 0,
++		ok ? 1 : 0, out);
++	FlushLog();
++	Device.dwFrame = frame;
++	Device.dwTimeGlobal = time;
++	Device.dwTimeDelta = delta;
++	Device.fTimeGlobal = ftime;
++	Device.fTimeDelta = fdelta;
++	Console->Execute("quit");
++}
++
+ void CGamePersistent::OnAppStart()
+ {
+ 	// load game materials
+@@ -169,6 +202,8 @@ void CGamePersistent::OnAppStart()
+ 	m_pUI_core = xr_new<ui_core>();
+ 	m_pMainMenu = xr_new<CMainMenu>();
+ 	m_pWallmarksManager = xr_new<ScriptWallmarksManager>();
++	if (strstr(Core.Params, "-s02-bone-capture"))
++		RunClientBoneCapture();
+ }
+ 
+ 

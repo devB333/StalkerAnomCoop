@@ -3,6 +3,7 @@
 import hashlib
 import json
 import ntpath
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,10 +12,15 @@ import sys
 
 workspace = Path(__file__).resolve().parents[1]
 baseline = workspace / "builds/build_2/test-install/source-client"
-run_name = sys.argv[1] if len(sys.argv) == 2 else "smoke-01"
+# Usage: prepare-stage2-smoke.py <run> [<task-id>]; the task id picks the
+# runtime folder (default S02-T02, the campaign smoke).
+run_name = sys.argv[1] if len(sys.argv) >= 2 else "smoke-01"
+task = sys.argv[2] if len(sys.argv) == 3 else "S02-T02"
 if not run_name.replace("-", "").isalnum():
     raise SystemExit("Run name must be alphanumeric with optional hyphens")
-runtime = workspace / "builds/stage2/test-install/S02-T02" / run_name
+if not re.fullmatch(r"S\d\d-T\d\d[a-z]?", task):
+    raise SystemExit("Task id must look like S02-T03c")
+runtime = workspace / "builds/stage2/test-install" / task / run_name
 if runtime.exists():
     raise SystemExit(f"Preserving existing run: {runtime}")
 for dirname in ("appdata", "appdata/logs", "appdata/savedgames", "tmp"):

@@ -19,6 +19,9 @@ device, creates only its model pool, skips and counts shader, geometry and GPU
 buffer creation, and registers bone materials without the persistent object.
 `0006-campaign-frame-driver.patch` (S02-T04a) adds `CCampaignServerClock`, the
 server's tick-based clock and serial frame driver, with pause and bounded catch-up.
+`0007-bone-capture.patch` (S02-T03c) adds the shared bone capture used by the
+campaign smoke and by the client's opt-in `-s02-bone-capture` flag, and stops
+view-based bone throttling in a CPU-only process.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

@@ -33,6 +33,10 @@
     {
       "path": "patches/engine/0006-campaign-frame-driver.patch",
       "sha256": "1d00b66f56852445a1d277af967dd3320c0c886d9953bf4a69eae5e4cba2fb48"
+    },
+    {
+      "path": "patches/engine/0007-bone-capture.patch",
+      "sha256": "b849759d70f415f3eacf8bc6dbde7c7de2f1525e6e3740720461642a95fdd197"
     }
   ],
   "submodules": [

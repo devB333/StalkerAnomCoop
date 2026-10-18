@@ -83,7 +83,7 @@ if ($Scope -ne 'Core') {
     }
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
-        $expectedStages += @('cpu-model-fixture-passed', 'frame-driver-fixture-passed', 'services-graphics-window-input-absent')
+        $expectedStages += @('cpu-model-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
         if ($Scope -eq 'GameState') { $expectedStages += 'persistent-context-required'; $expectedExit = 3 }
     }
     [array]::Reverse($started)

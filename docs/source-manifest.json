@@ -69,6 +69,10 @@
     {
       "path": "patches/engine/0015-actor-binder-diagnostics.patch",
       "sha256": "6e0491d4527fbf0bd61b0cfb4b7d9e1fb4c428f80017326d69734fe0c1096c61"
+    },
+    {
+      "path": "patches/engine/0016-inert-server-game-ui.patch",
+      "sha256": "fe0909a17873340418a6011f6242391f138deaa7ae89d62219c683caf83bfa01"
     }
   ],
   "submodules": [

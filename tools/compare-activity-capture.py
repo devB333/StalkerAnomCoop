@@ -9,7 +9,8 @@ Row kinds are documented in xrGame/CampaignActivityCapture.h. Rules:
   distances, ALife schedule bounds, objects per update, time factor); the
   activity policy flag is reported (server 1, client 0), not asserted.
 * The level's ALife object, online and scheduled counts at the begin agree
-  within 5 (scripts spawn a few extra objects per run).
+  within 10 (the scripts' simulation squads spawn a varying handful of
+  objects per run: offline scheduled 1,070-1,078 over the recorded runs).
 * The stalker's start positions agree within 5 m (the client's AI runs in real
   time for a second before the capture); each side's destination is at least
   its requested distance from its own start, and both destinations are
@@ -31,7 +32,7 @@ import csv
 import json
 import sys
 
-COUNT_TOL = 5
+COUNT_TOL = 10
 START_TOL = 5.0
 ARRIVAL_TOL = 1.0
 MIN_OBSERVE_UPDATES = 10

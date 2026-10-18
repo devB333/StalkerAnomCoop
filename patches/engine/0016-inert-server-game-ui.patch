@@ -1,0 +1,321 @@
+diff --git a/src/xrEngine/IGame_Level.cpp b/src/xrEngine/IGame_Level.cpp
+index 728c4ef..392e492 100644
+--- a/src/xrEngine/IGame_Level.cpp
++++ b/src/xrEngine/IGame_Level.cpp
+@@ -124,15 +124,16 @@ bool IGame_Level::Load(u32 dwNum)
+ 
+ 
+ 	// HUD + Environment
+-	// The campaign server presents nothing (S02-T05d): the HUD creates hit
+-	// marker and target shaders, and the render-level load is shaders,
+-	// sectors, lights, details and occlusion. CFORM, sound geometry,
+-	// environment modifiers, AI data and objects stay real.
++	// The campaign server presents nothing (S02-T05d): the render-level load
++	// is shaders, sectors, lights, details and occlusion and is skipped.
++	// CFORM, sound geometry, environment modifiers, AI data and objects stay
++	// real. S02-T06a: the HUD manager is created on the server too, as the
++	// owner of the inert game UI the scripts call; its hit-marker and target
++	// shaders are skipped and counted like every GPU resource.
++	if (!g_hud)
++		g_hud = (CCustomHUD*)NEW_INSTANCE(CLSID_HUDMANAGER);
+ 	if (!g_campaign_server)
+ 	{
+-		if (!g_hud)
+-			g_hud = (CCustomHUD*)NEW_INSTANCE(CLSID_HUDMANAGER);
+-
+ 		// Render-level Load
+ 		Render->level_Load(LL_Stream);
+ 	}
+diff --git a/src/xrGame/CampaignActivityPolicy.h b/src/xrGame/CampaignActivityPolicy.h
+index 56bdc56..79585dd 100644
+--- a/src/xrGame/CampaignActivityPolicy.h
++++ b/src/xrGame/CampaignActivityPolicy.h
+@@ -11,3 +11,18 @@
+ void CampaignActivityPolicyEnable();
+ void CampaignActivityPolicyDisable();
+ void CampaignActivityRefreshAnchors();
++
++// S02-T06a: wall time (QPC cycles) the level frame spends in its script
++// pumps and object update, accumulated since the module loaded; the campaign
++// smoke's tick report prints them. Measured on both products, reported only
++// by the server.
++struct SLevelFrameTiming
++{
++	u64 game_events; // CLevel::ProcessGameEvents
++	u64 objects_update; // IGame_Level::OnFrame (object list, scheduler slot excluded)
++	u64 script_process; // level script process update
++	u64 ph_commander; // physics commander calls
++	u64 ph_commander_scripts; // level.add_call script calls (the Lua time-event pump among them)
++	u64 script_gc; // Lua incremental GC step
++};
++extern SLevelFrameTiming g_level_frame_timing;
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+index d9bb10c..c838710 100644
+--- a/src/xrGame/CampaignServerStart.cpp
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -29,6 +29,8 @@
+ #include "inventory_item.h"
+ #include "../xrphysics/iphworld.h"
+ #include "../xrEngine/CustomHUD.h"
++#include "UIGameCustom.h"
++void ScriptBinderUpdateStats(float& total_ms, float& actor_ms, u32& actor_calls); // script_binder.cpp
+ #include "../xrEngine/Engine.h"
+ #include "../xrEngine/x_ray.h"
+ #include "../xrEngine/IGame_Persistent.h"
+@@ -196,14 +198,24 @@ extern "C" bool __cdecl xrCampaignLevel_ReportLoaded()
+ 	const bool level_script = ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel) != nullptr;
+ 	string_path som;
+ 	const bool som_file = FS.exist(som, "$level$", "level.som") != nullptr;
++	// S02-T06a (decision B20): the HUD manager and the game UI exist as inert
++	// CPU objects for the scripts; the UI must not be in the frame sequence.
++	CUIGameCustom* game_ui = CurrentGameUI();
++	bool ui_in_frame = false;
++	for (const auto& entry : Device.seqFrame.R)
++		if (game_ui && entry.Object == static_cast<pureFrame*>(game_ui))
++			ui_in_frame = true;
+ 	Msg("S02-T05d level ready=%d cform_tris=%u cform_verts=%u bbox=[%.1f,%.1f,%.1f]-[%.1f,%.1f,%.1f] "
+-		"physics_world=%d client_game=%d game_configured=%d level_script=%d som_file=%d hud=%d render_device=%d "
+-		"precache_frames=%u objects=%u",
++		"physics_world=%d client_game=%d game_configured=%d level_script=%d som_file=%d hud=%d game_ui=%d "
++		"ui_in_frame=%d actor_menu=%d pda_menu=%d maingame=%d messages=%d render_device=%d precache_frames=%u objects=%u",
+ 		level.bReady ? 1 : 0, tris, verts, VPUSH(box.min), VPUSH(box.max), physics ? 1 : 0, client_game ? 1 : 0,
+-		level.game_configured ? 1 : 0, level_script ? 1 : 0, som_file ? 1 : 0, g_hud ? 1 : 0,
++		level.game_configured ? 1 : 0, level_script ? 1 : 0, som_file ? 1 : 0, g_hud ? 1 : 0, game_ui ? 1 : 0,
++		ui_in_frame ? 1 : 0, game_ui && &game_ui->GetActorMenu() ? 1 : 0, game_ui && &game_ui->GetPdaMenu() ? 1 : 0,
++		game_ui && game_ui->UIMainIngameWnd ? 1 : 0, game_ui && game_ui->m_pMessagesWnd ? 1 : 0,
+ 		Device.m_pRender ? 1 : 0, Device.dwPrecacheFrame, level.Objects.o_count());
+ 	return level.bReady && tris != 0 && verts != 0 && physics && client_game && level.game_configured &&
+-		level_script && !g_hud && !Device.m_pRender && Device.dwPrecacheFrame == 0 && level.Objects.o_count() == 0;
++		level_script && g_hud && game_ui && !ui_in_frame && !Device.m_pRender && Device.dwPrecacheFrame == 0 &&
++		level.Objects.o_count() == 0;
+ }
+ 
+ // Logs what the first server ticks produced: the client-side objects spawned
+@@ -278,5 +290,23 @@ extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks)
+ 			scheduled ? 1 : 0, u32(actor->shedule.t_min), u32(actor->shedule.t_max), CActor::s_schedule_updates,
+ 			mutable_actor->processing_enabled() ? 1 : 0, binder ? 1 : 0, db_actor, after_first, check_start);
+ 	}
++	// S02-T06a: where the tick's wall time goes: the script binder updates
++	// since the module loaded (all objects and the actor) and the level
++	// frame's pumps. The device's per-frame statistic timers are not closed on
++	// the server, so they are not reported.
++	{
++		float binder_ms = 0.f, actor_binder_ms = 0.f;
++		u32 actor_binder_calls = 0;
++		ScriptBinderUpdateStats(binder_ms, actor_binder_ms, actor_binder_calls);
++		Msg("S02-T06 timing binder_update_ms=%.1f actor_binder_ms=%.1f actor_binder_calls=%u actor_binder_avg_ms=%.2f",
++			binder_ms, actor_binder_ms, actor_binder_calls,
++			actor_binder_calls ? actor_binder_ms / float(actor_binder_calls) : 0.f);
++		const float to_ms = 1000.f / float(CPU::qpc_freq);
++		const SLevelFrameTiming& t = g_level_frame_timing;
++		Msg("S02-T06 frame_ms game_events=%.1f objects_update=%.1f script_process=%.1f ph_commander=%.1f "
++			"ph_commander_scripts=%.1f script_gc=%.1f over %u ticks",
++			float(t.game_events) * to_ms, float(t.objects_update) * to_ms, float(t.script_process) * to_ms,
++			float(t.ph_commander) * to_ms, float(t.ph_commander_scripts) * to_ms, float(t.script_gc) * to_ms, ticks);
++	}
+ 	return objects != 0 && actors == 1 && actor && actor->g_Alive() && steps != 0 && no_view;
+ }
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 8be9156..8122abe 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -205,11 +205,26 @@ static void RunClientBoneCapture()
+ void CGamePersistent::OnAppStart()
+ {
+ 	// Campaign server (S02-T05a): materials, game globals and the script
+-	// engine are its own services, and it has no UI, cursor, fonts or menu.
+-	// Keep the environment data and the script wallmark manager.
++	// engine are its own services, and it has no main menu. Keep the
++	// environment data and the script wallmark manager.
++	// S02-T06a (decision B20): the server does own the UI core, fonts and the
++	// game UI, as inert CPU objects: the installed scripts call the HUD from
++	// the actor's callbacks (get_hud(), ActorMenu.*), so the objects exist,
++	// lay out at the UI base resolution (there is no window) and are never
++	// updated or drawn; their shaders and textures are skipped and counted
++	// like every other GPU resource (CpuOnlyResources).
+ 	if (g_campaign_server)
+ 	{
+ 		__super::OnAppStart();
++		if (!Device.dwWidth || !Device.dwHeight)
++		{
++			Device.dwWidth = u32(UI_BASE_WIDTH);
++			Device.dwHeight = u32(UI_BASE_HEIGHT);
++			Device.fWidth_2 = float(Device.dwWidth) / 2.f;
++			Device.fHeight_2 = float(Device.dwHeight) / 2.f;
++			Device.fASPECT = float(Device.dwHeight) / float(Device.dwWidth);
++		}
++		m_pUI_core = xr_new<ui_core>();
+ 		m_pWallmarksManager = xr_new<ScriptWallmarksManager>();
+ 		return;
+ 	}
+@@ -229,6 +244,7 @@ void CGamePersistent::OnAppEnd()
+ {
+ 	if (g_campaign_server)
+ 	{
++		xr_delete(m_pUI_core);
+ 		xr_delete(m_pWallmarksManager);
+ 		__super::OnAppEnd();
+ 		return;
+diff --git a/src/xrGame/HUDManager.cpp b/src/xrGame/HUDManager.cpp
+index 1910d5a..4f785f7 100644
+--- a/src/xrGame/HUDManager.cpp
++++ b/src/xrGame/HUDManager.cpp
+@@ -10,6 +10,8 @@
+ #include "spectator.h"
+ #include "Car.h"
+ #include "UIGameCustom.h"
++
++extern ENGINE_API bool g_campaign_server;
+ #include "UICursor.h"
+ #include "string_table.h"
+ #include "game_cl_base.h"
+@@ -127,6 +129,11 @@ CHUDManager::~CHUDManager()
+ //--------------------------------------------------------------------
+ void CHUDManager::OnFrame()
+ {
++	// S02-T06a: the campaign server's HUD and game UI are inert: no UI update
++	// (the in-game window alone cost ~100 ms per tick), no camera pick, no
++	// player-hud animation. Scripts keep their objects.
++	if (g_campaign_server)
++		return;
+ 	if (!psHUD_Flags.is(HUD_DRAW_RT2))
+ 		return;
+ 
+@@ -465,7 +472,9 @@ void CHUDManager::OnConnected()
+ {
+ 	if (b_online) return;
+ 	b_online = true;
+-	if (pUIGame)
++	// S02-T06a: the campaign server's game UI is inert; it is never updated
++	// (nor drawn), so it does not join the frame sequence.
++	if (pUIGame && !g_campaign_server)
+ 		Device.seqFrame.Add(pUIGame, REG_PRIORITY_LOW - 1000);
+ }
+ 
+diff --git a/src/xrGame/Level.cpp b/src/xrGame/Level.cpp
+index 3dd0df9..77fdcda 100644
+--- a/src/xrGame/Level.cpp
++++ b/src/xrGame/Level.cpp
+@@ -73,6 +73,7 @@
+ extern ENGINE_API bool g_dedicated_server;
+ extern ENGINE_API BOOL	g_bootComplete;
+ extern ENGINE_API bool g_campaign_server;
++SLevelFrameTiming g_level_frame_timing = {};
+ extern CUISequencer* g_tutorial;
+ extern CUISequencer* g_tutorial2;
+ 
+@@ -1027,7 +1028,11 @@ void CLevel::OnFrame()
+ 		Device.Statistic->netClient1.End();
+ 	}
+ 	
+-	ProcessGameEvents();
++	{
++		const u64 qpc = CPU::QPC();
++		ProcessGameEvents();
++		g_level_frame_timing.game_events += CPU::QPC() - qpc;
++	}
+ 	// S02-T04c: the server has no camera; its activity anchors follow the
+ 	// actors, including one spawned by the events just processed.
+ 	if (g_campaign_server)
+@@ -1071,7 +1076,11 @@ void CLevel::OnFrame()
+ 		}
+ 	}
+ 	// Inherited update
+-	inherited::OnFrame();
++	{
++		const u64 qpc = CPU::QPC();
++		inherited::OnFrame();
++		g_level_frame_timing.objects_update += CPU::QPC() - qpc;
++	}
+ 	// Draw client/server stats
+ 	if (!g_dedicated_server && psDeviceFlags.test(rsStatistic))
+ 	{
+@@ -1159,10 +1168,17 @@ void CLevel::OnFrame()
+ #endif
+ 	g_pGamePersistent->Environment().SetGameTime(GetEnvironmentGameDayTimeSec(),
+ 	                                             game->GetEnvironmentGameTimeFactor());
++	// S02-T06a: wall time of the frame's script pumps, for the campaign smoke.
++	u64 qpc = CPU::QPC();
+ 	if (!g_dedicated_server)
+ 		ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
++	g_level_frame_timing.script_process += CPU::QPC() - qpc;
++	qpc = CPU::QPC();
+ 	m_ph_commander->update();
++	g_level_frame_timing.ph_commander += CPU::QPC() - qpc;
++	qpc = CPU::QPC();
+ 	m_ph_commander_scripts->update();
++	g_level_frame_timing.ph_commander_scripts += CPU::QPC() - qpc;
+ 	Device.Statistic->TEST0.Begin();
+ 	BulletManager().CommitRenderSet();
+ 	Device.Statistic->TEST0.End();
+@@ -1206,9 +1222,11 @@ extern BOOL psLua_ParallelGC_debug;
+ void CLevel::script_gc()
+ {
+ 	if (!(psLua_ParallelGC && Device.LuaGC))
+-	{	
+-		PROF_EVENT();	
++	{
++		PROF_EVENT();
++		const u64 qpc = CPU::QPC();
+ 		lua_gc(ai().script_engine().lua(), LUA_GCSTEP, psLUA_GCSTEP);
++		g_level_frame_timing.script_gc += CPU::QPC() - qpc;
+ 	}
+ }
+ 
+diff --git a/src/xrGame/Level_network_start_client.cpp b/src/xrGame/Level_network_start_client.cpp
+index 104d27d..9ea6d9d 100644
+--- a/src/xrGame/Level_network_start_client.cpp
++++ b/src/xrGame/Level_network_start_client.cpp
+@@ -246,7 +246,7 @@ bool CLevel::net_start_client6()
+ 			pApp->LoadEnd();
+ 			return true;
+ 		}
+-		// The campaign server has no HUD (IGame_Level::Load).
++		// S02-T06a: the campaign server has a HUD manager with an inert game UI (IGame_Level::Load).
+ 		if (!g_dedicated_server && g_hud)
+ 		{
+ 			g_hud->Load();
+diff --git a/src/xrGame/script_binder.cpp b/src/xrGame/script_binder.cpp
+index 800ceb9..59aa2c9 100644
+--- a/src/xrGame/script_binder.cpp
++++ b/src/xrGame/script_binder.cpp
+@@ -253,10 +253,24 @@ void CScriptBinder::set_object(CScriptBinderObject* object)
+ 	}
+ }
+ 
++// S02-T06a: wall time spent in script binder updates, all objects and the
++// actor (object id 0), for the campaign smoke's tick report.
++static u64 s_binder_update_cycles = 0;
++static u64 s_actor_binder_update_cycles = 0;
++static u32 s_actor_binder_update_calls = 0;
++
++void ScriptBinderUpdateStats(float& total_ms, float& actor_ms, u32& actor_calls)
++{
++	total_ms = float(s_binder_update_cycles) * 1000.f / float(CPU::qpc_freq);
++	actor_ms = float(s_actor_binder_update_cycles) * 1000.f / float(CPU::qpc_freq);
++	actor_calls = s_actor_binder_update_calls;
++}
++
+ void CScriptBinder::shedule_Update(u32 time_delta)
+ {
+ 	if (m_object)
+ 	{
++		const u64 start = CPU::QPC();
+ 		__try
+ 		{
+ 			m_object->shedule_Update(time_delta);
+@@ -265,6 +279,14 @@ void CScriptBinder::shedule_Update(u32 time_delta)
+ 		{
+ 			clear();
+ 		}
++		const u64 spent = CPU::QPC() - start;
++		s_binder_update_cycles += spent;
++		CGameObject* object = smart_cast<CGameObject*>(this);
++		if (object && object->ID() == 0)
++		{
++			s_actor_binder_update_cycles += spent;
++			++s_actor_binder_update_calls;
++		}
+ 	}
+ }
+ 

@@ -85,6 +85,16 @@ the other catches log the object and phase. `ActorMenu.get_*` and
 dereferencing null; `CActor::s_schedule_updates` counts actor scheduled
 updates; the campaign smoke's tick report prints the actor's scheduling and
 Lua binder state (`S02-T06 actor …`). The client's behaviour is unchanged.
+`0016-inert-server-game-ui.patch` (S02-T06a, decision B20) gives the campaign
+server the UI core, fonts and the real game UI (`CUIGameSP` with its actor
+menu, PDA, in-game window and messages) as inert CPU objects: created by the
+native path with GPU resources skipped and counted, laid out at the UI base
+resolution (`Device.dwWidth/dwHeight` 1024×768 when no window set them), never
+updated (`CHUDManager::OnFrame` returns on the server; the game UI joins no
+frame sequence) and never drawn. The HUD manager is created on the server too.
+The smoke's loaded report expects `hud=1 game_ui=1 ui_in_frame=0`, and its
+tick report prints the script binder update time and the level frame's pump
+times (`SLevelFrameTiming`, measured on both products). The client is unchanged.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

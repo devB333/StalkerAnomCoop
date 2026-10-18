@@ -22,6 +22,11 @@ server's tick-based clock and serial frame driver, with pause and bounded catch-
 `0007-bone-capture.patch` (S02-T03c) adds the shared bone capture used by the
 campaign smoke and by the client's opt-in `-s02-bone-capture` flag, and stops
 view-based bone throttling in a CPU-only process.
+`0008-persistent-without-device.patch` (S02-T05a) constructs the real game
+persistent object with no device: shader/texture creation and resource
+destructors are skipped in CPU-only mode, environment ambience sounds are
+skipped without a sound manager, and the campaign branch of CGamePersistent
+skips UI, menu, fonts and prefetch.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

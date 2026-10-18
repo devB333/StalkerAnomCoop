@@ -250,7 +250,12 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S02-T05 — Remove remaining presentation startup dependencies
 
-- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- [ ] **Status: In Progress** · **Reasoning effort: Extra High** · **Complexity: High**
+- **Suffix tasks (split 2026-10-18; the parent completes when all four do):**
+  - **S02-T05a — Game persistent object with no device: Completed.** [Validation](docs/validation/S02-T05a.md). Patch 0008. The real `CGamePersistent` constructs and app-starts with the environment data, no UI/menu/fonts, and all GPU resource creation skipped and counted. Its presentation frame is never registered; the frame driver keeps the scheduler slot.
+  - **S02-T05b — CLevel, xrServer, game_sv_Single and ALife from the fixture save: Not Started.** Needs a CPU `Level_ID`/`Level_Set` (the `$level$` alias), loading-event pumping with deadlines, and the saved actor's view-entity decision. Prerequisite: S02-T05a.
+  - **S02-T05c — CPU sound-event layer for AI hearing and CPU particle definitions: Not Started.** A silent backend loses AI hearing (B18); footstep and impact sounds must come back from the stored material names. Prerequisite: S02-T05a.
+  - **S02-T05d — Renderer-free level load, spawn and first tick: Not Started.** CFORM, AI graph, physics world, level script process and `level.som` loaded for real; HUD, level_Load, precache and static presentation skipped. Prerequisites: S02-T05b/c.
 - **Purpose:** Reach real renderer-free level initialization.
 - **Prerequisites:** S02-T03a–c and S02-T04a (dependency loop resolved by user decision, 2026-10-18). S02-T03d, S02-T04b and S02-T04c follow this task's level load. G02 still requires every task.
 - **Relevant files/subsystems:** E06; E09; EngineAPI; Level_load; IGame_Level; GamePersistent; Level_Bullet_Manager.
@@ -942,5 +947,6 @@ Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Comple
 | S02-T02 | Completed | [Context and services validation](docs/validation/S02-T02-context.md): Core/Services pass, unwind checked; H02 construction moved to S02-T05/T06 by user decision. |
 | S02-T03 | In Progress | Split into T03a–d. [T03a](docs/validation/S02-T03a.md), [T03b](docs/validation/S02-T03b.md) and [T03c bones](docs/validation/S02-T03c.md) Completed; T03d needs a physics world. |
 | S02-T04 | In Progress | Split into T04a–c. [T04a clock/frame driver](docs/validation/S02-T04a.md) Completed; T04b/c need a level. |
+| S02-T05 | In Progress | Split into T05a–d. [T05a persistent](docs/validation/S02-T05a.md) Completed; T05b (level/ALife) next. |
 
 As work progresses, replace the aggregate engineering/gate rows with compact current-stage status plus completed-gate links; detailed results remain in task reports. Keep the stage summary at the top synchronized. The next engineering objectives are S02-T03 (CPU models, including the material library's CPU/media split) and S02-T04 (explicit clock and frame driver); S02-T05/T06 own real persistent, `CLevel`, ALife and game-state construction. The Services smoke pass does not satisfy any gameplay requirement. G02 requires S02-T02–T06 and their behavioral evidence.

@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
     [Parameter(Mandatory = $true)][ValidateSet('Core', 'Services', 'GameState')][string]$Scope,
     # Test-only: report this service as failed before it starts, to check the partial-start unwind.
-    [ValidateSet('', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'frame-driver')][string]$InjectFailure = '',
+    [ValidateSet('', 'cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'persistent', 'frame-driver')][string]$InjectFailure = '',
     # Optional comma-separated model list for the CPU model fixture (no spaces).
     [ValidatePattern('^[A-Za-z0-9_\\,.]*$')][string]$Models = '',
     # Test-only: the model list contains a missing model, so the fixture must fail (exit 5).
@@ -76,15 +76,15 @@ $expectedExit = 0
 if ($Scope -ne 'Core') {
     # Services start in native order and stop in reverse; a failed start unwinds only started services.
     $started = @()
-    foreach ($service in @('cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'frame-driver')) {
+    foreach ($service in @('cpu-models', 'spatial-db', 'materials', 'script-engine', 'campaign-registries', 'persistent', 'frame-driver')) {
         if ($service -eq $InjectFailure) { $expectedStages += "$service-failed"; $expectedExit = 4; break }
         $expectedStages += "$service-ready"
         $started += $service
     }
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
-        $expectedStages += @('cpu-model-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += 'persistent-context-required'; $expectedExit = 3 }
+        $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
+        if ($Scope -eq 'GameState') { $expectedStages += 'level-context-required'; $expectedExit = 3 }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }

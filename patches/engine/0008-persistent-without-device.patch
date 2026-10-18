@@ -1,0 +1,623 @@
+diff --git a/src/Layers/xrRender/CpuOnlyResources.h b/src/Layers/xrRender/CpuOnlyResources.h
+index 39238b2..7c8cf54 100644
+--- a/src/Layers/xrRender/CpuOnlyResources.h
++++ b/src/Layers/xrRender/CpuOnlyResources.h
+@@ -25,4 +25,9 @@ struct CpuOnlyResources
+ 		static u32 count = 0;
+ 		return count;
+ 	}
++	static u32& SkippedTextures()
++	{
++		static u32 count = 0;
++		return count;
++	}
+ };
+diff --git a/src/Layers/xrRender/DetailModel.cpp b/src/Layers/xrRender/DetailModel.cpp
+index 3518bd8..dff6532 100644
+--- a/src/Layers/xrRender/DetailModel.cpp
++++ b/src/Layers/xrRender/DetailModel.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "CpuOnlyResources.h"
+ #pragma hdrstop
+ #include "detailmodel.h"
+ 
+@@ -118,7 +119,10 @@ void CDetail::Load(IReader* S)
+ 	bv_bb.getsphere(bv_sphere.P, bv_sphere.R);
+ 
+ #ifndef _EDITOR
+-	Optimize();
++	// Vertex-cache reordering needs the device caps; a CPU-only process
++	// (campaign server) keeps the file order.
++	if (!CpuOnlyResources::Enabled())
++		Optimize();
+ #endif
+ }
+ 
+diff --git a/src/Layers/xrRender/Shader.cpp b/src/Layers/xrRender/Shader.cpp
+index 786809b..c9be038 100644
+--- a/src/Layers/xrRender/Shader.cpp
++++ b/src/Layers/xrRender/Shader.cpp
+@@ -12,40 +12,50 @@
+ #include "CpuOnlyResources.h"
+ 
+ 
++// With no device (CpuOnlyResources) no resource was ever registered with the
++// resource manager, so these destructors have nothing to unregister; the
++// objects that still exist are default-constructed members.
+ //
+ STextureList::~STextureList()
+ {
+-	DEV->_DeleteTextureList(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->_DeleteTextureList(this);
+ }
+ 
+ SMatrixList::~SMatrixList()
+ {
+-	DEV->_DeleteMatrixList(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->_DeleteMatrixList(this);
+ }
+ 
+ SConstantList::~SConstantList()
+ {
+-	DEV->_DeleteConstantList(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->_DeleteConstantList(this);
+ }
+ 
+ SPass::~SPass()
+ {
+-	DEV->_DeletePass(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->_DeletePass(this);
+ }
+ 
+ ShaderElement::~ShaderElement()
+ {
+-	DEV->_DeleteElement(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->_DeleteElement(this);
+ }
+ 
+ SGeometry::~SGeometry()
+ {
+-	DEV->DeleteGeom(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->DeleteGeom(this);
+ }
+ 
+ Shader::~Shader()
+ {
+-	DEV->Delete(this);
++	if (!CpuOnlyResources::Enabled())
++		DEV->Delete(this);
+ }
+ 
+ // demonized: Possible race condition with spawn antifreeze, add guard
+@@ -58,6 +68,11 @@ void resptrcode_shader::create(LPCSTR s_shader, LPCSTR s_textures, LPCSTR s_cons
+ #ifdef SPAWN_ANTIFREEZE
+ 	xrCriticalSectionGuard g(shaderCreate_cs);
+ #endif
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedShaders();
++		return;
++	}
+ 	_set(DEV->Create(s_shader, s_textures, s_constants, s_matrices));
+ }
+ 
+@@ -66,6 +81,11 @@ void resptrcode_shader::create(IBlender* B, LPCSTR s_shader, LPCSTR s_textures,
+ #ifdef SPAWN_ANTIFREEZE
+ 	xrCriticalSectionGuard g(shaderCreate_cs);
+ #endif
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedShaders();
++		return;
++	}
+ 	_set(DEV->Create(B, s_shader, s_textures, s_constants, s_matrices));
+ }
+ 
+diff --git a/src/Layers/xrRender/dxEnvironmentRender.cpp b/src/Layers/xrRender/dxEnvironmentRender.cpp
+index 80d1160..8eedb8f 100644
+--- a/src/Layers/xrRender/dxEnvironmentRender.cpp
++++ b/src/Layers/xrRender/dxEnvironmentRender.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "CpuOnlyResources.h"
+ #include "dxEnvironmentRender.h"
+ 
+ #include "dxRenderDeviceRender.h"
+@@ -206,6 +207,11 @@ void dxEnvDescriptorRender::OnDeviceDestroy()
+ 
+ dxEnvironmentRender::dxEnvironmentRender()
+ {
++	if (CpuOnlyResources::Enabled())
++	{
++		CpuOnlyResources::SkippedTextures() += 2;
++		return;
++	}
+ 	tsky0 = DEV->_CreateTexture("$user$sky0");
+ 	tsky1 = DEV->_CreateTexture("$user$sky1");
+ }
+@@ -262,6 +268,11 @@ void dxEnvironmentRender::OnFrame(CEnvironment& env)
+ 
+ void dxEnvironmentRender::OnLoad()
+ {
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedTextures();
++		return;
++	}
+ 	tonemap = DEV->_CreateTexture("$user$tonemap"); //. hack
+ }
+ 
+@@ -407,8 +418,10 @@ void dxEnvironmentRender::OnDeviceCreate()
+ 
+ void dxEnvironmentRender::OnDeviceDestroy()
+ {
+-	tsky0->surface_set(NULL);
+-	tsky1->surface_set(NULL);
++	if (tsky0)
++		tsky0->surface_set(NULL);
++	if (tsky1)
++		tsky1->surface_set(NULL);
+ 
+ 	sh_2sky.destroy();
+ 	sh_2geom.destroy();
+diff --git a/src/Layers/xrRenderDX10/dx10SH_Texture.cpp b/src/Layers/xrRenderDX10/dx10SH_Texture.cpp
+index fd54a86..8514ed8 100644
+--- a/src/Layers/xrRenderDX10/dx10SH_Texture.cpp
++++ b/src/Layers/xrRenderDX10/dx10SH_Texture.cpp
+@@ -1,6 +1,8 @@
+ #include "stdafx.h"
+ #pragma hdrstop
+ 
++#include "../xrRender/CpuOnlyResources.h"
++
+ #include "../xrRender/ResourceManager.h"
+ 
+ #ifndef _EDITOR
+@@ -21,6 +23,11 @@
+ 
+ void resptrcode_texture::create(LPCSTR _name)
+ {
++	if (CpuOnlyResources::Enabled())
++	{
++		++CpuOnlyResources::SkippedTextures();
++		return;
++	}
+ 	_set(DEV->_CreateTexture(_name));
+ }
+ 
+diff --git a/src/Layers/xrRenderPC_R4/r4.cpp b/src/Layers/xrRenderPC_R4/r4.cpp
+index 0cd6050..fd1bb4b 100644
+--- a/src/Layers/xrRenderPC_R4/r4.cpp
++++ b/src/Layers/xrRenderPC_R4/r4.cpp
+@@ -709,6 +709,7 @@ bool CRender::cpu_models_create(void (*registrar)(IRenderVisual*))
+ 	CpuOnlyResources::SkippedShaders() = 0;
+ 	CpuOnlyResources::SkippedGeometry() = 0;
+ 	CpuOnlyResources::SkippedBuffers() = 0;
++	CpuOnlyResources::SkippedTextures() = 0;
+ 	Models = xr_new<CModelPool>();
+ 	Models->m_registrar = registrar;
+ 	return true;
+@@ -726,6 +727,7 @@ bool CRender::cpu_models_stats(CpuModelStats& stats)
+ 	stats.skipped_shaders = CpuOnlyResources::SkippedShaders();
+ 	stats.skipped_geometry = CpuOnlyResources::SkippedGeometry();
+ 	stats.skipped_buffers = CpuOnlyResources::SkippedBuffers();
++	stats.skipped_textures = CpuOnlyResources::SkippedTextures();
+ 	return CpuOnlyResources::Enabled();
+ }
+ 
+diff --git a/src/xrEngine/CampaignServerClock.cpp b/src/xrEngine/CampaignServerClock.cpp
+index 1aa073c..7e6e992 100644
+--- a/src/xrEngine/CampaignServerClock.cpp
++++ b/src/xrEngine/CampaignServerClock.cpp
+@@ -40,14 +40,12 @@ void CCampaignServerClock::Start(u32 wall_ms)
+ 		owns_statistic = true;
+ 	}
+ 
+-	// Natively CGamePersistent::OnFrame (priority HIGH+1) runs the scheduler.
+-	// Without that object the driver takes the same slot, so it still runs
+-	// exactly once per tick in the same order.
+-	if (!g_pGamePersistent)
+-	{
+-		Device.seqFrame.Add(&scheduler_slot, REG_PRIORITY_HIGH + 1);
+-		owns_scheduler_slot = true;
+-	}
++	// Natively CGamePersistent::OnFrame (priority HIGH+1) runs the scheduler
++	// among presentation work. The campaign server never registers that frame
++	// (S02-T05a); the driver takes the same slot instead, so the scheduler
++	// still runs exactly once per tick in the same order.
++	Device.seqFrame.Add(&scheduler_slot, REG_PRIORITY_HIGH + 1);
++	owns_scheduler_slot = true;
+ 
+ 	wall_base = wall_ms;
+ 	ticks_since_base = 0;
+diff --git a/src/xrEngine/CampaignServerClock.h b/src/xrEngine/CampaignServerClock.h
+index 5d2f957..f99fa25 100644
+--- a/src/xrEngine/CampaignServerClock.h
++++ b/src/xrEngine/CampaignServerClock.h
+@@ -11,8 +11,9 @@
+ //
+ // One tick, in order:
+ //   1. advance Device frame and clocks by exactly one tick
+-//   2. Device.seqFrame in priority order; with no game persistent object the
+-//      driver runs Engine.Sheduler.Update in the persistent slot (HIGH+1)
++//   2. Device.seqFrame in priority order; the driver runs
++//      Engine.Sheduler.Update in the persistent slot (HIGH+1), because the
++//      campaign server never registers the persistent object's own frame
+ //   3. queued Device.seqParallel jobs, each exactly once
+ //   4. Device.seqFrameMT, run serially on this thread
+ class ENGINE_API CCampaignServerClock
+diff --git a/src/xrEngine/Environment_misc.cpp b/src/xrEngine/Environment_misc.cpp
+index 5d5b477..a8d994d 100644
+--- a/src/xrEngine/Environment_misc.cpp
++++ b/src/xrEngine/Environment_misc.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "x_ray.h"
+ #pragma hdrstop
+ 
+ #include "Environment.h"
+@@ -112,7 +113,11 @@ void CEnvAmbient::SSndChannel::load(CInifile& config, LPCSTR sect)
+ 	for (u32 k = 0; k < cnt; ++k)
+ 	{
+ 		_GetItem(snds, k, tmp);
+-		m_sounds[k].create(tmp, st_Effect, sg_SourceType);
++		// Ambience only; a process with no sound manager skips it.
++		if (::Sound)
++			m_sounds[k].create(tmp, st_Effect, sg_SourceType);
++		else
++			++g_skipped_environment_sounds;
+ 	}
+ }
+ 
+@@ -126,7 +131,10 @@ CEnvAmbient::SEffect* CEnvAmbient::create_effect(CInifile& config, LPCSTR id)
+ 	result->wind_gust_factor = config.r_float(id, "wind_gust_factor");
+ 
+ 	if (config.line_exist(id, "sound"))
+-		result->sound.create(config.r_string(id, "sound"), st_Effect, sg_SourceType);
++		if (::Sound)
++			result->sound.create(config.r_string(id, "sound"), st_Effect, sg_SourceType);
++		else
++			++g_skipped_environment_sounds;
+ 
+ 	if (config.line_exist(id, "wind_blast_strength"))
+ 	{
+diff --git a/src/xrEngine/IGame_Persistent.cpp b/src/xrEngine/IGame_Persistent.cpp
+index 38a21b6..d8dcc4b 100644
+--- a/src/xrEngine/IGame_Persistent.cpp
++++ b/src/xrEngine/IGame_Persistent.cpp
+@@ -41,6 +41,7 @@ IGame_Persistent::IGame_Persistent()
+ 	m_pGShaderConstants = new ShadersExternalData(); //--#SM+#--
+ 
+ 	m_pMainMenu = NULL;
++	m_textures_prefetch_config = NULL;
+ 
+ 	PerlinNoise1D = xr_new<CPerlinNoise1D>(Random.randI(0, 0xFFFF));
+ 	PerlinNoise1D->SetOctaves(2);
+@@ -71,7 +72,6 @@ IGame_Persistent::~IGame_Persistent()
+ #endif
+ 	xr_delete(m_pGShaderConstants); //--#SM+#--
+ 
+-	VERIFY(m_textures_prefetch_config);
+ 	CInifile::Destroy(m_textures_prefetch_config);
+ 	m_textures_prefetch_config = 0;
+ }
+diff --git a/src/xrEngine/Rain.cpp b/src/xrEngine/Rain.cpp
+index 82a5745..a2d754c 100644
+--- a/src/xrEngine/Rain.cpp
++++ b/src/xrEngine/Rain.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "x_ray.h"
+ #pragma once
+ 
+ #include "Rain.h"
+@@ -44,7 +45,11 @@ CEffect_Rain::CEffect_Rain()
+ {
+ 	state = stIdle;
+ 
+-	snd_Ambient.create("ambient\\rain", st_Effect, sg_Undefined);
++	// Ambience only; a process with no sound manager skips it.
++	if (::Sound)
++		snd_Ambient.create("ambient\\rain", st_Effect, sg_Undefined);
++	else
++		++g_skipped_environment_sounds;
+ 	rain_volume = 0.0f;
+ 
+ 	RainPerlin = xr_new<CPerlinNoise1D>(Random.randI(0, 0xFFFF));
+@@ -69,7 +74,8 @@ CEffect_Rain::CEffect_Rain()
+ CEffect_Rain::~CEffect_Rain()
+ {
+ 	xr_delete(RainPerlin);
+-	snd_Ambient.destroy();
++	if (::Sound)
++		snd_Ambient.destroy();
+ 	rain_volume = 0.0f;
+ 
+ 	// Cleanup
+diff --git a/src/xrEngine/Render.h b/src/xrEngine/Render.h
+index ead1400..78121e8 100644
+--- a/src/xrEngine/Render.h
++++ b/src/xrEngine/Render.h
+@@ -249,6 +249,7 @@ public:
+ 		u32 skipped_shaders;
+ 		u32 skipped_geometry;
+ 		u32 skipped_buffers;
++		u32 skipped_textures;
+ 	};
+ 	virtual bool cpu_models_create(void (*registrar)(IRenderVisual*)) { return false; }
+ 	virtual void cpu_models_destroy() {}
+diff --git a/src/xrEngine/thunderbolt.cpp b/src/xrEngine/thunderbolt.cpp
+index 1e00def..e55fdd0 100644
+--- a/src/xrEngine/thunderbolt.cpp
++++ b/src/xrEngine/thunderbolt.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "x_ray.h"
+ #pragma once
+ 
+ #ifndef _EDITOR
+@@ -30,7 +31,8 @@ SThunderboltDesc::~SThunderboltDesc()
+ 	m_GradientCenter->m_pFlare->DestroyShader();
+ 	//m_GradientTop.hShader.destroy ();
+ 	//m_GradientCenter.hShader.destroy();
+-	snd.destroy();
++	if (::Sound)
++		snd.destroy();
+ 
+ 	xr_delete(m_GradientTop);
+ 	xr_delete(m_GradientCenter);
+@@ -80,7 +82,14 @@ void SThunderboltDesc::load(CInifile& pIni, shared_str const& sect)
+ 
+ 	// sound
+ 	m_name = pIni.r_string(sect, "sound");
+-	if (m_name && m_name[0]) snd.create(m_name, st_Effect, sg_Undefined);
++	if (m_name && m_name[0])
++	{
++		// Ambience only; a process with no sound manager skips it.
++		if (::Sound)
++			snd.create(m_name, st_Effect, sg_Undefined);
++		else
++			++g_skipped_environment_sounds;
++	}
+ }
+ 
+ //----------------------------------------------------------------------------------------------
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index e8466b6..f78e07d 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -952,6 +952,9 @@ void foo()
+ 
+ ENGINE_API bool g_dedicated_server = false;
+ ENGINE_API bool g_campaign_server = false;
++// Environment ambience sounds (rain, thunder, ambient beds and effects) not
++// created because the process has no sound manager.
++ENGINE_API u32 g_skipped_environment_sounds = 0;
+ 
+ #ifdef XR_CAMPAIGN_SERVER
+ #if defined(NO_SINGLE) || defined(DEDICATED_SERVER_ONLY) || defined(DEDICATED_SERVER)
+@@ -1131,6 +1134,70 @@ bool RunCampaignModelFixture(LPCSTR command_line)
+         stats.skipped_geometry != 0 && stats.skipped_buffers != 0;
+ }
+ 
++// S02-T05a: the real game persistent object. LALib comes first, as in the
++// native Startup; the persistent object's own frame is presentation work and
++// is never registered, because the frame driver owns its slot. Its app start
++// keeps the environment data and skips the UI and menu (campaign branch in
++// CGamePersistent::OnAppStart).
++bool StartCampaignPersistent()
++{
++    LALib.OnCreate();
++    g_pGamePersistent = (IGame_Persistent*)NEW_INSTANCE(CLSID_GAME_PERSISTANT);
++    if (!g_pGamePersistent)
++    {
++        LALib.OnDestroy();
++        return false;
++    }
++    Device.seqFrame.Remove(g_pGamePersistent);
++    g_pGamePersistent->OnAppStart();
++    return true;
++}
++
++void StopCampaignPersistent()
++{
++    g_pGamePersistent->OnAppEnd();
++    DEL_INSTANCE(g_pGamePersistent);
++    LALib.OnDestroy();
++}
++
++// The environment data loaded by app start, and the game parameters the
++// client's load command would set for the fixture save.
++bool RunCampaignPersistentFixture()
++{
++    CEnvironment& env = g_pGamePersistent->Environment();
++    u32 descriptors = 0;
++    for (const auto& cycle : env.WeatherCycles)
++        descriptors += u32(cycle.second.size());
++    for (const auto& effect : env.WeatherFXs)
++        descriptors += u32(effect.second.size());
++    u32 sun_hours = 0;
++    for (const Fvector2& hp : env.sun_hp)
++        if (hp.x != 0.f || hp.y != 0.f)
++            ++sun_hours;
++
++    LPCSTR options = "player - autosave/single/alife/load";
++    g_pGamePersistent->PreStart(options);
++    g_pGamePersistent->Start(options);
++    const IGame_Persistent::params& p = g_pGamePersistent->m_game_params;
++    const bool params_ok = !xr_strcmp(p.m_game_or_spawn, "player - autosave") &&
++        !xr_strcmp(p.m_game_type, "single") && !xr_strcmp(p.m_alife, "alife") &&
++        !xr_strcmp(p.m_new_or_load, "load") && g_pGamePersistent->GameType() == (u32(1) << 0); // eGameIDSingle
++    Msg("S02-T05a persistent params save=%s type=%s alife=%s mode=%s game_type=%u",
++        p.m_game_or_spawn, p.m_game_type, p.m_alife, p.m_new_or_load, g_pGamePersistent->GameType());
++    g_pGamePersistent->Disconnect();
++    const bool disconnected = g_pGamePersistent->GameType() == 0;
++
++    IRender_interface::CpuModelStats stats = {};
++    ::Render->cpu_models_stats(stats);
++    Msg("S02-T05a environment weather_cycles=%u weather_effects=%u descriptors=%u ambients=%u sun_hours=%u "
++        "main_menu=%d skipped_textures=%u skipped_shaders=%u skipped_environment_sounds=%u device_absent=%d",
++        u32(env.WeatherCycles.size()), u32(env.WeatherFXs.size()), descriptors, u32(env.Ambients.size()),
++        sun_hours, g_pGamePersistent->m_pMainMenu ? 1 : 0, stats.skipped_textures, stats.skipped_shaders,
++        g_skipped_environment_sounds, stats.device_absent ? 1 : 0);
++    return !env.WeatherCycles.empty() && descriptors != 0 && sun_hours != 0 && params_ok && disconnected &&
++        stats.device_absent && stats.skipped_textures != 0 && !g_pGamePersistent->m_pMainMenu;
++}
++
+ // The campaign frame driver (S02-T04a): 20 ms ticks and at most 5 catch-up
+ // ticks per wall frame unless -campaign-tick-ms overrides the tick.
+ CCampaignServerClock* g_campaign_clock = nullptr;
+@@ -1492,6 +1559,7 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     return true;
+                 },
+                 {"campaign-registries-stopped", &xrCampaignGameGlobals_Destroy}) &&
++            start("persistent", &StartCampaignPersistent, {"persistent-stopped", &StopCampaignPersistent}) &&
+             start("frame-driver", &StartCampaignFrameDriver, {"frame-driver-stopped", &StopCampaignFrameDriver});
+ 
+         bool fixture_ready = services_ready;
+@@ -1503,6 +1571,13 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 result = 5;
+         }
+         if (fixture_ready)
++        {
++            fixture_ready = RunCampaignPersistentFixture();
++            stage(fixture_ready ? "persistent-fixture-passed" : "persistent-fixture-failed");
++            if (!fixture_ready)
++                result = 8;
++        }
++        if (fixture_ready)
+         {
+             fixture_ready = RunCampaignFrameDriverFixture();
+             stage(fixture_ready ? "frame-driver-fixture-passed" : "frame-driver-fixture-failed");
+@@ -1531,13 +1606,14 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             // CLevel construction loads player HUD models through Render.
+             if (!g_pGamePersistent)
+             {
+-                Msg("S02-T02 blocker=persistent: CEnvironment::OnDeviceCreate creates sky/cloud GPU resources");
+                 stage("persistent-context-required");
+                 result = 3;
+             }
+             else if (!g_pGameLevel)
+             {
+-                Msg("S02-T02 blocker=level: player_hud::load_default needs Render->model_Create");
++                // Next: CLevel (IGame_Level's constructor dumps render resource
++                // usage through Device.m_pRender), then xrServer and ALife (S02-T05b).
++                Msg("S02-T05 blocker=level: CLevel, xrServer and ALife are S02-T05b");
+                 stage("level-context-required");
+                 result = 3;
+             }
+diff --git a/src/xrEngine/x_ray.h b/src/xrEngine/x_ray.h
+index 3d0bf2c..8be6806 100644
+--- a/src/xrEngine/x_ray.h
++++ b/src/xrEngine/x_ray.h
+@@ -75,6 +75,7 @@ public:
+ 
+ extern ENGINE_API CApplication* pApp;
+ extern ENGINE_API bool g_campaign_server;
++extern ENGINE_API u32 g_skipped_environment_sounds;
+ 
+ //Discord
+ struct rpc_info
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index d19ea23..0654662 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -118,10 +118,16 @@ CGamePersistent::~CGamePersistent(void)
+ 	Engine.Event.Handler_Detach(eQuickLoad, this);
+ }
+ 
++extern ENGINE_API bool g_campaign_server;
++
+ // Assigns bone game materials. Also used by the campaign server's CPU model
+-// pool, which has no game persistent object.
++// pool before its game persistent object exists.
++static u32 g_registered_models = 0;
++u32 RegisteredModelCount() { return g_registered_models; }
++
+ void RegisterModelMaterials(IRenderVisual* V)
+ {
++	++g_registered_models;
+ 	// Check types
+ 	switch (V->getType())
+ 	{
+@@ -195,6 +201,15 @@ static void RunClientBoneCapture()
+ 
+ void CGamePersistent::OnAppStart()
+ {
++	// Campaign server (S02-T05a): materials, game globals and the script
++	// engine are its own services, and it has no UI, cursor, fonts or menu.
++	// Keep the environment data and the script wallmark manager.
++	if (g_campaign_server)
++	{
++		__super::OnAppStart();
++		m_pWallmarksManager = xr_new<ScriptWallmarksManager>();
++		return;
++	}
+ 	// load game materials
+ 	GMLib.Load();
+ 	init_game_globals();
+@@ -209,6 +224,12 @@ void CGamePersistent::OnAppStart()
+ 
+ void CGamePersistent::OnAppEnd()
+ {
++	if (g_campaign_server)
++	{
++		xr_delete(m_pWallmarksManager);
++		__super::OnAppEnd();
++		return;
++	}
+ 	if (m_pMainMenu->IsActive())
+ 		m_pMainMenu->Activate(false);
+ 
+@@ -235,7 +256,8 @@ void CGamePersistent::Disconnect()
+ 
+ 	__super::Disconnect();
+ 	// stop all played emitters
+-	::Sound->stop_emitters();
++	if (::Sound)
++		::Sound->stop_emitters();
+ 	m_game_params.m_e_game_type = eGameIDNoGame;
+ }
+ 
+@@ -243,7 +265,10 @@ void CGamePersistent::Disconnect()
+ 
+ void CGamePersistent::OnGameStart()
+ {
+-	__super::OnGameStart();
++	// The campaign server has no loading screen, and prefetching would upload
++	// textures; it only records the game type.
++	if (!g_campaign_server)
++		__super::OnGameStart();
+ 	UpdateGameType();
+ }
+ 
+diff --git a/src/xrGame/xrgame_dll_detach.cpp b/src/xrGame/xrgame_dll_detach.cpp
+index e0644dc..c1ff313 100644
+--- a/src/xrGame/xrgame_dll_detach.cpp
++++ b/src/xrGame/xrgame_dll_detach.cpp
+@@ -146,15 +146,15 @@ class IRenderVisual;
+ extern void RegisterModelMaterials(IRenderVisual* V);
+ 
+ // S02-T03: bone-material registrar for the campaign server's CPU model pool.
+-static u32 g_campaign_registered_models = 0;
++extern u32 RegisteredModelCount();
+ 
+ extern "C" void __cdecl xrCampaignRegisterModel(IRenderVisual* V)
+ {
+ 	RegisterModelMaterials(V);
+-	++g_campaign_registered_models;
+ }
+ 
+-extern "C" u32 __cdecl xrCampaignRegisteredModels() { return g_campaign_registered_models; }
++// Models registered through either the CPU registrar or the game persistent.
++extern "C" u32 __cdecl xrCampaignRegisteredModels() { return RegisteredModelCount(); }
+ 
+ extern "C" void __cdecl xrCampaignGameGlobals_Initialize()
+ {

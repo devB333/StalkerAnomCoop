@@ -156,6 +156,26 @@ binding after the server is ready and a level identity check after the first
 ticks (stage `campaign-identity-passed`). No gameplay behaviour changes.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
+`0022-actor-access-authority.patch` (S03-T02) separates local view access
+from gameplay authority. `xrGame/CampaignActorAccess.{h,cpp}` adds
+`local_view_actor()` (the client's own actor, null on the server), the
+participant lookups (`participant_actor`, `participant_of`,
+`participant_actors`, `nearest_participant_actor`, `context_actor`,
+`dialog_actor`), `sole_participant_actor(purpose)` and the `Actor()`
+compatibility accessor, which on the server returns the one participant
+actor, refuses with none or two, and records every caller; a client gets a
+`Role::Client` registry with its `CLevel`; every actor spawned on the server
+adopts a participant. The registry gains the actor lookups and adoption.
+`xrGame/CampaignMessagePolicy.{h,cpp}` classifies every server message and
+game event; `xrServer::OnMessage`, `Process_event`, `Process_update` and
+`Process_save` refuse state imports, world control and game events from any
+sender but the direct in-process client. Call sites in 54 engine files
+use the explicit lookups (70 files in the patch with the five new ones and the wiring) (the phantom, trader and psy dog aura B21
+sites among them); the inventory is `docs/actor-access-inventory.md`.
+`xrGame/CampaignAuthorityFixture.cpp` adds the `actor-access` and
+`message-policy` unit fixtures and the level authority check
+(`campaign-authority-passed`).
+
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):
 
 ```sh

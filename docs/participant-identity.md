@@ -1,4 +1,4 @@
-# Participant identity and authoritative contexts — S03-T01
+# Participant identity and authoritative contexts — S03-T01, S03-T02
 
 This document defines the identities the co-op server uses, how they map onto
 the engine's transient ids, who may create and resolve them, and the state a
@@ -135,9 +135,86 @@ a bridge session, an unknown session or a server-only scope is refused; the
 server can still act for a detached participant (its actor keeps simulating)
 and cannot act for a released one.
 
-The privileged state-import bridge (E04: `Process_update`/`Process_save`
-assert `bLocal`) is unchanged and remains `ServerInternal` by construction;
-enumerating and closing the remote outcome paths is S03-T02.
+The privileged state-import bridge (E04) is `ServerInternal` by
+construction and, since S03-T02, by policy: see "Local view and gameplay
+access" below.
+
+## Local view and gameplay access — S03-T02
+
+The engine reaches the player two ways: `Actor()` returns `g_actor`
+(`Actor_Network.cpp:60`) and `Level().CurrentEntity()` is the object the
+local input and camera control (`xrEngine/IGame_Level.h:147`). Both are one
+process's one player. The inventory of every use is
+[actor-access-inventory.md](actor-access-inventory.md) (126 `CurrentEntity()`
+sites, 372 `Actor()` sites). `xrGame/CampaignActorAccess.h` replaces them
+with three kinds of access, by purpose:
+
+| Access | Meaning | Server | Client |
+|---|---|---|---|
+| `local_view_actor()` | Presentation: cameras, HUD, post-process effectors, input, the map, pick-ups to draw | null (the server presents nothing, D1) | `g_actor` |
+| `participant_actor(ref)`, `participant_of(object)`, `participant_actors(out)`, `nearest_participant_actor(from)`, `context_actor(context, scope)`, `dialog_actor(speaker1, speaker2)` | Gameplay: the actor a participant holds, the participant holding an actor, every participant actor, the nearest one to a point, the one an authorized action context names, the one among two dialogue speakers | Registry slots → `EngineEntityKey` → live object (`Objects.net_Find`; `g_actor` answers for its own id, which also covers its own `net_Spawn`) | The local player is the only known participant until Stage 4 delivers the roster: `participant_actors` is `{g_actor}`; `participant_actor(ref)` and `context_actor` are `WrongRole` |
+| `sole_participant_actor(purpose)` and `Actor()` | The one participant actor while exactly one exists; null and a counted refusal with none (`NoActor`) or more than one (`Ambiguous`). Never a choice. `Actor()` is the compatibility accessor behind which every unconverted site sits; on the server each distinct caller is recorded by return address and reported with its symbol (`report_actor_access`) | sole actor or null, counted | `g_actor` |
+
+Registry additions: `participant_actor_key`, `participant_of_engine_id`,
+`live_actor_count`, `sole_actor_key`, `context_actor_key`,
+`current_participant`, and `adopt_spawned_actor`: on the server every
+`CActor::net_Spawn` (`OnServer()`) adopts the first participant without a
+live actor, by the spawn packet's id (the object's own is set later in
+`CGameObject::net_Spawn`). The harness binds fixture player 1 before the
+level loads, so the saved actor is held by slot 0 from its spawn; a
+checkpoint restart retires every binding and the re-spawned actor adopts
+the same slot. An actor with no participant to hold it is logged and
+counted (`unadopted`), never held by the global alone.
+
+**The client's registry role (decided).** A normal client creates a
+`Role::Client` registry when its `CLevel` is constructed and deletes it with
+the level (`CampaignActorAccess.cpp`, `ensure_client_registry`). It mints no
+authority, binds nothing, and knows one participant actor: its own. Stage 4
+fills it from the server's roster. A process with no registry at all is a
+client. The campaign server's registry is its identity service and exists
+before the level.
+
+**What was converted** (the inventory has every file): the three B21 sites
+(the phantom hunts the nearest participant actor and goes idle with none;
+the trader faces the nearest; the psy dog aura is the viewer's); dialogue
+info checks use the actor among the speakers; stalker "player on the path"
+and monster distributed-computation checks iterate every participant actor;
+stalker look-at, crows and distant idle sounds use the nearest; "is my
+enemy/hitter the player" became "is it an actor" (a cast of the entity in
+hand); weapons, devices, the PDA and the flashlight use their holder; the
+condition, animation, inventory, trade and dying-entity code use the object
+itself; cameras, HUD, map, effectors and the per-frame camera update use the
+local view actor. Tasks, map-location callbacks, script holders and
+autosave name their single-actor assumption through
+`sole_participant_actor(purpose)` until S03-T05/S08/Stage 7 give them a
+context. The Lua `level.*` bindings (S03-T05) and the player-bound monster
+abilities (S03-T04, S10-T02) are unchanged and go through the counted
+accessor.
+
+### The state-import bridge and remote outcome paths
+
+The engine's server trusts one client with its private state: the direct
+in-process client (`ClientID 1`, `xrServer::create_direct_client`), marked
+`bLocal` and held as `SV_Client`. Before S03-T02 only `Process_update` and
+`Process_save` checked it, as a fatal `R_ASSERT(bLocal)`, and
+`xrServer::OnMessage` dispatched every other message without a sender check
+(`xrServer.cpp:471-770`). `xrGame/CampaignMessagePolicy.h` classifies every
+message and game event and `OnMessage`, `Process_event`, `Process_update`
+and `Process_save` apply it before parsing:
+
+| Class | Messages | From the bridge | From a remote or unknown sender |
+|---|---|---|---|
+| State import | `M_UPDATE` (→ `UPDATE_Read`: health, position, state), `M_SPAWN`, `M_SAVE_PACKET` (→ `load`) | accepted | refused |
+| World control | `M_SAVE_GAME`, `M_LOAD_GAME`, `M_RELOAD_GAME`, `M_CHANGE_LEVEL`, `M_CHANGE_LEVEL_GAME`, `M_SWITCH_DISTANCE` | accepted | refused |
+| Outcome | every `GE_*` game event carried by `M_EVENT`/`M_EVENT_PACK` (hit, die, destroy, ownership, trade, info transfer, zone and weapon state, upgrades, visuals, box status, delayed game events...), `M_GAMEMESSAGE`, `M_PLAYER_FIRE`, statistics, self-rename | accepted | refused (the pack is unwrapped and each inner event refused and counted by type) |
+| Intent | `M_CL_INPUT`, `M_CL_UPDATE`, `M_MOVE_PLAYERS_RESPOND` | accepted | accepted (client-reported input and presentation state; Stage 4 defines the intent protocol) |
+| Connection | handshake, auth, liveness, chat, map/digest, admin, files, secure messaging | accepted | accepted |
+| Server-to-client, unknown | messages only the server sends; unknown types | accepted | refused |
+
+Refusals are counted per type and the first 32 logged with the sender
+(`report_message_policy`). The bridge is `ServerInternal` by policy as well
+as by construction: a remote client can change nothing until Stage 4 gives
+it an intent protocol, and even then only through intents.
 
 ## Ownership table
 
@@ -149,7 +226,8 @@ enumerating and closing the remote outcome paths is S03-T02.
 | `ParticipantRef` | Registry | Server; a client receives its own | Be trusted as the actor of a client intent without the session check |
 | Participant slot state | Registry under `ServerAuthority` | Anyone with the registry | Change hands without a generation bump |
 | Bridge session | Registry (`set_bridge_session` from the live server) | — | Attach as a participant |
-| `g_actor`, `Level().CurrentEntity()` | Engine (unchanged in S03-T01) | Client presentation; server gameplay until S03-T02 replaces it | Decide authority (S03-T02) |
+| `g_actor`, `Level().CurrentEntity()` | Engine | Client presentation only (`local_view_actor()`); the server's `Actor()` is the counted compatibility accessor (S03-T02) | Decide authority; choose a player when two exist |
+| Server message dispatch | `xrServer::OnMessage` with the S03-T02 policy | The bridge client for state imports, world control and game events; remote clients for connection and input messages only | Accept a state import, world control or game event from a remote sender |
 
 ## Files
 
@@ -161,6 +239,15 @@ enumerating and closing the remote outcome paths is S03-T02.
   is null until S03-T02. `CSE_Abstract::m_campaign_entity`
   (`xrServerEntities/xrServer_Object_Base.h`) carries the entity id.
 - `xrGame/CampaignIdentityFixture.{h,cpp}` — the `identity` service of the
-  campaign server (owns the process registry), the four unit fixtures
+  campaign server (owns the process registry and binds fixture player 1
+  before the level), the four unit fixtures
   (`Run-Stage2Smoke.ps1 -Scope Identity`), the bridge binding and the level
   identity check in the GameState smoke.
+- `xrGame/CampaignActorAccess.{h,cpp}` (S03-T02) — the local view, participant
+  and compatibility accessors, the `Actor()` caller audit, the client-role
+  registry lifetime and the spawn adoption hook.
+- `xrGame/CampaignMessagePolicy.{h,cpp}` (S03-T02) — the message and
+  game-event classes, the bridge/remote policy and its counters.
+- `xrGame/CampaignAuthorityFixture.cpp` (S03-T02) — the `actor-access` and
+  `message-policy` unit fixtures and the level authority check
+  (`campaign-authority-passed`).

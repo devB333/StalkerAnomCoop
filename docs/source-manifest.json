@@ -93,6 +93,10 @@
     {
       "path": "patches/engine/0021-participant-identity.patch",
       "sha256": "7c9dd3fe8badb6c2050b23dfe27a992ac9f023e6a53846d7532006cf8537fda2"
+    },
+    {
+      "path": "patches/engine/0022-actor-access-authority.patch",
+      "sha256": "c966e122ae59e38d6def7d07c3b4382c776cf062035002928de59665bfeba61d"
     }
   ],
   "submodules": [

@@ -1,0 +1,226 @@
+# Actor access inventory — S03-T02
+
+Every `Level().CurrentEntity()` and `Actor()` use in `src/xrGame` of
+`builds/build_1/engine-work` (`c57fe5b9` with patches 0001–0021), counted by
+raw grep on 2026-10-18 before the S03-T02 changes: **126** `CurrentEntity()`
+sites in 65 files and **372** `Actor()` sites in 85 files (the G02 carried
+input, B21). Each file is classified and the S03-T02 change recorded. The
+adapters are in [`xrGame/CampaignActorAccess.h`](../builds/build_1/engine-work/src/xrGame/CampaignActorAccess.h);
+the rules are in [participant-identity.md](participant-identity.md#local-view-and-gameplay-access).
+
+Classes:
+
+| Class | Meaning | What S03-T02 did |
+|---|---|---|
+| Gameplay authority | The code decides something in the simulation for "the player" | Converted to an explicit participant lookup: the nearest participant actor, every participant actor, the actor among the dialogue speakers |
+| Self or holder | The object already had its actor (the weapon's holder, the hit entity, the inventory's owner, the dying entity) and reached for the global anyway | Converted to the object's own reference or a cast of the entity in hand; works for any participant's actor |
+| Single-actor assumption | A system with no participant context yet (tasks, map callbacks, script holders, autosave) | `sole_participant_actor(purpose)`: the one participant actor while exactly one exists, else null and a counted, named refusal; the owning task is recorded |
+| Local view | Cameras, HUD, UI, post-process, input, map, render | `local_view_actor()` (the client's own actor, null on the server) or unchanged where the code already compares with the view entity and is null-safe |
+| Script binding | Lua `level.*` and script-object bindings | Unchanged except the three self-acting bindings; S03-T05 owns the context contract; on the server these go through the counted compatibility accessor |
+| Player-bound ability | Monster abilities that target *the* player | Unchanged, recorded as uncovered; on the server `Actor()` returns the sole participant actor and refuses (null) with two; S03-T04 lists them, S10-T02 owns the per-participant form |
+| Debug / MP | DEBUG-only, commented-out, or multiplayer game-mode code | Unchanged |
+
+Totals by class (files may hold sites of several classes; the file's dominant class is used):
+
+| Class | Files | Sites |
+|---|---|---|
+| Gameplay authority: converted to a participant lookup | 8 | 24 |
+| Self or holder: the object already knew its actor | 25 | 98 |
+| Single-actor assumption, named and counted | 4 | 8 |
+| Local view / presentation (client only) | 46 | 153 |
+| Script binding (S03-T05) | 2 | 46 |
+| Player-bound monster ability (S03-T04 / S10-T02) | 13 | 104 |
+| Debug, test or commented-out code | 17 | 42 |
+| Multiplayer game modes (not run by the campaign) | 9 | 17 |
+| The accessors themselves | 3 | 6 |
+| **All** | 127 | 498 |
+
+## Gameplay authority: converted to a participant lookup
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `PhraseScript.cpp` |  | 4 | dialogue info checks and transfers use the actor among the speakers (dialog_actor); a dialogue without an actor speaker falls back to sole_participant_actor, named |
+| `ai/crow/ai_crow.cpp` |  | 2 | look-at and before-look distance use nearest_participant_actor(); crows drift to the nearest participant (one debug/commented line unchanged) |
+| `ai/monsters/control_path_builder.cpp` |  | 2 | player-on-the-path and distributed-computation checks iterate every participant actor |
+| `ai/phantom/phantom.cpp` | 3 |  | B21: the phantom's enemy is now nearest_participant_actor(); with none it faces north, goes idle and is destroyed; every dereference guarded |
+| `ai/stalker/ai_stalker.cpp` | 1 | 7 | look-at and before-look distance use nearest_participant_actor(); crows drift to the nearest participant (one debug/commented line unchanged) |
+| `ai/trader/ai_trader.cpp` | 1 |  | B21: the trader's head faces nearest_participant_actor(); with none the bone callback leaves the transform |
+| `game_cl_single.cpp` |  | 1 | difficulty change applied to every participant actor |
+| `stalker_property_evaluators.cpp` |  | 3 | player-on-the-path and distributed-computation checks iterate every participant actor |
+
+## Self or holder: the object already knew its actor
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `ActorAnimation.cpp` |  | 1 | the condition's/animation's own actor (m_object/this); IK first-person check against the local view actor |
+| `ActorCondition.cpp` |  | 6 | the condition's/animation's own actor (m_object/this); IK first-person check against the local view actor |
+| `Entity.cpp` | 1 | 3 | (see above) |
+| `Flashlight.cpp` |  | 3 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `HudItem.cpp` |  | 3 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `IKLimbsController.cpp` |  | 4 | the condition's/animation's own actor (m_object/this); IK first-person check against the local view actor |
+| `Inventory.cpp` |  | 3 | name translation, faction/rank/reputation refresh and eat callback use the owner itself; the trade callback the actor in the trade; the inventory box uses sole_participant_actor (the box does not record who opened it, S08) |
+| `InventoryBox.cpp` |  | 1 | name translation, faction/rank/reputation refresh and eat callback use the owner itself; the trade callback the actor in the trade; the inventory box uses sole_participant_actor (the box does not record who opened it, S08) |
+| `InventoryOwner.cpp` |  | 7 | name translation, faction/rank/reputation refresh and eat callback use the owner itself; the trade callback the actor in the trade; the inventory box uses sole_participant_actor (the box does not record who opened it, S08) |
+| `WeaponAutomaticShotgun.cpp` |  | 1 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `WeaponFire.cpp` |  | 1 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `WeaponMagazined.cpp` |  | 9 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `WeaponMagazinedWGrenade.cpp` |  | 3 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `WeaponSSRS.cpp` |  | 1 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `WeaponShotgun.cpp` |  | 1 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+| `ai/monsters/basemonster/base_monster_feel.cpp` | 1 | 8 | attack effector on the viewer (local_view_actor()); hit effects on the hit entity itself (cast) |
+| `ai/monsters/controller/controller.cpp` | 5 | 9 | "is my enemy/hitter the player" became "is it an actor" (cast of the enemy, hitter or hit entity); controller stamina hit and control effectors act on that entity; the poltergeist detection sites and the controller debug key stay (ability/debug) |
+| `ai/monsters/dog/dog.cpp` |  | 2 | "is my enemy/hitter the player" became "is it an actor" (cast of the enemy, hitter or hit entity); controller stamina hit and control effectors act on that entity; the poltergeist detection sites and the controller debug key stay (ability/debug) |
+| `ai/monsters/monster_enemy_manager.cpp` |  | 2 | "is my enemy/hitter the player" became "is it an actor" (cast of the enemy, hitter or hit entity); controller stamina hit and control effectors act on that entity; the poltergeist detection sites and the controller debug key stay (ability/debug) |
+| `ai/monsters/poltergeist/poltergeist.cpp` |  | 12 | "is my enemy/hitter the player" became "is it an actor" (cast of the enemy, hitter or hit entity); controller stamina hit and control effectors act on that entity; the poltergeist detection sites and the controller debug key stay (ability/debug) |
+| `ai/monsters/pseudodog/psy_dog.cpp` |  | 3 | "is my enemy/hitter the player" became "is it an actor" (cast of the enemy, hitter or hit entity); controller stamina hit and control effectors act on that entity; the poltergeist detection sites and the controller debug key stay (ability/debug) |
+| `ai/monsters/pseudogigant/pseudo_gigant.cpp` | 1 | 4 | step shake on the viewer; threaten effectors and kick slow-down on the kicked enemy itself |
+| `ai/monsters/states/monster_state_attack_inline.h` |  | 1 | "is my enemy/hitter the player" became "is it an actor" (cast of the enemy, hitter or hit entity); controller stamina hit and control effectors act on that entity; the poltergeist detection sites and the controller debug key stay (ability/debug) |
+| `trade2.cpp` |  | 1 | name translation, faction/rank/reputation refresh and eat callback use the owner itself; the trade callback the actor in the trade; the inventory box uses sole_participant_actor (the box does not record who opened it, S08) |
+| `weaponBM16.cpp` |  | 1 | the item's holder (smart_cast<CActor*>(H_Parent())); the auto-fire key check uses the local view actor; one bDebug line unchanged |
+
+## Single-actor assumption, named and counted
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `GameTask.cpp` |  | 3 | task state/info, map-location-added callbacks, script holder attach and autosave: sole_participant_actor(purpose), refused and counted with two actors; owners S03-T05 (script context), S08 (tasks), Stage 7 (autosave) |
+| `HolderEntityObject.cpp` |  | 2 | task state/info, map-location-added callbacks, script holder attach and autosave: sole_participant_actor(purpose), refused and counted with two actors; owners S03-T05 (script context), S08 (tasks), Stage 7 (autosave) |
+| `autosave_manager.cpp` |  | 1 | task state/info, map-location-added callbacks, script holder attach and autosave: sole_participant_actor(purpose), refused and counted with two actors; owners S03-T05 (script context), S08 (tasks), Stage 7 (autosave) |
+| `map_manager.cpp` |  | 2 | task state/info, map-location-added callbacks, script holder attach and autosave: sole_participant_actor(purpose), refused and counted with two actors; owners S03-T05 (script context), S08 (tasks), Stage 7 (autosave) |
+
+## Local view / presentation (client only)
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `Actor.cpp` | 6 |  | the actor/object asks whether it is the local view or control entity (cameras, HUD pick, On_B_NotCurrentEntity); unchanged (the server adopts no entity, S02-T05d) |
+| `ActorCameras.cpp` | 3 |  | the actor/object asks whether it is the local view or control entity (cameras, HUD pick, On_B_NotCurrentEntity); unchanged (the server adopts no entity, S02-T05d) |
+| `Actor_Feel.cpp` | 1 |  | the actor/object asks whether it is the local view or control entity (cameras, HUD pick, On_B_NotCurrentEntity); unchanged (the server adopts no entity, S02-T05d) |
+| `CustomDevice.cpp` | 1 | 1 | device visibility for the view entity (null-safe) and the holder's climb state (now the holder) |
+| `CustomZone.cpp` | 6 |  | zone sound position relative to the control entity and the DOF pick effect; null-safe; unchanged |
+| `Explosive.cpp` | 1 |  | camera shake, zone post-process and crosshair dispersion: converted to local_view_actor() |
+| `GameObject.cpp` | 1 |  | the actor/object asks whether it is the local view or control entity (cameras, HUD pick, On_B_NotCurrentEntity); unchanged (the server adopts no entity, S02-T05d) |
+| `GameObject.h` | 1 |  | the actor/object asks whether it is the local view or control entity (cameras, HUD pick, On_B_NotCurrentEntity); unchanged (the server adopts no entity, S02-T05d) |
+| `GamePersistent.cpp` |  | 17 | the viewer's camera update each frame: converted to local_view_actor() (none on the server) |
+| `HUDManager.cpp` | 3 |  | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `HUDRecon.cpp` | 1 |  | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `HUDTarget.cpp` |  | 3 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `Level.cpp` | 1 | 3 | render-time debug of the current stalker and the viewer's pick-up drawing (converted to local_view_actor()) |
+| `Level_bullet_manager_firetrace.cpp` | 1 |  | no wallmark on the viewer's own actor; null-safe; unchanged |
+| `Level_input.cpp` | 6 |  | input goes to the local control entity; unchanged |
+| `Level_network_spawn.cpp` | 3 |  | the actor/object asks whether it is the local view or control entity (cameras, HUD pick, On_B_NotCurrentEntity); unchanged (the server adopts no entity, S02-T05d) |
+| `PDA.cpp` | 1 | 9 | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `UIDialogHolder.cpp` | 4 |  | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `UIDosimeter.cpp` |  | 1 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `UIGameCustom.cpp` | 1 |  | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `UIGameSP.cpp` | 2 | 1 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `Weapon.cpp` | 3 | 5 | HUD mode and DOF checks compare the holder with the view entity; unchanged (safemode and callbacks now use the holder) |
+| `WeaponBinoculars.cpp` | 2 |  | HUD mode and DOF checks compare the holder with the view entity; unchanged (safemode and callbacks now use the holder) |
+| `WeaponBinocularsVision.cpp` |  | 4 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `WeaponStatMgunFire.cpp` | 1 |  | HUD mode and DOF checks compare the holder with the view entity; unchanged (safemode and callbacks now use the holder) |
+| `actor_input_handler.cpp` | 1 | 1 | input goes to the local control entity; unchanged |
+| `ai/monsters/pseudodog/psy_dog_aura.cpp` | 1 | 1 | B21: the aura reads the local view actor (null on the server, update_schedule returns); the effector goes on that viewer; the ability is recorded for S03-T04 |
+| `cameralook.cpp` | 1 | 3 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `fire_disp_controller.cpp` | 1 |  | camera shake, zone post-process and crosshair dispersion: converted to local_view_actor() |
+| `map_location.cpp` | 3 | 6 | spots pinned to the viewer, the exit pointer path and the pointer distance: converted to local_view_actor() with null guards; the enemy-visibility check now uses the spot's own actor |
+| `player_hud.cpp` |  | 7 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `player_hud_legs.cpp` |  | 1 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `pp_effector_custom.cpp` |  | 3 | post-process controllers and script effectors apply to the local view actor; with no viewer the effector is dropped (client presentation callbacks are S03-T05) |
+| `script_effector.cpp` |  | 2 | post-process controllers and script effectors apply to the local view actor; with no viewer the effector is dropped (client presentation callbacks are S03-T05) |
+| `ui/UIActorMenu.cpp` |  | 1 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UICharacterInfo.cpp` |  | 4 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UIInventoryUtilities.cpp` | 1 |  | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `ui/UILogsWnd.cpp` |  | 3 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UIMMShniaga.cpp` |  | 2 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UIMapWnd.cpp` | 2 | 1 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UIMpTradeWnd.cpp` | 1 |  | HUD and UI read the view entity; the server UI is inert (B20); unchanged (PDA item logic now uses its holder) |
+| `ui/UIPdaWnd.cpp` |  | 5 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UITalkDialogWnd.cpp` |  | 2 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `ui/UITalkWnd.cpp` |  | 3 | HUD, camera and UI of the local player; the server has no HUD (g_hud null) and an inert UI (B20); unchanged |
+| `visual_memory_manager.cpp` |  | 2 | the HUD visibility indicator is fed for the local view actor only |
+| `zone_effector.cpp` | 2 |  | camera shake, zone post-process and crosshair dispersion: converted to local_view_actor() |
+
+## Script binding (S03-T05)
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `level_script.cpp` | 1 | 38 | level.actor (deprecated) and the level.* camera/effector/statistic bindings; S03-T05 owns the Lua context contract; unchanged, counted on the server |
+| `script_game_object_inventory_owner.cpp` |  | 7 | restore_weapon/hide_weapon/allow_sprint act on the script object itself (error if not an actor); give_game_news and the look-at-point camera stay on Actor() for S03-T05 (news) and are presentation (camera) |
+
+## Player-bound monster ability (S03-T04 / S10-T02)
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `ai/monsters/anti_aim_ability.cpp` |  | 10 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/bloodsucker/bloodsucker.cpp` |  | 8 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/bloodsucker/bloodsucker_alien.cpp` |  | 10 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/bloodsucker/bloodsucker_predator_inline.h` |  | 1 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/bloodsucker/bloodsucker_predator_lite_inline.h` |  | 2 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/bloodsucker/bloodsucker_vampire_execute_inline.h` |  | 7 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/burer/burer.cpp` |  | 8 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/burer/burer_state_attack_shield_inline.h` |  | 1 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/controller/controller_psy_hit.cpp` |  | 34 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/monster_aura.cpp` |  | 11 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/poltergeist/poltergeist_flame_thrower.cpp` |  | 1 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/poltergeist/poltergeist_telekinesis.cpp` |  | 9 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
+| `ai/monsters/scanning_ability_inline.h` | 1 | 1 | scan effect shown to the viewer (local_view_actor()); the scan itself still picks that one player: recorded uncovered for S03-T04/S10-T02 |
+
+## Debug, test or commented-out code
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `Car.cpp` | 2 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `CustomMonster.cpp` | 1 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `CustomRocket.cpp` |  | 2 | #if 0 or commented-out; unchanged |
+| `HelicopterMovementManager.cpp` | 1 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/monsters/basemonster/base_monster.cpp` | 1 | 1 | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/monsters/basemonster/base_monster_debug.cpp` | 2 | 2 | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/monsters/snork/snork.cpp` | 3 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/monsters/snork/snork_jump.cpp` | 1 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/monsters/states/state_test_look_actor_inline.h` | 2 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/monsters/states/state_test_state_inline.h` | 1 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `ai/stalker/ai_stalker_debug.cpp` | 7 | 3 | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `console_commands.cpp` | 2 | 1 | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `enemy_manager.cpp` |  | 1 | #if 0 or commented-out; unchanged |
+| `level_debug.cpp` | 1 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `level_graph_debug.cpp` | 4 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `level_graph_debug2.cpp` | 1 |  | DEBUG-only code, test states or commented-out lines; unchanged (console save command now uses sole_participant_actor) |
+| `sight_manager.cpp` |  | 3 | #if 0 or commented-out; unchanged |
+
+## Multiplayer game modes (not run by the campaign)
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `Spectator.cpp` | 2 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_artefacthunt.cpp` | 2 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_base.cpp` | 1 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_capture_the_artefact.cpp` | 2 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_capturetheartefact_buywnd.cpp` | 1 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_deathmatch.cpp` | 5 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_deathmatch_buywnd.cpp` | 1 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_mp.cpp` | 1 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+| `game_cl_teamdeathmatch.cpp` | 2 |  | multiplayer game modes and the spectator; not run by the campaign (GameID single) |
+
+## The accessors themselves
+
+| File | `CurrentEntity()` | `Actor()` | S03-T02 |
+|---|---|---|---|
+| `Actor.h` | 1 | 1 | the definition: Actor() is now the compatibility accessor (campaign::compat_actor) |
+| `Actor_Network.cpp` | 1 | 2 | the definition: Actor() is now the compatibility accessor (campaign::compat_actor) |
+| `CampaignServerStart.cpp` | 1 |  | the server's own no-view check (S02-T05d) |
+
+## The three B21 sites
+
+| Site | Before | After S03-T02 |
+|---|---|---|
+| `ai/phantom/phantom.cpp:86,149,266` (`CPhantom::net_Spawn`, `SwitchToState_internal`, `UpdateFlyMedia`) | `m_enemy = Level().CurrentEntity()`, dereferenced without a check; faults headless | `m_enemy = campaign::nearest_participant_actor(Position())`; with no participant actor the phantom spawns facing north, logs it, and its fly update switches it to idle, which destroys it; the contact hit and fly media are guarded |
+| `ai/trader/ai_trader.cpp:99` (`CAI_Trader::LookAtActor`, a bone callback) | `Level().CurrentEntity()->Position()`; faults headless | faces `nearest_participant_actor(Position())`; with none the callback returns and the bone keeps its transform |
+| `ai/monsters/pseudodog/psy_dog_aura.cpp:63,130` (`CPsyDogAura::reinit`, `update_schedule`) | guarded by patch 0020: no controlled entity, no aura | `m_actor = campaign::local_view_actor()` (the aura is a post-process on the viewer, driven by what that viewer's actor and the phantoms see of each other); the effector goes on `m_actor`; null on the server, so the guard stays and is now the rule, not a workaround; the ability is on the S03-T04 list |
+
+## Remaining single-actor assumptions on the server
+
+`campaign::report_actor_access` logs every distinct caller of `Actor()` on
+the server with its symbol and call count (the campaign server build ships
+`xrGame.pdb`). The GameState smoke's `campaign-authority-passed` stage and
+the identity service's stop line print the table; the S03-T02 validation
+report records the callers observed in the fixture run. A caller that is
+not a script binding, a presentation site or a recorded ability is a
+defect.

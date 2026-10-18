@@ -76,6 +76,15 @@ camera, the campaign clock pauses emitters, and hearing counters
 (`IGame_Level::snd_Stats`/`snd_Trace`, `CSoundMemoryManager::s_feel_calls`)
 feed the shared hearing fixture (`xrGame/CampaignHearingCapture.{h,cpp}`, stage
 `campaign-hearing-passed`, client flag `-s02-hearing-capture`).
+`0015-actor-binder-diagnostics.patch` (S02-T06) makes the script binder's
+exception handling visible: xrGame has no C++ exceptions, so its `catch (...)`
+blocks caught native faults and deleted the Lua binder silently; the scheduled
+update now uses an SEH filter that logs the fault with symbols (dbghelp) and
+the other catches log the object and phase. `ActorMenu.get_*` and
+`grab_menu_mode` return nil / `mmUndefined` with no game UI instead of
+dereferencing null; `CActor::s_schedule_updates` counts actor scheduled
+updates; the campaign smoke's tick report prints the actor's scheduling and
+Lua binder state (`S02-T06 actor …`). The client's behaviour is unchanged.
 Export later patches with `python3 tools/export-engine-patch.py <name> <check-number>`.
 
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):

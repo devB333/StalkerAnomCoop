@@ -1,0 +1,261 @@
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index 9634ba6..00d2da8 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -1771,8 +1771,11 @@ void CActor::set_state_box(u32 mstate)
+ 		character_physics_support()->movement()->ActivateBox(0, true);
+ }
+ 
++u32 CActor::s_schedule_updates = 0;
++
+ void CActor::shedule_Update(u32 DT)
+ {
++	++s_schedule_updates;
+ 	setSVU(OnServer());
+ 	//.	UpdateInventoryOwner			(DT);
+ 
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 69818b5..f077d72 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -120,6 +120,9 @@ public:
+ 	virtual void RenderCamAttached();
+ 
+ 	virtual void shedule_Update(u32 T);
++	// S02-T06: scheduled updates of any actor since the module loaded (the
++	// campaign smoke reports it with the actor's Lua binder state).
++	static u32 s_schedule_updates;
+ 	virtual void UpdateCL();
+ 
+ 	virtual void OnEvent(NET_Packet& P, u16 type);
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+index 1e222c6..d9bb10c 100644
+--- a/src/xrGame/CampaignServerStart.cpp
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -29,6 +29,7 @@
+ #include "inventory_item.h"
+ #include "../xrphysics/iphworld.h"
+ #include "../xrEngine/CustomHUD.h"
++#include "../xrEngine/Engine.h"
+ #include "../xrEngine/x_ray.h"
+ #include "../xrEngine/IGame_Persistent.h"
+ #include "../xrEngine/device.h"
+@@ -241,5 +242,41 @@ extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks)
+ 			se_actor ? se_actor->o_Position.z : 0.f, actor->getEnabled() ? 1 : 0, actor->Local() ? 1 : 0);
+ 	else
+ 		Msg("! S02-T05d no actor object");
++	if (actor)
++	{
++		// S02-T06: the actor's scheduling and Lua binder state. bind_stalker's
++		// actor_binder sets bCheckStart in net_spawn and clears it in its first
++		// update, which also sets db.actor.afterFirstUpdate.
++		CActor* mutable_actor = const_cast<CActor*>(actor);
++		// The scheduler keeps no public membership query; shedule_Needed is
++		// what it tests before each dispatch.
++		const bool scheduled = mutable_actor->shedule_Needed();
++		const bool binder = mutable_actor->object() != nullptr;
++		LPCSTR db_actor = "no-db";
++		LPCSTR after_first = "?";
++		LPCSTR check_start = "no-binder";
++		luabind::object globals = luabind::get_globals(ai().script_engine().lua());
++		luabind::object db = globals["db"];
++		if (db.type() == LUA_TTABLE)
++		{
++			luabind::object lua_actor = db["actor"];
++			db_actor = lua_actor.type() == LUA_TNIL ? "nil" : "set";
++			if (lua_actor.type() != LUA_TNIL)
++			{
++				luabind::object flag = lua_actor["afterFirstUpdate"];
++				after_first = flag.type() == LUA_TNIL ? "nil" : (luabind::object_cast<bool>(flag) ? "true" : "false");
++			}
++			luabind::object lua_binder = db["actor_binder"];
++			if (lua_binder.type() != LUA_TNIL)
++			{
++				luabind::object flag = lua_binder["bCheckStart"];
++				check_start = flag.type() == LUA_TNIL ? "nil" : (luabind::object_cast<bool>(flag) ? "true" : "false");
++			}
++		}
++		Msg("S02-T06 actor schedule_needed=%d t_min=%u t_max=%u schedule_updates=%u processing=%d binder=%d "
++			"db_actor=%s after_first_update=%s binder_check_start=%s",
++			scheduled ? 1 : 0, u32(actor->shedule.t_min), u32(actor->shedule.t_max), CActor::s_schedule_updates,
++			mutable_actor->processing_enabled() ? 1 : 0, binder ? 1 : 0, db_actor, after_first, check_start);
++	}
+ 	return objects != 0 && actors == 1 && actor && actor->g_Alive() && steps != 0 && no_view;
+ }
+diff --git a/src/xrGame/script_binder.cpp b/src/xrGame/script_binder.cpp
+index 3247759..800ceb9 100644
+--- a/src/xrGame/script_binder.cpp
++++ b/src/xrGame/script_binder.cpp
+@@ -19,6 +19,69 @@
+ // comment next string when commiting
+ //#define DBG_DISABLE_SCRIPTS
+ 
++// S02-T06: the binder's try/catch blocks used to delete the Lua binder
++// silently. xrGame builds without C++ exceptions, so catch (...) here catches
++// structured exceptions (an access violation in native code called from Lua),
++// while Lua errors go to the script engine's error callback and never reach
++// it. The scheduled update uses an SEH filter instead, which runs before the
++// stack unwinds and so can name the faulting native function and its callers.
++#include <DbgHelp.h>
++#pragma comment(lib, "dbghelp.lib")
++
++static void log_binder_symbol(LPCSTR prefix, void* address)
++{
++	static bool initialized = false;
++	HANDLE process = GetCurrentProcess();
++	if (!initialized)
++	{
++		SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
++		SymInitialize(process, NULL, TRUE);
++		initialized = true;
++	}
++	char buffer[sizeof(SYMBOL_INFO) + 512];
++	ZeroMemory(buffer, sizeof(buffer));
++	SYMBOL_INFO* symbol = (SYMBOL_INFO*)buffer;
++	symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
++	symbol->MaxNameLen = 511;
++	DWORD64 displacement = 0;
++	IMAGEHLP_LINE64 line;
++	ZeroMemory(&line, sizeof(line));
++	line.SizeOfStruct = sizeof(line);
++	DWORD line_displacement = 0;
++	const bool have_symbol = SymFromAddr(process, (DWORD64)address, &displacement, symbol) != FALSE;
++	const bool have_line = SymGetLineFromAddr64(process, (DWORD64)address, &line_displacement, &line) != FALSE;
++	Msg("%s %p %s+0x%I64x %s(%u)", prefix, address, have_symbol ? symbol->Name : "?", displacement,
++		have_line ? line.FileName : "", have_line ? line.LineNumber : 0);
++}
++
++static void report_binder_exception(CScriptBinder* binder, LPCSTR phase)
++{
++	CGameObject* object = smart_cast<CGameObject*>(binder);
++	Msg("! CScriptBinder::%s: native exception in the script binder of %s, binder cleared", phase,
++		object ? *object->cName() : "?");
++}
++
++static LONG binder_exception_filter(CScriptBinder* binder, LPCSTR phase, _EXCEPTION_POINTERS* info)
++{
++	CGameObject* object = smart_cast<CGameObject*>(binder);
++	Msg("! CScriptBinder::%s: native exception 0x%08X in the script binder of %s, binder cleared", phase,
++		u32(info->ExceptionRecord->ExceptionCode), object ? *object->cName() : "?");
++	log_binder_symbol("!   fault at", info->ExceptionRecord->ExceptionAddress);
++	void* frames[40];
++	const USHORT count = CaptureStackBackTrace(0, 40, frames, NULL);
++	for (USHORT i = 0; i < count; ++i)
++		log_binder_symbol("!   frame", frames[i]);
++	ai().script_engine().print_stack();
++	return EXCEPTION_EXECUTE_HANDLER;
++}
++
++#define BINDER_CATCH(phase) \
++	catch (...) \
++	{ \
++		report_binder_exception(this, phase); \
++		clear(); \
++	}
++
+ CScriptBinder::CScriptBinder()
+ {
+ 	init();
+@@ -60,10 +123,7 @@ void CScriptBinder::reinit()
+ 		{
+ 			m_object->reinit();
+ 		}
+-		catch (...)
+-		{
+-			clear();
+-		}
++		BINDER_CATCH("reinit")
+ 	}
+ #ifdef DEBUG_MEMORY_MANAGER
+ 	if (g_bMEMO) {
+@@ -106,6 +166,7 @@ void CScriptBinder::reload(LPCSTR section)
+ 	}
+ 	catch (...)
+ 	{
++		report_binder_exception(this, "reload(bind)");
+ 		clear();
+ 		return;
+ 	}
+@@ -116,10 +177,7 @@ void CScriptBinder::reload(LPCSTR section)
+ 		{
+ 			m_object->reload(section);
+ 		}
+-		catch (...)
+-		{
+-			clear();
+-		}
++		BINDER_CATCH("reload")
+ 	}
+ #endif
+ #ifdef DEBUG_MEMORY_MANAGER
+@@ -146,10 +204,7 @@ BOOL CScriptBinder::net_Spawn(CSE_Abstract* DC)
+ 		{
+ 			return ((BOOL)m_object->net_Spawn(object));
+ 		}
+-		catch (...)
+-		{
+-			clear();
+-		}
++		BINDER_CATCH("net_Spawn")
+ 	}
+ 
+ #ifdef DEBUG_MEMORY_MANAGER
+@@ -202,11 +257,11 @@ void CScriptBinder::shedule_Update(u32 time_delta)
+ {
+ 	if (m_object)
+ 	{
+-		try
++		__try
+ 		{
+ 			m_object->shedule_Update(time_delta);
+ 		}
+-		catch (...)
++		__except (binder_exception_filter(this, "shedule_Update", GetExceptionInformation()))
+ 		{
+ 			clear();
+ 		}
+diff --git a/src/xrGame/ui/UIActorMenu_script.cpp b/src/xrGame/ui/UIActorMenu_script.cpp
+index 2830628..30352cf 100644
+--- a/src/xrGame/ui/UIActorMenu_script.cpp
++++ b/src/xrGame/ui/UIActorMenu_script.cpp
+@@ -34,29 +34,35 @@
+ 
+ using namespace luabind;
+ 
++// S02-T06: the campaign server has no game UI (no HUD, no view actor), so
++// these script accessors return nil there instead of dereferencing a null
++// CurrentGameUI(). The installed scripts already test the result
++// (actor_effects.script: `if (maingameui and maingameui.UIZoneMap)`); an
++// unguarded caller now raises a logged Lua error instead of a silent native
++// fault that deleted the actor's script binder.
+ CUIActorMenu* GetActorMenu()
+ {
+-	return &CurrentGameUI()->GetActorMenu();
++	return CurrentGameUI() ? &CurrentGameUI()->GetActorMenu() : nullptr;
+ }
+ 
+ CUIPdaWnd* GetPDAMenu()
+ {
+-	return &CurrentGameUI()->GetPdaMenu();
++	return CurrentGameUI() ? &CurrentGameUI()->GetPdaMenu() : nullptr;
+ }
+ 
+ CUIMainIngameWnd* GetMainGameMenu()
+ {
+-	return CurrentGameUI()->UIMainIngameWnd;
++	return CurrentGameUI() ? CurrentGameUI()->UIMainIngameWnd : nullptr;
+ }
+ 
+ CUIMessagesWindow* GetMessagesMenu()
+ {
+-	return CurrentGameUI()->m_pMessagesWnd;
++	return CurrentGameUI() ? CurrentGameUI()->m_pMessagesWnd : nullptr;
+ }
+ 
+ u8 GrabMenuMode()
+ {
+-	return (u8)(CurrentGameUI()->GetActorMenu().GetMenuMode());
++	return CurrentGameUI() ? (u8)(CurrentGameUI()->GetActorMenu().GetMenuMode()) : (u8)mmUndefined;
+ }
+ 
+ CScriptGameObject* CUIActorMenu::GetCurrentItemAsGameObject()

@@ -65,6 +65,10 @@
     {
       "path": "patches/engine/0014-cpu-sound-events.patch",
       "sha256": "3837ed500c8a1c04d0b4130e01560498768306731860b2d14363c4514683eea1"
+    },
+    {
+      "path": "patches/engine/0015-actor-binder-diagnostics.patch",
+      "sha256": "6e0491d4527fbf0bd61b0cfb4b7d9e1fb4c428f80017326d69734fe0c1096c61"
     }
   ],
   "submodules": [

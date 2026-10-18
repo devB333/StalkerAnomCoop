@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — S02-T03 complete (T03d collision); next S02-T04b (physics stepping, falling body)
 
 ## Next session: start S02-T04b

@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — 2026-10-17, S02-T02 paused
 
 The user had to leave and asked for a note so work can resume later. Stop here.

@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — S02-T05a/b complete; next S02-T05d (level load, spawn, first tick)
 
 ## Next session: start S02-T05d

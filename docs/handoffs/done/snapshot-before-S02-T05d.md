@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — S02-T03a–c and S02-T04a complete; level work next
 
 G02 is In Progress. No headless gameplay, level, ALife tick or physics step has run.

@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — S02-T02 complete; next S02-T03/T04
 
 S02-T02 is **Completed** under the user's 2026-10-18 scope decision. Moving the

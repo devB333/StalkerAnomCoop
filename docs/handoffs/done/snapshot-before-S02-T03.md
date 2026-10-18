@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — settings fixed; Core smoke passes
 
 The resumed request was to fix settings loading and rerun the CPU/graphics

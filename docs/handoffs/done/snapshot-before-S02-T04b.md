@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — S02-T05d complete; next S02-T03d (skeleton collision, hit picking, physics shell)
 
 ## Next session: start S02-T03d

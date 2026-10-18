@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — S02-T04b complete (native physics stepping); next S02-T04c (objects, AI, ALife, activity policy)
 
 ## Next session: start S02-T04c

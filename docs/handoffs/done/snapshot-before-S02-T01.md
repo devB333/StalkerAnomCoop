@@ -1,3 +1,5 @@
+## Complete
+
 ## New-session handoff — 2026-10-17
 
 The user explicitly requested stopping exploration and starting a new session.

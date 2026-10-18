@@ -1,3 +1,5 @@
+## Complete
+
 # Session handoff — 2026-10-17, S02-T01 complete
 
 The user resumed `plan.md` at S02-T01. That source-mapping task is **Completed**;

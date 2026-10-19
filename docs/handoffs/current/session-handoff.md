@@ -1,126 +1,86 @@
-# Session handoff — S03-T04 in progress (participant-aware ALife activation); next: build, fixture, smoke
+# Session handoff — S03-T04 complete (participant activation and awareness); next: S03-T05
 
 ## State at the end of the session (2026-10-19)
 
-**S03-T04 is In Progress.** The engine change is written but **not built and
-not run**; it is exported as a work-in-progress patch 0024
-(`0024-participant-activation-wip.patch`, `481d9bec…6162`, 17 files;
-series reconstruction `patch-check-25b` applies cleanly). Nothing in this
-patch has evidence yet. The in-progress report is
-[S03-T04](../../validation/S03-T04.md); it holds the source reading and the
-design, no results.
+Stage 3 / G03 in progress. **S03-T01..T04 Completed.** S03-T05 Not Started.
 
-What is in patch 0024 (all in `builds/build_1/engine-work/src/xrGame`):
+**S03-T04** ([report](../../validation/S03-T04.md), patch
+`0024-participant-activation.patch`, `f70dd04d…513c`, 24 files,
+`patch-check-27b`, 191 files byte-equal; it replaced the unbuilt `-wip`
+patch):
 
-- `alife_switch_manager.{h,cpp,_inline.h}`, `alife_update_manager.cpp`: the
-  activation set. `refresh_activation_anchors()` runs at the start of every
-  `CALifeUpdateManager::update()`; on the server it snapshots the server
-  entities of the *alive* participant actors (`o_Position`, the same state
-  the engine measured for the ALife actor); `activation_distance(p)` is the
-  distance to the nearest anchor. On a client, or with no alive participant
-  actor, it is `graph().actor()->o_Position.distance_to(p)` read live, so
-  the normal client is unchanged.
-- The five switch rules now call `activation_distance`:
-  `alife_dynamic_object.cpp` (`try_switch_online/offline`),
-  `alife_online_offline_group.cpp` (both loops), `alife_group_abstract.cpp`.
-  The DEBUG-only `[LSS]` messages in `alife_switch_manager.cpp:111,122` still
-  print the ALife actor; they are not compiled.
-- `CampaignActorAccess.{h,cpp}`: `participant_actor_entities(out)` (the
-  participant actors' `CSE_ALifeCreatureActor` entities in slot order; empty
-  on a client).
-- Awareness: `ai/monsters/monster_enemy_memory.cpp` (the two `g_actor`
-  "the player watches me" rules run over `participant_actors()`),
-  `ai/stalker/ai_stalker.cpp:1694` (`LookAtActor` tests the nearest
-  participant it already chose), `bloodsucker_predator_inline.h` (no
-  predator state while any participant watches).
-- Player-bound abilities made explicit no-ops while `Actor()` refuses (two
-  participants on the server), each marked `S03-T04` and to be listed as
-  uncovered for S10-T02: `anti_aim_ability.cpp` (`check_update_condition`
-  dereferenced `Actor()` after a `g_actor` test and would fault),
-  `controller_psy_hit.cpp` (`check_start_conditions`,
-  `check_conditions_final`), `burer.cpp` (`StaminaHit`,
-  `actor_is_reloading_weapon`), `poltergeist_telekinesis.cpp`
-  (`update_schedule`), `monster_aura.cpp` (`calculate` returns 0).
-  Not touched (comparisons or states reachable only with the actor as the
-  enemy, recorded in the report): bloodsucker vampire/alien, poltergeist
-  flame thrower (null-safe), burer shield, scanning, psy-dog aura, phantom,
-  pseudogigant, snork (DEBUG).
+- The ALife switch rules measure from the nearest alive participant actor
+  (`CALifeSwitchManager::refresh_activation_anchors` / `activation_distance`,
+  `alife_switch_manager.cpp:60-89`, five call sites). Rules recorded in
+  [participant identity](../../participant-identity.md#activation-and-awareness--s03-t04).
+- `CampaignActivationFixture.cpp` (stage `campaign-activation-passed`, exit
+  34) passes 35 checks in smoke-128, 129 (campaign-110) and smoke-132
+  (campaign-111, final source); all 63 GameState stages. With the actors
+  1,098 m apart: 0 rule violations over 1,061 objects, every switchable object
+  near actor 2 online, nothing near actor 1 dropped, the far area offline on
+  return; a boar takes each actor as its enemy; a detached participant's
+  retained actor keeps its area.
+- Cost: +44 online objects, object update 0.78 → 0.95 ms/tick; the rule
+  itself +1.3 ns/object.
+- `Actor()->` sweep of `xrGame/ai/`: three more faults guarded
+  (`poltergeist.cpp:334` participant-aware, vampire attack and alien vision
+  no-ops). These three are compile- and regression-checked only (no
+  poltergeist or bloodsucker in the fixture).
+- smoke-130 (Identity) and client-27/28 pass.
 
-## Next steps (in order)
+## Found this session (open items)
 
-1. **Build**: `Build-Stage2.ps1 -Run campaign-101 -Product Campaign`. Expect
-   compile issues only in the new code; `CSE_ALifeCreatureActor::g_Alive`
-   is on `CSE_ALifeCreatureAbstract` (`xrServer_Objects_ALife_Monsters.h:220`).
-2. **Fixture** `xrGame/CampaignActivationFixture.cpp` (not written yet; the
-   design is in the report): after `campaign-two-actors-passed` (participant
-   2's third actor is alive beside actor 1), phases: baseline (settle until
-   no switch for 50 ticks, then measure 250 ticks: online count, object-list
-   and scheduler counters, `g_level_frame_timing` deltas); separate (teleport
-   actor 2 the way `CScriptGameObject::SetActorPosition` does, to the
-   farthest accessible level vertex found by a breadth-first walk from actor
-   1's vertex; settle; checks: objects within `online_distance` of actor 2
-   and beyond `offline_distance` of actor 1 came online, nothing within
-   `online_distance` of actor 1 went offline, switchable objects beyond
-   `offline_distance` of both are offline, exceptions logged by name);
-   awareness (god mode on, a boar `6 m` from each actor, each boar's
-   `EnemyMan.get_enemy()` becomes its actor within a budget; release them);
-   return (teleport back; the far objects go offline again); disconnect
-   (`detach_session` for session `0x53030002`, the retained actor stays an
-   anchor, level and ALife intact, `attach_session` again). CSV
-   `s03-t04-activation.csv`, stage `campaign-activation-passed`, exit 34,
-   budget `g_campaign_activation_ticks = 5000`. Wire it in `x_ray.cpp` after
-   the two-actor block, declare in `CampaignIdentityFixture.h`, add to
-   `xrGame.vcxproj` (copy the `CampaignTwoActorFixture.cpp` entry) and to
-   the expected stages in `tools/Run-Stage2Smoke.ps1` (line 96) with a
-   capture copy block (line ~161). `switch_distance` on k00_marsh is 750 m
-   (online 675, offline 825; smoke-117 activity meta); if the level cannot
-   separate the actors by more than 825 m, add `-s03-switch-distance` and
-   lower it for the fixture only, restoring it at the end.
-3. **Smoke**: `python3 tools/prepare-stage2-smoke.py smoke-119` then
-   `Run-Stage2Smoke.ps1 -Run smoke-119 -Scope GameState` (G02 regression
-   rule; now 63 stages). Then `Build-Stage2.ps1 -Run client-27 -Product
-   Client` for compile safety of the shared xrGame changes.
-4. **Report and docs**: finish `docs/validation/S03-T04.md` (results, the
-   player-bound ability table, tick cost), add the activation rule to
-   `docs/participant-identity.md` and the new sites to
-   `docs/actor-access-inventory.md`, re-export patch 0024 under its final
-   name (`python3 tools/export-engine-patch.py 0024-participant-activation.patch 26`,
-   remove the `-wip` file and its `series` line and manifest entry first),
-   update `plan.md` §I, snapshot and rewrite this handoff, commit.
-5. **Hearing variation** (S03-T01 open item, on this task's list): in the
-   captures the walked stalker produced footsteps in phase 1 only when its
-   object-handler action was `1272512514` (weapon `19416`, operator 2
-   `eWorldOperatorHide`, smoke-117: 22 `material\human\step` events) and
-   none when it was `1272512521` (operator 9 `eWorldOperatorIdle`, weapon in
-   hands, smoke-114/115: 0 events, holster/draw only in smoke-116). So the
-   footsteps depend on the legs animation the stalker walks with, which
-   depends on whether the planner keeps the rifle out. Next check: whether
-   `[stalker_step_manager]` (`configs/creatures/m_stalker.ltx:6`) lists the
-   weapon-in-hands walk motions; `CStepManager::on_animation_start` disables
-   steps for a motion without params. Not an identity or activation effect.
-6. Carried: S03-T05 inputs and open items are unchanged from the
-   [previous snapshot](../done/snapshot-before-S03-T04-fixture.md).
+1. **Server AI vision has no light.** The render object's luminosity is 0 on
+   the headless server (`LightTrack.cpp:23`, never updated without a render
+   pass); the visibility value scales with it
+   (`visual_memory_manager.cpp:322-328`), so every AI sees as in darkness
+   (30–60× slower). Affects all server AI since Stage 2. Needs a server-side
+   light model (sun/hemisphere from weather and time, sky occlusion from the
+   collision model). **Proposed as a new task; awaiting the user's decision on
+   where it goes in the plan.** Do not substitute a constant.
+2. A server-driven participant's camera keeps its last yaw (the fixture
+   turns it as `SetActorDirection` does); real views arrive with Stage 4.
+3. Hearing-stage `npc_walk_events=0` recurred in 3 of 13 GameState runs
+   (smoke-120, 122, 131). Candidate: `[stalker_step_manager]`
+   (`m_stalker.ltx:6-66`) has walk entries for every direction at index `_0`
+   but only `norm_walk_fwd_1` at index `_1`; next check: log the walked
+   stalker's legs motion name.
+4. Carried unchanged: `EntityId`s across a checkpoint (Stage 7), fixture
+   `PlayerId`s (S04-T04), detached-participant release (S04-T05), dropped
+   script effectors (S03-T05), friendly fire and god mode per participant
+   (Stage 6).
+
+## Next: S03-T05 — native and Lua participant context contract
+
+Inputs already collected (S03-T03 report and the
+[earlier snapshot](../done/snapshot-before-S03-T04-fixture.md)): the
+`se_actor` state gate, the actor binder's `db.actor` globals, the pre-hit
+callback (window, friendly fire, `db.actor` immunities), news to "the" actor,
+the `level.*` gameplay bindings behind null guards, `psActorFlags`.
+First action: inventory the script entry points the fixtures need (start
+from `report_actor_access`'s caller list in smoke-132's server log and the
+S03-T03 script gates), then define the context API.
 
 ## Tools and runs
 
-- Last run names: `campaign-100`, `client-26`, `smoke-118`, `capture-15`,
-  `patch-check-25a/b`. Next: `campaign-101`, `client-27`, `smoke-119`,
-  `capture-16`, patch check `26`.
+- Last run names: `campaign-111`, `client-28`, `smoke-132`, `capture-15`,
+  `patch-check-27a/b`. Next: `campaign-112`, `client-29`, `smoke-133`,
+  `capture-16`, patch check `28`.
 - Run PowerShell scripts with the Windows path in single quotes from bash
   (`-File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Stage2.ps1'`).
 - Smoke: `python3 tools/prepare-stage2-smoke.py <run>` then
   `Run-Stage2Smoke.ps1 -Run <run> -Scope Identity|GameState` (GameState
-  ~5 min; a hearing-stage `npc_walk_events=0` is recorded variation, rerun).
-- Build: `Build-Stage2.ps1 -Run <name> -Product Campaign|Client` (~6 min
-  after a project-file change, ~1.5 min incremental).
-- The campaign clock runs `Device.seqParallel` on the main thread
-  (`CampaignServerClock.cpp:151`), so the ALife update (`mtALife` is on by
-  default) and the activation refresh run on the tick thread.
-- Script files in the archives are cp1251/CRLF; use
-  `python3 tools/xray-db-extract.py grep -g '*.script' <pattern> builds/build_2/test-install/source-client/db/configs/scripts.db0`
-  (`-E` for a regex); configs are in `configs.db0`.
+  ~2.5 min; run it in the background — a crash leaves the process waiting on
+  the crash handler; a hearing-stage `npc_walk_events=0` is the recorded
+  variation, rerun).
+- Build: `Build-Stage2.ps1 -Run <name> -Product Campaign|Client` (~1–3 min
+  incremental, ~4 min for the client).
+- Export: `python3 tools/export-engine-patch.py <name> <check>` appends to
+  `series`; update `docs/source-manifest.json` by hand.
+- Activation fixture options: `-s03-switch-distance <m>`,
+  `-s03-monster-section <section>` (default `boar_normal`).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
 G02 carried limits are unchanged.
-Previous snapshot: [before the S03-T04 fixture](../done/snapshot-before-S03-T04-fixture.md).
+Previous snapshot: [before S03-T05](../done/snapshot-before-S03-T05.md).

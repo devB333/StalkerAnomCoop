@@ -1,4 +1,4 @@
-# Participant identity and authoritative contexts — S03-T01, S03-T02, S03-T03
+# Participant identity and authoritative contexts — S03-T01 to S03-T04
 
 This document defines the identities the co-op server uses, how they map onto
 the engine's transient ids, who may create and resolve them, and the state a
@@ -289,15 +289,61 @@ zone, the engine's own non-creature hit source, after 9 s of server ticks;
 the per-participant form of the gate (and the friendly-fire policy) is
 S03-T05 / Stage 6.
 
-**What is still single-player on the server** (recorded, not hidden): the
-ALife switch manager measures distance from the ALife actor alone
-(`alife_switch_manager.cpp:111,122`; the activation union is S03-T04); the god
+**What is still single-player on the server** (recorded, not hidden): the god
 mode flags `psActorFlags` (`AF_GODMODE`, `AF_GODMODE_RT`) are process-global
 and apply to every actor (the fixture clears and restores them; a
 per-participant form is Stage 6); the `Actor()` compatibility accessor
 refuses while two participant actors live, so the presentation, script and
 ability callers listed by `report_actor_access` get null then (S03-T04,
 S03-T05, S10-T02).
+
+## Activation and awareness — S03-T04
+
+**Activation set.** One level stays active. On the campaign server the ALife
+switch rules measure every object from the nearest **alive participant
+actor**, not from the ALife actor: `CALifeSwitchManager::refresh_activation_anchors`
+snapshots the participant actors' server entity positions at the start of
+each ALife update, and `activation_distance` is the distance to the nearest
+(`alife_switch_manager.cpp:60-89`; the five switch sites in
+`alife_dynamic_object.cpp`, `alife_online_offline_group.cpp`,
+`alife_group_abstract.cpp`). An object near either player stays online; an
+object far from both goes offline; squads use their nearest member. The rules
+are the same as the S02-T04c activity anchors (`CampaignServerStart.cpp:150`):
+
+- a dead or released participant actor contributes nothing;
+- a **detached** participant's retained actor still counts (its slot keeps
+  the actor; releasing it on disconnect is S04-T05);
+- with no alive participant actor the ALife actor is the anchor, the engine's
+  own rule, so the world never loses its anchor;
+- a client never changes: it reads the ALife actor live, as before.
+
+The ALife actor itself (`graph().actor()`, the saved player entity) is
+unchanged; level changes, travel and the surge still use it
+(`alife_update_manager.cpp:181-235,360-368`, Stage 6).
+
+**Awareness.** The monster rules that meant "the player" — a remembered
+dangerous sound while the player watches, the player within feel distance
+while watching — run over every participant actor
+(`monster_enemy_memory.cpp:49-123`); the stalker's `LookAtActor`, the
+bloodsucker predator check and the poltergeist's crow visibility likewise.
+All other enemy selection was already generic (hit, sound and visual memory
+filtered by `CEnemyManager::useful`). A server-driven participant's actor sees
+along its camera, which keeps its last yaw until a client sends a view
+(Stage 4).
+
+**Player-bound abilities** (psy hit, auras, anti-aim, burer stamina hit,
+poltergeist telekinesis and detection, bloodsucker vampire and alien vision)
+are explicit no-ops while `Actor()` refuses; the table is in
+[S03-T04](validation/S03-T04.md); their per-participant form is S10-T02.
+
+**Measured cost** (k00_marsh, actors 1,098 m apart): 1,005 → 1,049 objects
+online, object-update time 0.78 → 0.95 ms per tick; the rule itself is 1.3 ns
+more per object per pass and 115 ns per refresh. The cost of a second player
+is its area's objects.
+
+**Server AI vision** has no light: the render object's luminosity is 0 on the
+headless server, so AI sees as in darkness (S03-T04 Limits). Not a
+participant effect; a server light model is an open item.
 
 ## Ownership table
 
@@ -342,3 +388,8 @@ S03-T05, S10-T02).
   counters; `assign_participant_actor` is in `CampaignActorAccess.{h,cpp}`.
 - `xrGame/CampaignTwoActorFixture.cpp` (S03-T03) — the two-actor level
   fixture (`campaign-two-actors-passed`).
+- `xrGame/alife_switch_manager.{h,cpp,_inline.h}` (S03-T04) — the activation
+  anchors and `activation_distance`; `participant_actor_entities` is in
+  `CampaignActorAccess.{h,cpp}`.
+- `xrGame/CampaignActivationFixture.cpp` (S03-T04) — the activation and
+  awareness level fixture (`campaign-activation-passed`).

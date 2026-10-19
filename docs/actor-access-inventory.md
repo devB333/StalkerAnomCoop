@@ -163,6 +163,24 @@ Totals by class (files may hold sites of several classes; the file's dominant cl
 | `ai/monsters/poltergeist/poltergeist_telekinesis.cpp` |  | 9 | player-bound monster abilities (psy hit/tube, telekinesis, flames, auras, anti-aim, vampire/alien vision, gravi/shield): they target the one player; on the server Actor() is the sole participant actor and refuses with two; recorded uncovered for S03-T04 (list) and S10-T02 (per-participant form) |
 | `ai/monsters/scanning_ability_inline.h` | 1 | 1 | scan effect shown to the viewer (local_view_actor()); the scan itself still picks that one player: recorded uncovered for S03-T04/S10-T02 |
 
+### Resolved in S03-T04
+
+Every row above is now either an explicit no-op while `Actor()` refuses, a
+participant loop, or unreached on the server; the per-ability table is in
+[S03-T04](validation/S03-T04.md#player-bound-ability-table-for-s10-t02). New
+or changed sites:
+
+| Site | Was | Now |
+|---|---|---|
+| `alife_dynamic_object.cpp:160,180`, `alife_online_offline_group.cpp:226,263`, `alife_group_abstract.cpp:164` | distance to the ALife actor | `activation_distance`: the nearest alive participant actor on the server |
+| `ai/monsters/monster_enemy_memory.cpp:49-123` | `g_actor` watches / is near | every participant actor |
+| `ai/stalker/ai_stalker.cpp:1694` | `Actor()` after choosing the nearest participant | the chosen participant |
+| `ai/monsters/bloodsucker/bloodsucker_predator_inline.h:97` | `Actor()->memory()` (fault with two) | any participant watching |
+| `ai/monsters/poltergeist/poltergeist.cpp:334` | `Actor()->memory()` every `UpdateCL` (fault with two) | any participant watching within 85 m |
+| `ai/monsters/bloodsucker/bloodsucker_vampire_execute_inline.h:194` | any actor enemy, then `Actor()->` (fault) | only when the enemy is `Actor()` |
+| `ai/monsters/bloodsucker/bloodsucker_alien.cpp:223` | `VERIFY(Actor())`, then `Actor()->` | none while `Actor()` refuses |
+| `anti_aim_ability.cpp:265`, `controller_psy_hit.cpp:59,211`, `burer.cpp:247,539`, `poltergeist_telekinesis.cpp:56`, `monster_aura.cpp:56` | the one player | none while `Actor()` refuses (S10-T02) |
+
 ## Debug, test or commented-out code
 
 | File | `CurrentEntity()` | `Actor()` | S03-T02 |

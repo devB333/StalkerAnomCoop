@@ -103,8 +103,8 @@
       "sha256": "1b69e2dfa5d6888ad4ceffa502cb3e38b20eda8f5aa8f684421eb9a4f036689c"
     },
     {
-      "path": "patches/engine/0024-participant-activation-wip.patch",
-      "sha256": "481d9bec00cc42a1d602ed4aaa968bd70061423739cba52dff6b1f90ece36162"
+      "path": "patches/engine/0024-participant-activation.patch",
+      "sha256": "f70dd04d5faa1f49349e7e25be54a52601e576099850408fd01225a04c7a513c"
     }
   ],
   "submodules": [

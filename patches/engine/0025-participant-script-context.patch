@@ -1,0 +1,3566 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index bdee536..4334697 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1026,6 +1026,10 @@ extern "C" bool __cdecl xrCampaignLevel_ActivationBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_ActivationTick();
+ extern "C" bool __cdecl xrCampaignLevel_ActivationDone();
+ extern "C" bool __cdecl xrCampaignLevel_ActivationEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_ScriptContextTick();
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextDone();
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1320,6 +1324,10 @@ u32 g_campaign_two_actor_ticks = 3000;
+ // sum of its worst cases (three settle caps, two measurement windows, the
+ // follow, awareness, release and detached waits); it normally ends far sooner.
+ u32 g_campaign_activation_ticks = 9000;
++// Tick budget for the script context fixture (S03-T05): 6000 ticks are 120 s,
++// the sum of its worst cases (the deferred wait, the observation, two stage
++// waits and two completion waits); it normally ends far sooner.
++u32 g_campaign_script_context_ticks = 6000;
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -1668,8 +1676,9 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+         if (start("identity", &xrCampaignIdentity_Start, {"identity-stopped", &xrCampaignIdentity_Stop}))
+         {
+             // S03-T02 adds actor-access and message-policy (CampaignAuthorityFixture.cpp).
++            // S03-T05 adds script-context (CampaignScriptContextFixture.cpp).
+             static LPCSTR const fixtures[] = {"engine-id", "slot-reuse", "disconnect-retention", "role-context",
+-                "actor-access", "message-policy"};
++                "actor-access", "message-policy", "script-context"};
+             for (LPCSTR fixture : fixtures)
+             {
+                 const bool ok = xrCampaignIdentity_Fixture(fixture);
+@@ -2226,6 +2235,39 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 34;
+                     }
+                 }
++                if (result == 0)
++                {
++                    // S03-T05: the participant script context: a harmless
++                    // contextual action for both participants, invalid and
++                    // missing contexts, deferred work, and the installed quest
++                    // given to and completed by each participant.
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s03-t05-script-context.csv");
++                    bool ok = xrCampaignLevel_ScriptContextBegin(capture);
++                    const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                    const u32 wall_before = g_campaign_wall.GetElapsed_ms();
++                    if (ok)
++                    {
++                        g_campaign_clock->Resume(wall_before);
++                        while (!xrCampaignLevel_ScriptContextDone() &&
++                            g_campaign_clock->Stats().ticks < ticks_before + g_campaign_script_context_ticks)
++                        {
++                            RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                            xrCampaignLevel_ScriptContextTick();
++                        }
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                    }
++                    const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                    ok = xrCampaignLevel_ScriptContextEnd(ran, ran * g_campaign_clock->TickMs(),
++                             g_campaign_wall.GetElapsed_ms() - wall_before) && ok;
++                    if (ok)
++                        stage("campaign-script-context-passed");
++                    else
++                    {
++                        stage("campaign-script-context-failed");
++                        result = 35;
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index 895702d..c6ef11d 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -33,6 +33,7 @@
+ #include "Actor.h"
+ #include "CampaignActorAccess.h" // S03-T03
+ #include "CampaignActorControl.h"
++#include "CampaignScriptContext.h" // S03-T05
+ #include "ActorAnimation.h"
+ #include "actor_anim_defs.h"
+ #include "HudItem.h"
+@@ -1002,10 +1003,12 @@ void CActor::Die(CObject* who)
+ 		/* avo: end */
+ 
+ 		// S03-T03: the game-over sequence is presentation for the viewer's own
+-		// actor; a participant's death on the server is a gameplay outcome
+-		// (its client presentation callback is S03-T05).
++		// actor; on the campaign server a participant's death is a gameplay
++		// outcome and the sequence is that participant's presentation (S03-T05).
+ 		if (campaign::local_view_actor() == this)
+ 			start_tutorial("game_over");
++		else if (campaign::process_role() == campaign::Role::Server)
++			campaign::present_to_actor(this, campaign::Presentation::GameOver, ID(), "game_over");
+ 	}
+ 	else
+ 	{
+diff --git a/src/xrGame/CampaignIdentity.cpp b/src/xrGame/CampaignIdentity.cpp
+index e48daac..971049f 100644
+--- a/src/xrGame/CampaignIdentity.cpp
++++ b/src/xrGame/CampaignIdentity.cpp
+@@ -61,6 +61,8 @@ LPCSTR refusal_name(Refusal refusal)
+ 	case Refusal::WrongParty: return "wrong-party";
+ 	case Refusal::NoActor: return "no-actor";
+ 	case Refusal::Ambiguous: return "ambiguous";
++	case Refusal::NoContext: return "no-context";
++	case Refusal::ContextMismatch: return "context-mismatch";
+ 	}
+ 	return "unknown-refusal";
+ }
+diff --git a/src/xrGame/CampaignIdentity.h b/src/xrGame/CampaignIdentity.h
+index febb136..4709321 100644
+--- a/src/xrGame/CampaignIdentity.h
++++ b/src/xrGame/CampaignIdentity.h
+@@ -131,6 +131,8 @@ enum class Refusal : u8
+ 	WrongParty, // the context's party is not the participant's party
+ 	NoActor, // S03-T02: the participant holds no live actor
+ 	Ambiguous, // S03-T02: more than one participant actor; a single-actor lookup refuses to choose
++	NoContext, // S03-T05: no participant script context is entered
++	ContextMismatch, // S03-T05: a context leave that is not the innermost entered context
+ };
+ 
+ LPCSTR refusal_name(Refusal refusal);
+diff --git a/src/xrGame/CampaignIdentityFixture.cpp b/src/xrGame/CampaignIdentityFixture.cpp
+index e3d2985..dac7c1e 100644
+--- a/src/xrGame/CampaignIdentityFixture.cpp
++++ b/src/xrGame/CampaignIdentityFixture.cpp
+@@ -4,6 +4,7 @@
+ #include "CampaignActorAccess.h"
+ #include "CampaignActorControl.h"
+ #include "CampaignMessagePolicy.h"
++#include "CampaignScriptContext.h"
+ #include "id_generator.h"
+ 
+ // S03-T01: see CampaignIdentityFixture.h.
+@@ -446,6 +447,8 @@ extern "C" void __cdecl xrCampaignIdentity_Stop()
+ 		stats.incarnations, stats.max_generation, stats.next_entity, u32(g_campaign_identity->bound_count()));
+ 	campaign::report_actor_access("stop"); // S03-T02
+ 	campaign::report_actor_control("stop"); // S03-T03
++	campaign::report_script_context("stop"); // S03-T05
++	campaign::release_script_contexts();
+ 	campaign::report_message_policy("stop");
+ 	xr_delete(g_campaign_identity);
+ }
+@@ -462,6 +465,8 @@ extern "C" bool __cdecl xrCampaignIdentity_Fixture(LPCSTR name)
+ 		return fixture_role_context();
+ 	if (!xr_strcmp(name, "actor-access") || !xr_strcmp(name, "message-policy"))
+ 		return xrCampaignAuthority_Fixture(name); // S03-T02
++	if (!xr_strcmp(name, "script-context"))
++		return xrCampaignScriptContext_Fixture(); // S03-T05
+ 	Msg("! S03-T01 unknown fixture %s", name);
+ 	return false;
+ }
+diff --git a/src/xrGame/CampaignIdentityFixture.h b/src/xrGame/CampaignIdentityFixture.h
+index 48fe66e..e5f559d 100644
+--- a/src/xrGame/CampaignIdentityFixture.h
++++ b/src/xrGame/CampaignIdentityFixture.h
+@@ -42,3 +42,13 @@ extern "C" bool __cdecl xrCampaignLevel_ActivationBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_ActivationTick();
+ extern "C" bool __cdecl xrCampaignLevel_ActivationDone();
+ extern "C" bool __cdecl xrCampaignLevel_ActivationEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
++// S03-T05 (CampaignScriptContextFixture.cpp): the script-context unit fixture
++// (Identity scope) and the participant script context level fixture after the
++// activation fixture: a harmless contextual script action for both
++// participants, invalid and missing contexts, deferred work, and the installed
++// quest given to and completed by each participant concurrently.
++extern "C" bool __cdecl xrCampaignScriptContext_Fixture();
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_ScriptContextTick();
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextDone();
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
+diff --git a/src/xrGame/CampaignQuestCapture.cpp b/src/xrGame/CampaignQuestCapture.cpp
+index 38e759d..d56ced1 100644
+--- a/src/xrGame/CampaignQuestCapture.cpp
++++ b/src/xrGame/CampaignQuestCapture.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include "Level.h"
+ #include "Actor.h"
++#include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
+ #include "ai_space.h"
+ #include "alife_simulator.h"
+ #include "alife_object_registry.h"
+@@ -62,6 +64,19 @@ u32 g_turnin_tick = 0;
+ u32 g_completed_tick = 0;
+ bool g_turnin_ok = false;
+ 
++// S03-T05: the fixture names its actor. On the campaign server it is
++// participant 1's (the registry's current reference for slot 0, the saved
++// actor's participant), never "the" actor; on the client its own actor.
++CActor* quest_actor()
++{
++	if (campaign::process_role() != campaign::Role::Server)
++		return campaign::local_view_actor();
++	campaign::ParticipantRef p1;
++	if (!g_campaign_identity || g_campaign_identity->current_participant(0, p1) != campaign::Refusal::None)
++		return nullptr;
++	return campaign::participant_actor(p1);
++}
++
+ void read_options()
+ {
+ 	xr_strcpy(g_task_id, default_task);
+@@ -97,10 +112,10 @@ CGameObject* giver_object()
+ 
+ u32 count_items(LPCSTR section)
+ {
+-	if (!g_actor || !section || !section[0])
++	if (!quest_actor() || !section || !section[0])
+ 		return 0;
+ 	u32 count = 0;
+-	for (PIItem item : g_actor->inventory().m_all)
++	for (PIItem item : quest_actor()->inventory().m_all)
+ 		if (item && xr_strcmp(item->object().cNameSect_str(), section) == 0)
+ 			++count;
+ 	return count;
+@@ -108,11 +123,11 @@ u32 count_items(LPCSTR section)
+ 
+ int community_goodwill(LPCSTR community)
+ {
+-	if (!g_actor)
++	if (!quest_actor())
+ 		return 0;
+ 	CHARACTER_COMMUNITY c;
+ 	c.set(community);
+-	return int(RELATION_REGISTRY().GetCommunityGoodwill(c.index(), g_actor->ID()));
++	return int(RELATION_REGISTRY().GetCommunityGoodwill(c.index(), quest_actor()->ID()));
+ }
+ 
+ luabind::object lua_globals() { return luabind::get_globals(ai().script_engine().lua()); }
+@@ -227,7 +242,7 @@ void take(QuestSnapshot& s, LPCSTR label)
+ 		if (CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc))
+ 			s.npc_talking = owner->IsTalking();
+ 
+-	if (g_pGameLevel && g_actor)
++	if (g_pGameLevel && quest_actor())
+ 	{
+ 		CGameTaskManager& tm = Level().GameTaskManager();
+ 		CGameTask* task = tm.HasGameTask(g_task_id, false);
+@@ -241,10 +256,10 @@ void take(QuestSnapshot& s, LPCSTR label)
+ 		s.native_inprogress = tm.GetTaskCount(eTaskStateInProgress);
+ 		s.native_completed = tm.GetTaskCount(eTaskStateCompleted);
+ 		s.active_is_task = tm.ActiveTask() == task && task != nullptr;
+-		s.money = g_actor->get_money();
++		s.money = quest_actor()->get_money();
+ 		s.goodwill_csky = community_goodwill("csky");
+-		s.info_tier1 = g_actor->HasInfo(info_tier1);
+-		s.actor_talking = g_actor->IsTalking();
++		s.info_tier1 = quest_actor()->HasInfo(info_tier1);
++		s.actor_talking = quest_actor()->IsTalking();
+ 	}
+ 
+ 	// Lua side
+@@ -355,28 +370,44 @@ bool rule(bool ok, LPCSTR what)
+ bool dialog_open(CGameObject* npc)
+ {
+ 	CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc);
+-	if (!owner || !g_actor)
++	if (!owner || !quest_actor())
+ 		return false;
+-	const bool used = npc->use(g_actor);
+-	const bool offered = owner->OfferTalk(g_actor);
++	const bool used = npc->use(quest_actor());
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		// S03-T05: the server's dialogue entry: participant 1's context, the
++		// talk window as that participant's presentation.
++		const campaign::Refusal opened = campaign::dialogue_open(quest_actor(), owner, false);
++		Msg("S02-T06e dialog open: used=%d dialogue_open=%s actor_talking=%d npc_talking=%d", used ? 1 : 0,
++			campaign::refusal_name(opened), quest_actor()->IsTalking() ? 1 : 0, owner->IsTalking() ? 1 : 0);
++		return used && opened == campaign::Refusal::None;
++	}
++	const bool offered = owner->OfferTalk(quest_actor());
+ 	if (offered)
+-		g_actor->StartTalk(owner);
++		quest_actor()->StartTalk(owner);
+ 	luabind::functor<void> menu_mode;
+ 	const bool have_menu = ai().script_engine().functor("pda.actor_menu_mode", menu_mode);
+ 	if (have_menu)
+ 		menu_mode(10);
+ 	Msg("S02-T06e dialog open: used=%d offered=%d actor_talking=%d npc_talking=%d menu_mode=%d", used ? 1 : 0,
+-		offered ? 1 : 0, g_actor->IsTalking() ? 1 : 0, owner->IsTalking() ? 1 : 0, have_menu ? 1 : 0);
++		offered ? 1 : 0, quest_actor()->IsTalking() ? 1 : 0, owner->IsTalking() ? 1 : 0, have_menu ? 1 : 0);
+ 	return used && offered && have_menu;
+ }
+ 
+ void dialog_close(CGameObject* npc)
+ {
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc);
++		if (quest_actor() && owner)
++			campaign::dialogue_close(quest_actor(), owner); // S03-T05
++		return;
++	}
+ 	luabind::functor<void> menu_mode;
+ 	if (ai().script_engine().functor("pda.actor_menu_mode", menu_mode))
+ 		menu_mode(11);
+-	if (g_actor)
+-		g_actor->StopTalk();
++	if (quest_actor())
++		quest_actor()->StopTalk();
+ 	if (CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc))
+ 		owner->StopTalk();
+ }
+@@ -386,7 +417,7 @@ void dialog_close(CGameObject* npc)
+ // show the job text (runs on_job_descr and the fetch_func) and accept.
+ bool dialog_accept_task(CGameObject* npc)
+ {
+-	CScriptGameObject* actor_go = g_actor->lua_game_object();
++	CScriptGameObject* actor_go = quest_actor()->lua_game_object();
+ 	CScriptGameObject* npc_go = npc->lua_game_object();
+ 	luabind::functor<void> generate, skip, give;
+ 	luabind::functor<bool> has_task;
+@@ -439,7 +470,7 @@ bool dialog_accept_task(CGameObject* npc)
+ // The turn-in phrases: the finished-task list and "job done".
+ bool dialog_turn_in(CGameObject* npc)
+ {
+-	CScriptGameObject* actor_go = g_actor->lua_game_object();
++	CScriptGameObject* actor_go = quest_actor()->lua_game_object();
+ 	CScriptGameObject* npc_go = npc->lua_game_object();
+ 	luabind::functor<bool> finished;
+ 	luabind::functor<luabind::object> text;
+@@ -470,7 +501,12 @@ bool give_task()
+ 		return false;
+ 	}
+ 	bool ok = dialog_open(npc);
+-	ok = dialog_accept_task(npc) && ok;
++	{
++		// S03-T05: the phrases run in participant 1's context, as the phrase
++		// script calls do (CDialogScriptHelper, the actor speaker's participant).
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(quest_actor()), "quest-phrases");
++		ok = dialog_accept_task(npc) && ok;
++	}
+ 	dialog_close(npc);
+ 	return ok;
+ }
+@@ -480,7 +516,7 @@ bool give_task()
+ // as parent (CALifeSimulator__spawn_item2, the Lua binding).
+ bool spawn_fetch_items(LPCSTR section, u32 count)
+ {
+-	if (!g_actor || !section || section[0] == '-' || !ai().get_alife())
++	if (!quest_actor() || !section || section[0] == '-' || !ai().get_alife())
+ 		return false;
+ 	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
+ 	const CSE_ALifeCreatureActor* se_actor = alife->graph().actor();
+@@ -488,8 +524,8 @@ bool spawn_fetch_items(LPCSTR section, u32 count)
+ 		return false;
+ 	for (u32 i = 0; i < count; ++i)
+ 	{
+-		CSE_Abstract* entity = CALifeSimulator__spawn_item2(alife, section, g_actor->Position(),
+-			g_actor->ai_location().level_vertex_id(), se_actor->m_tGraphID, g_actor->ID());
++		CSE_Abstract* entity = CALifeSimulator__spawn_item2(alife, section, quest_actor()->Position(),
++			quest_actor()->ai_location().level_vertex_id(), se_actor->m_tGraphID, quest_actor()->ID());
+ 		if (!entity)
+ 		{
+ 			Msg("! S02-T06e %s did not spawn", section);
+@@ -505,7 +541,7 @@ bool spawn_fetch_items(LPCSTR section, u32 count)
+ extern "C" bool __cdecl xrCampaignLevel_QuestApproachBegin()
+ {
+ 	read_options();
+-	if (!g_pGameLevel || !ai().get_alife() || !g_actor || !g_actor->g_Alive())
++	if (!g_pGameLevel || !ai().get_alife() || !quest_actor() || !quest_actor()->g_Alive())
+ 	{
+ 		Msg("! S02-T06e quest: no level, ALife or alive actor");
+ 		return false;
+@@ -517,7 +553,7 @@ extern "C" bool __cdecl xrCampaignLevel_QuestApproachBegin()
+ 		return false;
+ 	}
+ 	g_giver_id = giver->ID;
+-	const float distance = giver->o_Position.distance_to(g_actor->Position());
++	const float distance = giver->o_Position.distance_to(quest_actor()->Position());
+ 	if (giver_object())
+ 	{
+ 		Msg("S02-T06e approach: giver %s (%u) is online %.1f m away", g_giver_profile, u32(g_giver_id), distance);
+@@ -526,14 +562,14 @@ extern "C" bool __cdecl xrCampaignLevel_QuestApproachBegin()
+ 	// 2 m beside the giver, as the script API's SetActorPosition would put the actor
+ 	Fvector target = giver->o_Position;
+ 	target.x += 2.f;
+-	const Fvector from = g_actor->Position();
+-	Fmatrix F = g_actor->XFORM();
++	const Fvector from = quest_actor()->Position();
++	Fmatrix F = quest_actor()->XFORM();
+ 	F.c = target;
+-	g_actor->XFORM().set(F);
+-	if (g_actor->character_physics_support()->movement()->CharacterExist())
++	quest_actor()->XFORM().set(F);
++	if (quest_actor()->character_physics_support()->movement()->CharacterExist())
+ 	{
+-		g_actor->character_physics_support()->movement()->SetPosition(F.c);
+-		g_actor->character_physics_support()->movement()->SetVelocity(0.f, 0.f, 0.f);
++		quest_actor()->character_physics_support()->movement()->SetPosition(F.c);
++		quest_actor()->character_physics_support()->movement()->SetVelocity(0.f, 0.f, 0.f);
+ 	}
+ 	Msg("S02-T06e approach: giver %s (%u) offline %.1f m away at [%.2f,%.2f,%.2f]; actor moved from [%.2f,%.2f,%.2f] "
+ 		"to [%.2f,%.2f,%.2f]",
+@@ -547,7 +583,7 @@ extern "C" bool __cdecl xrCampaignLevel_QuestApproachTick()
+ 	if (!npc)
+ 		return false;
+ 	Msg("S02-T06e approach: giver %u online, %.1f m from the actor", u32(g_giver_id),
+-		g_actor ? npc->Position().distance_to(g_actor->Position()) : -1.f);
++		quest_actor() ? npc->Position().distance_to(quest_actor()->Position()) : -1.f);
+ 	return true;
+ }
+ 
+@@ -557,7 +593,7 @@ extern "C" bool __cdecl xrCampaignLevel_QuestGive(LPCSTR out_path)
+ 	read_options();
+ 	g_have_given = g_have_completed = false;
+ 	g_available_count = g_spawned_items = 0;
+-	if (!g_pGameLevel || !ai().get_alife() || !g_actor || !g_actor->g_Alive())
++	if (!g_pGameLevel || !ai().get_alife() || !quest_actor() || !quest_actor()->g_Alive())
+ 	{
+ 		Msg("! S02-T06e quest: no level, ALife or alive actor");
+ 		return false;
+@@ -669,7 +705,10 @@ extern "C" bool __cdecl xrCampaignLevel_QuestCompleteTick()
+ 			g_turnin_tick = g_complete_ticks;
+ 			CGameObject* npc = giver_object();
+ 			g_turnin_ok = npc && dialog_open(npc);
+-			g_turnin_ok = npc && dialog_turn_in(npc) && g_turnin_ok;
++			{
++				campaign::ScriptContextScope scope(static_cast<const CObject*>(quest_actor()), "quest-phrases"); // S03-T05
++				g_turnin_ok = npc && dialog_turn_in(npc) && g_turnin_ok;
++			}
+ 			if (npc)
+ 				dialog_close(npc);
+ 			g_complete_phase = g_turnin_ok ? 1 : 2;
+@@ -743,7 +782,7 @@ void ClientQuestCaptureOnFrame()
+ 	static u32 since = 0;
+ 	static u32 phase = 0; // 0 waiting, 1 approaching the giver, 2 completing, 3 done
+ 	static u32 complete_since = 0;
+-	if ((!restored_run && !persisted_run) || phase == 3 || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor ||
++	if ((!restored_run && !persisted_run) || phase == 3 || !g_pGameLevel || !g_pGameLevel->bReady || !quest_actor() ||
+ 		Device.dwPrecacheFrame)
+ 		return;
+ 	if (!since)
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+new file mode 100644
+index 0000000..f26e29f
+--- /dev/null
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -0,0 +1,1004 @@
++#include "pch_script.h"
++#include "CampaignScriptContext.h"
++
++// S03-T05: see CampaignScriptContext.h.
++
++#include "CampaignActorAccess.h"
++#include "Actor.h"
++#include "GameTask.h"
++#include "GametaskManager.h"
++#include "InventoryOwner.h"
++#include "Level.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_graph_registry.h"
++#include "script_engine.h"
++#include "script_game_object.h"
++#include "xrServer_Objects_ALife_Monsters.h"
++#include "../xrEngine/device.h"
++
++using namespace luabind;
++
++namespace campaign
++{
++namespace
++{
++const u32 kOutboxSlots = 8;
++const u32 kOutboxCapacity = 256;
++
++ScriptContextStack* s_stack = nullptr;
++const CampaignIdentityRegistry* s_stack_registry = nullptr;
++ScriptContextStats s_stats = {};
++
++xr_vector<PresentationRecord> s_outbox[kOutboxSlots];
++u32 s_present_serial = 0;
++u32 s_present_dropped = 0; // to no participant, or evicted from a full outbox
++
++bool server_role()
++{
++	return g_campaign_identity && g_campaign_identity->role() == Role::Server;
++}
++
++// The script engine lives as long as the level does here (ai_space keeps no
++// null-safe accessor; script_engine() only VERIFYs).
++lua_State* script_state()
++{
++	return g_pGameLevel ? ai().script_engine().lua() : nullptr;
++}
++
++// The compatibility layer keeps its state in _G.__campaign_ctx (a plain table).
++bool push_compat_table(lua_State* L)
++{
++	lua_pushstring(L, "__campaign_ctx");
++	lua_rawget(L, LUA_GLOBALSINDEX);
++	if (lua_istable(L, -1))
++	{
++		lua_pushstring(L, "installed");
++		lua_rawget(L, -2);
++		const bool installed = lua_toboolean(L, -1) != 0;
++		lua_pop(L, 1);
++		if (installed)
++			return true;
++	}
++	lua_pop(L, 1);
++	return false;
++}
++
++// After every push and pop: the layer reads the depth to decide what db.actor
++// is, and gives a participant actor without a Lua binder its db.storage entry.
++void sync_lua(bool entered)
++{
++	if (!server_role() || !s_stack)
++		return;
++	lua_State* L = script_state();
++	if (!L || !push_compat_table(L))
++		return;
++	lua_pushstring(L, "depth");
++	lua_pushnumber(L, lua_Number(s_stack->depth()));
++	lua_rawset(L, -3);
++	if (entered)
++	{
++		ScriptContext context;
++		if (s_stack->current(context) == Refusal::None && context.actor_key.id != kNoEngineId)
++		{
++			lua_pushstring(L, "on_enter");
++			lua_rawget(L, -2);
++			if (lua_isfunction(L, -1))
++			{
++				lua_pushnumber(L, lua_Number(context.actor_key.id));
++				if (lua_pcall(L, 1, 0, 0) != 0)
++				{
++					Msg("! S03-T05 compat on_enter failed: %s", lua_tostring(L, -1));
++					lua_pop(L, 1);
++				}
++			}
++			else
++				lua_pop(L, 1);
++		}
++	}
++	lua_pop(L, 1);
++}
++
++void format_uuid(const Uuid128& id, string64& out)
++{
++	xr_sprintf(out, "%016I64x%016I64x", id.hi, id.lo);
++}
++
++CGameObject* object_of(CInventoryOwner* owner)
++{
++	return smart_cast<CGameObject*>(owner);
++}
++} // namespace
++
++// --- the stack ------------------------------------------------------------------
++
++ScriptContextStack::ScriptContextStack(const CampaignIdentityRegistry* registry)
++	: m_registry(registry), m_next_token(0), m_next_handle(0)
++{
++	ZeroMemory(&m_stats, sizeof(m_stats));
++}
++
++Refusal ScriptContextStack::enter(const ActionContext& context, Scope scope, LPCSTR entry, u32& token)
++{
++	token = 0;
++	Refusal refusal = Refusal::None;
++	const Participant* participant = nullptr;
++	EngineEntityKey key = {kNoEngineId, 0};
++	if (!m_registry)
++		refusal = Refusal::WrongRole;
++	else if (scope == Scope::Identity || scope == Scope::World)
++		refusal = Refusal::NotAuthoritative; // not a participant script context
++	else if (m_stack.size() >= max_depth)
++		refusal = Refusal::NotAuthoritative;
++	else
++		refusal = m_registry->authorize(context, scope);
++	if (refusal == Refusal::None)
++		refusal = m_registry->participant(context.actor, participant);
++	if (refusal == Refusal::None)
++	{
++		const Refusal actor = m_registry->participant_actor_key(context.actor, key);
++		if (actor != Refusal::None)
++		{
++			key.id = kNoEngineId;
++			key.generation = 0;
++			if (scope == Scope::Self)
++				refusal = actor;
++		}
++	}
++	if (refusal != Refusal::None)
++	{
++		++m_stats.refused;
++		return refusal;
++	}
++	ScriptContext entered;
++	entered.action = context;
++	entered.scope = scope;
++	entered.party = participant->party;
++	entered.actor_key = key;
++	if (++m_next_token == 0)
++		++m_next_token;
++	entered.token = m_next_token;
++	entered.entry = entry ? entry : "?";
++	m_stack.push_back(entered);
++	++m_stats.entered;
++	if (m_stack.size() > m_stats.max_depth_seen)
++		m_stats.max_depth_seen = u32(m_stack.size());
++	token = entered.token;
++	return Refusal::None;
++}
++
++Refusal ScriptContextStack::leave(u32 token)
++{
++	if (m_stack.empty() || m_stack.back().token != token)
++	{
++		++m_stats.leave_mismatch;
++		return m_stack.empty() ? Refusal::NoContext : Refusal::ContextMismatch;
++	}
++	m_stack.pop_back();
++	++m_stats.left;
++	return Refusal::None;
++}
++
++Refusal ScriptContextStack::current(ScriptContext& out) const
++{
++	if (m_stack.empty())
++		return Refusal::NoContext;
++	out = m_stack.back();
++	return Refusal::None;
++}
++
++Refusal ScriptContextStack::capture(u32& handle)
++{
++	handle = 0;
++	if (m_stack.empty())
++		return Refusal::NoContext;
++	const ScriptContext& top = m_stack.back();
++	if (m_captured.size() >= max_captured)
++	{
++		m_captured.erase(m_captured.begin());
++		++m_stats.captured_evicted;
++	}
++	Captured captured;
++	if (++m_next_handle == 0)
++		++m_next_handle;
++	captured.handle = m_next_handle;
++	captured.participant = top.action.actor;
++	captured.party = top.party;
++	captured.scope = top.scope;
++	m_captured.push_back(captured);
++	++m_stats.captured;
++	handle = captured.handle;
++	return Refusal::None;
++}
++
++Refusal ScriptContextStack::enter_captured(u32 handle, LPCSTR entry, u32& token)
++{
++	token = 0;
++	for (const Captured& captured : m_captured)
++	{
++		if (captured.handle != handle)
++			continue;
++		ActionContext context;
++		context.origin = Origin::ServerInternal;
++		context.session = 0;
++		context.actor = captured.participant;
++		context.party = captured.party;
++		const Refusal refusal = enter(context, captured.scope, entry, token);
++		if (refusal == Refusal::None)
++			++m_stats.captured_entered;
++		else
++			++m_stats.captured_refused;
++		return refusal;
++	}
++	++m_stats.captured_refused;
++	return Refusal::NoContext;
++}
++
++ScriptContextStack* script_contexts()
++{
++	if (!server_role())
++		return nullptr;
++	if (s_stack_registry != g_campaign_identity)
++	{
++		xr_delete(s_stack);
++		s_stack = xr_new<ScriptContextStack>(g_campaign_identity);
++		s_stack_registry = g_campaign_identity;
++	}
++	return s_stack;
++}
++
++void release_script_contexts()
++{
++	xr_delete(s_stack);
++	s_stack_registry = nullptr;
++	for (u32 i = 0; i < kOutboxSlots; ++i)
++		s_outbox[i].clear();
++}
++
++// --- scopes ---------------------------------------------------------------------
++
++ScriptContextScope::ScriptContextScope(const ActionContext& context, Scope scope, LPCSTR entry)
++	: m_refusal(Refusal::WrongRole), m_token(0)
++{
++	if (ScriptContextStack* stack = script_contexts())
++	{
++		m_refusal = stack->enter(context, scope, entry, m_token);
++		if (m_refusal == Refusal::None)
++			sync_lua(true);
++		else
++			Msg("S03-T05 script context refused at %s: %s (origin %u session %u participant {%u,%u})",
++				entry ? entry : "?", refusal_name(m_refusal), u32(context.origin), context.session,
++				u32(context.actor.slot), context.actor.generation);
++	}
++}
++
++ScriptContextScope::ScriptContextScope(u32 captured_handle, LPCSTR entry) : m_refusal(Refusal::WrongRole), m_token(0)
++{
++	if (ScriptContextStack* stack = script_contexts())
++	{
++		m_refusal = stack->enter_captured(captured_handle, entry, m_token);
++		if (m_refusal == Refusal::None)
++			sync_lua(true);
++	}
++}
++
++ScriptContextScope::ScriptContextScope(const CGameTask* task, LPCSTR entry) : m_refusal(Refusal::WrongRole), m_token(0)
++{
++	ScriptContextStack* stack = script_contexts();
++	if (!stack || !task)
++		return;
++	if (!task->m_campaign_owned)
++	{
++		m_refusal = Refusal::NoContext;
++		++s_stats.task_unowned;
++		return;
++	}
++	ActionContext context;
++	if (!participant_context(task->m_campaign_owner, context))
++	{
++		m_refusal = Refusal::StaleReference;
++		Msg("S03-T05 task [%s] owner {%u,%u} is no longer current; its %s runs in no context", task->m_ID.c_str(),
++			u32(task->m_campaign_owner.slot), task->m_campaign_owner.generation, entry ? entry : "?");
++		return;
++	}
++	m_refusal = stack->enter(context, Scope::Self, entry, m_token);
++	if (m_refusal == Refusal::None)
++	{
++		++s_stats.task_scopes;
++		sync_lua(true);
++	}
++}
++
++ScriptContextScope::ScriptContextScope(const CObject* actor, LPCSTR entry) : m_refusal(Refusal::WrongRole), m_token(0)
++{
++	ScriptContextStack* stack = script_contexts();
++	if (!stack)
++		return;
++	ActionContext context;
++	if (!actor || !actor_context(actor, context))
++	{
++		m_refusal = Refusal::UnknownParticipant;
++		return;
++	}
++	m_refusal = stack->enter(context, Scope::Self, entry, m_token);
++	if (m_refusal == Refusal::None)
++		sync_lua(true);
++}
++
++ScriptContextScope::~ScriptContextScope()
++{
++	if (m_refusal != Refusal::None || !s_stack)
++		return;
++	const Refusal left = s_stack->leave(m_token);
++	if (left != Refusal::None)
++		Msg("! S03-T05 script context leave out of order: %s (token %u)", refusal_name(left), m_token);
++	sync_lua(false);
++}
++
++bool participant_context(const ParticipantRef& ref, ActionContext& out)
++{
++	if (!server_role())
++		return false;
++	const Participant* participant = nullptr;
++	if (g_campaign_identity->participant(ref, participant) != Refusal::None)
++		return false;
++	out.origin = Origin::ServerInternal;
++	out.session = 0;
++	out.actor = ref;
++	out.party = participant->party;
++	return true;
++}
++
++bool actor_context(const CObject* actor, ActionContext& out)
++{
++	ParticipantRef ref;
++	if (!server_role() || participant_of(actor, ref) != Refusal::None)
++		return false;
++	return participant_context(ref, out);
++}
++
++Refusal current_script_context(ScriptContext& out)
++{
++	if (!s_stack || !server_role())
++		return Refusal::NoContext;
++	return s_stack->current(out);
++}
++
++CActor* script_context_actor(Refusal* why)
++{
++	ScriptContext context;
++	Refusal refusal = current_script_context(context);
++	CActor* actor = nullptr;
++	if (refusal == Refusal::None)
++		actor = participant_actor(context.action.actor, &refusal);
++	if (why)
++		*why = refusal;
++	return actor;
++}
++
++CActor* gameplay_script_actor(LPCSTR purpose)
++{
++	ScriptContext context;
++	if (current_script_context(context) == Refusal::None)
++	{
++		++s_stats.gameplay_context;
++		return participant_actor(context.action.actor);
++	}
++	++s_stats.gameplay_compat;
++	return sole_participant_actor(purpose);
++}
++
++// --- tasks ------------------------------------------------------------------------
++
++void set_task_owner(CGameTask* task, const CObject* receiver)
++{
++	if (!task || !server_role())
++		return;
++	ParticipantRef ref;
++	if (participant_of(receiver, ref) != Refusal::None)
++	{
++		Msg("S03-T05 task [%s] given to object %u, which no participant holds: no owner", task->m_ID.c_str(),
++			receiver ? u32(receiver->ID()) : u32(-1));
++		return;
++	}
++	task->m_campaign_owned = true;
++	task->m_campaign_owner = ref;
++	Msg("S03-T05 task [%s] owner participant {%u,%u} (actor %u)", task->m_ID.c_str(), u32(ref.slot), ref.generation,
++		u32(receiver->ID()));
++}
++
++CActor* task_owner_actor(const CGameTask* task)
++{
++	if (!task || !task->m_campaign_owned)
++		return nullptr;
++	return participant_actor(task->m_campaign_owner);
++}
++
++CActor* script_host_actor()
++{
++	if (!g_pGameLevel || !ai().get_alife())
++		return nullptr;
++	const CSE_ALifeCreatureActor* sp_actor = ai().alife().graph().actor();
++	if (!sp_actor)
++		return nullptr;
++	CObject* object = Level().Objects.net_Find(sp_actor->ID);
++	return object && !object->getDestroy() ? smart_cast<CActor*>(object) : nullptr;
++}
++
++void note_task_callback_hosted()
++{
++	++s_stats.task_callbacks_hosted;
++}
++
++// --- dialogue ---------------------------------------------------------------------
++
++Refusal dialogue_open(CActor* actor, CInventoryOwner* partner, bool disable_break)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	if (!actor || !partner)
++		return Refusal::InvalidIdentity;
++	ScriptContextScope scope(static_cast<const CObject*>(actor), "dialogue-open");
++	if (!scope.entered())
++		return scope.refusal();
++	if (!partner->OfferTalk(actor))
++		return Refusal::NotAttached; // the partner does not talk now
++	actor->StartTalk(partner);
++	luabind::functor<void> menu_mode;
++	if (ai().script_engine().functor("pda.actor_menu_mode", menu_mode))
++		menu_mode(10);
++	CGameObject* partner_object = object_of(partner);
++	present_to_actor(actor, Presentation::DialogOpen, partner_object ? partner_object->ID() : 0,
++		disable_break ? "no-break" : "");
++	return Refusal::None;
++}
++
++Refusal dialogue_close(CActor* actor, CInventoryOwner* partner)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	if (!actor || !partner)
++		return Refusal::InvalidIdentity;
++	ScriptContextScope scope(static_cast<const CObject*>(actor), "dialogue-close");
++	if (!scope.entered())
++		return scope.refusal();
++	luabind::functor<void> menu_mode;
++	if (ai().script_engine().functor("pda.actor_menu_mode", menu_mode))
++		menu_mode(11);
++	actor->StopTalk();
++	partner->StopTalk();
++	CGameObject* partner_object = object_of(partner);
++	present_to_actor(actor, Presentation::DialogClose, partner_object ? partner_object->ID() : 0, "");
++	return Refusal::None;
++}
++
++// --- presentation -------------------------------------------------------------------
++
++LPCSTR presentation_name(Presentation kind)
++{
++	switch (kind)
++	{
++	case Presentation::DialogOpen: return "dialog-open";
++	case Presentation::DialogClose: return "dialog-close";
++	case Presentation::News: return "news";
++	case Presentation::TalkMessage: return "talk-message";
++	case Presentation::CameraEffector: return "camera-effector";
++	case Presentation::CameraEffectorRemove: return "camera-effector-remove";
++	case Presentation::PostProcess: return "post-process";
++	case Presentation::PostProcessRemove: return "post-process-remove";
++	case Presentation::GameOver: return "game-over";
++	default: return "?";
++	}
++}
++
++Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	const Participant* participant = nullptr;
++	const Refusal refusal = g_campaign_identity->participant(to, participant);
++	if (refusal != Refusal::None || to.slot >= kOutboxSlots)
++	{
++		++s_present_dropped;
++		return refusal != Refusal::None ? refusal : Refusal::UnknownParticipant;
++	}
++	xr_vector<PresentationRecord>& outbox = s_outbox[to.slot];
++	if (outbox.size() >= kOutboxCapacity)
++	{
++		outbox.erase(outbox.begin());
++		++s_present_dropped;
++	}
++	PresentationRecord record;
++	record.serial = ++s_present_serial;
++	record.participant = to;
++	record.kind = kind;
++	record.object = object;
++	record.frame = Device.dwFrame;
++	xr_strcpy(record.detail, detail ? detail : "");
++	outbox.push_back(record);
++	++s_stats.presented;
++	return Refusal::None;
++}
++
++Refusal present_to_context(Presentation kind, u16 object, LPCSTR detail)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	ScriptContext context;
++	if (current_script_context(context) != Refusal::None)
++	{
++		++s_stats.present_no_context;
++		++s_present_dropped;
++		return Refusal::NoContext;
++	}
++	return present(context.action.actor, kind, object, detail);
++}
++
++Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LPCSTR detail)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	ParticipantRef ref;
++	const Refusal refusal = participant_of(actor, ref);
++	if (refusal != Refusal::None)
++	{
++		++s_present_dropped;
++		return refusal;
++	}
++	return present(ref, kind, object, detail);
++}
++
++u32 presentation_outbox(u8 slot, xr_vector<PresentationRecord>& out)
++{
++	out.clear();
++	if (slot < kOutboxSlots)
++		out = s_outbox[slot];
++	return u32(out.size());
++}
++
++u32 presentation_dropped()
++{
++	return s_present_dropped;
++}
++
++// --- Lua ----------------------------------------------------------------------------
++namespace
++{
++bool lua_context(ScriptContext& out)
++{
++	++s_stats.lua_actor_calls;
++	if (current_script_context(out) == Refusal::None)
++		return true;
++	++s_stats.lua_no_context;
++	return false;
++}
++
++CScriptGameObject* lua_actor()
++{
++	ScriptContext context;
++	if (!lua_context(context))
++		return nullptr;
++	CActor* actor = participant_actor(context.action.actor);
++	return actor ? actor->lua_game_object() : nullptr;
++}
++
++int lua_actor_id()
++{
++	ScriptContext context;
++	return lua_context(context) && context.actor_key.id != kNoEngineId ? int(context.actor_key.id) : -1;
++}
++
++int lua_slot()
++{
++	ScriptContext context;
++	return lua_context(context) ? int(context.action.actor.slot) : -1;
++}
++
++int lua_generation()
++{
++	ScriptContext context;
++	return lua_context(context) ? int(context.action.actor.generation) : -1;
++}
++
++LPCSTR lua_party()
++{
++	static string64 text;
++	ScriptContext context;
++	if (!lua_context(context))
++		return "";
++	format_uuid(context.party, text);
++	return text;
++}
++
++LPCSTR lua_player()
++{
++	static string64 text;
++	ScriptContext context;
++	const Participant* participant = nullptr;
++	if (!lua_context(context) || g_campaign_identity->participant(context.action.actor, participant) != Refusal::None)
++		return "";
++	format_uuid(participant->player, text);
++	return text;
++}
++
++LPCSTR lua_origin()
++{
++	ScriptContext context;
++	if (!lua_context(context))
++		return "";
++	return context.action.origin == Origin::ClientIntent ? "client-intent" : "server-internal";
++}
++
++LPCSTR lua_entry()
++{
++	ScriptContext context;
++	return lua_context(context) ? context.entry : "";
++}
++
++bool lua_in_context()
++{
++	ScriptContext context;
++	return current_script_context(context) == Refusal::None;
++}
++
++int lua_depth()
++{
++	return s_stack && server_role() ? int(s_stack->depth()) : 0;
++}
++
++double lua_capture()
++{
++	if (!s_stack || !server_role())
++		return 0;
++	u32 handle = 0;
++	s_stack->capture(handle);
++	return double(handle);
++}
++
++double lua_enter_captured(double handle)
++{
++	if (!s_stack || !server_role())
++		return 0;
++	u32 token = 0;
++	const Refusal refusal = s_stack->enter_captured(u32(handle), "deferred", token);
++	if (refusal != Refusal::None)
++	{
++		Msg("S03-T05 deferred script work refused: %s (handle %u)", refusal_name(refusal), u32(handle));
++		return 0;
++	}
++	sync_lua(true);
++	return double(token);
++}
++
++double lua_enter_task(LPCSTR task_id)
++{
++	if (!s_stack || !server_role() || !g_pGameLevel || !task_id)
++		return 0;
++	CGameTask* task = Level().GameTaskManager().HasGameTask(task_id, true);
++	if (!task)
++		return 0;
++	if (!task->m_campaign_owned)
++	{
++		++s_stats.task_unowned;
++		return 0;
++	}
++	ActionContext context;
++	if (!participant_context(task->m_campaign_owner, context))
++		return 0;
++	u32 token = 0;
++	if (s_stack->enter(context, Scope::Self, "task-check", token) != Refusal::None)
++		return 0;
++	++s_stats.task_scopes;
++	sync_lua(true);
++	return double(token);
++}
++
++bool lua_leave(double token)
++{
++	if (!s_stack || !server_role())
++		return false;
++	const Refusal refusal = s_stack->leave(u32(token));
++	if (refusal != Refusal::None)
++		Msg("! S03-T05 Lua context leave refused: %s (token %u)", refusal_name(refusal), u32(token));
++	sync_lua(false);
++	return refusal == Refusal::None;
++}
++
++bool lua_is_participant_actor(CScriptGameObject* object)
++{
++	return object && is_participant_actor(&object->object());
++}
++
++int lua_participant_slot_of(CScriptGameObject* object)
++{
++	ParticipantRef ref;
++	return object && participant_of(&object->object(), ref) == Refusal::None ? int(ref.slot) : -1;
++}
++
++bool lua_present(LPCSTR kind, LPCSTR detail)
++{
++	Presentation presentation = Presentation::Count;
++	for (u32 i = 0; i < u32(Presentation::Count); ++i)
++		if (!xr_strcmp(kind, presentation_name(Presentation(i))))
++			presentation = Presentation(i);
++	if (presentation == Presentation::Count)
++		return false;
++	return present_to_context(presentation, 0, detail) == Refusal::None;
++}
++
++lua_State* s_compat_state = nullptr;
++
++// The server's compatibility layer for the installed single-player scripts.
++// Loaded once per Lua state on the campaign server only. It never names a
++// participant: it reads the context native code entered.
++LPCSTR const compat_source =
++	"local S = rawget(_G, '__campaign_ctx')\n"
++	"if type(S) == 'table' and S.installed then return end\n"
++	"S = { depth = 0, audit = false, installed = false, host_reads = {}, host_read_total = 0,\n"
++	"      storage_created = 0, deferred_captured = 0, deferred_refused = 0, wrapped = 0 }\n"
++	"rawset(_G, '__campaign_ctx', S)\n"
++	"local campaign = campaign\n"
++	"local getinfo = debug and debug.getinfo\n"
++	"local pcall, error, unpack, select, type, rawget, rawset, tostring =\n"
++	"      pcall, error, unpack, select, type, rawget, rawset, tostring\n"
++	"local function pack(...) return { n = select('#', ...), ... } end\n"
++	"local function finish(tok, r)\n"
++	"  campaign.leave(tok)\n"
++	"  if not r[1] then error(r[2], 0) end\n"
++	"  return unpack(r, 2, r.n)\n"
++	"end\n"
++	// db.actor: the context's actor inside a context, the binder's actor outside.
++	"local db_ns = db\n"
++	"local mt = getmetatable(db_ns)\n"
++	"if not mt then mt = {} setmetatable(db_ns, mt) end\n"
++	"local base_index, base_newindex = mt.__index, mt.__newindex\n"
++	"local host = rawget(db_ns, 'actor')\n"
++	"rawset(db_ns, 'actor', nil)\n"
++	"mt.__index = function(t, k)\n"
++	"  if k == 'actor' then\n"
++	"    if S.depth > 0 then return campaign.actor() end\n"
++	"    if S.audit then\n"
++	"      local site = '?'\n"
++	"      if getinfo then\n"
++	"        local i = getinfo(2, 'Sl')\n"
++	"        if i then site = tostring(i.short_src) .. ':' .. tostring(i.currentline) end\n"
++	"      end\n"
++	"      S.host_reads[site] = (S.host_reads[site] or 0) + 1\n"
++	"      S.host_read_total = S.host_read_total + 1\n"
++	"    end\n"
++	"    return host\n"
++	"  end\n"
++	"  if type(base_index) == 'function' then return base_index(t, k) end\n"
++	"  if base_index ~= nil then return base_index[k] end\n"
++	"  return nil\n"
++	"end\n"
++	"mt.__newindex = function(t, k, v)\n"
++	"  if k == 'actor' then host = v return end\n"
++	"  if type(base_newindex) == 'function' then return base_newindex(t, k, v) end\n"
++	"  rawset(t, k, v)\n"
++	"end\n"
++	"S.host_actor = function() return host end\n"
++	// AC_ID (the player's engine id, a Lua global): the context's actor's id
++	// inside a context, the single-player value outside one.
++	"local gmt = getmetatable(_G)\n"
++	"if gmt and rawget(_G, 'AC_ID') ~= nil then\n"
++	"  local ac_id = rawget(_G, 'AC_ID')\n"
++	"  local g_index, g_newindex = gmt.__index, gmt.__newindex\n"
++	"  rawset(_G, 'AC_ID', nil)\n"
++	"  gmt.__index = function(t, k)\n"
++	"    if k == 'AC_ID' then\n"
++	"      if S.depth > 0 then\n"
++	"        local id = campaign.actor_id()\n"
++	"        if id >= 0 then return id end\n"
++	"      end\n"
++	"      return ac_id\n"
++	"    end\n"
++	"    if type(g_index) == 'function' then return g_index(t, k) end\n"
++	"    if g_index ~= nil then return g_index[k] end\n"
++	"    return nil\n"
++	"  end\n"
++	"  gmt.__newindex = function(t, k, v)\n"
++	"    if k == 'AC_ID' then ac_id = v return end\n"
++	"    if type(g_newindex) == 'function' then return g_newindex(t, k, v) end\n"
++	"    rawset(t, k, v)\n"
++	"  end\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	"S.on_enter = function(id)\n"
++	"  local storage = rawget(db_ns, 'storage')\n"
++	"  if storage and id and storage[id] == nil then\n"
++	"    storage[id] = {}\n"
++	"    S.storage_created = S.storage_created + 1\n"
++	"  end\n"
++	"end\n"
++	// Deferred work created inside a context runs in that context again.
++	"local orig_cte = _G.CreateTimeEvent\n"
++	"if type(orig_cte) == 'function' then\n"
++	"  _G.CreateTimeEvent = function(ev_id, act_id, timer, f, ...)\n"
++	"    if S.depth > 0 and type(f) == 'function' then\n"
++	"      local h = campaign.capture()\n"
++	"      if h ~= 0 then\n"
++	"        local inner = f\n"
++	"        f = function(...)\n"
++	"          local tok = campaign.enter_captured(h)\n"
++	"          if tok == 0 then S.deferred_refused = S.deferred_refused + 1 return true end\n"
++	"          return finish(tok, pack(pcall(inner, ...)))\n"
++	"        end\n"
++	"        S.deferred_captured = S.deferred_captured + 1\n"
++	"      end\n"
++	"    end\n"
++	"    return orig_cte(ev_id, act_id, timer, f, ...)\n"
++	"  end\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	// An owned task's periodic Lua check runs in its owner's context.
++	"S.check_wrap = 'no-class'\n"
++	"local tobj = task_objects\n"
++	"local CGT = rawget(_G, 'CGeneralTask') or (type(tobj) == 'table' and rawget(tobj, 'CGeneralTask'))\n"
++	"if CGT and not CGT.check_task then S.check_wrap = 'no-method' end\n"
++	"if CGT and CGT.check_task then\n"
++	"  S.check_wrap = 'ok'\n"
++	"  local orig_check = CGT.check_task\n"
++	"  CGT.check_task = function(self, ...)\n"
++	"    local tok = campaign.enter_task(self.id)\n"
++	"    if tok == 0 then return orig_check(self, ...) end\n"
++	"    return finish(tok, pack(pcall(orig_check, self, ...)))\n"
++	"  end\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	"S.installed = true\n";
++
++bool install_compat(lua_State* L)
++{
++	if (luaL_loadbuffer(L, compat_source, xr_strlen(compat_source), "campaign_compat") != 0 ||
++		lua_pcall(L, 0, 0, 0) != 0)
++	{
++		Msg("! S03-T05 compatibility layer failed: %s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		++s_stats.compat_failures;
++		return false;
++	}
++	if (!push_compat_table(L))
++	{
++		++s_stats.compat_failures;
++		return false;
++	}
++	lua_pushstring(L, "wrapped");
++	lua_rawget(L, -2);
++	const int wrapped = int(lua_tonumber(L, -1));
++	lua_pop(L, 1);
++	lua_pushstring(L, "check_wrap");
++	lua_rawget(L, -2);
++	const char* check_wrap = lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
++	Msg("S03-T05 compatibility layer CGeneralTask.check_task wrap: %s", check_wrap);
++	lua_pop(L, 2);
++	++s_stats.compat_installs;
++	s_compat_state = L;
++	Msg("S03-T05 compatibility layer installed (db.actor; wrapped=%d: AC_ID, CreateTimeEvent, CGeneralTask.check_task)",
++		wrapped);
++	return true;
++}
++
++double compat_number(lua_State* L, LPCSTR field)
++{
++	lua_pushstring(L, field);
++	lua_rawget(L, -2);
++	const double value = lua_tonumber(L, -1);
++	lua_pop(L, 1);
++	return value;
++}
++} // namespace
++
++void script_register_context(lua_State* L)
++{
++	module(L, "campaign")
++	[
++		def("actor", &lua_actor),
++		def("actor_id", &lua_actor_id),
++		def("slot", &lua_slot),
++		def("generation", &lua_generation),
++		def("party", &lua_party),
++		def("player", &lua_player),
++		def("origin", &lua_origin),
++		def("entry", &lua_entry),
++		def("in_context", &lua_in_context),
++		def("depth", &lua_depth),
++		def("capture", &lua_capture),
++		def("enter_captured", &lua_enter_captured),
++		def("enter_task", &lua_enter_task),
++		def("leave", &lua_leave),
++		def("is_participant_actor", &lua_is_participant_actor),
++		def("participant_slot_of", &lua_participant_slot_of),
++		def("present", &lua_present)
++	];
++}
++
++void script_context_frame()
++{
++	if (!server_role())
++		return;
++	script_contexts();
++	lua_State* L = script_state();
++	if (!L)
++		return;
++	if (!push_compat_table(L))
++	{
++		if (!install_compat(L) || !push_compat_table(L))
++			return;
++	}
++	lua_pushstring(L, "audit");
++	lua_pushboolean(L, g_campaign_identity->live_actor_count() >= 2);
++	lua_rawset(L, -3);
++	lua_pop(L, 1);
++}
++
++bool script_compat_installed()
++{
++	lua_State* L = script_state();
++	if (!L || !push_compat_table(L))
++		return false;
++	lua_pop(L, 1);
++	return true;
++}
++
++u32 script_host_reads(xr_vector<std::pair<shared_str, u32>>& out, u32* total)
++{
++	out.clear();
++	if (total)
++		*total = 0;
++	lua_State* L = script_state();
++	if (!L || !push_compat_table(L))
++		return 0;
++	if (total)
++		*total = u32(compat_number(L, "host_read_total"));
++	lua_pushstring(L, "host_reads");
++	lua_rawget(L, -2);
++	if (lua_istable(L, -1))
++	{
++		lua_pushnil(L);
++		while (lua_next(L, -2) != 0)
++		{
++			if (lua_type(L, -2) == LUA_TSTRING)
++				out.push_back(std::make_pair(shared_str(lua_tostring(L, -2)), u32(lua_tonumber(L, -1))));
++			lua_pop(L, 1);
++		}
++	}
++	lua_pop(L, 2);
++	std::sort(out.begin(), out.end(),
++		[](const std::pair<shared_str, u32>& a, const std::pair<shared_str, u32>& b) { return a.second > b.second; });
++	return u32(out.size());
++}
++
++const ScriptContextStats& script_context_stats()
++{
++	return s_stats;
++}
++
++void report_script_context(LPCSTR tag)
++{
++	const ScriptContextStack::Stats empty = {};
++	const ScriptContextStack::Stats& st = s_stack ? s_stack->stats() : empty;
++	Msg("S03-T05 script-context %s entered=%I64u refused=%I64u left=%I64u leave_mismatch=%I64u depth=%u max_depth=%u "
++		"captured=%I64u captured_entered=%I64u captured_refused=%I64u captured_evicted=%I64u",
++		tag, st.entered, st.refused, st.left, st.leave_mismatch, s_stack ? s_stack->depth() : 0u, st.max_depth_seen,
++		st.captured, st.captured_entered, st.captured_refused, st.captured_evicted);
++	Msg("S03-T05 script-context %s lua_calls=%I64u lua_no_context=%I64u task_scopes=%I64u task_unowned=%I64u "
++		"task_callbacks_hosted=%I64u presented=%I64u present_no_context=%I64u dropped=%u gameplay_context=%I64u "
++		"gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u",
++		tag, s_stats.lua_actor_calls, s_stats.lua_no_context, s_stats.task_scopes, s_stats.task_unowned,
++		s_stats.task_callbacks_hosted, s_stats.presented, s_stats.present_no_context, s_present_dropped,
++		s_stats.gameplay_context, s_stats.gameplay_compat, s_stats.compat_installs, s_stats.compat_failures);
++	for (u32 slot = 0; slot < kOutboxSlots; ++slot)
++		if (!s_outbox[slot].empty())
++			Msg("S03-T05 script-context %s outbox slot=%u records=%u", tag, slot, u32(s_outbox[slot].size()));
++	xr_vector<std::pair<shared_str, u32>> reads;
++	u32 total = 0;
++	if (script_host_reads(reads, &total))
++	{
++		Msg("S03-T05 script-context %s host db.actor reads outside a context with two actors: total=%u sites=%u", tag,
++			total, u32(reads.size()));
++		for (const auto& read : reads)
++			Msg("S03-T05 host-read %s %u", read.first.c_str(), read.second);
++	}
++}
++} // namespace campaign
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+new file mode 100644
+index 0000000..5d136e8
+--- /dev/null
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -0,0 +1,269 @@
++#pragma once
++
++// S03-T05: the native and Lua participant context contract.
++//
++// The installed single-player scripts reach "the player" four ways: the Lua
++// global db.actor (set by the actor binder), the actor's engine id 0 (AC_ID,
++// has_alife_info, alife():has_info(0, ...)), the ALife actor (alife():actor())
++// and the story object "actor". The engine reaches it through Actor() and
++// Level().CurrentEntity(). On the campaign server two participant actors live
++// and no choice among them may be implicit (D4, docs/state-ownership.md).
++//
++// The contract:
++//  - A participant script context is entered only by native code, for one
++//    ActionContext authorized against the identity registry (S03-T01) for a
++//    scope: Scope::Self needs the participant's live actor; Scope::Party the
++//    participant's own party. Contexts nest (a stack); each entry has a token
++//    and only the innermost may leave. Nothing in Lua can name a participant
++//    and enter its context: Lua can only re-enter a context native code
++//    captured for it (deferred work), and that re-entry is authorized again
++//    as server-internal, so a released participant's deferred work is
++//    refused, never redirected.
++//  - The native entry points: the dialogue (dialogue_open/close and the
++//    phrase script calls, for the actor speaker's participant), a task's
++//    update and state callback (for the participant the task was given to:
++//    CGameTask::m_campaign_owner), the Lua task check of an owned task, and
++//    deferred Lua work created inside a context.
++//  - Lookups are strict: script_context_actor() and the Lua campaign.*
++//    functions return nothing outside a context; they never fall back to a
++//    player. gameplay_script_actor(purpose) is the native bindings' rule: the
++//    context's actor, else the single-actor compatibility accessor
++//    (sole_participant_actor, refused and counted with two actors).
++//  - Installed-script compatibility, campaign server only: inside a context
++//    the installed scripts' two Lua-global handles for the player, db.actor
++//    and AC_ID, are the context's actor and its id; outside one they are the
++//    single-player script actor the installed binder registered (the ALife
++//    actor, S03-T03) and 0, and every out-of-context db.actor read while two
++//    participant actors live is counted by script and line
++//    (report_script_context). The native forms (alife():has_info(0, ...)
++//    behind has_alife_info, alife():actor(), the story object "actor") are not
++//    remapped: they stay the single-player script actor's, recorded as
++//    party/personal state decisions for S08.
++//  - Presentation callbacks: what the server would show a player (the talk
++//    window, news, talk messages, camera and post-process effectors, the
++//    game-over sequence) goes to that participant's presentation outbox; a
++//    client presents locally as before. Stage 4 delivers the outbox.
++//
++// On a client none of this changes behaviour: no context is ever entered,
++// the compatibility layer is not loaded, presentation stays local.
++
++#include "CampaignIdentity.h"
++
++class CActor;
++class CObject;
++class CGameObject;
++class CGameTask;
++class CInventoryOwner;
++class CScriptGameObject;
++struct lua_State;
++
++namespace campaign
++{
++// One entered context.
++struct ScriptContext
++{
++	ActionContext action; // as authorized
++	Scope scope;
++	PartyId party; // the participant's party, from the registry
++	EngineEntityKey actor_key; // the participant's live actor at entry (none allowed for Scope::Party)
++	u32 token;
++	LPCSTR entry; // the native entry point (a static string)
++};
++
++// The context stack over one registry. The process uses one over
++// g_campaign_identity (script_contexts()); the unit fixture builds its own.
++class ScriptContextStack
++{
++public:
++	enum
++	{
++		max_depth = 16,
++		max_captured = 4096,
++	};
++
++	struct Stats
++	{
++		u64 entered;
++		u64 refused;
++		u64 left;
++		u64 leave_mismatch;
++		u64 captured;
++		u64 captured_evicted;
++		u64 captured_entered;
++		u64 captured_refused;
++		u32 max_depth_seen;
++	};
++
++	explicit ScriptContextStack(const CampaignIdentityRegistry* registry);
++
++	// Authorizes the context for the scope and pushes it. Scope::Self needs a
++	// live actor (NoActor); Scope::Identity and Scope::World are not script
++	// contexts (NotAuthoritative).
++	Refusal enter(const ActionContext& context, Scope scope, LPCSTR entry, u32& token);
++	// Pops the innermost context; ContextMismatch for any other token.
++	Refusal leave(u32 token);
++	// The innermost context; NoContext when none.
++	Refusal current(ScriptContext& out) const;
++	u32 depth() const { return u32(m_stack.size()); }
++
++	// Deferred work: the innermost context, recorded under a handle (never 0).
++	Refusal capture(u32& handle);
++	// Re-enters a captured context as server-internal: authorized again, so a
++	// released or rebound participant is refused. NoContext for an unknown or
++	// evicted handle.
++	Refusal enter_captured(u32 handle, LPCSTR entry, u32& token);
++
++	const Stats& stats() const { return m_stats; }
++
++private:
++	struct Captured
++	{
++		u32 handle;
++		ParticipantRef participant;
++		PartyId party;
++		Scope scope;
++	};
++
++	const CampaignIdentityRegistry* m_registry;
++	xr_vector<ScriptContext> m_stack;
++	xr_vector<Captured> m_captured; // oldest first
++	u32 m_next_token;
++	u32 m_next_handle;
++	Stats m_stats;
++};
++
++// The process stack (campaign server only; null elsewhere).
++ScriptContextStack* script_contexts();
++
++// Enters a context on the process stack for the lifetime of the scope and
++// binds the installed scripts' db.actor to its actor (through the server's
++// compatibility layer). On a client, or refused, it enters nothing.
++class ScriptContextScope
++{
++public:
++	ScriptContextScope(const ActionContext& context, Scope scope, LPCSTR entry);
++	// A captured context (deferred work).
++	ScriptContextScope(u32 captured_handle, LPCSTR entry);
++	// The participant the task was given to (NoContext for a task with no
++	// owner: it runs outside any context, counted).
++	ScriptContextScope(const CGameTask* task, LPCSTR entry);
++	// The participant holding this actor (server-internal, Self).
++	ScriptContextScope(const CObject* actor, LPCSTR entry);
++	~ScriptContextScope();
++	Refusal refusal() const { return m_refusal; }
++	bool entered() const { return m_refusal == Refusal::None; }
++
++private:
++	ScriptContextScope(const ScriptContextScope&);
++	ScriptContextScope& operator=(const ScriptContextScope&);
++	Refusal m_refusal;
++	u32 m_token;
++};
++
++// The server's own context for a participant (server-internal, Self, the
++// participant's party). False when the reference is not current.
++bool participant_context(const ParticipantRef& ref, ActionContext& out);
++// ...for the participant holding this actor.
++bool actor_context(const CObject* actor, ActionContext& out);
++
++// Strict lookups: nothing outside a context.
++Refusal current_script_context(ScriptContext& out);
++CActor* script_context_actor(Refusal* why = nullptr);
++// The native bindings' rule: the context's actor; outside a context the
++// single-actor compatibility accessor (null and counted with two actors).
++CActor* gameplay_script_actor(LPCSTR purpose);
++
++// --- tasks ------------------------------------------------------------------
++// The participant a task was given to (CGameTask::m_campaign_owner), set by
++// the script binding give_task on the receiving actor, on the server only.
++void set_task_owner(CGameTask* task, const CObject* receiver);
++// The owner's actor (null when the task has no owner or the owner holds no actor).
++CActor* task_owner_actor(const CGameTask* task);
++// The actor whose Lua binder hosts the installed scripts' callbacks (the
++// single-player script actor); its registered handlers receive owned tasks'
++// state callbacks inside the owner's context.
++CActor* script_host_actor();
++// Counts an owned task's state callback delivered to the script host.
++void note_task_callback_hosted();
++// --- dialogue -----------------------------------------------------------------
++// The server's dialogue entry for a participant actor: OfferTalk/StartTalk,
++// the talk window's script hook (pda.actor_menu_mode(10), which a client's
++// window runs when it shows) inside the participant's context, and a
++// DialogOpen presentation to that participant. Close: actor_menu_mode(11) in
++// the context, StopTalk on both, DialogClose.
++Refusal dialogue_open(CActor* actor, CInventoryOwner* partner, bool disable_break);
++Refusal dialogue_close(CActor* actor, CInventoryOwner* partner);
++
++// --- presentation callbacks -----------------------------------------------------
++enum class Presentation : u8
++{
++	DialogOpen,
++	DialogClose,
++	News,
++	TalkMessage,
++	CameraEffector,
++	CameraEffectorRemove,
++	PostProcess,
++	PostProcessRemove,
++	GameOver,
++	Count,
++};
++
++LPCSTR presentation_name(Presentation kind);
++
++struct PresentationRecord
++{
++	u32 serial;
++	ParticipantRef participant;
++	Presentation kind;
++	u16 object; // the partner, effector id or 0
++	u32 frame;
++	string128 detail;
++};
++
++// To a participant: recorded in its outbox (bounded; the oldest is dropped
++// and counted). StaleReference/UnknownParticipant for a reference that is not
++// current, WrongRole on a client.
++Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail);
++// To the innermost context's participant; NoContext (dropped, counted) when none.
++Refusal present_to_context(Presentation kind, u16 object, LPCSTR detail);
++// To the participant holding this actor.
++Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LPCSTR detail);
++// A copy of the slot's outbox, oldest first.
++u32 presentation_outbox(u8 slot, xr_vector<PresentationRecord>& out);
++u32 presentation_dropped();
++
++// --- Lua ------------------------------------------------------------------------
++// The campaign.* module (both products; inert on a client).
++void script_register_context(lua_State* L);
++// Campaign server, every level frame: installs the compatibility layer in the
++// current Lua state when it is missing and refreshes the db.actor audit flag.
++void script_context_frame();
++// Whether the compatibility layer is installed in the current Lua state.
++bool script_compat_installed();
++// The out-of-context db.actor reads the layer counted (site "script:line",
++// count), most frequent first; the total in `total`.
++u32 script_host_reads(xr_vector<std::pair<shared_str, u32>>& out, u32* total = nullptr);
++// The process stack's lifetime follows the identity service.
++void release_script_contexts();
++
++struct ScriptContextStats
++{
++	u64 lua_actor_calls; // campaign.actor() and friends
++	u64 lua_no_context; // ...outside a context (returned nothing)
++	u64 task_scopes; // task scopes entered (owned tasks)
++	u64 task_unowned; // ...for a task with no owner (ran outside a context)
++	u64 task_callbacks_hosted; // owned tasks' state callbacks delivered to the script host
++	u64 presented;
++	u64 present_no_context;
++	u64 compat_installs;
++	u64 compat_failures;
++	u64 gameplay_context; // gameplay_script_actor answered from a context
++	u64 gameplay_compat; // ...from the compatibility accessor
++};
++
++const ScriptContextStats& script_context_stats();
++// Logs the stack and Lua stats, the outboxes' counts and the out-of-context
++// db.actor reads by site.
++void report_script_context(LPCSTR tag);
++} // namespace campaign
+diff --git a/src/xrGame/CampaignScriptContextFixture.cpp b/src/xrGame/CampaignScriptContextFixture.cpp
+new file mode 100644
+index 0000000..ad19604
+--- /dev/null
++++ b/src/xrGame/CampaignScriptContextFixture.cpp
+@@ -0,0 +1,1317 @@
++#include "pch_script.h"
++#include "CampaignIdentityFixture.h"
++#include "CampaignIdentity.h"
++#include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
++
++// S03-T05: the participant script context fixtures.
++//
++// script-context (unit, Identity scope, no level): the context stack over a
++// standalone registry: nesting and the innermost-only leave, every refusal an
++// entry can meet (forged, unknown and bridge sessions, world and identity
++// scope, wrong party, stale reference, no actor for Self, depth), capture and
++// re-entry as server-internal, re-entry refused after the participant's
++// release, a client-role registry entering nothing.
++//
++// Level fixture (GameState, after the activation fixture; both participant
++// actors live, participant 2 attached on its session):
++//  1 contract:  a fixture-owned Lua probe runs with no context, in
++//               participant 1's server-internal context, in participant 2's
++//               client-intent context and nested (2 inside 1). Each run reads
++//               campaign.* and db.actor and does a harmless action on the
++//               context's actor: a portable-store marker, 1 RU, a news item, a
++//               presentation and a camera effector. Forged, unknown-session,
++//               bridge, stale, wrong-party and world contexts enter nothing.
++//  2 deferred:  a time event created in each context and one outside any
++//               fires in the context it was created in.
++//  3 quests:    the installed mechanic quests are given in each participant's
++//               context through the dialogue entry (participant 2 is offered
++//               mar_base_stalker_tech_task_1, participant 1, who completed it in
++//               S02-T06e, mar_base_stalker_tech_task_2); both stay open
++//               together. Participant 2's fetch item is spawned into actor 2's
++//               inventory; its task reaches the complete stage while
++//               participant 1's does not; participant 2 turns in; the
++//               completion, goodwill, info portion, reward and item removal
++//               land on actor 2 alone. Then participant 1 does the same with
++//               its own task.
++//  4 audit:     the out-of-context db.actor reads counted while two actors
++//               lived (script and line) are written to the capture.
++//
++// CSV rows (s03-t05-script-context.csv):
++//   meta,<p1>,<p2>,<actor1>,<actor2>,<party1>,<party2>,<giver>
++//   probe,<label>,<in_context>,<slot>,<generation>,<origin>,<entry>,<actor>,<db_actor>,<ac_id>,<marker>,<presented>,<effector>,
++//         <money1>,<money2>,<outbox1>,<outbox2>
++//   refusal,<label>,<expected>,<observed>
++//   deferred,<tag>,<fired>,<slot>,<actor>,<db_actor>,<entry>
++//   quest,<label>,<who>,<task>,<native_state>,<owned>,<owner_slot>,<lua_status>,<lua_stage>,<fetch>,<items_self>,
++//         <items_other>,<money_self>,<money_other>,<goodwill_self>,<goodwill_other>,<info_self>,<info_other>,
++//         <outbox_self>,<outbox_other>
++//   outbox,<slot>,<serial>,<kind>,<object>,<detail>
++//   host-read,<site>,<count>
++//   stats,<name>,<value>
++//   check,<phase>,<ok>,<what>
++//   end,<ticks>,<sim_ms>,<wall_ms>,<checks>,<failures>,<phase>,<ok>
++
++#include "Level.h"
++#include "xrServer.h"
++#include "Actor.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "alife_graph_registry.h"
++#include "ai_object_location.h"
++#include "CharacterPhysicsSupport.h"
++#include "PHMovementControl.h"
++#include "GametaskManager.h"
++#include "GameTask.h"
++#include "InventoryOwner.h"
++#include "Inventory.h"
++#include "inventory_item.h"
++#include "relation_registry.h"
++#include "character_community.h"
++#include "script_game_object.h"
++#include "script_engine.h"
++#include "../xrServerEntities/xrServer_Objects_ALife.h"
++#include "../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
++#include "../xrEngine/device.h"
++
++CSE_Abstract* CALifeSimulator__spawn_item2(CALifeSimulator* self, LPCSTR section, const Fvector& position,
++	u32 level_vertex_id, GameGraph::_GRAPH_ID game_vertex_id, ALife::_OBJECT_ID id_parent);
++
++using namespace campaign;
++
++namespace
++{
++const u16 no_id = u16(-1);
++const u32 session2 = 0x53030002; // participant 2's session (S03-T03)
++LPCSTR giver_profile = "mar_base_stalker_tech";
++const u32 deferred_budget = 150;
++const u32 approach_ticks = 100; // the giver's logic updates after the actors arrive
++const u32 observe_ticks = 100;
++const u32 stage_budget = 500;
++const u32 complete_budget = 750;
++
++PlayerId player_id(u64 n)
++{
++	PlayerId id;
++	id.hi = 0x5303000000000001ull;
++	id.lo = n;
++	return id;
++}
++
++PartyId party_id(u64 n)
++{
++	PartyId id;
++	id.hi = 0x5303000000000002ull;
++	id.lo = n;
++	return id;
++}
++
++ActionContext make_context(Origin origin, u32 session, const ParticipantRef& actor, const PartyId& party)
++{
++	ActionContext c;
++	c.origin = origin;
++	c.session = session;
++	c.actor = actor;
++	c.party = party;
++	return c;
++}
++
++// --- unit fixture ---------------------------------------------------------------
++
++struct UnitCheck
++{
++	u32 checks = 0;
++	u32 failures = 0;
++
++	bool check(bool condition, LPCSTR what)
++	{
++		++checks;
++		if (!condition)
++		{
++			++failures;
++			Msg("! S03-T05 script-context-fixture failed: %s", what);
++		}
++		return condition;
++	}
++
++	bool expect(Refusal observed, Refusal expected, LPCSTR what)
++	{
++		++checks;
++		if (observed != expected)
++		{
++			++failures;
++			Msg("! S03-T05 script-context-fixture failed: %s: expected %s, observed %s", what, refusal_name(expected),
++				refusal_name(observed));
++		}
++		return observed == expected;
++	}
++};
++
++bool unit_fixture()
++{
++	UnitCheck f;
++	CampaignIdentityRegistry registry(Role::Server);
++	registry.on_server_incarnation();
++	const ServerAuthority* authority = registry.authority();
++	const EngineEntityKey k1 = registry.on_engine_id_assigned(10);
++	const EngineEntityKey k2 = registry.on_engine_id_assigned(11);
++	ParticipantRef p1, p2;
++	f.expect(registry.bind_participant(authority, player_id(1), party_id(1), 1, p1), Refusal::None, "bind player 1");
++	f.expect(registry.bind_participant(authority, player_id(2), party_id(1), 2, p2), Refusal::None, "bind player 2");
++	f.expect(registry.bind_actor(authority, p1, k1), Refusal::None, "actor 10 is participant 1's");
++	f.expect(registry.bind_actor(authority, p2, k2), Refusal::None, "actor 11 is participant 2's");
++	f.expect(registry.attach_session(authority, p2, 7, 3), Refusal::None, "session 7 attaches to participant 2");
++	f.expect(registry.set_bridge_session(authority, 5), Refusal::None, "session 5 is the bridge");
++
++	ScriptContextStack stack(&registry);
++	ScriptContext c;
++	u32 t1 = 0, t2 = 0, t3 = 0, h1 = 0, h2 = 0;
++	const ActionContext ctx1 = make_context(Origin::ServerInternal, 0, p1, party_id(1));
++	const ActionContext ctx2 = make_context(Origin::ClientIntent, 7, p2, party_id(1));
++
++	f.expect(stack.current(c), Refusal::NoContext, "an empty stack has no context");
++	f.expect(stack.capture(h1), Refusal::NoContext, "nothing to capture outside a context");
++	f.check(h1 == 0, "no handle outside a context");
++
++	// Nesting: the innermost context is current; only it may leave.
++	f.expect(stack.enter(ctx1, Scope::Self, "unit-1", t1), Refusal::None, "the server enters participant 1's context");
++	f.expect(stack.current(c), Refusal::None, "a context is current");
++	f.check(c.action.actor == p1 && c.actor_key == k1 && c.party == party_id(1), "...participant 1, actor 10, party 1");
++	f.expect(stack.enter(ctx2, Scope::Self, "unit-2", t2), Refusal::None,
++		"participant 2's session enters participant 2's context inside it");
++	f.expect(stack.current(c), Refusal::None, "the nested context is current");
++	f.check(c.action.actor == p2 && c.actor_key == k2 && c.action.origin == Origin::ClientIntent,
++		"...participant 2, actor 11, a client intent");
++	f.check(stack.depth() == 2, "depth 2");
++	f.expect(stack.leave(t1), Refusal::ContextMismatch, "the outer context cannot leave first");
++	f.check(stack.depth() == 2, "a refused leave pops nothing");
++	f.expect(stack.leave(t2), Refusal::None, "the inner context leaves");
++	f.expect(stack.current(c), Refusal::None, "the outer context is current again");
++	f.check(c.action.actor == p1 && c.actor_key == k1, "...participant 1's again");
++	f.expect(stack.capture(h1), Refusal::None, "participant 1's context is captured");
++	f.check(h1 != 0, "...under a handle");
++	f.expect(stack.leave(t1), Refusal::None, "the outer context leaves");
++	f.expect(stack.current(c), Refusal::NoContext, "no context after both left");
++	f.expect(stack.leave(t1), Refusal::NoContext, "leaving an empty stack is refused");
++
++	// Refusals: nothing is entered.
++	f.expect(stack.enter(make_context(Origin::ClientIntent, 7, p1, party_id(1)), Scope::Self, "forged", t3),
++		Refusal::NotAuthoritative, "participant 2's session cannot name participant 1");
++	f.expect(stack.enter(make_context(Origin::ClientIntent, 99, p2, party_id(1)), Scope::Self, "unknown", t3),
++		Refusal::UnknownSession, "an unknown session enters nothing");
++	f.expect(stack.enter(make_context(Origin::ClientIntent, 5, p2, party_id(1)), Scope::Self, "bridge", t3),
++		Refusal::BridgeNotParticipant, "the bridge is not a participant");
++	f.expect(stack.enter(ctx1, Scope::World, "world", t3), Refusal::NotAuthoritative,
++		"world scope is not a participant script context");
++	f.expect(stack.enter(ctx1, Scope::Identity, "identity", t3), Refusal::NotAuthoritative,
++		"identity scope is not a participant script context");
++	f.expect(stack.enter(make_context(Origin::ServerInternal, 0, p1, party_id(2)), Scope::Party, "party", t3),
++		Refusal::WrongParty, "a party context names the participant's party");
++	ParticipantRef stale = p2;
++	++stale.generation;
++	f.expect(stack.enter(make_context(Origin::ServerInternal, 0, stale, party_id(1)), Scope::Self, "stale", t3),
++		Refusal::StaleReference, "a stale reference enters nothing");
++	f.check(stack.depth() == 0 && t3 == 0, "no refused entry pushed a context or returned a token");
++
++	// Party scope needs no actor; Self does.
++	f.expect(stack.enter(make_context(Origin::ServerInternal, 0, p1, party_id(1)), Scope::Party, "party", t3),
++		Refusal::None, "the right party enters");
++	f.expect(stack.leave(t3), Refusal::None, "...and leaves");
++	registry.on_engine_id_freed(11);
++	f.expect(stack.enter(ctx2, Scope::Self, "no-actor", t3), Refusal::NoActor,
++		"a participant without a live actor has no Self context");
++	f.expect(stack.enter(make_context(Origin::ServerInternal, 0, p2, party_id(1)), Scope::Party, "party", t3),
++		Refusal::None, "...but a Party one");
++	f.expect(stack.current(c), Refusal::None, "the party context is current");
++	f.check(c.actor_key.id == kNoEngineId, "...with no actor");
++	f.expect(stack.leave(t3), Refusal::None, "...and leaves");
++
++	// Capture and re-entry: authorized again, as the server.
++	const EngineEntityKey k3 = registry.on_engine_id_assigned(12);
++	f.expect(registry.bind_actor(authority, p2, k3), Refusal::None, "actor 12 is participant 2's");
++	f.expect(stack.enter(ctx2, Scope::Self, "unit-2b", t2), Refusal::None, "participant 2's context again");
++	f.expect(stack.capture(h2), Refusal::None, "captured");
++	f.expect(stack.leave(t2), Refusal::None, "left");
++	f.check(h2 != 0 && h2 != h1, "a new handle");
++	f.expect(stack.enter_captured(h2, "deferred", t3), Refusal::None, "the captured context re-enters");
++	f.expect(stack.current(c), Refusal::None, "it is current");
++	f.check(c.action.actor == p2 && c.actor_key == k3 && c.action.origin == Origin::ServerInternal && c.action.session == 0,
++		"...participant 2, actor 12, re-entered as server-internal");
++	f.expect(stack.leave(t3), Refusal::None, "and leaves");
++	f.expect(registry.release_participant(authority, p2, 9), Refusal::None, "participant 2 is released");
++	const Refusal released = stack.enter_captured(h2, "deferred", t3);
++	f.check(released != Refusal::None && t3 == 0, "a released participant's captured context is refused");
++	Msg("S03-T05 script-context-fixture released participant's capture: %s", refusal_name(released));
++	f.expect(stack.enter_captured(h1, "deferred", t3), Refusal::None, "participant 1's capture still re-enters");
++	f.expect(stack.leave(t3), Refusal::None, "and leaves");
++	f.expect(stack.enter_captured(12345, "deferred", t3), Refusal::NoContext, "an unknown handle is no context");
++
++	// Depth bound.
++	u32 tokens[ScriptContextStack::max_depth];
++	bool all = true;
++	for (u32 i = 0; i < ScriptContextStack::max_depth; ++i)
++		all = stack.enter(ctx1, Scope::Self, "depth", tokens[i]) == Refusal::None && all;
++	f.check(all, "sixteen nested contexts enter");
++	f.expect(stack.enter(ctx1, Scope::Self, "depth", t3), Refusal::NotAuthoritative, "a seventeenth is refused");
++	for (u32 i = ScriptContextStack::max_depth; i > 0; --i)
++		all = stack.leave(tokens[i - 1]) == Refusal::None && all;
++	f.check(all && stack.depth() == 0, "and all leave in order");
++
++	// A client registry authorizes nothing.
++	CampaignIdentityRegistry client(Role::Client);
++	client.on_server_incarnation();
++	ScriptContextStack client_stack(&client);
++	f.expect(client_stack.enter(ctx1, Scope::Self, "client", t3), Refusal::WrongRole, "a client stack enters nothing");
++
++	const ScriptContextStack::Stats& st = stack.stats();
++	f.check(st.entered == st.left, "every entered context left");
++	f.check(st.leave_mismatch == 2, "two refused leaves counted");
++	f.check(st.captured == 2 && st.captured_entered == 2 && st.captured_refused == 2,
++		"captures: 2 taken, 2 re-entered, 2 refused");
++	Msg("S03-T05 script-context-fixture checks=%u failures=%u entered=%I64u refused=%I64u max_depth=%u", f.checks,
++		f.failures, st.entered, st.refused, st.max_depth_seen);
++	return f.failures == 0;
++}
++
++// --- level fixture ----------------------------------------------------------------
++
++struct QuestRun
++{
++	LPCSTR label;
++	u8 slot; // 0 participant 1, 1 participant 2
++	ActionContext phrase_context; // the context the phrase choices arrive in
++	u16 actor_id;
++	u16 other_id;
++	string128 task_id;
++	string64 info;
++	string64 fetch;
++	u32 fetch_count;
++	u32 money_before;
++	u32 other_money_before;
++	int goodwill_before;
++	int other_goodwill_before;
++	bool info_before;
++	bool other_info_before;
++	u32 outbox_before;
++	u32 other_outbox_before;
++	u32 items_other_before;
++	bool given;
++	bool stage_reached;
++	bool turned_in;
++	bool completed;
++	u32 stage_tick;
++	u32 completed_tick;
++};
++
++enum Phase
++{
++	PhaseDeferred,
++	PhaseApproach,
++	PhaseObserve,
++	PhaseStage2,
++	PhaseComplete2,
++	PhaseStage1,
++	PhaseComplete1,
++	PhaseDone,
++};
++
++LPCSTR phase_name(int phase)
++{
++	switch (phase)
++	{
++	case PhaseDeferred: return "deferred";
++	case PhaseApproach: return "approach";
++	case PhaseObserve: return "observe";
++	case PhaseStage2: return "stage-2";
++	case PhaseComplete2: return "complete-2";
++	case PhaseStage1: return "stage-1";
++	case PhaseComplete1: return "complete-1";
++	case PhaseDone: return "done";
++	default: return "contract";
++	}
++}
++
++struct Fixture
++{
++	bool running = false;
++	bool ok = true;
++	FILE* out = nullptr;
++	u32 tick = 0;
++	u32 checks = 0;
++	u32 failures = 0;
++	int phase = -1;
++	u32 phase_tick = 0;
++	ParticipantRef p1, p2;
++	PartyId party1, party2;
++	u16 actor1 = no_id;
++	u16 actor2 = no_id;
++	u16 giver = no_id;
++	ActionContext ctx1, ctx2;
++	QuestRun quest[2]; // [0] participant 2, [1] participant 1
++};
++
++Fixture g_fixture;
++
++void row(LPCSTR format, ...)
++{
++	if (!g_fixture.out)
++		return;
++	va_list args;
++	va_start(args, format);
++	vfprintf(g_fixture.out, format, args);
++	va_end(args);
++	fputc('\n', g_fixture.out);
++	fflush(g_fixture.out);
++}
++
++bool check(bool condition, LPCSTR what)
++{
++	Fixture& f = g_fixture;
++	++f.checks;
++	if (!condition)
++	{
++		++f.failures;
++		f.ok = false;
++		Msg("! S03-T05 script-context check failed (%s): %s", phase_name(f.phase), what);
++	}
++	row("check,%s,%d,%s", phase_name(f.phase), condition ? 1 : 0, what);
++	return condition;
++}
++
++bool expect_refusal(Refusal observed, Refusal expected, LPCSTR what)
++{
++	row("refusal,%s,%s,%s", what, refusal_name(expected), refusal_name(observed));
++	return check(observed == expected, what);
++}
++
++CActor* actor_by_id(u16 id)
++{
++	if (id == no_id || !g_pGameLevel)
++		return nullptr;
++	CObject* object = Level().Objects.net_Find(id);
++	return object && !object->getDestroy() ? smart_cast<CActor*>(object) : nullptr;
++}
++
++CGameObject* giver_object()
++{
++	if (g_fixture.giver == no_id)
++		return nullptr;
++	CObject* object = Level().Objects.net_Find(g_fixture.giver);
++	return object && !object->getDestroy() ? smart_cast<CGameObject*>(object) : nullptr;
++}
++
++u32 money_of(u16 id)
++{
++	CActor* actor = actor_by_id(id);
++	return actor ? actor->get_money() : 0;
++}
++
++int goodwill_of(u16 id, LPCSTR community)
++{
++	CHARACTER_COMMUNITY c;
++	c.set(community);
++	return int(RELATION_REGISTRY().GetCommunityGoodwill(c.index(), id));
++}
++
++bool info_of(u16 id, LPCSTR info)
++{
++	CActor* actor = actor_by_id(id);
++	return actor && actor->HasInfo(info);
++}
++
++u32 items_of(u16 id, LPCSTR section)
++{
++	CActor* actor = actor_by_id(id);
++	if (!actor || !section || !section[0])
++		return 0;
++	u32 count = 0;
++	for (PIItem item : actor->inventory().m_all)
++		if (item && xr_strcmp(item->object().cNameSect_str(), section) == 0)
++			++count;
++	return count;
++}
++
++u32 outbox_size(u8 slot)
++{
++	xr_vector<PresentationRecord> records;
++	return presentation_outbox(slot, records);
++}
++
++u32 outbox_count(u8 slot, Presentation kind)
++{
++	xr_vector<PresentationRecord> records;
++	presentation_outbox(slot, records);
++	u32 count = 0;
++	for (const PresentationRecord& record : records)
++		if (record.kind == kind)
++			++count;
++	return count;
++}
++
++// --- Lua helpers ------------------------------------------------------------------
++luabind::object lua_nil()
++{
++	return luabind::object(ai().script_engine().lua());
++}
++
++bool ensure_lua()
++{
++	lua_State* L = ai().script_engine().lua();
++	lua_pushstring(L, "s03_t05");
++	lua_rawget(L, LUA_GLOBALSINDEX);
++	const bool present = lua_istable(L, -1);
++	lua_pop(L, 1);
++	if (present)
++		return true;
++	LPCSTR source =
++		"s03_t05 = { fired = {} }\n"
++		"function s03_t05.probe(tag)\n"
++		"  local a = campaign.actor()\n"
++		"  local r = { tag = tag, in_context = campaign.in_context(), slot = campaign.slot(),\n"
++		"    generation = campaign.generation(), party = campaign.party(), player = campaign.player(),\n"
++		"    origin = campaign.origin(), entry = campaign.entry(), actor = a and a:id() or -1,\n"
++		"    actor_id = campaign.actor_id(), db_actor = db.actor and db.actor:id() or -1, ac_id = AC_ID,\n"
++		"    marker = '', presented = false, effector = 0 }\n"
++		"  if a then\n"
++		"    save_var(a, 's03_t05_marker', tag)\n"
++		"    r.marker = load_var(a, 's03_t05_marker', '') or ''\n"
++		"    a:give_money(1)\n"
++		"    a:give_game_news('s03-t05 ' .. tag, 'probe', 'ui_inGame2_D_Sisshik', 0, 1000)\n"
++		"    r.presented = campaign.present('talk-message', 's03-t05 ' .. tag)\n"
++		"    r.effector = level.add_cam_effector('camera_effects\\\\item_use.anm', 8053, false, '')\n"
++		"  end\n"
++		"  return r\n"
++		"end\n"
++		"function s03_t05.marker(id)\n"
++		"  local o = level.object_by_id(id)\n"
++		"  if not o then return '' end\n"
++		"  return load_var(o, 's03_t05_marker', '') or ''\n"
++		"end\n"
++		"function s03_t05.defer(tag)\n"
++		"  CreateTimeEvent('s03_t05', tag, 0.3, function()\n"
++		"    local a = campaign.actor()\n"
++		"    s03_t05.fired[tag] = { slot = campaign.slot(), actor = a and a:id() or -1,\n"
++		"      db_actor = db.actor and db.actor:id() or -1, entry = campaign.entry() }\n"
++		"    return true\n"
++		"  end)\n"
++		"end\n"
++		"function s03_t05.fired_info(tag) return s03_t05.fired[tag] end\n"
++		"function s03_t05.task(id)\n"
++		"  local tm = task_manager.get_task_manager()\n"
++		"  local t = tm and tm.task_info and tm.task_info[id]\n"
++		"  if not t then return nil end\n"
++		"  return { status = t.status or '', stage = t.stage or -1, giver = t.task_giver_id or -1 }\n"
++		"end\n"
++		"function s03_t05.fetch(id, actor_id)\n"
++		"  local o = level.object_by_id(actor_id)\n"
++		"  if not o then return nil end\n"
++		"  return { section = load_var(o, id .. '_fetch', '') or '', count = load_var(o, id .. '_fetch_count', 1) or 1 }\n"
++		"end\n"
++		"function s03_t05.db_actor_id() return db.actor and db.actor:id() or -1 end\n"
++		"function s03_t05.compat()\n"
++		"  local S = rawget(_G, '__campaign_ctx')\n"
++		"  if not S then return nil end\n"
++		"  return { installed = S.installed == true, depth = S.depth, audit = S.audit == true, wrapped = S.wrapped,\n"
++		"    storage_created = S.storage_created, deferred_captured = S.deferred_captured,\n"
++		"    deferred_refused = S.deferred_refused, host_read_total = S.host_read_total }\n"
++		"end\n";
++	if (luaL_loadbuffer(L, source, xr_strlen(source), "s03_t05") != 0 || lua_pcall(L, 0, 0, 0) != 0)
++	{
++		Msg("! S03-T05 fixture Lua failed: %s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		return false;
++	}
++	return true;
++}
++
++luabind::object call(LPCSTR function, LPCSTR arg)
++{
++	luabind::functor<luabind::object> f;
++	if (!ensure_lua() || !ai().script_engine().functor(function, f))
++		return lua_nil();
++	return f(arg);
++}
++
++luabind::object call2(LPCSTR function, LPCSTR arg, int arg2)
++{
++	luabind::functor<luabind::object> f;
++	if (!ensure_lua() || !ai().script_engine().functor(function, f))
++		return lua_nil();
++	return f(arg, arg2);
++}
++
++int field_int(const luabind::object& t, LPCSTR key, int fallback = -1)
++{
++	if (t.type() != LUA_TTABLE)
++		return fallback;
++	luabind::object v = t[key];
++	if (v.type() == LUA_TNUMBER)
++		return int(luabind::object_cast<float>(v));
++	return fallback;
++}
++
++bool field_bool(const luabind::object& t, LPCSTR key)
++{
++	if (t.type() != LUA_TTABLE)
++		return false;
++	luabind::object v = t[key];
++	return v.type() == LUA_TBOOLEAN && luabind::object_cast<bool>(v);
++}
++
++void field_str(const luabind::object& t, LPCSTR key, string128& out)
++{
++	out[0] = 0;
++	if (t.type() != LUA_TTABLE)
++		return;
++	luabind::object v = t[key];
++	if (v.type() == LUA_TSTRING)
++		xr_strcpy(out, luabind::object_cast<LPCSTR>(v));
++}
++
++struct Probe
++{
++	bool in_context;
++	int slot;
++	int generation;
++	string128 origin;
++	string128 entry;
++	string128 party;
++	int actor;
++	int db_actor;
++	int ac_id;
++	string128 marker;
++	bool presented;
++	float effector;
++};
++
++Probe probe(LPCSTR label)
++{
++	Probe p;
++	luabind::object r = call("s03_t05.probe", label);
++	p.in_context = field_bool(r, "in_context");
++	p.slot = field_int(r, "slot");
++	p.generation = field_int(r, "generation");
++	field_str(r, "origin", p.origin);
++	field_str(r, "entry", p.entry);
++	field_str(r, "party", p.party);
++	p.actor = field_int(r, "actor");
++	p.db_actor = field_int(r, "db_actor");
++	p.ac_id = field_int(r, "ac_id");
++	field_str(r, "marker", p.marker);
++	p.presented = field_bool(r, "presented");
++	p.effector = 0.f;
++	if (r.type() == LUA_TTABLE)
++	{
++		luabind::object e = r["effector"];
++		if (e.type() == LUA_TNUMBER)
++			p.effector = luabind::object_cast<float>(e);
++	}
++	const Fixture& f = g_fixture;
++	row("probe,%s,%d,%d,%d,%s,%s,%d,%d,%d,%s,%d,%.3f,%u,%u,%u,%u", label, p.in_context ? 1 : 0, p.slot, p.generation,
++		p.origin, p.entry, p.actor, p.db_actor, p.ac_id, p.marker[0] ? p.marker : "-", p.presented ? 1 : 0, p.effector,
++		money_of(f.actor1), money_of(f.actor2), outbox_size(f.p1.slot), outbox_size(f.p2.slot));
++	return p;
++}
++
++void uuid_text(const Uuid128& id, string128& out)
++{
++	xr_sprintf(out, "%016I64x%016I64x", id.hi, id.lo);
++}
++
++// --- phase 1: contract ---------------------------------------------------------------
++void phase_contract()
++{
++	Fixture& f = g_fixture;
++	string128 party1_text;
++	uuid_text(f.party1, party1_text);
++	check(script_compat_installed(), "the compatibility layer is installed on the server");
++	luabind::object compat = call("s03_t05.compat", "");
++	check(field_int(compat, "wrapped", 0) == 3, "it wrapped AC_ID, CreateTimeEvent and CGeneralTask.check_task");
++	check(field_bool(compat, "audit"), "the db.actor audit is on while two participant actors live");
++
++	const u32 m1 = money_of(f.actor1), m2 = money_of(f.actor2);
++	const u32 o1 = outbox_size(f.p1.slot), o2 = outbox_size(f.p2.slot);
++	const ScriptContextStats before = script_context_stats();
++
++	// No context: strict lookups return nothing; db.actor is the host's (compat).
++	Probe none = probe("none");
++	check(!none.in_context && none.slot == -1 && none.actor == -1, "outside a context campaign.* names nobody");
++	check(none.db_actor == int(f.actor1), "outside a context db.actor is the single-player script actor (counted)");
++	check(none.ac_id == 0, "outside a context AC_ID is the single-player value 0");
++	check(script_context_stats().lua_no_context > before.lua_no_context, "...and the strict lookups counted no context");
++	check(money_of(f.actor1) == m1 && money_of(f.actor2) == m2, "the probe changed no money without a context");
++	check(outbox_size(f.p1.slot) == o1 && outbox_size(f.p2.slot) == o2, "and presented nothing");
++
++	// Participant 1, server-internal.
++	{
++		ScriptContextScope scope(f.ctx1, Scope::Self, "s03-t05-probe-1");
++		check(scope.entered(), "participant 1's server-internal context enters");
++		Probe p = probe("p1");
++		check(p.in_context && p.slot == int(f.p1.slot) && p.generation == int(f.p1.generation),
++			"participant 1's context names participant 1");
++		check(p.actor == int(f.actor1) && p.db_actor == int(f.actor1) && p.ac_id == int(f.actor1),
++			"...its actor is actor 1, and so are db.actor and AC_ID");
++		check(!xr_strcmp(p.origin, "server-internal") && !xr_strcmp(p.entry, "s03-t05-probe-1"), "...server-internal");
++		check(!xr_strcmp(p.party, party1_text), "...in participant 1's party");
++		check(!xr_strcmp(p.marker, "p1") && p.presented && p.effector > 0.f, "the action ran on actor 1");
++	}
++	check(money_of(f.actor1) == m1 + 1 && money_of(f.actor2) == m2, "1 RU went to actor 1 only");
++	check(outbox_size(f.p1.slot) == o1 + 3 && outbox_size(f.p2.slot) == o2,
++		"participant 1 got the news, the talk message and the camera effector; participant 2 nothing");
++
++	// Participant 2, a client intent on its session.
++	{
++		ScriptContextScope scope(f.ctx2, Scope::Self, "s03-t05-probe-2");
++		check(scope.entered(), "participant 2's client intent enters its context");
++		Probe p = probe("p2");
++		check(p.in_context && p.slot == int(f.p2.slot) && p.generation == int(f.p2.generation),
++			"participant 2's context names participant 2");
++		check(p.actor == int(f.actor2) && p.db_actor == int(f.actor2) && p.ac_id == int(f.actor2),
++			"...its actor is actor 2, and so are db.actor and AC_ID");
++		check(!xr_strcmp(p.origin, "client-intent"), "...a client intent");
++		check(!xr_strcmp(p.marker, "p2") && p.presented && p.effector > 0.f, "the action ran on actor 2");
++	}
++	check(money_of(f.actor1) == m1 + 1 && money_of(f.actor2) == m2 + 1, "1 RU went to actor 2 only");
++	check(outbox_size(f.p1.slot) == o1 + 3 && outbox_size(f.p2.slot) == o2 + 3, "participant 2 got its three");
++
++	// Nested: both contexts coexist; the inner one is current, the outer returns.
++	{
++		ScriptContextScope outer(f.ctx1, Scope::Self, "s03-t05-outer");
++		{
++			ScriptContextScope inner(f.ctx2, Scope::Self, "s03-t05-inner");
++			Probe p = probe("inner");
++			check(inner.entered() && p.actor == int(f.actor2) && p.db_actor == int(f.actor2),
++				"inside participant 1's context, participant 2's inner context is current");
++		}
++		Probe p = probe("outer");
++		check(outer.entered() && p.actor == int(f.actor1) && p.db_actor == int(f.actor1),
++			"after the inner context left, participant 1's is current and db.actor is actor 1 again");
++	}
++
++	// Refusals: nothing is entered, so nothing runs as anybody.
++	const u32 depth_before = script_contexts() ? script_contexts()->depth() : 0;
++	{
++		ScriptContextScope s(make_context(Origin::ClientIntent, session2, f.p1, f.party1), Scope::Self, "s03-t05-forged");
++		expect_refusal(s.refusal(), Refusal::NotAuthoritative, "participant 2's session naming participant 1");
++	}
++	{
++		ScriptContextScope s(make_context(Origin::ClientIntent, 0x5303dead, f.p2, f.party2), Scope::Self, "s03-t05-unknown");
++		expect_refusal(s.refusal(), Refusal::UnknownSession, "an unknown session");
++	}
++	if (IClient* bridge = Level().Server ? Level().Server->GetServerClient() : nullptr)
++	{
++		ScriptContextScope s(make_context(Origin::ClientIntent, bridge->ID.value(), f.p1, f.party1), Scope::Self,
++			"s03-t05-bridge");
++		expect_refusal(s.refusal(), Refusal::BridgeNotParticipant, "the bridge session");
++	}
++	else
++		check(false, "the server has a bridge client to test");
++	{
++		ParticipantRef stale = f.p2;
++		++stale.generation;
++		ScriptContextScope s(make_context(Origin::ServerInternal, 0, stale, f.party2), Scope::Self, "s03-t05-stale");
++		expect_refusal(s.refusal(), Refusal::StaleReference, "a stale participant reference");
++	}
++	{
++		ScriptContextScope s(make_context(Origin::ServerInternal, 0, f.p1, party_id(2)), Scope::Party, "s03-t05-party");
++		expect_refusal(s.refusal(), Refusal::WrongParty, "a party context naming another party");
++	}
++	{
++		ScriptContextScope s(f.ctx1, Scope::World, "s03-t05-world");
++		expect_refusal(s.refusal(), Refusal::NotAuthoritative, "world scope as a script context");
++	}
++	{
++		ScriptContextScope s(make_context(Origin::ClientIntent, session2, f.p2, f.party2), Scope::World, "s03-t05-intent-world");
++		expect_refusal(s.refusal(), Refusal::NotAuthoritative, "a client intent in world scope");
++	}
++	check(script_contexts() && script_contexts()->depth() == depth_before && depth_before == 0,
++		"no refused context was entered");
++	check(field_int(call("s03_t05.compat", ""), "depth", -1) == 0, "the Lua layer saw no context left behind");
++	{
++		luabind::functor<luabind::object> marker;
++		ai().script_engine().functor("s03_t05.marker", marker);
++		luabind::object m1 = marker(int(f.actor1));
++		luabind::object m2 = marker(int(f.actor2));
++		row("markers,%s,%s", m1.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(m1) : "-",
++			m2.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(m2) : "-");
++		check(m1.type() == LUA_TSTRING && !xr_strcmp(luabind::object_cast<LPCSTR>(m1), "outer"),
++			"actor 1's portable store holds the last marker written in participant 1's context");
++		check(m2.type() == LUA_TSTRING && !xr_strcmp(luabind::object_cast<LPCSTR>(m2), "inner"),
++			"actor 2's holds the last one written in participant 2's");
++	}
++	luabind::functor<luabind::object> db_actor_id;
++	ai().script_engine().functor("s03_t05.db_actor_id", db_actor_id);
++	luabind::object host = db_actor_id();
++	check(host.type() == LUA_TNUMBER && int(luabind::object_cast<float>(host)) == int(f.actor1),
++		"outside any context db.actor is the single-player script actor again");
++
++	// Deferred work: one event in each context, one outside any.
++	{
++		ScriptContextScope scope(f.ctx1, Scope::Self, "s03-t05-defer-1");
++		call("s03_t05.defer", "p1");
++	}
++	{
++		ScriptContextScope scope(f.ctx2, Scope::Self, "s03-t05-defer-2");
++		call("s03_t05.defer", "p2");
++	}
++	call("s03_t05.defer", "none");
++}
++
++// --- phase 2: deferred -----------------------------------------------------------------
++bool deferred_fired(LPCSTR tag)
++{
++	return call("s03_t05.fired_info", tag).type() == LUA_TTABLE;
++}
++
++void deferred_end()
++{
++	Fixture& f = g_fixture;
++	LPCSTR tags[] = {"p1", "p2", "none"};
++	const int expect_slot[] = {int(f.p1.slot), int(f.p2.slot), -1};
++	const int expect_actor[] = {int(f.actor1), int(f.actor2), -1};
++	const int expect_db[] = {int(f.actor1), int(f.actor2), int(f.actor1)};
++	for (u32 i = 0; i < 3; ++i)
++	{
++		luabind::object r = call("s03_t05.fired_info", tags[i]);
++		string128 entry;
++		field_str(r, "entry", entry);
++		const int slot = field_int(r, "slot"), actor = field_int(r, "actor"), db = field_int(r, "db_actor");
++		row("deferred,%s,%d,%d,%d,%d,%s", tags[i], r.type() == LUA_TTABLE ? 1 : 0, slot, actor, db, entry[0] ? entry : "-");
++		string128 what;
++		xr_sprintf(what, "the %s time event fired in the context it was created in (slot %d actor %d db.actor %d)",
++			tags[i], expect_slot[i], expect_actor[i], expect_db[i]);
++		check(r.type() == LUA_TTABLE && slot == expect_slot[i] && actor == expect_actor[i] && db == expect_db[i], what);
++	}
++	luabind::object compat = call("s03_t05.compat", "");
++	check(field_int(compat, "deferred_captured", 0) >= 2, "the two in-context events were captured");
++	check(field_int(compat, "deferred_refused", 0) == 0, "no captured event was refused");
++}
++
++// --- phase 3: quests ---------------------------------------------------------------------
++luabind::object lua_available(u16 npc_id)
++{
++	luabind::object manager = luabind::get_globals(ai().script_engine().lua())["axr_task_manager"];
++	if (manager.type() != LUA_TTABLE)
++		return lua_nil();
++	luabind::object available = manager["available_tasks"];
++	if (available.type() != LUA_TTABLE)
++		return lua_nil();
++	return available[npc_id];
++}
++
++void read_fetch(QuestRun& q, u16 actor_id, string64& section, u32& count)
++{
++	luabind::object r = call2("s03_t05.fetch", q.task_id, int(actor_id));
++	string128 s;
++	field_str(r, "section", s);
++	xr_strcpy(section, s[0] ? s : "-");
++	count = u32(_max(1, field_int(r, "count", 1)));
++}
++
++CGameTask* inprogress_task(const QuestRun& q)
++{
++	return Level().GameTaskManager().HasGameTask(q.task_id, true);
++}
++
++CGameTask* completed_task_of(const QuestRun& q)
++{
++	for (const SGameTaskKey& key : Level().GameTaskManager().GetGameTasks())
++	{
++		CGameTask* t = key.game_task;
++		if (t && t->m_ID == q.task_id && t->GetTaskState() == eTaskStateCompleted && t->m_campaign_owned &&
++			t->m_campaign_owner.slot == q.slot)
++			return t;
++	}
++	return nullptr;
++}
++
++void quest_row(const QuestRun& q, LPCSTR label)
++{
++	CGameTask* t = inprogress_task(q);
++	if (!t)
++		t = completed_task_of(q);
++	luabind::object lua = call("s03_t05.task", q.task_id);
++	string128 status;
++	field_str(lua, "status", status);
++	row("quest,%s,%s,%s,%d,%d,%d,%s,%d,%s,%u,%u,%u,%u,%d,%d,%d,%d,%u,%u", label, q.label, q.task_id,
++		t ? int(t->GetTaskState()) : -1, t && t->m_campaign_owned ? 1 : 0, t && t->m_campaign_owned ? int(t->m_campaign_owner.slot) : -1,
++		lua.type() == LUA_TTABLE ? status : "-", field_int(lua, "stage"), q.fetch, items_of(q.actor_id, q.fetch),
++		items_of(q.other_id, q.fetch), money_of(q.actor_id), money_of(q.other_id), goodwill_of(q.actor_id, "csky"),
++		goodwill_of(q.other_id, "csky"), info_of(q.actor_id, q.info) ? 1 : 0, info_of(q.other_id, q.info) ? 1 : 0,
++		outbox_size(q.slot), outbox_size(q.slot == 0 ? 1 : 0));
++}
++
++// The "any work for me?" phrases, in the participant's phrase context.
++bool accept_task(QuestRun& q, CGameObject* npc)
++{
++	CActor* actor = actor_by_id(q.actor_id);
++	if (!actor)
++		return false;
++	CScriptGameObject* a = actor->lua_game_object();
++	CScriptGameObject* n = npc->lua_game_object();
++	luabind::functor<void> generate, skip, give;
++	luabind::functor<bool> has_task;
++	luabind::functor<luabind::object> text;
++	if (!ai().script_engine().functor("dialogs.generate_available_tasks", generate) ||
++		!ai().script_engine().functor("dialogs.npc_has_task", has_task) ||
++		!ai().script_engine().functor("dialogs.npc_skip_task", skip) ||
++		!ai().script_engine().functor("dialogs.text_npc_has_task", text) ||
++		!ai().script_engine().functor("dialogs.npc_give_task", give))
++		return false;
++	generate(a, n);
++	for (u32 skipped = 0; skipped < 16; ++skipped)
++	{
++		if (!has_task(a, n))
++			break;
++		luabind::object list = lua_available(npc->ID());
++		luabind::object first = list.type() == LUA_TTABLE ? luabind::object(list[1]) : lua_nil();
++		LPCSTR offered = first.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(first) : "-";
++		row("offer,%s,%s,%u", q.label, offered, skipped);
++		if (!xr_strcmp(offered, q.task_id))
++		{
++			luabind::object job = text(a, n);
++			Msg("S03-T05 %s offered %s: \"%s\"", q.label, q.task_id,
++				job.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(job) : "-");
++			give(a, n);
++			return true;
++		}
++		skip(a, n);
++	}
++	Msg("! S03-T05 %s: the giver never offered %s", q.label, q.task_id);
++	return false;
++}
++
++bool turn_in(QuestRun& q, CGameObject* npc)
++{
++	CActor* actor = actor_by_id(q.actor_id);
++	if (!actor)
++		return false;
++	CScriptGameObject* a = actor->lua_game_object();
++	CScriptGameObject* n = npc->lua_game_object();
++	luabind::functor<bool> finished;
++	luabind::functor<luabind::object> text;
++	luabind::functor<void> complete;
++	if (!ai().script_engine().functor("dialogs.actor_has_finished_task", finished) ||
++		!ai().script_engine().functor("dialogs.text_npc_task_finish", text) ||
++		!ai().script_engine().functor("dialogs.npc_set_finished_task_complete", complete))
++		return false;
++	if (!finished(a, n))
++	{
++		Msg("! S03-T05 %s: actor_has_finished_task is false", q.label);
++		return false;
++	}
++	luabind::object t = text(a, n);
++	Msg("S03-T05 %s turn-in: \"%s\"", q.label, t.type() == LUA_TSTRING ? luabind::object_cast<LPCSTR>(t) : "-");
++	complete(a, n);
++	return true;
++}
++
++// A dialogue as the server runs it: the use, the dialogue entry (the
++// participant's own context, the window as its presentation), the phrases in
++// the context the choices arrive in, the close.
++template <typename Phrases>
++bool dialogue(QuestRun& q, Phrases phrases)
++{
++	CGameObject* npc = giver_object();
++	CActor* actor = actor_by_id(q.actor_id);
++	CInventoryOwner* owner = smart_cast<CInventoryOwner*>(npc);
++	if (!npc || !actor || !owner)
++		return false;
++	// The giver's own logic (xr_meet.process_npc_usability, run outside any
++	// context) may have disabled his talk at this hour; the fixture enables it
++	// for the dialogue, as the installed force_all_talk option would, and
++	// records that it did.
++	const bool talk_enabled = owner->IsTalkEnabled();
++	if (!talk_enabled)
++		owner->EnableTalk();
++	const bool used = npc->use(actor);
++	const Refusal opened = dialogue_open(actor, owner, false);
++	const bool talking = owner->IsTalking() && actor->IsTalking();
++	Msg("S03-T05 %s dialogue open: talk_enabled=%d used=%d open=%s npc_talking=%d actor_talking=%d distance=%.2f",
++		q.label, talk_enabled ? 1 : 0, used ? 1 : 0, refusal_name(opened), owner->IsTalking() ? 1 : 0,
++		actor->IsTalking() ? 1 : 0, actor->Position().distance_to(npc->Position()));
++	row("dialogue,%s,%d,%d,%s,%d,%.2f", q.label, talk_enabled ? 1 : 0, used ? 1 : 0, refusal_name(opened),
++		talking ? 1 : 0, actor->Position().distance_to(npc->Position()));
++	bool ok = false;
++	if (talking) // the installed phrases assume a talking partner (get_speaker)
++	{
++		ScriptContextScope scope(q.phrase_context, Scope::Self, "s03-t05-phrases");
++		ok = scope.entered() && phrases(q, npc);
++	}
++	const Refusal closed = dialogue_close(actor, owner);
++	Msg("S03-T05 %s dialogue: used=%d open=%s phrases=%d close=%s", q.label, used ? 1 : 0, refusal_name(opened),
++		ok ? 1 : 0, refusal_name(closed));
++	return used && opened == Refusal::None && closed == Refusal::None && ok;
++}
++
++void give_quest(QuestRun& q)
++{
++	Fixture& f = g_fixture;
++	string64 other_fetch_before;
++	u32 other_count = 0;
++	read_fetch(q, q.other_id, other_fetch_before, other_count);
++	const u32 dialog_open_before = outbox_count(q.slot, Presentation::DialogOpen);
++	const u32 other_open_before = outbox_count(q.slot == 0 ? 1 : 0, Presentation::DialogOpen);
++	q.given = dialogue(q, accept_task);
++	string128 what;
++	xr_sprintf(what, "%s accepted %s through the installed dialogue functions", q.label, q.task_id);
++	check(q.given, what);
++	CGameTask* t = inprogress_task(q);
++	check(t && t->GetTaskState() == eTaskStateInProgress, "the native task is in progress");
++	check(t && t->m_campaign_owned && t->m_campaign_owner.slot == q.slot &&
++			t->m_campaign_owner.generation == (q.slot == 0 ? f.p1.generation : f.p2.generation),
++		"...and owned by the participant whose context gave it");
++	luabind::object lua = call("s03_t05.task", q.task_id);
++	check(lua.type() == LUA_TTABLE && field_int(lua, "stage") == 0, "the Lua task exists at stage 0");
++	read_fetch(q, q.actor_id, q.fetch, q.fetch_count);
++	string64 other_fetch_after;
++	read_fetch(q, q.other_id, other_fetch_after, other_count);
++	check(xr_strcmp(q.fetch, "-") != 0, "the fetch item was stored in the participant's own actor's portable store");
++	check(!xr_strcmp(other_fetch_before, other_fetch_after), "...and not in the other actor's");
++	check(outbox_count(q.slot, Presentation::DialogOpen) == dialog_open_before + 1 &&
++			outbox_count(q.slot == 0 ? 1 : 0, Presentation::DialogOpen) == other_open_before,
++		"the talk window went to this participant only");
++	quest_row(q, "given");
++}
++
++bool spawn_item(u16 actor_id, LPCSTR section)
++{
++	CActor* actor = actor_by_id(actor_id);
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_ALifeDynamicObject* se = alife ? ai().get_alife()->objects().object(actor_id, true) : nullptr;
++	if (!actor || !se || !section || section[0] == '-')
++		return false;
++	CSE_Abstract* entity = CALifeSimulator__spawn_item2(alife, section, actor->Position(),
++		actor->ai_location().level_vertex_id(), se->m_tGraphID, actor_id);
++	Msg("S03-T05 spawned %s id=%u into actor %u's inventory", section, entity ? u32(entity->ID) : u32(-1), u32(actor_id));
++	return entity != nullptr;
++}
++
++void begin_item(QuestRun& q)
++{
++	q.items_other_before = items_of(q.other_id, q.fetch);
++	string128 what;
++	xr_sprintf(what, "%s's fetch item %s spawned into its own actor", q.label, q.fetch);
++	bool ok = true;
++	for (u32 i = 0; i < q.fetch_count; ++i)
++		ok = spawn_item(q.actor_id, q.fetch) && ok;
++	check(ok, what);
++	quest_row(q, "item");
++}
++
++int lua_stage(const QuestRun& q)
++{
++	return field_int(call("s03_t05.task", q.task_id), "stage");
++}
++
++void begin_turn_in(QuestRun& q)
++{
++	q.money_before = money_of(q.actor_id);
++	q.other_money_before = money_of(q.other_id);
++	q.goodwill_before = goodwill_of(q.actor_id, "csky");
++	q.other_goodwill_before = goodwill_of(q.other_id, "csky");
++	q.info_before = info_of(q.actor_id, q.info);
++	q.other_info_before = info_of(q.other_id, q.info);
++	q.outbox_before = outbox_size(q.slot);
++	q.other_outbox_before = outbox_count(q.slot == 0 ? 1 : 0, Presentation::DialogOpen);
++	q.turned_in = dialogue(q, turn_in);
++	string128 what;
++	xr_sprintf(what, "%s turned %s in through the installed dialogue functions", q.label, q.task_id);
++	check(q.turned_in, what);
++	quest_row(q, "turned-in");
++}
++
++bool completion_landed(const QuestRun& q)
++{
++	return !inprogress_task(q) && call("s03_t05.task", q.task_id).type() != LUA_TTABLE &&
++		items_of(q.actor_id, q.fetch) == 0 && money_of(q.actor_id) > q.money_before;
++}
++
++void end_completion(QuestRun& q, bool landed, const ScriptContextStats& before)
++{
++	const u8 other_slot = q.slot == 0 ? 1 : 0;
++	quest_row(q, "completed");
++	string128 what;
++	xr_sprintf(what, "%s's completion landed within the budget", q.label);
++	check(landed, what);
++	check(completed_task_of(q) != nullptr, "the native task is Completed and still owned by its participant");
++	check(call("s03_t05.task", q.task_id).type() != LUA_TTABLE, "the Lua task entry retired");
++	check(script_context_stats().task_callbacks_hosted > before.task_callbacks_hosted,
++		"the completion's state callback reached the script host in the owner's context");
++	check(money_of(q.actor_id) > q.money_before, "the reward was paid to the participant's own actor");
++	check(money_of(q.other_id) == q.other_money_before, "the other actor's money did not change");
++	check(goodwill_of(q.actor_id, "csky") > q.goodwill_before, "Clear Sky goodwill rose for the participant's actor");
++	check(goodwill_of(q.other_id, "csky") == q.other_goodwill_before, "...and not for the other actor");
++	check(info_of(q.actor_id, q.info) && !q.info_before, "the completion info portion went to the participant's actor");
++	check(info_of(q.other_id, q.info) == q.other_info_before, "...and not to the other actor");
++	check(items_of(q.actor_id, q.fetch) == 0, "the fetch item was taken from the participant's actor");
++	check(items_of(q.other_id, q.fetch) == q.items_other_before, "...and nothing from the other actor");
++	check(outbox_size(q.slot) > q.outbox_before, "the participant got the turn-in presentations");
++	check(outbox_count(other_slot, Presentation::DialogOpen) == q.other_outbox_before,
++		"the other participant got no talk window");
++	Msg("S03-T05 %s completed: money %u -> %u (other %u), goodwill %d -> %d, info %d", q.label, q.money_before,
++		money_of(q.actor_id), money_of(q.other_id), q.goodwill_before, goodwill_of(q.actor_id, "csky"),
++		info_of(q.actor_id, q.info) ? 1 : 0);
++}
++
++ScriptContextStats g_stats_before;
++
++// As the script API's SetActorPosition does (S02-T06b/e): the actor's transform
++// and its physics character.
++void place_beside_giver(u16 actor_id, float dx)
++{
++	CActor* actor = actor_by_id(actor_id);
++	CGameObject* npc = giver_object();
++	if (!actor || !npc)
++		return;
++	const Fvector from = actor->Position();
++	Fmatrix F = actor->XFORM();
++	F.c = npc->Position();
++	F.c.x += dx;
++	actor->XFORM().set(F);
++	if (actor->character_physics_support()->movement()->CharacterExist())
++	{
++		actor->character_physics_support()->movement()->SetPosition(F.c);
++		actor->character_physics_support()->movement()->SetVelocity(0.f, 0.f, 0.f);
++	}
++	row("place,%u,%.2f,%.2f,%.2f,%.2f", u32(actor_id), from.distance_to(npc->Position()), F.c.x, F.c.y, F.c.z);
++	Msg("S03-T05 actor %u placed beside the giver (was %.1f m away)", u32(actor_id), from.distance_to(npc->Position()));
++}
++
++void set_phase(int phase)
++{
++	Fixture& f = g_fixture;
++	f.phase = phase;
++	f.phase_tick = f.tick;
++	Msg("S03-T05 script-context phase %s at tick %u", phase_name(phase), f.tick);
++}
++
++void finish_audit()
++{
++	Fixture& f = g_fixture;
++	xr_vector<PresentationRecord> records;
++	for (u8 slot = 0; slot < 2; ++slot)
++	{
++		presentation_outbox(slot, records);
++		for (const PresentationRecord& r : records)
++			row("outbox,%u,%u,%s,%u,%s", u32(slot), r.serial, presentation_name(r.kind), u32(r.object), r.detail);
++	}
++	xr_vector<std::pair<shared_str, u32>> reads;
++	u32 total = 0;
++	script_host_reads(reads, &total);
++	for (const auto& read : reads)
++		row("host-read,%s,%u", read.first.c_str(), read.second);
++	row("stats,host_read_total,%u", total);
++	row("stats,host_read_sites,%u", u32(reads.size()));
++	const ScriptContextStats& s = script_context_stats();
++	const ScriptContextStack::Stats& st = script_contexts()->stats();
++	row("stats,entered,%I64u", st.entered);
++	row("stats,refused,%I64u", st.refused);
++	row("stats,captured,%I64u", st.captured);
++	row("stats,captured_entered,%I64u", st.captured_entered);
++	row("stats,task_scopes,%I64u", s.task_scopes);
++	row("stats,task_unowned,%I64u", s.task_unowned);
++	row("stats,task_callbacks_hosted,%I64u", s.task_callbacks_hosted);
++	row("stats,presented,%I64u", s.presented);
++	row("stats,present_no_context,%I64u", s.present_no_context);
++	row("stats,lua_no_context,%I64u", s.lua_no_context);
++	row("stats,gameplay_context,%I64u", s.gameplay_context);
++	row("stats,gameplay_compat,%I64u", s.gameplay_compat);
++	check(st.entered == st.left, "every context entered during the run left");
++	check(script_contexts()->depth() == 0, "no context is left entered");
++	report_script_context("script-context-fixture");
++	f.running = false;
++	set_phase(PhaseDone);
++}
++} // namespace
++
++extern "C" bool __cdecl xrCampaignScriptContext_Fixture()
++{
++	return unit_fixture();
++}
++
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextBegin(LPCSTR out_path)
++{
++	Fixture& f = g_fixture;
++	f = Fixture();
++	f.out = fopen(out_path, "w");
++	f.running = true;
++	if (!g_campaign_identity || !g_pGameLevel || !ai().get_alife())
++	{
++		check(false, "a campaign server level is running");
++		f.running = false;
++		return false;
++	}
++	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	check(registry.current_participant(0, f.p1) == Refusal::None, "participant 1 is current");
++	check(registry.current_participant(1, f.p2) == Refusal::None, "participant 2 is current");
++	const Participant* p = nullptr;
++	if (registry.participant(f.p1, p) == Refusal::None)
++		f.party1 = p->party;
++	if (registry.participant(f.p2, p) == Refusal::None)
++		f.party2 = p->party;
++	CActor* a1 = participant_actor(f.p1);
++	CActor* a2 = participant_actor(f.p2);
++	f.actor1 = a1 ? a1->ID() : no_id;
++	f.actor2 = a2 ? a2->ID() : no_id;
++	check(a1 && a2 && a1 != a2 && a1->g_Alive() && a2->g_Alive(), "both participant actors are alive");
++	ParticipantRef by_session;
++	check(registry.resolve_session(session2, by_session) == Refusal::None && by_session == f.p2,
++		"participant 2 is attached on its session");
++	f.ctx1 = make_context(Origin::ServerInternal, 0, f.p1, f.party1);
++	f.ctx2 = make_context(Origin::ClientIntent, session2, f.p2, f.party2);
++	for (const auto& entry : ai().get_alife()->objects().objects())
++	{
++		CSE_ALifeHumanStalker* stalker = smart_cast<CSE_ALifeHumanStalker*>(entry.second);
++		if (stalker && !xr_strcmp(stalker->character_profile().c_str(), giver_profile))
++			f.giver = stalker->ID;
++	}
++	row("meta,{%u;%u},{%u;%u},%u,%u,%I64x,%I64x,%u", u32(f.p1.slot), f.p1.generation, u32(f.p2.slot), f.p2.generation,
++		u32(f.actor1), u32(f.actor2), f.party1.lo, f.party2.lo, u32(f.giver));
++	if (!f.ok || !ensure_lua())
++	{
++		check(false, "the fixture's Lua helpers loaded");
++		f.running = false;
++		return false;
++	}
++	// The quest runs: participant 2 the first mechanic task (its actor has no
++	// tier-1 upgrade), participant 1 the second (S02-T06e gave actor 1 tier 1).
++	QuestRun& q2 = f.quest[0];
++	ZeroMemory(&q2, sizeof(q2));
++	q2.label = "participant-2";
++	q2.slot = f.p2.slot;
++	q2.phrase_context = f.ctx2;
++	q2.actor_id = f.actor2;
++	q2.other_id = f.actor1;
++	xr_strcpy(q2.task_id, "mar_base_stalker_tech_task_1");
++	xr_strcpy(q2.info, "mar_base_stalker_tech_upgrade_tier_1");
++	xr_strcpy(q2.fetch, "-");
++	QuestRun& q1 = f.quest[1];
++	ZeroMemory(&q1, sizeof(q1));
++	q1.label = "participant-1";
++	q1.slot = f.p1.slot;
++	q1.phrase_context = f.ctx1;
++	q1.actor_id = f.actor1;
++	q1.other_id = f.actor2;
++	xr_strcpy(q1.task_id, "mar_base_stalker_tech_task_2");
++	xr_strcpy(q1.info, "mar_base_stalker_tech_upgrade_tier_2");
++	xr_strcpy(q1.fetch, "-");
++
++	phase_contract();
++	set_phase(PhaseDeferred);
++	return true;
++}
++
++extern "C" void __cdecl xrCampaignLevel_ScriptContextTick()
++{
++	Fixture& f = g_fixture;
++	if (!f.running)
++		return;
++	++f.tick;
++	const u32 in_phase = f.tick - f.phase_tick;
++	switch (f.phase)
++	{
++	case PhaseDeferred:
++		if ((deferred_fired("p1") && deferred_fired("p2") && deferred_fired("none")) || in_phase >= deferred_budget)
++		{
++			deferred_end();
++			check(giver_object() != nullptr, "the mechanic is online");
++			if (!giver_object())
++			{
++				finish_audit();
++				return;
++			}
++			// Both actors stand beside the giver: his meet logic decides whether
++			// he talks against the single-player script actor only (outside any
++			// context), so actor 1 is placed there too.
++			place_beside_giver(f.actor1, 2.f);
++			place_beside_giver(f.actor2, -2.f);
++			set_phase(PhaseApproach);
++		}
++		break;
++	case PhaseApproach:
++		if (in_phase >= approach_ticks)
++		{
++			give_quest(f.quest[0]);
++			give_quest(f.quest[1]);
++			g_stats_before = script_context_stats();
++			set_phase(PhaseObserve);
++		}
++		break;
++	case PhaseObserve:
++		if (in_phase >= observe_ticks)
++		{
++			quest_row(f.quest[0], "observed");
++			quest_row(f.quest[1], "observed");
++			check(script_context_stats().task_scopes > g_stats_before.task_scopes,
++				"both open tasks were updated and checked in their owners' contexts");
++			check(lua_stage(f.quest[0]) == 0 && lua_stage(f.quest[1]) == 0, "neither task reached its complete stage");
++			begin_item(f.quest[0]);
++			set_phase(PhaseStage2);
++		}
++		break;
++	case PhaseStage2:
++	case PhaseStage1:
++	{
++		QuestRun& q = f.quest[f.phase == PhaseStage2 ? 0 : 1];
++		QuestRun& other = f.quest[f.phase == PhaseStage2 ? 1 : 0];
++		if (lua_stage(q) == 1 || in_phase >= stage_budget)
++		{
++			quest_row(q, "stage");
++			string128 what;
++			xr_sprintf(what, "%s's task reached its complete stage from its own actor's inventory", q.label);
++			check(lua_stage(q) == 1, what);
++			if (f.phase == PhaseStage2)
++				check(lua_stage(other) == 0, "participant 1's open task stayed at stage 0 meanwhile");
++			g_stats_before = script_context_stats();
++			begin_turn_in(q);
++			set_phase(f.phase == PhaseStage2 ? PhaseComplete2 : PhaseComplete1);
++		}
++		break;
++	}
++	case PhaseComplete2:
++	case PhaseComplete1:
++	{
++		QuestRun& q = f.quest[f.phase == PhaseComplete2 ? 0 : 1];
++		const bool landed = completion_landed(q);
++		if (landed || in_phase >= complete_budget)
++		{
++			end_completion(q, landed, g_stats_before);
++			if (f.phase == PhaseComplete2)
++			{
++				begin_item(f.quest[1]);
++				set_phase(PhaseStage1);
++			}
++			else
++				finish_audit();
++		}
++		break;
++	}
++	default: break;
++	}
++}
++
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextDone()
++{
++	return !g_fixture.running;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_ScriptContextEnd(u32 ticks, u32 sim_ms, u32 wall_ms)
++{
++	Fixture& f = g_fixture;
++	if (f.running)
++	{
++		check(false, "the fixture finished within its tick budget");
++		finish_audit();
++	}
++	row("end,%u,%u,%u,%u,%u,%s,%d", ticks, sim_ms, wall_ms, f.checks, f.failures, phase_name(f.phase), f.ok ? 1 : 0);
++	Msg("S03-T05 script-context ticks=%u sim_ms=%u wall_ms=%u checks=%u failures=%u", ticks, sim_ms, wall_ms, f.checks,
++		f.failures);
++	if (f.out)
++	{
++		fclose(f.out);
++		f.out = nullptr;
++	}
++	return f.ok;
++}
+diff --git a/src/xrGame/GameTask.cpp b/src/xrGame/GameTask.cpp
+index 33b30d2..2ed64c5 100644
+--- a/src/xrGame/GameTask.cpp
++++ b/src/xrGame/GameTask.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
+ #include "GameTask.h"
+ #include "ui/xrUIXmlParser.h"
+ #include "encyclopedia_article.h"
+@@ -32,6 +33,9 @@ CGameTask::CGameTask()
+ 	m_Title = NULL;
+ 	m_Description = NULL;
+ 	m_ID = NULL;
++	m_campaign_owned = false;
++	m_campaign_owner.slot = 0;
++	m_campaign_owner.generation = 0;
+ 	m_task_type = eTaskTypeDummy;
+ 	m_task_state = eTaskStateDummy;
+ 	m_linked_map_location = NULL;
+@@ -137,11 +141,39 @@ void CGameTask::ChangeMapLocation(LPCSTR new_map_location, u16 new_map_object_id
+ 
+ void CGameTask::ChangeStateCallback()
+ {
+-	// S03-T02: tasks have no participant yet (party quests are S03-T05/S08).
++	// S03-T05: an owned task's state callback goes to the handler the
++	// installed actor binder registered (on the single-player script actor,
++	// the only actor with a Lua binder on the server), inside the owner's
++	// context, so the installed task_callback acts on the owner's actor. With
++	// the owner gone the callback is not delivered (counted, logged). A task
++	// with no owner keeps the S03-T02 single-actor rule.
++	if (m_campaign_owned && campaign::process_role() == campaign::Role::Server)
++	{
++		campaign::ScriptContextScope scope(this, "task-state-callback");
++		CActor* host = campaign::script_host_actor();
++		if (scope.entered() && host)
++		{
++			campaign::note_task_callback_hosted();
++			host->callback(GameObject::eTaskStateChange)(this, GetTaskState());
++		}
++		else
++			Msg("S03-T05 task [%s] state callback not delivered: %s, host %s", m_ID.c_str(),
++				campaign::refusal_name(scope.refusal()), host ? "present" : "absent");
++		return;
++	}
+ 	if (CActor* actor = campaign::sole_participant_actor("task-state-change"))
+ 		actor->callback(GameObject::eTaskStateChange)(this, GetTaskState());
+ }
+ 
++// S03-T05: the actor whose info portions a task checks and sends: the owner's,
++// else the S03-T02 single-actor rule.
++static CActor* task_info_actor(const CGameTask* task, LPCSTR purpose)
++{
++	if (task->m_campaign_owned)
++		return campaign::task_owner_actor(task);
++	return campaign::sole_participant_actor(purpose);
++}
++
+ extern u32 g_s02_task_state_updates; // S02-T06e observation counter
+ 
+ ETaskState CGameTask::UpdateState()
+@@ -181,7 +213,7 @@ bool CGameTask::CheckInfo(const xr_vector<shared_str>& v) const
+ 	xr_vector<shared_str>::const_iterator it = v.begin();
+ 	for (; it != v.end(); ++it)
+ 	{
+-		CActor* actor = campaign::sole_participant_actor("task-check-info"); // S03-T02
++		CActor* actor = task_info_actor(this, "task-check-info"); // S03-T02, S03-T05
+ 		res = actor && actor->HasInfo(*it);
+ 		if (!res) break;
+ 	}
+@@ -212,7 +244,7 @@ void CGameTask::CallAllFuncs(const task_state_functors& v)
+ void CGameTask::SendInfo(const xr_vector<shared_str>& v)
+ {
+ 	xr_vector<shared_str>::const_iterator it = v.begin();
+-	CActor* actor = campaign::sole_participant_actor("task-send-info"); // S03-T02
++	CActor* actor = task_info_actor(this, "task-send-info"); // S03-T02, S03-T05
+ 	for (; actor && it != v.end(); ++it)
+ 		actor->TransferInfo((*it), true);
+ }
+diff --git a/src/xrGame/GameTask.h b/src/xrGame/GameTask.h
+index 34a59d6..42d85b1 100644
+--- a/src/xrGame/GameTask.h
++++ b/src/xrGame/GameTask.h
+@@ -4,6 +4,7 @@
+ #include "GameTaskDefs.h"
+ #include "script_export_space.h"
+ #include <luabind/functor.hpp>
++#include "CampaignIdentity.h"
+ 
+ class CGameTaskManager;
+ class CMapLocation;
+@@ -80,6 +81,11 @@ public:
+ 
+ 
+ 	shared_str m_ID;
++	// S03-T05: the participant the task was given to (campaign server only;
++	// set by the give_task binding on the receiving actor, not saved: a task
++	// loaded from a checkpoint has no owner until Stage 7).
++	bool m_campaign_owned;
++	campaign::ParticipantRef m_campaign_owner;
+ 	shared_str m_Title;
+ 	shared_str m_Description;
+ 	ALife::_TIME_ID m_ReceiveTime;
+diff --git a/src/xrGame/GametaskManager.cpp b/src/xrGame/GametaskManager.cpp
+index ba294a1..a2a3745 100644
+--- a/src/xrGame/GametaskManager.cpp
++++ b/src/xrGame/GametaskManager.cpp
+@@ -3,6 +3,7 @@
+ #include "alife_registry_wrappers.h"
+ #include "ui/xrUIXmlParser.h"
+ #include "GameTask.h"
++#include "CampaignScriptContext.h"
+ #include "Level.h"
+ #include "map_manager.h"
+ #include "map_location.h"
+@@ -190,6 +191,11 @@ void CGameTaskManager::UpdateTasks()
+ 			if (t->GetTaskState() != eTaskStateInProgress)
+ 				continue;
+ 
++			// S03-T05: on the campaign server an owned task's state functors
++			// and the completion they cause run in its owner's context; an
++			// unowned task (a client, a task loaded from a checkpoint) runs
++			// as before, outside any context.
++			campaign::ScriptContextScope scope(t, "task-update");
+ 			ETaskState const state = t->UpdateState();
+ 
+ 			if ((state == eTaskStateFail) || (state == eTaskStateCompleted))
+diff --git a/src/xrGame/Level.cpp b/src/xrGame/Level.cpp
+index f1a65fa..291fff1 100644
+--- a/src/xrGame/Level.cpp
++++ b/src/xrGame/Level.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
+ #include "xrEngine/FDemoRecord.h"
+ #include "xrEngine/FDemoPlay.h"
+ #include "xrEngine/Environment.h"
+@@ -1041,7 +1042,11 @@ void CLevel::OnFrame()
+ 	// S02-T04c: the server has no camera; its activity anchors follow the
+ 	// actors, including one spawned by the events just processed.
+ 	if (g_campaign_server)
++	{
+ 		CampaignActivityRefreshAnchors();
++		// S03-T05: the installed scripts' compatibility layer and its audit flag.
++		campaign::script_context_frame();
++	}
+ #ifdef SPAWN_ANTIFREEZE
+ 	{
+ 		bool queueEmpty = false;
+diff --git a/src/xrGame/PhraseScript.cpp b/src/xrGame/PhraseScript.cpp
+index 3f1488a..90bbe53 100644
+--- a/src/xrGame/PhraseScript.cpp
++++ b/src/xrGame/PhraseScript.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
+ #include "PhraseScript.h"
+ #include "script_engine.h"
+ #include "ai_space.h"
+@@ -99,6 +100,7 @@ LPCSTR CDialogScriptHelper::GetScriptText(LPCSTR str_to_translate, const CGameOb
+ {
+ 	if (!m_sScriptTextFunc.size())
+ 		return str_to_translate;
++	campaign::ScriptContextScope dialogue_scope(campaign::dialog_actor(pSpeakerGO1, pSpeakerGO2), "dialogue-phrase"); // S03-T05
+ 
+ 	::luabind::functor<LPCSTR> lua_function;
+ #ifdef DIALOG_UPGRADE
+@@ -138,6 +140,7 @@ LPCSTR CDialogScriptHelper::GetScriptText(LPCSTR str_to_translate, const CGameOb
+ 
+ bool CDialogScriptHelper::Precondition(const CGameObject* pSpeakerGO, LPCSTR dialog_id, LPCSTR phrase_id) const
+ {
++	campaign::ScriptContextScope dialogue_scope(campaign::dialog_actor(pSpeakerGO, nullptr), "dialogue-phrase"); // S03-T05
+ 	bool predicate_result = true;
+ 
+ 	if (!CheckInfo(smart_cast<const CInventoryOwner*>(pSpeakerGO), dialog_actor_of(pSpeakerGO, nullptr)))
+@@ -170,6 +173,7 @@ bool CDialogScriptHelper::Precondition(const CGameObject* pSpeakerGO, LPCSTR dia
+ 
+ void CDialogScriptHelper::Action(const CGameObject* pSpeakerGO, LPCSTR dialog_id, LPCSTR phrase_id) const
+ {
++	campaign::ScriptContextScope dialogue_scope(campaign::dialog_actor(pSpeakerGO, nullptr), "dialogue-phrase"); // S03-T05
+ 	for (u32 i = 0; i < Actions().size(); ++i)
+ 	{
+ 		::luabind::functor<void> lua_function;
+@@ -187,6 +191,7 @@ bool CDialogScriptHelper::Precondition(const CGameObject* pSpeakerGO1,
+                                        LPCSTR phrase_id,
+                                        LPCSTR next_phrase_id) const
+ {
++	campaign::ScriptContextScope dialogue_scope(campaign::dialog_actor(pSpeakerGO1, pSpeakerGO2), "dialogue-phrase"); // S03-T05
+ 	bool predicate_result = true;
+ 
+ 	if (!CheckInfo(smart_cast<const CInventoryOwner*>(pSpeakerGO1), dialog_actor_of(pSpeakerGO1, pSpeakerGO2)))
+@@ -249,6 +254,7 @@ bool CDialogScriptHelper::Precondition(const CGameObject* pSpeakerGO1,
+ void CDialogScriptHelper::Action(const CGameObject* pSpeakerGO1, const CGameObject* pSpeakerGO2, LPCSTR dialog_id,
+                                  LPCSTR phrase_id) const
+ {
++	campaign::ScriptContextScope dialogue_scope(campaign::dialog_actor(pSpeakerGO1, pSpeakerGO2), "dialogue-phrase"); // S03-T05
+ 	TransferInfo(smart_cast<const CInventoryOwner*>(pSpeakerGO1), dialog_actor_of(pSpeakerGO1, pSpeakerGO2));
+ 
+ 	for (u32 i = 0; i < Actions().size(); ++i)
+diff --git a/src/xrGame/UsableScriptObject.cpp b/src/xrGame/UsableScriptObject.cpp
+index f72f8f8..5972a11 100644
+--- a/src/xrGame/UsableScriptObject.cpp
++++ b/src/xrGame/UsableScriptObject.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "UsableScriptObject.h"
++#include "CampaignScriptContext.h"
+ #include "GameObject.h"
+ #include "script_game_object.h"
+ #include "script_callback_ex.h"
+@@ -37,6 +38,10 @@ bool CUsableScriptObject::use(CGameObject* who_use)
+ 	))
+ 		return false;
+ 
++	// S03-T05: using an object is its user's action: on the campaign server a
++	// participant actor's use runs the object's script callback in that
++	// participant's context (nothing is entered for any other user).
++	campaign::ScriptContextScope scope(static_cast<const CObject*>(who_use), "use");
+ 	pThis->callback(GameObject::eUseObject)(pThis->lua_game_object(), who_use->lua_game_object());
+ 
+ 	return true;
+diff --git a/src/xrGame/actor_communication.cpp b/src/xrGame/actor_communication.cpp
+index 6331bb6..5bdb38b 100644
+--- a/src/xrGame/actor_communication.cpp
++++ b/src/xrGame/actor_communication.cpp
+@@ -1,5 +1,7 @@
+ #include "pch_script.h"
+ #include "actor.h"
++#include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
+ #include "UIGameSP.h"
+ #include "PDA.h"
+ #include "level.h"
+@@ -122,6 +124,14 @@ void CActor::TryToTalk()
+ 
+ void CActor::RunTalkDialog(CInventoryOwner* talk_partner, bool disable_break)
+ {
++	// S03-T05: the campaign server shows no window: the dialogue's gameplay
++	// runs in this actor's participant context and the talk window is that
++	// participant's presentation (campaign::dialogue_open).
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		campaign::dialogue_open(this, talk_partner, talk_partner->bDisableBreakDialog);
++		return;
++	}
+ 	//предложить поговорить с нами
+ 	if (talk_partner->OfferTalk(this))
+ 	{
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index f8737de..429296f 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -10,6 +10,7 @@
+ #include "level.h"
+ #include "actor.h"
+ #include "CampaignActorAccess.h" // S03-T03
++#include "CampaignScriptContext.h" // S03-T05
+ #include "script_game_object.h"
+ #include "patrol_path_storage.h"
+ #include "xrServer.h"
+@@ -853,8 +854,12 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func)
+ 	CActor* viewer = campaign::local_view_actor();
+ 	if (!viewer)
+ 	{
++		// S03-T05: on the server the effector is the script context
++		// participant's presentation (dropped and counted without one).
++		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+-		return 0.f;
++		return length;
+ 	}
+ 	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+@@ -874,8 +879,12 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	CActor* viewer = campaign::local_view_actor();
+ 	if (!viewer)
+ 	{
++		// S03-T05: on the server the effector is the script context
++		// participant's presentation (dropped and counted without one).
++		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+-		return 0.f;
++		return length;
+ 	}
+ 	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+@@ -896,8 +905,12 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	CActor* viewer = campaign::local_view_actor();
+ 	if (!viewer)
+ 	{
++		// S03-T05: on the server the effector is the script context
++		// participant's presentation (dropped and counted without one).
++		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+-		return 0.f;
++		return length;
+ 	}
+ 	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+@@ -922,8 +935,12 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	CActor* viewer = campaign::local_view_actor();
+ 	if (!viewer)
+ 	{
++		// S03-T05: on the server the effector is the script context
++		// participant's presentation (dropped and counted without one).
++		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+-		return 0.f;
++		return length;
+ 	}
+ 	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+@@ -952,8 +969,10 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+     CActor* viewer = campaign::local_view_actor();
+     if (!viewer)
+     {
++    	const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++    		campaign::Refusal::None ? e->GetAnimatorLength() : 0.f; // S03-T05
+     	xr_delete(e);
+-    	return 0.f;
++    	return length;
+     }
+     viewer->Cameras().AddCamEffector(e);
+     return e->GetAnimatorLength();
+@@ -1064,6 +1083,8 @@ void remove_cam_effector(int id)
+ {
+ 	if (CActor* viewer = campaign::local_view_actor())
+ 		viewer->Cameras().RemoveCamEffector((ECamEffectorType)id);
++	else
++		campaign::present_to_context(campaign::Presentation::CameraEffectorRemove, u16(id), ""); // S03-T05
+ }
+ 
+ void set_cam_effector_factor(int id, float factor)
+@@ -1131,21 +1152,23 @@ void set_music_volume(float v) {
+ 
+ #include "actor_statistic_mgr.h"
+ 
++// S03-T05: gameplay bindings act on the script context's actor; outside a
++// context the single-actor compatibility rule (null with two participant actors).
+ void add_actor_points(LPCSTR sect, LPCSTR detail_key, int cnt, int pts)
+ {
+-	if (CActor* actor = Actor()) // S03-T03: null with two participant actors (S03-T05)
++	if (CActor* actor = campaign::gameplay_script_actor("level.add_actor_points"))
+ 		actor->StatisticMgr().AddPoints(sect, detail_key, cnt, pts);
+ }
+ 
+ void add_actor_points_str(LPCSTR sect, LPCSTR detail_key, LPCSTR str_value)
+ {
+-	if (CActor* actor = Actor())
++	if (CActor* actor = campaign::gameplay_script_actor("level.add_actor_points_str"))
+ 		actor->StatisticMgr().AddPoints(sect, detail_key, str_value);
+ }
+ 
+ int get_actor_points(LPCSTR sect)
+ {
+-	CActor* actor = Actor();
++	CActor* actor = campaign::gameplay_script_actor("level.get_actor_points");
+ 	return actor ? actor->StatisticMgr().GetSectionPoints(sect) : 0;
+ }
+ 
+@@ -1176,7 +1199,10 @@ void add_pp_effector(LPCSTR fn, int id, bool cyclic)
+ {
+ 	CActor* viewer = campaign::local_view_actor();
+ 	if (!viewer)
++	{
++		campaign::present_to_context(campaign::Presentation::PostProcess, u16(id), fn); // S03-T05
+ 		return;
++	}
+ 	CPostprocessAnimator* pp = xr_new<CPostprocessAnimator>(id, cyclic);
+ 	pp->Load(fn);
+ 	viewer->Cameras().AddPPEffector(pp);
+@@ -1187,6 +1213,8 @@ void remove_pp_effector(int id)
+ 	CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+ 
+ 	if (pp) pp->Stop(1.0f);
++	else if (campaign::process_role() == campaign::Role::Server)
++		campaign::present_to_context(campaign::Presentation::PostProcessRemove, u16(id), ""); // S03-T05
+ }
+ 
+ void set_pp_effector_factor(int id, float f, float f_sp)
+@@ -2278,13 +2306,13 @@ void reload_hud_xml()
+ 
+ bool actor_safemode()
+ {
+-	CActor* actor = Actor();
++	CActor* actor = campaign::gameplay_script_actor("level.actor_safemode"); // S03-T05
+ 	return actor && actor->is_safemode();
+ }
+ 
+ void actor_set_safemode(bool status)
+ {
+-	CActor* actor = Actor();
++	CActor* actor = campaign::gameplay_script_actor("level.actor_set_safemode"); // S03-T05
+ 	if (actor && actor->is_safemode() != status)
+ 	{
+ 		CWeapon* wep = smart_cast<CWeapon*>(actor->inventory().ActiveItem());
+@@ -2595,11 +2623,9 @@ void update_pda_news_from_uiwindow(CUIWindow* CUIWindowPItem) {
+ 
+ float GetActorAlcohol()
+ {
+-    if (Actor())
+-    {
+-        return Actor()->conditions().GetAlcohol();
+-    }
+-
++    // S03-T05: the script context's actor; outside one the single-actor rule.
++    if (CActor* actor = campaign::gameplay_script_actor("level.get_actor_alcohol"))
++        return actor->conditions().GetAlcohol();
+     return 0.0f;
+ }
+ 
+@@ -2644,6 +2670,7 @@ extern void open_originals_link();
+ 
+ void CLevel::script_register(lua_State* L)
+ {
++	campaign::script_register_context(L); // S03-T05: the campaign.* module
+ 	module(L)
+ 		[
+ 			class_<CEnvDescriptor>("CEnvDescriptor")
+diff --git a/src/xrGame/script_game_object_inventory_owner.cpp b/src/xrGame/script_game_object_inventory_owner.cpp
+index 11aba35..2f8c547 100644
+--- a/src/xrGame/script_game_object_inventory_owner.cpp
++++ b/src/xrGame/script_game_object_inventory_owner.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "pch_script.h"
+ #include "script_game_object.h"
++#include "CampaignActorAccess.h"
++#include "CampaignScriptContext.h"
+ #include "script_game_object_impl.h"
+ #include "InventoryOwner.h"
+ #include "Pda.h"
+@@ -90,6 +92,13 @@ void _AddIconedTalkMessage(LPCSTR caption, LPCSTR text, LPCSTR texture_name, LPC
+ 
+ void CScriptGameObject::AddIconedTalkMessage(LPCSTR caption, LPCSTR text, LPCSTR texture_name, LPCSTR templ_name)
+ {
++	// S03-T05: on the campaign server a talk-window message is the receiving
++	// participant's presentation (the object it is called on).
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		campaign::present_to_actor(&object(), campaign::Presentation::TalkMessage, 0, text);
++		return;
++	}
+ 	_AddIconedTalkMessage(caption, text, texture_name, templ_name);
+ }
+ 
+@@ -115,6 +124,13 @@ void CScriptGameObject::GiveGameNews(LPCSTR caption, LPCSTR news, LPCSTR texture
+ void CScriptGameObject::GiveGameNews(LPCSTR caption, LPCSTR news, LPCSTR texture_name, int delay, int show_time,
+                                      int type)
+ {
++	// S03-T05: on the campaign server news are the receiving participant's
++	// presentation (the actor object the news are given to).
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		campaign::present_to_actor(&object(), campaign::Presentation::News, 0, caption);
++		return;
++	}
+ 	_give_news(caption, news, texture_name, delay, show_time, type);
+ }
+ 
+@@ -131,8 +147,8 @@ void _give_news(LPCSTR caption, LPCSTR text, LPCSTR texture_name, int delay, int
+ 
+ 	news_data.texture_name = texture_name;
+ 
+-	// S03-T03: news go to "the" actor; null with two participant actors until
+-	// S03-T05 names the receiving participant.
++	// S03-T03: news go to "the" actor (client); the campaign server sends them
++	// to the receiving participant instead (CScriptGameObject::GiveGameNews).
+ 	CActor* actor = Actor();
+ 	if (!actor)
+ 		return;
+@@ -1675,6 +1691,9 @@ CScriptGameObject* CScriptGameObject::item_in_slot(u32 slot_id) const
+ 
+ void CScriptGameObject::GiveTaskToActor(CGameTask* t, u32 dt, bool bCheckExisting, u32 t_timer)
+ {
++	// S03-T05: on the campaign server the task belongs to the participant
++	// holding the actor it is given to (db.actor is the context's actor).
++	campaign::set_task_owner(t, &object());
+ 	Level().GameTaskManager().GiveGameTaskToActor(t, dt, bCheckExisting, t_timer);
+ }
+ 
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 886e928..c5b3b44 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2010,6 +2010,7 @@
+     <ClInclude Include="CampaignIdentityFixture.h" />
+     <ClInclude Include="CampaignActorAccess.h" />
+     <ClInclude Include="CampaignActorControl.h" />
++    <ClInclude Include="CampaignScriptContext.h" />
+     <ClInclude Include="CampaignMessagePolicy.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+@@ -4406,6 +4407,14 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignScriptContext.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
++    <ClCompile Include="CampaignScriptContextFixture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

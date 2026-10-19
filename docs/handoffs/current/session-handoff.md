@@ -1,86 +1,89 @@
-# Session handoff — S03-T04 complete (participant activation and awareness); next: S03-T05
+# Session handoff — S03-T05 complete (participant script context); next: G03 review, then S04-T01
 
 ## State at the end of the session (2026-10-19)
 
-Stage 3 / G03 in progress. **S03-T01..T04 Completed.** S03-T05 Not Started.
+Stage 3 / G03 in progress. **S03-T01..T05 Completed** — every Stage 3 task.
+The [G03 evidence record](../../validation/G03.md) is written and **awaits the
+user's review and acceptance**; S04-T01 needs G03.
 
-**S03-T04** ([report](../../validation/S03-T04.md), patch
-`0024-participant-activation.patch`, `f70dd04d…513c`, 24 files,
-`patch-check-27b`, 191 files byte-equal; it replaced the unbuilt `-wip`
-patch):
+**S03-T05** ([report](../../validation/S03-T05.md), patch
+`0025-participant-script-context.patch`, `23fa820f…3f0a`, 20 files,
+`patch-check-28b`, 197 files byte-equal; contract in
+[participant identity](../../participant-identity.md#native-and-lua-participant-script-context--s03-t05),
+sites and audit in [actor access inventory](../../actor-access-inventory.md#script-context-sites--s03-t05)):
 
-- The ALife switch rules measure from the nearest alive participant actor
-  (`CALifeSwitchManager::refresh_activation_anchors` / `activation_distance`,
-  `alife_switch_manager.cpp:60-89`, five call sites). Rules recorded in
-  [participant identity](../../participant-identity.md#activation-and-awareness--s03-t04).
-- `CampaignActivationFixture.cpp` (stage `campaign-activation-passed`, exit
-  34) passes 35 checks in smoke-128, 129 (campaign-110) and smoke-132
-  (campaign-111, final source); all 63 GameState stages. With the actors
-  1,098 m apart: 0 rule violations over 1,061 objects, every switchable object
-  near actor 2 online, nothing near actor 1 dropped, the far area offline on
-  return; a boar takes each actor as its enemy; a detached participant's
-  retained actor keeps its area.
-- Cost: +44 online objects, object update 0.78 → 0.95 ms/tick; the rule
-  itself +1.3 ns/object.
-- `Actor()->` sweep of `xrGame/ai/`: three more faults guarded
-  (`poltergeist.cpp:334` participant-aware, vampire attack and alien vision
-  no-ops). These three are compile- and regression-checked only (no
-  poltergeist or bloodsucker in the fixture).
-- smoke-130 (Identity) and client-27/28 pass.
+- `xrGame/CampaignScriptContext.{h,cpp}`: a context stack over the registry
+  (Self needs a live actor, Party the participant's party; innermost-only
+  leave); scopes for an `ActionContext`, a captured handle, a task's owner,
+  an actor's own participant; strict lookups (`campaign.*` in Lua returns
+  nothing outside a context); `gameplay_script_actor` for the native
+  bindings; task ownership (`CGameTask::m_campaign_owner`); `dialogue_open/close`;
+  presentation outboxes; a server-only Lua compatibility layer: `db.actor` and
+  `AC_ID` follow the context, `CreateTimeEvent` captures it, an owned task's
+  `check_task` runs in its owner's context, out-of-context `db.actor` reads are
+  counted by line while two actors live.
+- Entry points converted: `UpdateTasks`, `ChangeStateCallback` (owned tasks go
+  to the script host's handler in the owner's context), `give_task`,
+  `RunTalkDialog` (server), phrase script calls, `CUsableScriptObject::use`;
+  news, talk messages, game over and `level.*` effectors are presentation.
+- smoke-133 (Identity, 18 stages; unit fixture 62 checks) and **smoke-136**
+  (GameState, all 64 stages; level fixture 101 checks): probes in both
+  contexts, nested, seven refused contexts, deferred events in their contexts;
+  both participants run the installed mechanic quest **concurrently** (P2
+  `task_1`, P1 `task_2`), each reward, goodwill, info and item removal on its
+  own actor only. client-29 + capture-16/17 against smoke-136: `match: true`.
+- smoke-134 (installed `tasks_fetch.script` fault: no talking partner) and
+  smoke-135 (giver's talk disabled by his schedule) were fixture iterations;
+  details in the report.
 
 ## Found this session (open items)
 
-1. **Server AI vision has no light.** The render object's luminosity is 0 on
-   the headless server (`LightTrack.cpp:23`, never updated without a render
-   pass); the visibility value scales with it
-   (`visual_memory_manager.cpp:322-328`), so every AI sees as in darkness
-   (30–60× slower). Affects all server AI since Stage 2. Needs a server-side
-   light model (sun/hemisphere from weather and time, sky occlusion from the
-   collision model). **Proposed as a new task; awaiting the user's decision on
-   where it goes in the plan.** Do not substitute a constant.
-2. A server-driven participant's camera keeps its last yaw (the fixture
-   turns it as `SetActorDirection` does); real views arrive with Stage 4.
-3. Hearing-stage `npc_walk_events=0` recurred in 3 of 13 GameState runs
-   (smoke-120, 122, 131). Candidate: `[stalker_step_manager]`
-   (`m_stalker.ltx:6-66`) has walk entries for every direction at index `_0`
-   but only `norm_walk_fwd_1` at index `_1`; next check: log the walked
-   stalker's legs motion name.
-4. Carried unchanged: `EntityId`s across a checkpoint (Stage 7), fixture
-   `PlayerId`s (S04-T04), detached-participant release (S04-T05), dropped
-   script effectors (S03-T05), friendly fire and god mode per participant
-   (Stage 6).
+1. **Installed scripts outside a context decide for actor 0**: 320,729 reads
+   from 167 lines in smoke-136 (NPC condlists `xr_logic.script:372`, meet/talk
+   availability, disguise, corpse detection, warfare). The giver's talk
+   availability follows actor 0 only. Bounded batches for S08/S10.
+2. **Not remapped**: `has_alife_info` (`alife():has_info(0, …)`),
+   `alife():actor()`, the story object. An info portion given in participant
+   2's context lands on actor 2 but `has_alife_info` reads actor 0; party vs
+   personal info portions are an S08 decision.
+3. `axr_task_manager` offered/finished lists are per NPC, not per participant;
+   the time-event key `delay_reward` is global (S08).
+4. Carried: server AI vision has no light (**still awaiting the user's decision
+   on where a server light model goes**); server-driven camera yaw (Stage 4);
+   hearing-stage `npc_walk_events=0` (not seen in smoke-134..136); `EntityId`s
+   and task owners across a checkpoint (Stage 7); fixture `PlayerId`s
+   (S04-T04); detached release (S04-T05); friendly fire and god mode per
+   participant (Stage 6); presentation delivery (Stage 4).
 
-## Next: S03-T05 — native and Lua participant context contract
+## Next
 
-Inputs already collected (S03-T03 report and the
-[earlier snapshot](../done/snapshot-before-S03-T04-fixture.md)): the
-`se_actor` state gate, the actor binder's `db.actor` globals, the pre-hit
-callback (window, friendly fire, `db.actor` immunities), news to "the" actor,
-the `level.*` gameplay bindings behind null guards, `psActorFlags`.
-First action: inventory the script entry points the fixtures need (start
-from `report_actor_access`'s caller list in smoke-132's server log and the
-S03-T03 script gates), then define the context API.
+1. **G03 review by the user** ([evidence](../../validation/G03.md)). On
+   acceptance: mark G03 Completed in plan.md (§I, roadmap table Stage 3) and
+   record the decision in G03.md.
+2. Then **S04-T01 — Validate GameNetworkingSockets in isolation** (plan.md
+   Stage 4). First action: pin the GNS release and its dependencies
+   (protobuf/OpenSSL or the bundled crypto option) against the recorded VS2022
+   v143 toolchain and build an isolated listener + two peers under
+   `tools/network-probe` (or `builds/`), without touching engine-work.
 
 ## Tools and runs
 
-- Last run names: `campaign-111`, `client-28`, `smoke-132`, `capture-15`,
-  `patch-check-27a/b`. Next: `campaign-112`, `client-29`, `smoke-133`,
-  `capture-16`, patch check `28`.
+- Last run names: `campaign-115`, `client-29`, `smoke-136`, `capture-17`,
+  `patch-check-28a/b`. Next: `campaign-116`, `client-30`, `smoke-137`,
+  `capture-18`, patch check `29`.
 - Run PowerShell scripts with the Windows path in single quotes from bash
   (`-File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Stage2.ps1'`).
 - Smoke: `python3 tools/prepare-stage2-smoke.py <run>` then
   `Run-Stage2Smoke.ps1 -Run <run> -Scope Identity|GameState` (GameState
-  ~2.5 min; run it in the background — a crash leaves the process waiting on
-  the crash handler; a hearing-stage `npc_walk_events=0` is the recorded
-  variation, rerun).
-- Build: `Build-Stage2.ps1 -Run <name> -Product Campaign|Client` (~1–3 min
-  incremental, ~4 min for the client).
-- Export: `python3 tools/export-engine-patch.py <name> <check>` appends to
-  `series`; update `docs/source-manifest.json` by hand.
-- Activation fixture options: `-s03-switch-distance <m>`,
-  `-s03-monster-section <section>` (default `boar_normal`).
+  ~4 min; run it in the background).
+- Client quest check: `prepare-stage2-smoke.py capture-N S02-T06e`,
+  `Run-ClientCollisionCapture.ps1 -Run capture-N -Capture quest|quest-persisted -CheckpointRun <smoke>`;
+  copy `builds/logs/S02-T06e/run-capture-N/client-quest*.csv` to
+  `builds/logs/S02-T06/` before `compare-quest-capture.py`.
+- Installed scripts for grepping: `python3 tools/xray-db-extract.py -q extract -o <dir>
+  builds/build_2/test-install/source-client/db/configs/scripts.db0` (cp1251/CRLF).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
 G02 carried limits are unchanged.
-Previous snapshot: [before S03-T05](../done/snapshot-before-S03-T05.md).
+Previous snapshot: [before G03 review](../done/snapshot-before-G03-review.md).

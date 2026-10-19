@@ -80,7 +80,7 @@ $expectedStages = @('core-ready', 'settings-ready', 'scheduler-ready', 'console-
 $expectedExit = 0
 if ($Scope -eq 'Identity') {
     # S03-T01: the identity registry and its unit fixtures on the core only (no level).
-    $expectedStages += @('identity-ready', 'identity-engine-id-fixture-passed', 'identity-slot-reuse-fixture-passed', 'identity-disconnect-retention-fixture-passed', 'identity-role-context-fixture-passed', 'identity-actor-access-fixture-passed', 'identity-message-policy-fixture-passed', 'identity-stopped')
+    $expectedStages += @('identity-ready', 'identity-engine-id-fixture-passed', 'identity-slot-reuse-fixture-passed', 'identity-disconnect-retention-fixture-passed', 'identity-role-context-fixture-passed', 'identity-actor-access-fixture-passed', 'identity-message-policy-fixture-passed', 'identity-script-context-fixture-passed', 'identity-stopped')
 }
 if ($Scope -eq 'Services' -or $Scope -eq 'GameState') {
     # Services start in native order and stop in reverse; a failed start unwinds only started services.
@@ -93,7 +93,7 @@ if ($Scope -eq 'Services' -or $Scope -eq 'GameState') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-identity-passed', 'campaign-authority-passed', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-two-actors-passed', 'campaign-activation-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-identity-passed', 'campaign-authority-passed', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-two-actors-passed', 'campaign-activation-passed', 'campaign-script-context-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -170,6 +170,13 @@ $result.activation_capture_present = Test-Path $activationPath
 if ($result.activation_capture_present) {
     Copy-Item $activationPath (Join-Path $logDir 'server-activation.csv')
     $result.activation_capture_sha256 = (Get-FileHash $activationPath -Algorithm SHA256).Hash.ToLower()
+}
+# S03-T05: the script context fixture's capture (probes, refusals, deferred work, both quests, outboxes, the db.actor audit, every check).
+$scriptContextPath = Join-Path $runtime 'appdata\logs\s03-t05-script-context.csv'
+$result.script_context_capture_present = Test-Path $scriptContextPath
+if ($result.script_context_capture_present) {
+    Copy-Item $scriptContextPath (Join-Path $logDir 'server-script-context.csv')
+    $result.script_context_capture_sha256 = (Get-FileHash $scriptContextPath -Algorithm SHA256).Hash.ToLower()
 }
 $result.checkpoint_saves = @()
 foreach ($name in @('s02-t06d-checkpoint', 's02-t06e-checkpoint')) {

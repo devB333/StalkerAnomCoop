@@ -1,4 +1,4 @@
-# Participant identity and authoritative contexts — S03-T01 to S03-T04
+# Participant identity and authoritative contexts — S03-T01 to S03-T05
 
 This document defines the identities the co-op server uses, how they map onto
 the engine's transient ids, who may create and resolve them, and the state a
@@ -345,6 +345,79 @@ is its area's objects.
 headless server, so AI sees as in darkness (S03-T04 Limits). Not a
 participant effect; a server light model is an open item.
 
+## Native and Lua participant script context — S03-T05
+
+The installed single-player scripts reach "the player" four ways: the Lua
+global `db.actor` (3,228 uses in 245 scripts, set by the actor binder), the
+engine id 0 (`AC_ID`, 290 uses; `has_alife_info` → `alife():has_info(0, …)`,
+638 uses), the ALife actor (`alife():actor()`, 58) and the story object
+`"actor"` (20). With two participant actors none of these may pick a player
+(D4; [state ownership](state-ownership.md): "a compatibility layer for
+single-player scripts must not silently select whichever player most
+recently interacted"). `xrGame/CampaignScriptContext.{h,cpp}` defines the
+contract.
+
+**Contexts.** A participant script context is one `ActionContext`
+authorized against the registry for `Scope::Self` (needs the participant's
+live actor) or `Scope::Party` (needs the participant's own party);
+`Identity` and `World` are not script contexts. Contexts form a stack: each
+entry has a token and only the innermost may leave (`ContextMismatch`
+otherwise). Only native code enters one (`ScriptContextScope`). Lua cannot
+name a participant: it can only re-enter a context native code captured for
+it (`campaign.capture` / `enter_captured`), and the re-entry is authorized
+again as server-internal, so a released participant's deferred work is
+refused, never redirected.
+
+| Entry point | Context |
+|---|---|
+| `campaign::dialogue_open/close` (and `CActor::RunTalkDialog` on the server) | the talking actor's participant, server-internal |
+| `CDialogScriptHelper` phrase preconditions, actions, script text | the actor speaker's participant |
+| `CUsableScriptObject::use` | the user's participant, when the user is a participant actor |
+| `CGameTaskManager::UpdateTasks` per task, `CGameTask::ChangeStateCallback` | the task's owner (`CGameTask::m_campaign_owner`, set by `give_task` on the receiving actor) |
+| the Lua `CGeneralTask:check_task` of an owned task | the owner (compatibility layer) |
+| a `CreateTimeEvent` created inside a context | that context, re-entered when it fires |
+
+**Lookups are strict.** `script_context_actor()` and the Lua module
+(`campaign.actor`, `actor_id`, `slot`, `generation`, `party`, `player`,
+`origin`, `entry`, `in_context`, `present`) return nothing outside a context.
+Native gameplay bindings use `gameplay_script_actor(purpose)`: the context's
+actor, else the S03-T02 single-actor rule (null and counted with two actors).
+Converted: `level.add_actor_points*`, `get_actor_points`, `actor_safemode`,
+`actor_set_safemode`, `get_actor_alcohol`.
+
+**Tasks.** A task belongs to the participant whose actor it was given to. Its
+native update, its state callback and its Lua check run in the owner's
+context. The installed actor binder is the server's one Lua script host (the
+only actor binder, S03-T03): an owned task's state callback goes to the
+handler that binder registered, inside the owner's context, so the installed
+`task_callback` and its `on_complete` effects act on the owner's actor.
+Ownership is not saved: a task loaded from a checkpoint has no owner and runs
+as before (Stage 7). The task's info lists use the owner's actor.
+
+**Installed-script compatibility** (campaign server only, Lua loaded at the
+first level frame, `script_context_frame`): inside a context `db.actor` is the
+context's actor and `AC_ID` its engine id; outside one they are the binder's
+actor (the ALife actor) and 0. A participant actor without a binder gets an
+empty `db.storage` entry on its first context entry, so its portable store
+works (not persisted). While two participant actors live, every out-of-context
+`db.actor` read is counted by script and line and reported. The native forms
+are **not** remapped: `has_alife_info`/`alife():has_info(0, …)`,
+`alife():actor()` and the story object stay the script actor's. Consequence:
+inside participant 2's context an info portion given through `db.actor` goes
+to actor 2 while `has_alife_info` keeps reading actor 1; which info portions
+are party state and which personal is S08's decision.
+
+**Presentation callbacks.** On the server, what a player would see goes to
+that participant's outbox (`campaign::present`, bounded, oldest dropped and
+counted): the talk window open/close, news (`give_game_news`), talk messages,
+`level.*` camera and post-process effectors added in a context (without a
+context they are dropped and counted), the game-over sequence. Stage 4
+delivers the outbox. A client presents locally as before.
+
+On a client nothing changes: no context is entered, the compatibility layer is
+not loaded, `gameplay_script_actor` returns the local actor, presentation stays
+local. The `campaign` Lua module exists there and returns nothing.
+
 ## Ownership table
 
 | Thing | Owner (mints / mutates) | May resolve | Must never |
@@ -358,7 +431,9 @@ participant effect; a server light model is an open item.
 | `g_actor`, `Level().CurrentEntity()` | Engine | Client presentation only (`local_view_actor()`); the server's `Actor()` is the counted compatibility accessor (S03-T02) | Decide authority; choose a player when two exist |
 | `Level().CurrentControlEntity()` | Engine | The client's own control path; the server answers `controls_actor` from the participant registry (S03-T03) | Decide which actor the server simulates by input |
 | A participant's input | Its session (client intents, Stage 4) or the harness (`ServerInternal`) | `actor_input_*` under an authorized `Scope::Self` context | Reach another participant's actor |
-| The single-player Lua binder (`bind_stalker.actor_init`) | The installed scripts, for the script actor only (S03-T03) | `db.actor` on the client and, on the server, for the ALife actor | Attach to a second participant's actor before S03-T05 |
+| The single-player Lua binder (`bind_stalker.actor_init`) | The installed scripts, for the script actor only (S03-T03); the server's one script host (S03-T05) | Its registered callbacks, for owned tasks inside the owner's context | Attach to a second participant's actor |
+| A participant script context | Native entry points only (S03-T05) | `campaign.*` in Lua, `script_context_actor()` natively; `db.actor`/`AC_ID` through the compatibility layer | Be entered or named from Lua; fall back to a player outside a context |
+| A participant's presentation outbox | The server (`campaign::present`) | Stage 4 delivery to that participant's client | Receive another participant's presentation |
 | Server message dispatch | `xrServer::OnMessage` with the S03-T02 policy | The bridge client for state imports, world control and game events; remote clients for connection and input messages only | Accept a state import, world control or game event from a remote sender |
 
 ## Files
@@ -393,3 +468,8 @@ participant effect; a server light model is an open item.
   `CampaignActorAccess.{h,cpp}`.
 - `xrGame/CampaignActivationFixture.cpp` (S03-T04) — the activation and
   awareness level fixture (`campaign-activation-passed`).
+- `xrGame/CampaignScriptContext.{h,cpp}` (S03-T05) — the context stack and
+  scopes, task ownership, the dialogue entry, the presentation outboxes, the
+  `campaign` Lua module and the server's compatibility layer.
+- `xrGame/CampaignScriptContextFixture.cpp` (S03-T05) — the `script-context`
+  unit fixture and the level fixture (`campaign-script-context-passed`).

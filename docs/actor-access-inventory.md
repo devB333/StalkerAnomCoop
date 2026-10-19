@@ -298,3 +298,36 @@ counts the mismatch (`g_spawn_state_resyncs`, logged); see
 | `bind_stalker.script:29-142`, `db.script:102-112` | `actor_binder` sets `db.actor`, resets and finalizes the weather, surge and psi-storm managers | would re-point the globals at the second actor and tear them down on its destruction; the binder attaches to the script actor only (`script_binding_allowed`) | S03-T05 |
 | `_g.script:1221,2838`, `bind_stalker_ext.script:74-76` | `CActor__BeforeHitCallback`: 7 s invulnerability after the first binder update, a friend check against `db.actor` whose `IsStalker` includes actors, artefact immunities from `db.actor`'s belt | any actor's hits are dropped during the window, hits sourced from an actor (the other participant, or the victim itself) are dropped as friendly fire, damage is scaled by actor 1's belt | S03-T05 (per-participant gate), Stage 6 (friendly fire) |
 | `level_script.cpp` `show_indicators`/`hide_indicators` | set and clear the global `AF_GODMODE_RT` | god mode is process-wide; the fixture clears and restores it | Stage 6 |
+
+## Script context sites — S03-T05
+
+The sites S03-T02/T03 left for "the script context" now name their
+participant ([participant-identity.md](participant-identity.md#native-and-lua-participant-script-context--s03-t05)).
+
+| File | Site | S03-T05 |
+|---|---|---|
+| `GameTask.cpp` | `ChangeStateCallback`, `CheckInfo`, `SendInfo` | an owned task: the owner's actor; its state callback goes to the script host's handler inside the owner's context. An unowned task (client, checkpoint-loaded) keeps `sole_participant_actor` |
+| `GametaskManager.cpp` | `UpdateTasks` | each owned task is updated inside its owner's context |
+| `script_game_object_inventory_owner.cpp` | `GiveTaskToActor` | records the receiving actor's participant as the task's owner |
+| `script_game_object_inventory_owner.cpp` | `GiveGameNews`, `AddIconedTalkMessage` | server: the receiving actor's participant's presentation (`News`, `TalkMessage`); client unchanged. `_give_news` stays client-only |
+| `Actor_Communication.cpp` | `CActor::RunTalkDialog` | server: `campaign::dialogue_open` (the actor's context, `DialogOpen` presentation); client unchanged |
+| `PhraseScript.cpp` | the five `CDialogScriptHelper` script calls | run in the actor speaker's participant context |
+| `UsableScriptObject.cpp` | `CUsableScriptObject::use` | runs the use callback in the user's participant context |
+| `Actor.cpp` | `CActor::Die` game-over sequence | server: `GameOver` presentation to the dying participant |
+| `level_script.cpp` | `add_cam_effector` (5), `remove_cam_effector`, `add_pp_effector`, `remove_pp_effector` | server: the script context participant's presentation; dropped and counted without a context (S03-T03 dropped them all). An added camera effector returns its length when presented |
+| `level_script.cpp` | `add_actor_points`, `add_actor_points_str`, `get_actor_points`, `actor_safemode`, `actor_set_safemode`, `get_actor_alcohol` | `gameplay_script_actor`: the context's actor, else the single-actor rule |
+| `level_script.cpp` | Discord RPC, `get_pick(TT_ACTOR)`, `g_get_target_pos`, `update_pda_news_from_uiwindow`, `level.debug_actor` | unchanged: presentation, UI or debug (null with two actors on the server) |
+
+### Installed-script forms of "the player" — S03-T05 audit
+
+| Form | Uses (installed `scripts.db0`) | Inside a participant context | Outside |
+|---|---|---|---|
+| `db.actor` | 3,228 in 245 scripts | the context's actor | the binder's actor; reads counted by site while two actors live |
+| `AC_ID` | 290 in 76 scripts | the context's actor's id | 0 |
+| `has_alife_info` → `alife():has_info(0, …)` | 638 (+4 direct `has_info(0, …)` calls) | **actor 0** (not remapped; S08) | actor 0 |
+| `alife():actor()` | 58 | **the ALife actor** (not remapped; S08) | the ALife actor |
+| story object `"actor"` | 20 | not remapped (S08) | — |
+| `CreateTimeEvent` | 114 calls | the creating context is captured and re-entered | no context |
+
+The runtime audit (out-of-context `db.actor` reads while two actors lived)
+is in [S03-T05](validation/S03-T05.md).

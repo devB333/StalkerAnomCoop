@@ -105,6 +105,10 @@
     {
       "path": "patches/engine/0024-participant-activation.patch",
       "sha256": "f70dd04d5faa1f49349e7e25be54a52601e576099850408fd01225a04c7a513c"
+    },
+    {
+      "path": "patches/engine/0025-participant-script-context.patch",
+      "sha256": "23fa820fa5775b8ff91ee0baf1df680fd899abd0308ab0eed7c59a7351973f0a"
     }
   ],
   "submodules": [

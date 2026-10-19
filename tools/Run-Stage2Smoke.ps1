@@ -93,7 +93,7 @@ if ($Scope -eq 'Services' -or $Scope -eq 'GameState') {
     if ($ExpectModelFailure) { $expectedStages += 'cpu-model-fixture-failed'; $expectedExit = 5 }
     elseif (-not $InjectFailure) {
         $expectedStages += @('cpu-model-fixture-passed', 'persistent-fixture-passed', 'frame-driver-fixture-passed', 'bone-capture-passed', 'services-graphics-window-input-absent')
-        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-identity-passed', 'campaign-authority-passed', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-two-actors-passed', 'campaign-activation-passed', 'campaign-script-context-passed', 'campaign-stopped') }
+        if ($Scope -eq 'GameState') { $expectedStages += @('campaign-level-created', 'campaign-server-ready', 'campaign-level-loaded', 'campaign-ticked', 'campaign-identity-passed', 'campaign-authority-passed', 'campaign-collision-passed', 'campaign-physics-passed', 'campaign-activity-passed', 'campaign-hearing-passed', 'campaign-actor-position-passed', 'campaign-combat-passed', 'campaign-quest-given', 'campaign-checkpoint-saved', 'campaign-stopped', 'campaign-restart-server-ready', 'campaign-restart-level-loaded', 'campaign-checkpoint-passed', 'campaign-quest-restored', 'campaign-quest-completed', 'campaign-quest-checkpoint-saved', 'campaign-stopped', 'campaign-quest-restart-server-ready', 'campaign-quest-restart-level-loaded', 'campaign-quest-checkpoint-passed', 'campaign-quest-persisted', 'campaign-lighting-snapshot-passed', 'campaign-two-actors-passed', 'campaign-activation-passed', 'campaign-script-context-passed', 'campaign-lighting-passed', 'campaign-stopped') }
     }
     [array]::Reverse($started)
     foreach ($service in $started) { $expectedStages += "$service-stopped" }
@@ -170,6 +170,15 @@ $result.activation_capture_present = Test-Path $activationPath
 if ($result.activation_capture_present) {
     Copy-Item $activationPath (Join-Path $logDir 'server-activation.csv')
     $result.activation_capture_sha256 = (Get-FileHash $activationPath -Algorithm SHA256).Hash.ToLower()
+}
+# S03-T06: the lighting snapshot after the second restore (compared with the client's) and the lighting fixture.
+foreach ($pair in @(@('s03-t06-lighting-snapshot.csv', 'server-lighting-snapshot.csv', 'lighting_snapshot'), @('s03-t06-lighting.csv', 'server-lighting.csv', 'lighting'))) {
+    $source = Join-Path $runtime ('appdata\logs\' + $pair[0])
+    $result[$pair[2] + '_capture_present'] = Test-Path $source
+    if (Test-Path $source) {
+        Copy-Item $source (Join-Path $logDir $pair[1])
+        $result[$pair[2] + '_capture_sha256'] = (Get-FileHash $source -Algorithm SHA256).Hash.ToLower()
+    }
 }
 # S03-T05: the script context fixture's capture (probes, refusals, deferred work, both quests, outboxes, the db.actor audit, every check).
 $scriptContextPath = Join-Path $runtime 'appdata\logs\s03-t05-script-context.csv'

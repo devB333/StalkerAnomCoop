@@ -1,4 +1,4 @@
-# Participant identity and authoritative contexts — S03-T01 to S03-T05
+# Participant identity and authoritative contexts — S03-T01 to S03-T06
 
 This document defines the identities the co-op server uses, how they map onto
 the engine's transient ids, who may create and resolve them, and the state a
@@ -341,9 +341,9 @@ online, object-update time 0.78 → 0.95 ms per tick; the rule itself is 1.3 ns
 more per object per pass and 115 ns per refresh. The cost of a second player
 is its area's objects.
 
-**Server AI vision** has no light: the render object's luminosity is 0 on the
-headless server, so AI sees as in darkness (S03-T04 Limits). Not a
-participant effect; a server light model is an open item.
+**Server AI vision** had no light: the render object's luminosity was 0 on the
+headless server, so AI saw as in darkness (S03-T04 Limits). S03-T06 resolves
+it per participant: see "Lighting for AI vision" below.
 
 ## Native and Lua participant script context — S03-T05
 
@@ -411,12 +411,27 @@ are party state and which personal is S08's decision.
 that participant's outbox (`campaign::present`, bounded, oldest dropped and
 counted): the talk window open/close, news (`give_game_news`), talk messages,
 `level.*` camera and post-process effectors added in a context (without a
-context they are dropped and counted), the game-over sequence. Stage 4
+context they are dropped and counted), the game-over sequence, and (S03-T06)
+`game.start_tutorial`, whose UI sequence faulted inside the actor binder when
+the installed campfire hint fired on the server. Stage 4
 delivers the outbox. A client presents locally as before.
 
 On a client nothing changes: no context is entered, the compatibility layer is
 not loaded, `gameplay_script_actor` returns the local actor, presentation stays
 local. The `campaign` Lua module exists there and returns nothing.
+
+## Lighting for AI vision — S03-T06
+
+Each server tick, for every participant actor, the server does what a client
+does for its own view: the camera position is the actor's eye, the
+environment blends weather and time of day with the level's modifiers there,
+the sun is aimed, and the client's own light tracking (`CROS_impl::update`)
+runs on the actor and on one object of its view frustum in turn
+(`xrGame/CampaignServerLighting.cpp`). The level's sun and static lights are
+CPU objects loaded with the level. No other NPC is refreshed (user decision
+2026-10-19), as on a client. At steady state the server and the normal client
+read the same actor at the same checkpoint identically
+([S03-T06](validation/S03-T06.md)).
 
 ## Ownership table
 
@@ -473,3 +488,6 @@ local. The `campaign` Lua module exists there and returns nothing.
   `campaign` Lua module and the server's compatibility layer.
 - `xrGame/CampaignScriptContextFixture.cpp` (S03-T05) — the `script-context`
   unit fixture and the level fixture (`campaign-script-context-passed`).
+- `xrGame/CampaignServerLighting.{h,cpp}`, `CampaignLightingFixture.cpp`
+  (S03-T06) — the per-participant light model, its snapshot, level fixture and
+  client capture.

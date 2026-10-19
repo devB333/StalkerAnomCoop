@@ -315,6 +315,7 @@ participant ([participant-identity.md](participant-identity.md#native-and-lua-pa
 | `UsableScriptObject.cpp` | `CUsableScriptObject::use` | runs the use callback in the user's participant context |
 | `Actor.cpp` | `CActor::Die` game-over sequence | server: `GameOver` presentation to the dying participant |
 | `level_script.cpp` | `add_cam_effector` (5), `remove_cam_effector`, `add_pp_effector`, `remove_pp_effector` | server: the script context participant's presentation; dropped and counted without a context (S03-T03 dropped them all). An added camera effector returns its length when presented |
+| `level_script.cpp` | `start_tutorial` (S03-T06) | server: `Tutorial` presentation to the script context participant, dropped and counted without one; no UI sequencer is created (it faulted inside the actor binder, smoke-140) |
 | `level_script.cpp` | `add_actor_points`, `add_actor_points_str`, `get_actor_points`, `actor_safemode`, `actor_set_safemode`, `get_actor_alcohol` | `gameplay_script_actor`: the context's actor, else the single-actor rule |
 | `level_script.cpp` | Discord RPC, `get_pick(TT_ACTOR)`, `g_get_target_pos`, `update_pda_news_from_uiwindow`, `level.debug_actor` | unchanged: presentation, UI or debug (null with two actors on the server) |
 

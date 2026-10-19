@@ -16,11 +16,13 @@
 # restored task, completes it through the installed dialogue functions and records the completion
 # (-s02-quest-capture); with -Capture quest-persisted it starts from the server's second checkpoint (task
 # completed) and records the persisted state (-s02-quest-persisted); task S02-T06e.
+# With -Capture lighting (S03-T06) it starts from the server's second checkpoint and records the view actor's
+# luminosity and the environment one second after spawning (-s03-lighting-capture); task S03-T06.
 # The accepted source-client runtime is only read: its bin DLLs, user settings and
 # shader cache are copied, and the archives are read in place through fsgame.ltx.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
-    [ValidateSet('collision', 'physics', 'activity', 'hearing', 'combat', 'checkpoint', 'quest', 'quest-persisted')][string]$Capture = 'collision',
+    [ValidateSet('collision', 'physics', 'activity', 'hearing', 'combat', 'checkpoint', 'quest', 'quest-persisted', 'lighting')][string]$Capture = 'collision',
     # -Capture checkpoint|quest|quest-persisted: the campaign smoke run whose checkpoint the client loads
     # (s02-t06d-checkpoint for checkpoint and quest, s02-t06e-checkpoint for quest-persisted).
     [ValidatePattern('^[a-zA-Z0-9-]*$')][string]$CheckpointRun = '',
@@ -28,12 +30,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
-$fromCheckpoint = $Capture -in @('checkpoint', 'quest', 'quest-persisted')
-if ($fromCheckpoint -ne [bool]$CheckpointRun) { throw '-CheckpointRun is required with, and only with, -Capture checkpoint, quest or quest-persisted.' }
-$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } 'hearing' { 'S02-T05c' } 'combat' { 'S02-T06c' } 'checkpoint' { 'S02-T06d' } 'quest' { 'S02-T06e' } 'quest-persisted' { 'S02-T06e' } default { 'S02-T03d' } }
-$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } 'hearing' { '-s02-hearing-capture' } 'combat' { '-s02-combat-capture' } 'checkpoint' { '-s02-checkpoint-capture' } 'quest' { '-s02-quest-capture' } 'quest-persisted' { '-s02-quest-persisted' } default { '-s02-collision-capture' } }
-$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } 'hearing' { 's02-t05c-hearing.csv' } 'combat' { 's02-t06c-combat.csv' } 'checkpoint' { 's02-t06d-checkpoint.csv' } 'quest' { 's02-t06e-quest.csv' } 'quest-persisted' { 's02-t06e-quest.csv' } default { 's02-t03d-collision.csv' } }
-$checkpointName = if ($Capture -eq 'quest-persisted') { 's02-t06e-checkpoint' } else { 's02-t06d-checkpoint' }
+$fromCheckpoint = $Capture -in @('checkpoint', 'quest', 'quest-persisted', 'lighting')
+if ($fromCheckpoint -ne [bool]$CheckpointRun) { throw '-CheckpointRun is required with, and only with, -Capture checkpoint, quest, quest-persisted or lighting.' }
+$task = switch ($Capture) { 'physics' { 'S02-T04b' } 'activity' { 'S02-T04c' } 'hearing' { 'S02-T05c' } 'combat' { 'S02-T06c' } 'checkpoint' { 'S02-T06d' } 'quest' { 'S02-T06e' } 'quest-persisted' { 'S02-T06e' } 'lighting' { 'S03-T06' } default { 'S02-T03d' } }
+$flag = switch ($Capture) { 'physics' { '-s02-physics-capture' } 'activity' { '-s02-activity-capture' } 'hearing' { '-s02-hearing-capture' } 'combat' { '-s02-combat-capture' } 'checkpoint' { '-s02-checkpoint-capture' } 'quest' { '-s02-quest-capture' } 'quest-persisted' { '-s02-quest-persisted' } 'lighting' { '-s03-lighting-capture' } default { '-s02-collision-capture' } }
+$captureFile = switch ($Capture) { 'physics' { 's02-t04b-physics.csv' } 'activity' { 's02-t04c-activity.csv' } 'hearing' { 's02-t05c-hearing.csv' } 'combat' { 's02-t06c-combat.csv' } 'checkpoint' { 's02-t06d-checkpoint.csv' } 'quest' { 's02-t06e-quest.csv' } 'quest-persisted' { 's02-t06e-quest.csv' } 'lighting' { 's03-t06-lighting-snapshot.csv' } default { 's02-t03d-collision.csv' } }
+$checkpointName = if ($Capture -in @('quest-persisted', 'lighting')) { 's02-t06e-checkpoint' } else { 's02-t06d-checkpoint' }
 $runtime = Join-Path $workspace "builds\stage2\test-install\$task\$Run"
 $fixture = Join-Path $runtime 'fixture.json'
 if (-not (Test-Path $fixture)) { throw "Prepare the isolated runtime first (prepare-stage2-smoke.py <run> $task)." }
@@ -92,7 +94,7 @@ if ($fromCheckpoint) {
         if (-not $afterSave) { throw 'The server checkpoint capture has no after-save row.' }
         if ([int]$afterSave.npc_id -ne 65535 -and [int]$afterSave.npc_id -ne 0) { $fixtureOptions += ' -s02-checkpoint-npc ' + $afterSave.npc_id }
         if ([int]$afterSave.monster_id -ne 65535) { $fixtureOptions += ' -s02-checkpoint-monster ' + $afterSave.monster_id }
-    } else {
+    } elseif ($Capture -ne 'lighting') {
         # The quest and its giver are the server's (its given row); the defaults are the same on both products.
         $questRows = Import-Csv (Join-Path $smokeLog 'server-quest.csv')
         $given = $questRows | Where-Object { $_.label -eq 'given' } | Select-Object -First 1

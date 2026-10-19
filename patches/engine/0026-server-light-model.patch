@@ -1,0 +1,1040 @@
+diff --git a/src/Layers/xrRender/Light_DB.h b/src/Layers/xrRender/Light_DB.h
+index 50404a7..f0dedbb 100644
+--- a/src/Layers/xrRender/Light_DB.h
++++ b/src/Layers/xrRender/Light_DB.h
+@@ -20,6 +20,7 @@ public:
+ 	void					LoadHemi			();
+ #endif
+ 	void Unload();
++	u32 hemi_count() const { return u32(v_hemi.size()); } // S03-T06
+ 
+ 	light* Create();
+ 	void Update();
+diff --git a/src/Layers/xrRenderPC_R4/r4.h b/src/Layers/xrRenderPC_R4/r4.h
+index 9fd087e..16abf10 100644
+--- a/src/Layers/xrRenderPC_R4/r4.h
++++ b/src/Layers/xrRenderPC_R4/r4.h
+@@ -313,6 +313,12 @@ public:
+ 	virtual bool cpu_models_create(void (*registrar)(IRenderVisual*));
+ 	virtual void cpu_models_destroy();
+ 	virtual bool cpu_models_stats(CpuModelStats& stats);
++	// S03-T06 (r4_loader.cpp)
++	virtual u32 cpu_lighting_load(IReader* level_fs);
++	virtual void cpu_lighting_unload();
++	virtual bool cpu_lighting_sun();
++	virtual bool cpu_lighting_track(IRenderable* object);
++	bool m_cpu_lighting = false;
+ 	virtual void destroy();
+ 	virtual void reset_begin();
+ 	virtual void reset_end();
+diff --git a/src/Layers/xrRenderPC_R4/r4_loader.cpp b/src/Layers/xrRenderPC_R4/r4_loader.cpp
+index 899a21a..ff570e2 100644
+--- a/src/Layers/xrRenderPC_R4/r4_loader.cpp
++++ b/src/Layers/xrRenderPC_R4/r4_loader.cpp
+@@ -119,6 +119,53 @@ void CRender::level_Load(IReader* fs)
+ 	b_loaded = TRUE;
+ }
+ 
++// S03-T06: the campaign server never loads the render level (S02-T05d). The
++// lighting AI vision reads needs only CPU objects: the level's sun and static
++// lights (the same CLight_DB::Load/LoadHemi the client runs, from the level
++// stream IGame_Level::Load has open), registered in the spatial database of
++// this level, released before it goes.
++u32 CRender::cpu_lighting_load(IReader* level_fs)
++{
++	if (m_cpu_lighting || !level_fs)
++		return 0;
++	Lights.Load(level_fs);
++	Lights.LoadHemi();
++	m_cpu_lighting = true;
++	Msg("S03-T06 cpu lighting loaded: sun=%d hemi_lights=%u", Lights.sun_adapted ? 1 : 0, Lights.hemi_count());
++	return Lights.hemi_count();
++}
++
++void CRender::cpu_lighting_unload()
++{
++	if (!m_cpu_lighting)
++		return;
++	Lights.Unload();
++	m_cpu_lighting = false;
++}
++
++// The client's per-frame sun update (r2_R_calculate.cpp, CLight_DB::Update):
++// the adapted sun's direction and colour from the current environment.
++bool CRender::cpu_lighting_sun()
++{
++	if (!m_cpu_lighting)
++		return false;
++	Lights.Update();
++	return true;
++}
++
++// The client's light tracking of one object (r4_R_render.cpp: the view entity
++// and one renderable in the view every frame): sun ray, sky rays, static lights.
++bool CRender::cpu_lighting_track(IRenderable* object)
++{
++	if (!m_cpu_lighting || !object)
++		return false;
++	CROS_impl* ros = (CROS_impl*)object->renderable_ROS();
++	if (!ros)
++		return false;
++	ros->update(object);
++	return true;
++}
++
+ void CRender::level_Unload()
+ {
+ 	if (0 == g_pGameLevel) return;
+diff --git a/src/xrEngine/Environment.cpp b/src/xrEngine/Environment.cpp
+index cdc0187..af566dd 100644
+--- a/src/xrEngine/Environment.cpp
++++ b/src/xrEngine/Environment.cpp
+@@ -587,6 +587,17 @@ void CEnvironment::set_lerp(float current_weight)
+     Current[1]->exec_time = new_t1;
+ }
+ 
++bool CEnvironment::UpdateCPU()
++{
++	if (!g_pGameLevel || !CurrentWeather)
++		return false;
++	float current_weight;
++	lerp(current_weight);
++	if (!m_paused)
++		calculate_config_sun_dir();
++	return true;
++}
++
+ void CEnvironment::OnFrame()
+ {
+ #ifdef _EDITOR
+diff --git a/src/xrEngine/Environment.h b/src/xrEngine/Environment.h
+index 18acf37..a154aa2 100644
+--- a/src/xrEngine/Environment.h
++++ b/src/xrEngine/Environment.h
+@@ -356,6 +356,10 @@ public:
+ 
+ 	void OnFrame();
+ 	void lerp(float& current_weight);
++	// S03-T06: the CPU part of OnFrame for the campaign server: the weather and
++	// time-of-day blend (with the modifiers at Device.vCameraPosition) and the
++	// configured sun direction; no lens flare, rain, thunderbolt or render state.
++	bool UpdateCPU();
+     void set_lerp(float current_weight);
+ 
+ 	void RenderSky(bool only_MV = false);
+diff --git a/src/xrEngine/IGame_Level.cpp b/src/xrEngine/IGame_Level.cpp
+index 392e492..804fb74 100644
+--- a/src/xrEngine/IGame_Level.cpp
++++ b/src/xrEngine/IGame_Level.cpp
+@@ -44,6 +44,7 @@ IGame_Level::~IGame_Level()
+ 	xr_delete(pLevel);
+ 
+ 	// Render-level unload
++	Render->cpu_lighting_unload(); // S03-T06: before the level's spatial space goes
+ 	Render->level_Unload();
+ 	xr_delete(m_pCameras);
+ 	// Unregister
+@@ -137,6 +138,12 @@ bool IGame_Level::Load(u32 dwNum)
+ 		// Render-level Load
+ 		Render->level_Load(LL_Stream);
+ 	}
++	else
++	{
++		// S03-T06: the level's sun and static lights as CPU objects only, for
++		// the luminosity AI vision reads.
++		Render->cpu_lighting_load(LL_Stream);
++	}
+ 	// tscreate.FrameEnd ();
+ 	// Msg ("* S-CREATE: %f ms, %d times",tscreate.result,tscreate.count);
+ 
+diff --git a/src/xrEngine/Render.h b/src/xrEngine/Render.h
+index 78121e8..121de42 100644
+--- a/src/xrEngine/Render.h
++++ b/src/xrEngine/Render.h
+@@ -254,6 +254,16 @@ public:
+ 	virtual bool cpu_models_create(void (*registrar)(IRenderVisual*)) { return false; }
+ 	virtual void cpu_models_destroy() {}
+ 	virtual bool cpu_models_stats(CpuModelStats& stats) { return false; }
++	// S03-T06: the campaign server's CPU lighting. No render level is loaded
++	// there, so the luminosity AI vision reads (CROS_impl, the object's ROS)
++	// was never computed. These load the level's sun and static hemi lights as
++	// CPU objects from the open level stream, aim the sun from the current
++	// environment, and run an object's light-tracking update (CROS_impl::update,
++	// the client's own code). No-ops by default.
++	virtual u32 cpu_lighting_load(IReader* level_fs) { return 0; }
++	virtual void cpu_lighting_unload() {}
++	virtual bool cpu_lighting_sun() { return false; }
++	virtual bool cpu_lighting_track(IRenderable* object) { return false; }
+ 	virtual void destroy() = 0;
+ 	virtual void reset_begin() = 0;
+ 	virtual void reset_end() = 0;
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 4334697..51001d8 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1030,6 +1030,11 @@ extern "C" bool __cdecl xrCampaignLevel_ScriptContextBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_ScriptContextTick();
+ extern "C" bool __cdecl xrCampaignLevel_ScriptContextDone();
+ extern "C" bool __cdecl xrCampaignLevel_ScriptContextEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
++extern "C" bool __cdecl xrCampaignLevel_LightingSnapshot(LPCSTR out_path, LPCSTR label);
++extern "C" bool __cdecl xrCampaignLevel_LightingBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_LightingTick();
++extern "C" bool __cdecl xrCampaignLevel_LightingDone();
++extern "C" bool __cdecl xrCampaignLevel_LightingEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -2172,6 +2177,27 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     }
+                 }
+                 if (result == 0)
++                {
++                    // S03-T06: each participant actor's lighting after the
++                    // restore, for the client comparison from the same checkpoint,
++                    // at steady state: the smoothed sun and sky terms settle
++                    // with a 1 s time constant (CROS_impl::update_smooth), so
++                    // 10 s of ticks run first (the client waits 10 s too).
++                    const u64 settle_from = g_campaign_clock->Stats().ticks;
++                    g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                    RunCampaignTicksTo(settle_from + 500);
++                    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s03-t06-lighting-snapshot.csv");
++                    if (xrCampaignLevel_LightingSnapshot(capture, "server-restored"))
++                        stage("campaign-lighting-snapshot-passed");
++                    else
++                    {
++                        stage("campaign-lighting-snapshot-failed");
++                        result = 37;
++                    }
++                }
++                if (result == 0)
+                 {
+                     // S03-T03: a second genuine actor beside the saved one,
+                     // explicitly participant 2's; both addressed, hit, equipped,
+@@ -2268,6 +2294,33 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 35;
+                     }
+                 }
++                if (result == 0)
++                {
++                    // S03-T06: both participants' lighting over 200 ticks and
++                    // what AI vision reads from it.
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s03-t06-lighting.csv");
++                    bool ok = xrCampaignLevel_LightingBegin(capture);
++                    const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                    const u32 wall_before = g_campaign_wall.GetElapsed_ms();
++                    g_campaign_clock->Resume(wall_before);
++                    while (!xrCampaignLevel_LightingDone() && g_campaign_clock->Stats().ticks < ticks_before + 400)
++                    {
++                        RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                        xrCampaignLevel_LightingTick();
++                    }
++                    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                    const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                    ok = xrCampaignLevel_LightingEnd(ran, ran * g_campaign_clock->TickMs(),
++                             g_campaign_wall.GetElapsed_ms() - wall_before) && ok;
++                    if (ok)
++                        stage("campaign-lighting-passed");
++                    else
++                    {
++                        stage("campaign-lighting-failed");
++                        result = 36;
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrGame/CampaignActivationFixture.cpp b/src/xrGame/CampaignActivationFixture.cpp
+index e3ad7dc..cd254ce 100644
+--- a/src/xrGame/CampaignActivationFixture.cpp
++++ b/src/xrGame/CampaignActivationFixture.cpp
+@@ -68,6 +68,7 @@
+ #include "CharacterPhysicsSupport.h"
+ #include "PHMovementControl.h"
+ #include "ai/monsters/basemonster/base_monster.h"
++#include "CustomMonster.h"
+ #include "memory_manager.h"
+ #include "actor_memory.h"
+ #include "visual_memory_manager.h"
+@@ -180,6 +181,8 @@ struct Fixture
+ 
+ 	u16 monster1_id;
+ 	u16 monster2_id;
++	Fvector actor1_home; // S03-T06: actor 1's place before the awareness phase
++	bool actor1_moved;
+ 	u32 monster1_tick; // tick at which the monster took its actor as enemy
+ 	u32 monster2_tick;
+ 	u16 monster1_enemy;
+@@ -615,6 +618,33 @@ bool vertex_near(CActor* actor, float distance, u32& vertex, Fvector& position)
+ 	return false;
+ }
+ 
++// S03-T06: a level vertex 100-250 m from the actor with no alive stalker or
++// monster online within 80 m.
++bool quiet_vertex(CActor* actor, u32& vertex, Fvector& position)
++{
++	const float distances[] = {120.f, 160.f, 200.f, 250.f, 100.f};
++	for (float d : distances)
++		for (int k = 0; k < 16; ++k)
++		{
++			const float a = float(k) * PI_MUL_2 / 16.f;
++			Fvector target = actor->Position();
++			target.x += d * _cos(a);
++			target.z += d * _sin(a);
++			if (!vertex_at(target, vertex, position))
++				continue;
++			bool quiet = true;
++			for (u32 i = 0; quiet && i < Level().Objects.o_count(); ++i)
++			{
++				CCustomMonster* m = smart_cast<CCustomMonster*>(Level().Objects.o_get_by_iterator(i));
++				if (m && !m->getDestroy() && m->g_Alive() && m->Position().distance_to(position) < 80.f)
++					quiet = false;
++			}
++			if (quiet)
++				return true;
++		}
++	return false;
++}
++
+ u16 spawn_monster(CActor* actor, LPCSTR label)
+ {
+ 	Fixture& f = g_fixture;
+@@ -916,6 +946,24 @@ void phase_separate(CActor* a1, CActor* a2)
+ 	// Awareness: god mode for both actors, a monster beside each.
+ 	psActorFlags.set(AF_GODMODE, TRUE);
+ 	psActorFlags.set(AF_GODMODE_RT, TRUE);
++	// S03-T06: with AI vision lit, the Clear Sky base's NPCs see and engage a
++	// monster spawned beside actor 1 there before it picks its enemy
++	// (smoke-138, smoke-139). Actor 1 stands at a quiet vertex for this phase
++	// and goes back before the disconnect phase.
++	f.actor1_home = a1->Position();
++	f.actor1_moved = false;
++	{
++		u32 vertex = u32(-1);
++		Fvector position;
++		if (quiet_vertex(a1, vertex, position))
++		{
++			teleport(a1, position);
++			f.actor1_moved = true;
++			Msg("S03-T04 awareness: actor 1 moved %.0f m to quiet vertex %u", f.actor1_home.distance_to(position), vertex);
++		}
++		else
++			Msg("! S03-T04 awareness: no quiet vertex near actor 1; it stays in place");
++	}
+ 	f.monster1_id = spawn_monster(a1, "actor 1");
+ 	f.monster2_id = spawn_monster(a2, "actor 2");
+ 	f.monster1_tick = f.monster2_tick = 0;
+@@ -965,6 +1013,11 @@ void phase_awareness(CActor* a1, CActor* a2)
+ 		check(a1->g_Alive() && a2->g_Alive(), "both actors are alive (god mode)");
+ 		release_entity(f.monster1_id);
+ 		release_entity(f.monster2_id);
++		if (f.actor1_moved)
++		{
++			teleport(a1, f.actor1_home); // S03-T06: back to its area before the disconnect phase
++			f.actor1_moved = false;
++		}
+ 		next_step();
+ 		return;
+ 	}
+diff --git a/src/xrGame/CampaignIdentityFixture.cpp b/src/xrGame/CampaignIdentityFixture.cpp
+index dac7c1e..4ba3ee7 100644
+--- a/src/xrGame/CampaignIdentityFixture.cpp
++++ b/src/xrGame/CampaignIdentityFixture.cpp
+@@ -5,6 +5,7 @@
+ #include "CampaignActorControl.h"
+ #include "CampaignMessagePolicy.h"
+ #include "CampaignScriptContext.h"
++#include "CampaignServerLighting.h"
+ #include "id_generator.h"
+ 
+ // S03-T01: see CampaignIdentityFixture.h.
+@@ -448,6 +449,7 @@ extern "C" void __cdecl xrCampaignIdentity_Stop()
+ 	campaign::report_actor_access("stop"); // S03-T02
+ 	campaign::report_actor_control("stop"); // S03-T03
+ 	campaign::report_script_context("stop"); // S03-T05
++	campaign::report_server_lighting("stop"); // S03-T06
+ 	campaign::release_script_contexts();
+ 	campaign::report_message_policy("stop");
+ 	xr_delete(g_campaign_identity);
+diff --git a/src/xrGame/CampaignIdentityFixture.h b/src/xrGame/CampaignIdentityFixture.h
+index e5f559d..2368d05 100644
+--- a/src/xrGame/CampaignIdentityFixture.h
++++ b/src/xrGame/CampaignIdentityFixture.h
+@@ -52,3 +52,11 @@ extern "C" bool __cdecl xrCampaignLevel_ScriptContextBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_ScriptContextTick();
+ extern "C" bool __cdecl xrCampaignLevel_ScriptContextDone();
+ extern "C" bool __cdecl xrCampaignLevel_ScriptContextEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
++// S03-T06 (CampaignLightingFixture.cpp): the server light model: a snapshot
++// of each participant actor's lighting (after the second checkpoint restore,
++// compared with the client's) and the lighting level fixture.
++extern "C" bool __cdecl xrCampaignLevel_LightingSnapshot(LPCSTR out_path, LPCSTR label);
++extern "C" bool __cdecl xrCampaignLevel_LightingBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_LightingTick();
++extern "C" bool __cdecl xrCampaignLevel_LightingDone();
++extern "C" bool __cdecl xrCampaignLevel_LightingEnd(u32 ticks, u32 sim_ms, u32 wall_ms);
+diff --git a/src/xrGame/CampaignLightingFixture.cpp b/src/xrGame/CampaignLightingFixture.cpp
+new file mode 100644
+index 0000000..ef5606e
+--- /dev/null
++++ b/src/xrGame/CampaignLightingFixture.cpp
+@@ -0,0 +1,337 @@
++#include "pch_script.h"
++#include "CampaignIdentityFixture.h"
++#include "CampaignIdentity.h"
++#include "CampaignActorAccess.h"
++#include "CampaignServerLighting.h"
++
++// S03-T06: the server light model fixtures.
++//
++//  - Snapshot (server, 500 ticks after the second checkpoint restore; client,
++//    from the same checkpoint ten seconds after its actor spawned): one row per actor
++//    with the environment (game time, weather, sun direction and colour,
++//    ambient, sky colour, far plane), the actor's position and eye, and the
++//    luminosity and sky term AI vision reads. tools/compare-lighting-capture.py
++//    compares the server row with the client's.
++//  - Level fixture (GameState, after the script-context fixture): over 200
++//    ticks both participant actors are tracked every tick, one object in each
++//    view in turn; both luminosities are lit (above the 0.001 darkness floor,
++//    at least the environment's ambient, at most 1); the environment blend
++//    never failed; and an online stalker's visual memory now reads each actor
++//    brighter than darkness (CVisualMemoryManager::object_luminocity).
++//
++// CSV rows (s03-t06-lighting.csv, s03-t06-lighting-snapshot.csv):
++//   light,<label>,<frame>,<game_time_s>,<weather>,<sun_dir xyz>,<sun_color xyz>,<ambient xyz>,<hemi_color xyz>,
++//         <far_plane>,<actor>,<pos xyz>,<eye xyz>,<luminocity>,<hemi>
++//   ai,<label>,<observer>,<actor>,<luminocity>,<object_luminocity>,<darkness_floor>,<ratio>
++//   stats,<name>,<value>
++//   check,<ok>,<what>
++//   end,<ticks>,<sim_ms>,<wall_ms>,<checks>,<failures>,<ok>
++
++#include "Level.h"
++#include "Actor.h"
++#include "ai_space.h"
++#include "CustomMonster.h"
++#include "memory_manager.h"
++#include "visual_memory_manager.h"
++#include "../xrEngine/CameraBase.h"
++#include "../Include/xrRender/RenderVisual.h"
++#include "../xrEngine/IGame_Persistent.h"
++#include "../xrEngine/Environment.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/xr_ioconsole.h"
++
++using namespace campaign;
++
++namespace
++{
++const u32 fixture_ticks = 200;
++
++FILE* open_csv(LPCSTR path, LPCSTR mode)
++{
++	return path && path[0] ? fopen(path, mode) : nullptr;
++}
++
++void light_row(FILE* out, LPCSTR label, CActor* actor)
++{
++	if (!out || !actor || !g_pGamePersistent)
++		return;
++	CEnvironment& env = g_pGamePersistent->Environment();
++	const CEnvDescriptorMixer* e = env.CurrentEnv;
++	const CCameraBase* camera = actor->cam_Active();
++	const Fvector eye = camera ? camera->vPosition : actor->Position();
++	const Fvector pos = actor->Position();
++	// The point CROS_impl::update samples from: the visual's bounding-sphere
++	// centre in world space, raised by 0.3 of its radius (LightTrack.cpp:192-196).
++	Fvector sample = pos;
++	float radius = 0.f;
++	if (IRenderVisual* visual = actor->Visual())
++	{
++		const vis_data& vis = visual->getVisData();
++		actor->XFORM().transform_tiny(sample, vis.sphere.P);
++		radius = vis.sphere.R;
++		sample.y += .3f * radius;
++	}
++	fprintf(out,
++		"light,%s,%u,%.1f,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.1f,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f\n",
++		label, Device.dwFrame, env.GetGameTime(), env.GetWeather().c_str() ? env.GetWeather().c_str() : "-",
++		e ? e->sun_dir.x : 0.f, e ? e->sun_dir.y : 0.f, e ? e->sun_dir.z : 0.f, e ? e->sun_color.x : 0.f,
++		e ? e->sun_color.y : 0.f, e ? e->sun_color.z : 0.f, e ? e->ambient.x : 0.f, e ? e->ambient.y : 0.f,
++		e ? e->ambient.z : 0.f, e ? e->hemi_color.x : 0.f, e ? e->hemi_color.y : 0.f, e ? e->hemi_color.z : 0.f,
++		e ? e->far_plane : 0.f, u32(actor->ID()), VPUSH(pos), VPUSH(eye), actor_luminocity(actor),
++		actor_luminocity_hemi(actor), VPUSH(sample), radius);
++	fflush(out);
++	Msg("S03-T06 %s actor %u luminocity=%.4f hemi=%.4f game_time=%.0f weather=%s sun_dir=[%.3f,%.3f,%.3f] "
++		"ambient=[%.3f,%.3f,%.3f]",
++		label, u32(actor->ID()), actor_luminocity(actor), actor_luminocity_hemi(actor), env.GetGameTime(),
++		env.GetWeather().c_str() ? env.GetWeather().c_str() : "-", e ? e->sun_dir.x : 0.f, e ? e->sun_dir.y : 0.f,
++		e ? e->sun_dir.z : 0.f, e ? e->ambient.x : 0.f, e ? e->ambient.y : 0.f, e ? e->ambient.z : 0.f);
++}
++
++const char* light_header =
++	"kind,label,frame,game_time_s,weather,sun_dir_x,sun_dir_y,sun_dir_z,sun_r,sun_g,sun_b,ambient_r,ambient_g,"
++	"ambient_b,hemi_r,hemi_g,hemi_b,far_plane,actor,x,y,z,eye_x,eye_y,eye_z,luminocity,hemi,sample_x,sample_y,sample_z,"
++	"sphere_r\n";
++
++struct Fixture
++{
++	bool running = false;
++	bool ok = true;
++	FILE* out = nullptr;
++	u32 tick = 0;
++	u32 checks = 0;
++	u32 failures = 0;
++	ServerLightingStats before = {};
++	u16 actors[2] = {u16(-1), u16(-1)};
++	float min_lum[2] = {2.f, 2.f};
++	float max_lum[2] = {-1.f, -1.f};
++};
++
++Fixture g_fixture;
++
++bool check(bool condition, LPCSTR what)
++{
++	Fixture& f = g_fixture;
++	++f.checks;
++	if (!condition)
++	{
++		++f.failures;
++		f.ok = false;
++		Msg("! S03-T06 lighting check failed: %s", what);
++	}
++	if (f.out)
++	{
++		fprintf(f.out, "check,%d,%s\n", condition ? 1 : 0, what);
++		fflush(f.out);
++	}
++	return condition;
++}
++
++CActor* actor_by_id(u16 id)
++{
++	if (id == u16(-1) || !g_pGameLevel)
++		return nullptr;
++	CObject* object = Level().Objects.net_Find(id);
++	return object && !object->getDestroy() ? smart_cast<CActor*>(object) : nullptr;
++}
++
++// The nearest alive online stalker or monster to the actor: its visual
++// memory's reading of the actor.
++CCustomMonster* nearest_observer(CActor* actor)
++{
++	CCustomMonster* best = nullptr;
++	float best_d = flt_max;
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CCustomMonster* m = smart_cast<CCustomMonster*>(Level().Objects.o_get_by_iterator(i));
++		if (!m || m->getDestroy() || !m->g_Alive())
++			continue;
++		const float d = m->Position().distance_to(actor->Position());
++		if (d < best_d)
++		{
++			best_d = d;
++			best = m;
++		}
++	}
++	return best;
++}
++
++void ai_row(CActor* actor)
++{
++	Fixture& f = g_fixture;
++	CCustomMonster* observer = nearest_observer(actor);
++	if (!observer)
++	{
++		check(false, "an online stalker or monster observes the actor");
++		return;
++	}
++	const float lum = actor_luminocity(actor);
++	const float seen = observer->memory().visual().object_luminocity(actor);
++	// object_luminocity = exp(log(max(lum, .001)) * factor): recover the
++	// observer's factor and the value it would read in darkness.
++	const float clamped = lum > .001f ? lum : .001f;
++	const float factor = (clamped < .999f) ? log(seen) / log(clamped) : 0.f;
++	const float floor = exp(log(.001f) * factor);
++	const float ratio = floor > 0.f ? seen / floor : 0.f;
++	if (f.out)
++		fprintf(f.out, "ai,%s,%u,%u,%.4f,%.4f,%.4f,%.2f\n", *observer->cName(), u32(observer->ID()), u32(actor->ID()),
++			lum, seen, floor, ratio);
++	Msg("S03-T06 observer %s (%u) reads actor %u: luminocity %.4f -> visibility scale %.4f (darkness %.4f, x%.1f)",
++		*observer->cName(), u32(observer->ID()), u32(actor->ID()), lum, seen, floor, ratio);
++	string128 what;
++	xr_sprintf(what, "the nearest observer reads actor %u brighter than darkness", u32(actor->ID()));
++	check(seen > floor * 1.5f, what);
++}
++
++void stat_rows(LPCSTR tag)
++{
++	Fixture& f = g_fixture;
++	const ServerLightingStats& s = server_lighting_stats();
++	if (!f.out)
++		return;
++	fprintf(f.out, "stats,%s_frames,%I64u\nstats,%s_env_updates,%I64u\nstats,%s_env_failures,%I64u\n"
++		"stats,%s_actor_tracks,%I64u\nstats,%s_view_picks,%I64u\nstats,%s_view_tracks,%I64u\n"
++		"stats,%s_view_skipped,%I64u\nstats,%s_view_empty,%I64u\n"
++		"stats,%s_qpc_total,%I64u\nstats,%s_view_count_0,%u\nstats,%s_view_count_1,%u\n",
++		tag, s.frames, tag, s.env_updates, tag, s.env_failures, tag, s.actor_tracks, tag, s.view_picks, tag,
++		s.view_tracks, tag, s.view_skipped, tag, s.view_empty, tag, s.qpc_total, tag, s.last_view_count[0], tag,
++		s.last_view_count[1]);
++	fflush(f.out);
++}
++} // namespace
++
++// Server: one row per participant actor (the restored checkpoint).
++extern "C" bool __cdecl xrCampaignLevel_LightingSnapshot(LPCSTR out_path, LPCSTR label)
++{
++	FILE* out = open_csv(out_path, "w");
++	if (!out)
++		return false;
++	fputs(light_header, out);
++	xr_vector<CActor*> actors;
++	participant_actors(actors);
++	for (CActor* actor : actors)
++		light_row(out, label, actor);
++	fclose(out);
++	report_server_lighting(label);
++	return !actors.empty() && actor_luminocity(actors.front()) > .001f;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_LightingBegin(LPCSTR out_path)
++{
++	Fixture& f = g_fixture;
++	f = Fixture();
++	f.out = open_csv(out_path, "w");
++	if (f.out)
++		fputs(light_header, f.out);
++	f.running = true;
++	f.before = server_lighting_stats();
++	xr_vector<CActor*> actors;
++	participant_actors(actors);
++	check(actors.size() == 2, "two participant actors are live");
++	for (u32 i = 0; i < actors.size() && i < 2; ++i)
++		f.actors[i] = actors[i]->ID();
++	check(f.before.frames > 0 && f.before.actor_tracks > 0, "the light model has run since the level loaded");
++	for (CActor* actor : actors)
++		light_row(f.out, "begin", actor);
++	return f.ok;
++}
++
++extern "C" void __cdecl xrCampaignLevel_LightingTick()
++{
++	Fixture& f = g_fixture;
++	if (!f.running)
++		return;
++	++f.tick;
++	for (u32 i = 0; i < 2; ++i)
++		if (CActor* actor = actor_by_id(f.actors[i]))
++		{
++			const float lum = actor_luminocity(actor);
++			f.min_lum[i] = _min(f.min_lum[i], lum);
++			f.max_lum[i] = _max(f.max_lum[i], lum);
++		}
++	if (f.tick >= fixture_ticks)
++		f.running = false;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_LightingDone()
++{
++	return !g_fixture.running;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_LightingEnd(u32 ticks, u32 sim_ms, u32 wall_ms)
++{
++	Fixture& f = g_fixture;
++	const ServerLightingStats& s = server_lighting_stats();
++	const u64 frames = s.frames - f.before.frames;
++	check(frames >= ticks, "the light model ran every tick");
++	check(s.actor_tracks - f.before.actor_tracks >= 2 * frames, "both participant actors were tracked every tick");
++	check(s.view_picks - f.before.view_picks == s.actor_tracks - f.before.actor_tracks,
++		"one pick in each participant's view every tick it was tracked");
++	check(s.view_tracks > f.before.view_tracks, "objects in the participants' views were updated");
++	check(s.env_failures == f.before.env_failures, "the environment blend never failed");
++	const CEnvDescriptorMixer* e = g_pGamePersistent->Environment().CurrentEnv;
++	const float ambient = e ? _max(e->ambient.x, _max(e->ambient.y, e->ambient.z)) : 0.f;
++	check(e && e->sun_dir.y < 0.f, "the sun direction is valid (pointing down)");
++	for (u32 i = 0; i < 2; ++i)
++	{
++		CActor* actor = actor_by_id(f.actors[i]);
++		if (!actor)
++		{
++			check(false, "the participant actor is still live");
++			continue;
++		}
++		light_row(f.out, "end", actor);
++		const float lum = actor_luminocity(actor);
++		string128 what;
++		xr_sprintf(what, "actor %u is lit: luminocity above the darkness floor and at most 1 over the run",
++			u32(actor->ID()));
++		check(f.min_lum[i] > .001f && f.max_lum[i] <= 1.f, what);
++		xr_sprintf(what, "actor %u's luminocity is at least the environment's ambient", u32(actor->ID()));
++		check(lum + 1e-3f >= _min(ambient, 1.f), what);
++		ai_row(actor);
++	}
++	stat_rows("run");
++	const double us = frames ? double(s.qpc_total - f.before.qpc_total) * 1e6 / double(CPU::qpc_freq) / double(frames) : 0.0;
++	if (f.out)
++		fprintf(f.out, "stats,per_tick_us,%.2f\nend,%u,%u,%u,%u,%u,%d\n", us, ticks, sim_ms, wall_ms, f.checks,
++			f.failures, f.ok ? 1 : 0);
++	Msg("S03-T06 lighting ticks=%u per_tick_us=%.2f checks=%u failures=%u", ticks, us, f.checks, f.failures);
++	report_server_lighting("lighting-fixture");
++	if (f.out)
++	{
++		fclose(f.out);
++		f.out = nullptr;
++	}
++	return f.ok;
++}
++
++// Normal client, -s03-lighting-capture: ten seconds after the actor is in the
++// loaded level (the smoothed terms have settled), the same row for the view
++// actor, then quit.
++void ClientLightingCaptureOnFrame()
++{
++	static const bool run = strstr(Core.Params, "-s03-lighting-capture") != nullptr;
++	static u32 since = 0;
++	static bool done = false;
++	if (!run || done || !g_pGameLevel || !g_pGameLevel->bReady || !g_actor || Device.dwPrecacheFrame)
++		return;
++	if (!since)
++	{
++		since = Device.dwTimeGlobal;
++		return;
++	}
++	if (Device.dwTimeGlobal - since < 10000) // steady state, as the server's 500 ticks
++		return;
++	string_path path;
++	FS.update_path(path, "$logs$", "s03-t06-lighting-snapshot.csv");
++	FILE* out = open_csv(path, "w");
++	if (out)
++	{
++		fputs(light_header, out);
++		light_row(out, "client-restored", g_actor);
++		fclose(out);
++	}
++	done = true;
++	Msg("S03-T06 client lighting capture written to %s", path);
++	FlushLog();
++	Console->Execute("quit");
++}
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index f26e29f..7157529 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -487,6 +487,7 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::PostProcess: return "post-process";
+ 	case Presentation::PostProcessRemove: return "post-process-remove";
+ 	case Presentation::GameOver: return "game-over";
++	case Presentation::Tutorial: return "tutorial";
+ 	default: return "?";
+ 	}
+ }
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 5d136e8..d5e9118 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -206,6 +206,7 @@ enum class Presentation : u8
+ 	PostProcess,
+ 	PostProcessRemove,
+ 	GameOver,
++	Tutorial, // S03-T06: game.start_tutorial
+ 	Count,
+ };
+ 
+diff --git a/src/xrGame/CampaignServerLighting.cpp b/src/xrGame/CampaignServerLighting.cpp
+new file mode 100644
+index 0000000..b6b01ff
+--- /dev/null
++++ b/src/xrGame/CampaignServerLighting.cpp
+@@ -0,0 +1,139 @@
++#include "pch_script.h"
++#include "CampaignServerLighting.h"
++
++// S03-T06: see CampaignServerLighting.h.
++
++#include "CampaignActorAccess.h"
++#include "Actor.h"
++#include "Level.h"
++#include "../xrEngine/CameraBase.h"
++#include "../xrEngine/IGame_Persistent.h"
++#include "../xrEngine/Environment.h"
++#include "../xrEngine/device.h"
++#include "../xrEngine/Render.h"
++#include "../xrCDB/ISpatial.h"
++#include "../xrCDB/Frustum.h"
++
++namespace campaign
++{
++namespace
++{
++ServerLightingStats s_stats = {};
++u32 s_view_turn[2] = {0, 0}; // the client's uLastLTRACK, per participant slot
++xr_vector<ISpatial*> s_view_list;
++
++// The view's aspect: the camera's own times the window's height/width
++// (CCameraManager::Update). The server has no window; 16:9 is assumed.
++const float server_window_aspect = 9.f / 16.f;
++
++Fvector s_sort_from;
++bool by_distance(ISpatial* a, ISpatial* b)
++{
++	return a->spatial.sphere.P.distance_to_sqr(s_sort_from) < b->spatial.sphere.P.distance_to_sqr(s_sort_from);
++}
++
++// One renderable in the actor's view frustum, front to back, in turn: what the
++// client's render pass picks for its light tracking (r4_R_render.cpp:30-63).
++IRenderable* view_object(u8 slot, const CCameraBase* camera, float far_plane, bool& empty)
++{
++	empty = false;
++	Fmatrix view, project, full;
++	view.build_camera_dir(camera->vPosition, camera->vDirection, camera->vNormal);
++	const float aspect = (camera->f_aspect > 0.f ? camera->f_aspect : 1.f) * server_window_aspect;
++	project.build_projection(deg2rad(camera->f_fov), aspect, VIEWPORT_NEAR, far_plane);
++	full.mul(project, view);
++	CFrustum frustum;
++	frustum.CreateFromMatrix(full, FRUSTUM_P_LRTB + FRUSTUM_P_FAR);
++	s_view_list.clear();
++	g_SpatialSpace->q_frustum(s_view_list, ISpatial_DB::O_ORDERED, STYPE_RENDERABLE + STYPE_LIGHTSOURCE, frustum);
++	if (slot < 2)
++		s_stats.last_view_count[slot] = u32(s_view_list.size());
++	if (s_view_list.empty())
++	{
++		empty = true;
++		return nullptr;
++	}
++	s_sort_from = camera->vPosition;
++	std::sort(s_view_list.begin(), s_view_list.end(), by_distance);
++	const u32 turn = slot < 2 ? ++s_view_turn[slot] : 0;
++	return s_view_list[turn % s_view_list.size()]->dcast_Renderable();
++}
++} // namespace
++
++void server_lighting_frame()
++{
++	if (process_role() != Role::Server || !g_pGameLevel || !g_pGamePersistent)
++		return;
++	xr_vector<CActor*> actors;
++	if (!participant_actors(actors))
++		return;
++	const u64 qpc = CPU::QPC();
++	const Fvector camera_before = Device.vCameraPosition;
++	CEnvironment& environment = g_pGamePersistent->Environment();
++	for (CActor* actor : actors)
++	{
++		if (!actor || actor->getDestroy())
++			continue;
++		ParticipantRef ref;
++		const u8 slot = participant_of(actor, ref) == Refusal::None ? ref.slot : u8(-1);
++		const CCameraBase* camera = actor->cam_Active();
++		if (!camera)
++			continue;
++		// 1-3: the environment and the sun as this participant's client sees them.
++		Device.vCameraPosition = camera->vPosition;
++		if (environment.UpdateCPU())
++			++s_stats.env_updates;
++		else
++			++s_stats.env_failures;
++		Render->cpu_lighting_sun();
++		// 4: the participant's own actor, every tick.
++		if (Render->cpu_lighting_track(actor))
++			++s_stats.actor_tracks;
++		// 5: one object in its view, in turn.
++		const float far_plane = environment.CurrentEnv ? environment.CurrentEnv->far_plane : 300.f;
++		++s_stats.view_picks;
++		bool empty = false;
++		IRenderable* object = view_object(slot, camera, far_plane, empty);
++		if (empty)
++			++s_stats.view_empty;
++		else if (object && Render->cpu_lighting_track(object))
++		{
++			++s_stats.view_tracks;
++			CObject* as_object = dynamic_cast<CObject*>(object);
++			if (slot < 2)
++				s_stats.last_view_object[slot] = as_object ? as_object->ID() : u16(-1);
++		}
++		else
++			++s_stats.view_skipped;
++	}
++	Device.vCameraPosition = camera_before;
++	++s_stats.frames;
++	s_stats.qpc_total += CPU::QPC() - qpc;
++}
++
++const ServerLightingStats& server_lighting_stats()
++{
++	return s_stats;
++}
++
++float actor_luminocity(const CActor* actor)
++{
++	IRender_ObjectSpecific* ros = actor ? const_cast<CActor*>(actor)->renderable_ROS() : nullptr;
++	return ros ? ros->get_luminocity() : -1.f;
++}
++
++float actor_luminocity_hemi(const CActor* actor)
++{
++	IRender_ObjectSpecific* ros = actor ? const_cast<CActor*>(actor)->renderable_ROS() : nullptr;
++	return ros ? ros->get_luminocity_hemi() : -1.f;
++}
++
++void report_server_lighting(LPCSTR tag)
++{
++	const double ms = s_stats.frames ? double(s_stats.qpc_total) * 1000.0 / double(CPU::qpc_freq) : 0.0;
++	Msg("S03-T06 server-lighting %s frames=%I64u env_updates=%I64u env_failures=%I64u actor_tracks=%I64u "
++		"view_picks=%I64u view_tracks=%I64u view_skipped=%I64u view_empty=%I64u total_ms=%.3f per_frame_us=%.2f",
++		tag, s_stats.frames, s_stats.env_updates, s_stats.env_failures, s_stats.actor_tracks, s_stats.view_picks,
++		s_stats.view_tracks, s_stats.view_skipped, s_stats.view_empty, ms, s_stats.frames ? ms * 1000.0 / double(s_stats.frames) : 0.0);
++}
++} // namespace campaign
+diff --git a/src/xrGame/CampaignServerLighting.h b/src/xrGame/CampaignServerLighting.h
+new file mode 100644
+index 0000000..2fe2506
+--- /dev/null
++++ b/src/xrGame/CampaignServerLighting.h
+@@ -0,0 +1,57 @@
++#pragma once
++
++// S03-T06: the campaign server's light model for AI vision.
++//
++// AI vision scales a target's visibility by the target's luminosity
++// (CVisualMemoryManager::object_luminocity, visual_memory_manager.cpp), read
++// from the object's render-specific data (CROS_impl, LightTrack.cpp). On a
++// client the renderer fills it every frame for two objects: the view entity
++// and one renderable in the camera frustum, in turn (r4_R_render.cpp), from a
++// ray toward the sun, rays toward the sky, the level's static lights in range
++// (each with an occlusion ray), and the environment's ambient, sky and sun
++// colours at the camera. The server never renders, so every luminosity
++// stayed 0 and AI saw everyone as in darkness.
++//
++// Every server tick, for each participant actor, this does what a client does
++// for its own view (user decision 2026-10-19: no other NPC is refreshed):
++//  1. the camera position is the actor's eye (its active camera);
++//  2. the environment blends weather and time of day with the level's
++//     modifiers at that eye (CEnvironment::UpdateCPU);
++//  3. the sun is aimed from that environment (CLight_DB::Update);
++//  4. the actor's light tracking runs (CROS_impl::update, the client's code);
++//  5. one object in the actor's view frustum, front to back and in turn,
++//     gets the same update.
++// The level's sun and static hemi lights are loaded as CPU objects with the
++// level (IGame_Level::Load, CRender::cpu_lighting_load). Dynamic lights
++// (flashlights, campfires, lamps) do not count, as on the DX11 client.
++
++class CActor;
++
++namespace campaign
++{
++struct ServerLightingStats
++{
++	u64 frames; // server_lighting_frame calls with work done
++	u64 env_updates; // per-participant environment blends
++	u64 env_failures; // ...refused (no level or weather)
++	u64 actor_tracks; // participant actors updated
++	u64 view_picks; // one pick per participant per frame
++	u64 view_tracks; // ...that updated an object
++	u64 view_skipped; // ...that fell on a light or an object with no light tracking (the client skips these too)
++	u64 view_empty; // ...in an empty frustum
++	u64 qpc_total; // time spent, QPC ticks
++	u32 last_view_count[2]; // frustum list size per slot, last frame
++	u16 last_view_object[2]; // the object updated in that view, last frame
++};
++
++// The campaign server, every level frame (Level.cpp).
++void server_lighting_frame();
++const ServerLightingStats& server_lighting_stats();
++// The actor's luminosity and sky term as AI vision reads them.
++float actor_luminocity(const CActor* actor);
++float actor_luminocity_hemi(const CActor* actor);
++void report_server_lighting(LPCSTR tag);
++} // namespace campaign
++
++// Normal client, -s03-lighting-capture (CampaignLightingFixture.cpp).
++void ClientLightingCaptureOnFrame();
+diff --git a/src/xrGame/GamePersistent.cpp b/src/xrGame/GamePersistent.cpp
+index 5e0278b..0b25a95 100644
+--- a/src/xrGame/GamePersistent.cpp
++++ b/src/xrGame/GamePersistent.cpp
+@@ -10,6 +10,7 @@
+ #include "CampaignCombatCapture.h"
+ #include "CampaignCheckpoint.h"
+ #include "CampaignQuestCapture.h"
++#include "CampaignServerLighting.h"
+ #include "../xrEngine/gamemtllib.h"
+ #include "../Include/xrRender/Kinematics.h"
+ #include "profiler.h"
+@@ -954,6 +955,8 @@ void CGamePersistent::OnFrame()
+ 	ClientCheckpointCaptureOnFrame();
+ 	// S02-T06e: opt-in quest capture (restore a given task, complete it, or record the persisted state), then quit.
+ 	ClientQuestCaptureOnFrame();
++	// S03-T06: opt-in lighting capture (the view actor's luminosity from a server checkpoint), then quit.
++	ClientLightingCaptureOnFrame();
+ }
+ 
+ void CGamePersistent::ImGui_OnRender(LPCSTR name)
+diff --git a/src/xrGame/Level.cpp b/src/xrGame/Level.cpp
+index 291fff1..ff0a0ae 100644
+--- a/src/xrGame/Level.cpp
++++ b/src/xrGame/Level.cpp
+@@ -1,6 +1,7 @@
+ #include "pch_script.h"
+ #include "CampaignActorAccess.h"
+ #include "CampaignScriptContext.h"
++#include "CampaignServerLighting.h"
+ #include "xrEngine/FDemoRecord.h"
+ #include "xrEngine/FDemoPlay.h"
+ #include "xrEngine/Environment.h"
+@@ -1046,6 +1047,8 @@ void CLevel::OnFrame()
+ 		CampaignActivityRefreshAnchors();
+ 		// S03-T05: the installed scripts' compatibility layer and its audit flag.
+ 		campaign::script_context_frame();
++		// S03-T06: each participant's lighting, as its client would compute it.
++		campaign::server_lighting_frame();
+ 	}
+ #ifdef SPAWN_ANTIFREEZE
+ 	{
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 429296f..72d0c18 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -1407,6 +1407,15 @@ CUISequencer* g_tutorial2 = NULL;
+ 
+ void start_tutorial(LPCSTR name)
+ {
++	// S03-T06: a tutorial (a UI sequence that grabs input, e.g. the installed
++	// campfire hint) is presentation: on the campaign server it is the script
++	// context participant's, dropped and counted without one. Starting the UI
++	// sequencer there faulted inside the actor binder (smoke-140).
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		campaign::present_to_context(campaign::Presentation::Tutorial, 0, name);
++		return;
++	}
+ 	if (g_tutorial)
+ 	{
+ 		VERIFY(!g_tutorial2);
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index c5b3b44..3de1ef7 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2011,6 +2011,7 @@
+     <ClInclude Include="CampaignActorAccess.h" />
+     <ClInclude Include="CampaignActorControl.h" />
+     <ClInclude Include="CampaignScriptContext.h" />
++    <ClInclude Include="CampaignServerLighting.h" />
+     <ClInclude Include="CampaignMessagePolicy.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+@@ -4415,6 +4416,14 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignServerLighting.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
++    <ClCompile Include="CampaignLightingFixture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

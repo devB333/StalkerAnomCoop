@@ -40,9 +40,10 @@ evidence in [S03-T03](../../validation/S03-T03.md).
   passes all 62 stages; smoke-118 passes the Identity scope. The capture is
   `server-two-actors.csv` (state rows per phase, the participant map,
   every check).
-- Client build client-26: 0 errors; the client was not run against a
-  level this session (a client gameplay check of this build is due before
-  the next capture).
+- Client build client-26: 0 errors; checked against the server's smoke-117
+  checkpoints (capture-14 completes the quest from the first, capture-15
+  loads the completed state from the second; `compare-quest-capture.py`
+  matches all rules).
 
 ## Next steps
 
@@ -71,9 +72,9 @@ evidence in [S03-T03](../../validation/S03-T03.md).
 
 ## Tools and runs
 
-- Last run names: `campaign-100`, `client-26`, `smoke-118`, `capture-13`
+- Last run names: `campaign-100`, `client-26`, `smoke-118`, `capture-15`
   (`patch-check-24a/b`). Next: `campaign-101`, `client-27`, `smoke-119`,
-  `capture-14`; next patch export is
+  `capture-16`; next patch export is
   `python3 tools/export-engine-patch.py <name> 25`.
 - Run PowerShell scripts with the Windows path in single quotes from bash
   (`-File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Stage2.ps1'`).

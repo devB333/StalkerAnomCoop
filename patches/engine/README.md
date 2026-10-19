@@ -220,6 +220,18 @@ Do not export proprietary assets or generated outputs. Revert by reconstructing
 the pinned source with only the preceding patches in a new directory, preserving
 the old tree until its changes are accounted for.
 
+`0024-participant-activation-wip.patch` (S03-T04, work in progress, not yet
+built) adds the ALife activation set: on the campaign server the five switch
+rules (`CSE_ALifeDynamicObject::try_switch_online/offline`, the online-offline
+groups, the monster groups) measure from the nearest alive participant actor
+(`CALifeSwitchManager::activation_distance`, refreshed once per ALife
+update) instead of the one ALife actor; a client still reads the ALife actor.
+The monster enemy memory and the stalker look-at run over every participant,
+and the player-bound abilities that dereferenced `Actor()` on reachable paths
+(anti-aim, controller psy hit, burer stamina hit, poltergeist telekinesis,
+monster aura strength) are explicit no-ops while it refuses. To be re-exported
+under its final name once built and validated.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

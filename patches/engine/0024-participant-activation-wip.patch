@@ -1,0 +1,451 @@
+diff --git a/src/xrGame/CampaignActorAccess.cpp b/src/xrGame/CampaignActorAccess.cpp
+index 88fc7c3..97b0104 100644
+--- a/src/xrGame/CampaignActorAccess.cpp
++++ b/src/xrGame/CampaignActorAccess.cpp
+@@ -6,6 +6,7 @@
+ #include "Actor.h"
+ #include "Level.h"
+ #include "xrServer.h"
++#include "xrServer_Objects_ALife_Monsters.h"
+ #include "../xrEngine/xr_object.h"
+ #include <intrin.h>
+ #include <dbghelp.h>
+@@ -215,6 +216,26 @@ u32 participant_actors(xr_vector<CActor*>& out)
+ 	return u32(out.size());
+ }
+ 
++u32 participant_actor_entities(xr_vector<CSE_ALifeCreatureActor*>& out)
++{
++	out.clear();
++	if (!server_role() || !g_pGameLevel || !Level().Server)
++		return 0;
++	const CampaignIdentityRegistry& registry = *g_campaign_identity;
++	for (u8 slot = 0; slot < registry.active_slots(); ++slot)
++	{
++		ParticipantRef ref;
++		EngineEntityKey key;
++		if (registry.current_participant(slot, ref) != Refusal::None ||
++			registry.participant_actor_key(ref, key) != Refusal::None)
++			continue;
++		CSE_ALifeCreatureActor* entity = smart_cast<CSE_ALifeCreatureActor*>(Level().Server->ID_to_entity(key.id));
++		if (entity)
++			out.push_back(entity);
++	}
++	return u32(out.size());
++}
++
+ CActor* nearest_participant_actor(const Fvector& from, ParticipantRef* who, float* distance)
+ {
+ 	xr_vector<CActor*> actors;
+diff --git a/src/xrGame/CampaignActorAccess.h b/src/xrGame/CampaignActorAccess.h
+index 27a8214..1d1844a 100644
+--- a/src/xrGame/CampaignActorAccess.h
++++ b/src/xrGame/CampaignActorAccess.h
+@@ -35,6 +35,7 @@
+ class CActor;
+ class CObject;
+ class CGameObject;
++class CSE_ALifeCreatureActor;
+ 
+ namespace campaign
+ {
+@@ -48,6 +49,9 @@ CActor* participant_actor(const ParticipantRef& ref, Refusal* why = nullptr);
+ Refusal participant_of(const CObject* object, ParticipantRef& out);
+ bool is_participant_actor(const CObject* object);
+ u32 participant_actors(xr_vector<CActor*>& out);
++// S03-T04: the participant actors' server entities (the state the ALife
++// switch rules measure from), in slot order; empty on a client.
++u32 participant_actor_entities(xr_vector<CSE_ALifeCreatureActor*>& out);
+ CActor* nearest_participant_actor(const Fvector& from, ParticipantRef* who = nullptr, float* distance = nullptr);
+ CActor* context_actor(const ActionContext& context, Scope scope, Refusal* why = nullptr);
+ // The participant actor among two dialogue speakers (either order), else null.
+diff --git a/src/xrGame/ai/monsters/anti_aim_ability.cpp b/src/xrGame/ai/monsters/anti_aim_ability.cpp
+index 2e7b6e2..788c8f1 100644
+--- a/src/xrGame/ai/monsters/anti_aim_ability.cpp
++++ b/src/xrGame/ai/monsters/anti_aim_ability.cpp
+@@ -262,14 +262,17 @@ extern CActor* g_actor;
+ 
+ bool anti_aim_ability::check_update_condition() const
+ {
+-	if (!m_object->g_Alive() || !g_actor || !Actor()->g_Alive())
++	// S03-T04: the ability aims at the one player; it is explicitly off while
++	// Actor() refuses (two participants on the server), recorded for S10-T02.
++	CActor* actor = Actor();
++	if (!m_object->g_Alive() || !actor || !actor->g_Alive())
+ 		return false;
+ 
+ 	CEntityAlive const* enemy = m_object->EnemyMan.get_enemy();
+-	if (enemy != Actor())
++	if (enemy != actor)
+ 		return false;
+ 
+-	if (!smart_cast<CWeapon*>(Actor()->inventory().ActiveItem()))
++	if (!smart_cast<CWeapon*>(actor->inventory().ActiveItem()))
+ 		return false;
+ 
+ 	return true;
+diff --git a/src/xrGame/ai/monsters/bloodsucker/bloodsucker_predator_inline.h b/src/xrGame/ai/monsters/bloodsucker/bloodsucker_predator_inline.h
+index f3d1801..dea9a9b 100644
+--- a/src/xrGame/ai/monsters/bloodsucker/bloodsucker_predator_inline.h
++++ b/src/xrGame/ai/monsters/bloodsucker/bloodsucker_predator_inline.h
+@@ -10,6 +10,7 @@
+ #include "../../../actor.h"
+ #include "../../../actor_memory.h"
+ #include "../../../visual_memory_manager.h"
++#include "../../../CampaignActorAccess.h"
+ 
+ 
+ #define TEMPLATE_SPECIALIZATION template <\
+@@ -93,7 +94,12 @@ void CStateBloodsuckerPredatorAbstract::critical_finalize()
+ TEMPLATE_SPECIALIZATION
+ bool CStateBloodsuckerPredatorAbstract::check_start_conditions()
+ {
+-	if (Actor()->memory().visual().visible_now(object)) return false;
++	// S03-T04: no predator state while any participant actor watches the
++	// bloodsucker (was the one global player, a null dereference with two).
++	xr_vector<CActor*> participants;
++	campaign::participant_actors(participants);
++	for (u32 i = 0; i < participants.size(); ++i)
++		if (participants[i]->memory().visual().visible_now(object)) return false;
+ 	return true;
+ }
+ 
+diff --git a/src/xrGame/ai/monsters/burer/burer.cpp b/src/xrGame/ai/monsters/burer/burer.cpp
+index 1fcf900..a280538 100644
+--- a/src/xrGame/ai/monsters/burer/burer.cpp
++++ b/src/xrGame/ai/monsters/burer/burer.cpp
+@@ -244,7 +244,7 @@ void CBurer::CheckSpecParams(u32 spec_params)
+ 
+ void xr_stdcall CBurer::StaminaHit()
+ {
+-	if (GodMode())
++	if (GodMode() || !Actor()) // S03-T04: the stamina hit lands on the one player; none while Actor() refuses
+ 	{
+ 		return;
+ 	}
+@@ -536,7 +536,7 @@ extern CActor* g_actor;
+ 
+ bool actor_is_reloading_weapon()
+ {
+-	if (!g_actor)
++	if (!g_actor || !Actor()) // S03-T04: "is the player reloading" has no answer with two participants
+ 	{
+ 		return false;
+ 	}
+diff --git a/src/xrGame/ai/monsters/controller/controller_psy_hit.cpp b/src/xrGame/ai/monsters/controller/controller_psy_hit.cpp
+index 9b0a62f..20b4223 100644
+--- a/src/xrGame/ai/monsters/controller/controller_psy_hit.cpp
++++ b/src/xrGame/ai/monsters/controller/controller_psy_hit.cpp
+@@ -56,6 +56,11 @@ bool CControllerPsyHit::check_start_conditions()
+ 	if (m_man->is_captured_pure())
+ 		return false;
+ 
++	// S03-T04: the psy hit targets the one player; off while Actor() refuses
++	// (two participants on the server), recorded for S10-T02.
++	if (!Actor())
++		return false;
++
+ 	if (Actor()->Cameras().GetCamEffector(eCEControllerPsyHit))
+ 		return false;
+ 
+@@ -203,7 +208,7 @@ bool CControllerPsyHit::check_conditions_final()
+ 	if (!m_object->g_Alive())
+ 		return false;
+ 
+-	if (!g_actor)
++	if (!g_actor || !Actor()) // S03-T04: see check_start_conditions
+ 		return false;
+ 
+ 	// 	if (m_object->EnemyMan.get_enemy() != Actor())	
+diff --git a/src/xrGame/ai/monsters/monster_aura.cpp b/src/xrGame/ai/monsters/monster_aura.cpp
+index 503c9bf..503a7ac 100644
+--- a/src/xrGame/ai/monsters/monster_aura.cpp
++++ b/src/xrGame/ai/monsters/monster_aura.cpp
+@@ -53,6 +53,10 @@ float monster_aura::override_if_debug(pcstr var_name, float const value) const
+ 
+ float monster_aura::calculate() const
+ {
++	// S03-T04: the aura strength at the one player; zero while Actor()
++	// refuses (two participants on the server), recorded for S10-T02.
++	if (!Actor())
++		return 0.f;
+ 	float const distance = m_object->Position().distance_to(Actor()->Position());
+ 
+ 	float const epsilon = 0.0001f;
+diff --git a/src/xrGame/ai/monsters/monster_enemy_memory.cpp b/src/xrGame/ai/monsters/monster_enemy_memory.cpp
+index db06339..fc916c5 100644
+--- a/src/xrGame/ai/monsters/monster_enemy_memory.cpp
++++ b/src/xrGame/ai/monsters/monster_enemy_memory.cpp
+@@ -11,6 +11,7 @@
+ #include "ai_monster_squad_manager.h"
+ #include "../../Actor.h"
+ #include "../../actor_memory.h"
++#include "../../CampaignActorAccess.h"
+ 
+ CMonsterEnemyMemory::CMonsterEnemyMemory()
+ {
+@@ -28,12 +29,18 @@ void CMonsterEnemyMemory::init_external(CBaseMonster* M, TTime mem_time)
+ 	time_memory = mem_time;
+ }
+ 
+-extern CActor* g_actor;
+-
+ void CMonsterEnemyMemory::update()
+ {
+ 	VERIFY(monster->g_Alive());
+ 
++	// S03-T04: the two "the player" rules below (a remembered dangerous sound
++	// while the player watches the monster; the player within feel distance
++	// while watching the monster) ran against g_actor, the one global player.
++	// They run against every participant actor: on a client that is the one
++	// local actor as before, on the server both players.
++	xr_vector<CActor*> participants;
++	campaign::participant_actors(participants);
++
+ 	CMonsterHitMemory& monster_hit_memory = monster->HitMemory;
+ 
+ 	typedef CObjectManager<const CEntityAlive>::OBJECTS objects_list;
+@@ -61,8 +68,10 @@ void CMonsterEnemyMemory::update()
+ 		}
+ 	}
+ 
+-	if (monster->SoundMemory.IsRememberSound() && g_actor
+-		&& g_actor->memory().visual().visible_now(monster))
++	bool watched = false;
++	for (u32 i = 0; i < participants.size() && !watched; ++i)
++		watched = participants[i]->memory().visual().visible_now(monster);
++	if (monster->SoundMemory.IsRememberSound() && watched)
+ 	{
+ 		SoundElem sound;
+ 		bool dangerous;
+@@ -105,17 +114,18 @@ void CMonsterEnemyMemory::update()
+ 	}
+ 
+ 	float const feel_enemy_max_distance = monster->get_feel_enemy_max_distance();
+-	if (g_actor)
++	for (u32 i = 0; i < participants.size(); ++i)
+ 	{
+-		float const xz_dist = monster->Position().distance_to_xz(g_actor->Position());
+-		float const y_dist = _abs(monster->Position().y - g_actor->Position().y);
++		CActor* actor = participants[i];
++		float const xz_dist = monster->Position().distance_to_xz(actor->Position());
++		float const y_dist = _abs(monster->Position().y - actor->Position().y);
+ 
+ 		if (xz_dist < feel_enemy_max_distance &&
+ 			y_dist < 10 &&
+-			monster->memory().enemy().is_useful(g_actor) &&
+-			g_actor->memory().visual().visible_now(monster))
++			monster->memory().enemy().is_useful(actor) &&
++			actor->memory().visual().visible_now(monster))
+ 		{
+-			add_enemy(g_actor);
++			add_enemy(actor);
+ 		}
+ 	}
+ 
+diff --git a/src/xrGame/ai/monsters/poltergeist/poltergeist_telekinesis.cpp b/src/xrGame/ai/monsters/poltergeist/poltergeist_telekinesis.cpp
+index 9851853..9a47373 100644
+--- a/src/xrGame/ai/monsters/poltergeist/poltergeist_telekinesis.cpp
++++ b/src/xrGame/ai/monsters/poltergeist/poltergeist_telekinesis.cpp
+@@ -53,6 +53,11 @@ void CPolterTele::update_schedule()
+ 	if (!m_object->g_Alive() || m_object->get_actor_ignore())
+ 		return;
+ 
++	// S03-T04: the telekinesis targets the one player; off while Actor()
++	// refuses (two participants on the server), recorded for S10-T02.
++	if (!Actor())
++		return;
++
+ 	Fvector const actor_pos = Actor()->Position();
+ 	float const dist2actor = actor_pos.distance_to(m_object->Position());
+ 
+diff --git a/src/xrGame/ai/stalker/ai_stalker.cpp b/src/xrGame/ai/stalker/ai_stalker.cpp
+index 3d9e614..d47acf4 100644
+--- a/src/xrGame/ai/stalker/ai_stalker.cpp
++++ b/src/xrGame/ai/stalker/ai_stalker.cpp
+@@ -1691,7 +1691,7 @@ void CAI_Stalker::LookAtActor(CBoneInstance* headBone) {
+ 		return LookAtActorSoftReset(headBone);
+ 
+ 	// soft reset if can't see actor
+-	if (!memory().visual().visible_right_now(Actor()))
++	if (!memory().visual().visible_right_now(actor)) // S03-T04: the nearest participant chosen above
+ 		return LookAtActorSoftReset(headBone);
+ 
+ 	// soft reset if lua callback returned false
+diff --git a/src/xrGame/alife_dynamic_object.cpp b/src/xrGame/alife_dynamic_object.cpp
+index 68cdb2f..1155f54 100644
+--- a/src/xrGame/alife_dynamic_object.cpp
++++ b/src/xrGame/alife_dynamic_object.cpp
+@@ -157,7 +157,7 @@ void CSE_ALifeDynamicObject::try_switch_online()
+ 		return;
+ 	}
+ 
+-	if (alife().graph().actor()->o_Position.distance_to(o_Position) > alife().online_distance())
++	if (alife().activation_distance(o_Position) > alife().online_distance()) // S03-T04
+ 	{
+ 		on_failed_switch_online();
+ 		return;
+@@ -177,7 +177,7 @@ void CSE_ALifeDynamicObject::try_switch_offline()
+ 		return;
+ 	}
+ 
+-	if (alife().graph().actor()->o_Position.distance_to(o_Position) <= alife().offline_distance())
++	if (alife().activation_distance(o_Position) <= alife().offline_distance()) // S03-T04
+ 		return;
+ 
+ 	alife().switch_offline(this);
+diff --git a/src/xrGame/alife_group_abstract.cpp b/src/xrGame/alife_group_abstract.cpp
+index 16ea80f..a9ed3aa 100644
+--- a/src/xrGame/alife_group_abstract.cpp
++++ b/src/xrGame/alife_group_abstract.cpp
+@@ -161,9 +161,7 @@ void CSE_ALifeGroupAbstract::try_switch_offline()
+ 				// to switch offline
+ 				break;
+ 
+-			if (I->alife().graph().actor()->o_Position.distance_to(tpGroupMember->o_Position) <= I
+-			                                                                                     ->alife().
+-			                                                                                     offline_distance())
++			if (I->alife().activation_distance(tpGroupMember->o_Position) <= I->alife().offline_distance()) // S03-T04
+ 				// so, it is not ready, breaking a cycle, because we can't 
+ 				// switch group offline since not all the group members are ready
+ 				// to switch offline
+diff --git a/src/xrGame/alife_online_offline_group.cpp b/src/xrGame/alife_online_offline_group.cpp
+index 78bb840..513e70a 100644
+--- a/src/xrGame/alife_online_offline_group.cpp
++++ b/src/xrGame/alife_online_offline_group.cpp
+@@ -223,7 +223,7 @@ void CSE_ALifeOnlineOfflineGroup::try_switch_online()
+ 		VERIFY3((*I).second->can_switch_offline(),
+ 		        "Incorrect situation : some of the OnlineOffline group members cannot be switched online due to their personal properties",
+ 		        (*I).second->name_replace());
+-		if (alife().graph().actor()->o_Position.distance_to((*I).second->o_Position) > alife().online_distance())
++		if (alife().activation_distance((*I).second->o_Position) > alife().online_distance()) // S03-T04
+ 		{
+ 			continue;
+ 		}
+@@ -260,7 +260,7 @@ void CSE_ALifeOnlineOfflineGroup::try_switch_offline()
+ 		        "Incorrect situation : some of the OnlineOffline group members cannot be switched online due to their personal properties",
+ 		        (*I).second->name_replace());
+ 
+-		if (alife().graph().actor()->o_Position.distance_to((*I).second->o_Position) <= alife().offline_distance())
++		if (alife().activation_distance((*I).second->o_Position) <= alife().offline_distance()) // S03-T04
+ 			return;
+ 	}
+ 
+diff --git a/src/xrGame/alife_switch_manager.cpp b/src/xrGame/alife_switch_manager.cpp
+index 9a08250..27156f3 100644
+--- a/src/xrGame/alife_switch_manager.cpp
++++ b/src/xrGame/alife_switch_manager.cpp
+@@ -16,6 +16,8 @@
+ #include "xrserver.h"
+ #include "ai_space.h"
+ #include "level_graph.h"
++#include "CampaignActorAccess.h"
++#include "xrServer_Objects_ALife_Monsters.h"
+ 
+ #ifdef DEBUG
+ #	include "level.h"
+@@ -44,6 +46,48 @@ CALifeSwitchManager::~CALifeSwitchManager()
+ {
+ }
+ 
++// S03-T04: the switch rules (CSE_ALifeDynamicObject::try_switch_online /
++// try_switch_offline, the online-offline groups, the monster groups) compared
++// an object's distance to the one ALife actor (CALifeGraphRegistry::actor())
++// with the online/offline distances. On the campaign server the comparison is
++// against the nearest alive participant actor instead, so an object near
++// either player stays online and an object far from both goes offline. The
++// positions are the participant actors' server entities, the same state the
++// engine measured for the ALife actor (updated from each actor's net_Export).
++// With no alive participant actor the ALife actor's position is used, the
++// engine's own rule, so the world never loses its anchor. A client never
++// changes: it still reads the ALife actor live.
++void CALifeSwitchManager::refresh_activation_anchors()
++{
++	m_activation_anchors.clear();
++	m_activation_from_participants = false;
++	if (campaign::process_role() != campaign::Role::Server)
++		return;
++	xr_vector<CSE_ALifeCreatureActor*> actors;
++	campaign::participant_actor_entities(actors);
++	for (u32 i = 0; i < actors.size(); ++i)
++	{
++		if (!actors[i]->g_Alive())
++			continue;
++		m_activation_anchors.push_back(actors[i]->o_Position);
++	}
++	m_activation_from_participants = !m_activation_anchors.empty();
++}
++
++float CALifeSwitchManager::activation_distance(const Fvector& position) const
++{
++	if (!m_activation_from_participants)
++		return graph().actor()->o_Position.distance_to(position);
++	float best = flt_max;
++	for (u32 i = 0; i < m_activation_anchors.size(); ++i)
++	{
++		const float distance = m_activation_anchors[i].distance_to(position);
++		if (distance < best)
++			best = distance;
++	}
++	return best;
++}
++
+ void CALifeSwitchManager::add_online(CSE_ALifeDynamicObject* object, bool update_registries)
+ {
+ 	START_PROFILE("ALife/switch/add_online")
+diff --git a/src/xrGame/alife_switch_manager.h b/src/xrGame/alife_switch_manager.h
+index 343a9af..b9e6690 100644
+--- a/src/xrGame/alife_switch_manager.h
++++ b/src/xrGame/alife_switch_manager.h
+@@ -24,6 +24,13 @@ protected:
+ 
+ private:
+ 	OBJECT_VECTOR m_saved_chidren;
++	// S03-T04: the activation set the switch rules measure from. On the
++	// campaign server: the server entities of the alive participant actors
++	// (every player keeps the world around him active); on a client: the
++	// ALife actor, as the engine always did. Refreshed once per ALife update,
++	// on the thread that runs the switch loop.
++	xr_vector<Fvector> m_activation_anchors;
++	bool m_activation_from_participants;
+ 
+ protected:
+ 	bool synchronize_location(CSE_ALifeDynamicObject* object);
+@@ -42,6 +49,13 @@ public:
+ 	void switch_object(CSE_ALifeDynamicObject* object);
+ 	IC float online_distance() const;
+ 	IC float offline_distance() const;
++	// S03-T04: distance from `position` to the nearest activation anchor
++	// (the ALife actor on a client; the nearest alive participant actor on the
++	// server, or the ALife actor while no participant actor is alive).
++	float activation_distance(const Fvector& position) const;
++	void refresh_activation_anchors();
++	const xr_vector<Fvector>& activation_anchors() const { return m_activation_anchors; }
++	bool activation_from_participants() const { return m_activation_from_participants; }
+ 	IC float switch_distance() const;
+ 	IC void set_switch_distance(float switch_distance);
+ 	IC void set_switch_factor(float switch_factor);
+diff --git a/src/xrGame/alife_switch_manager_inline.h b/src/xrGame/alife_switch_manager_inline.h
+index 1a3a26e..0bce0db 100644
+--- a/src/xrGame/alife_switch_manager_inline.h
++++ b/src/xrGame/alife_switch_manager_inline.h
+@@ -14,6 +14,7 @@ IC CALifeSwitchManager::CALifeSwitchManager(xrServer* server, LPCSTR section) :
+ 	m_switch_distance = pSettings->r_float(section, "switch_distance");
+ 	m_switch_factor = pSettings->r_float(section, "switch_factor");
+ 	set_switch_distance(m_switch_distance);
++	m_activation_from_participants = false;
+ 	seed(u32(CPU::QPC() & 0xffffffff));
+ }
+ 
+diff --git a/src/xrGame/alife_update_manager.cpp b/src/xrGame/alife_update_manager.cpp
+index 4872b1e..a6de3f1 100644
+--- a/src/xrGame/alife_update_manager.cpp
++++ b/src/xrGame/alife_update_manager.cpp
+@@ -112,6 +112,7 @@ void CALifeUpdateManager::update_scheduled(bool init_ef)
+ 
+ void CALifeUpdateManager::update()
+ {
++	refresh_activation_anchors(); // S03-T04
+ 	update_switch();
+ 	update_scheduled(false);
+ }

@@ -1,83 +1,98 @@
-# Session handoff — S03-T02 complete (local view vs gameplay authority); next: S03-T03
+# Session handoff — S03-T03 complete (two independent native actors); next: S03-T04
 
-## State at the end of the session (2026-10-18)
+## State at the end of the session (2026-10-19)
 
-**S03-T02 is Completed** and exported as patch 0022
-(`c966e122…a61d`, 70 files; reconstruction `patch-check-23b`). Rules in
-[participant-identity.md](../../participant-identity.md#local-view-and-gameplay-access--s03-t02),
-every call site in [actor-access-inventory.md](../../actor-access-inventory.md),
-evidence in [S03-T02](../../validation/S03-T02.md).
+**S03-T03 is Completed** and exported as patch 0023
+(`1b69e2df…689c`, 16 files; reconstruction `patch-check-24b`). Rules in
+[participant-identity.md](../../participant-identity.md#per-participant-control-and-the-single-player-script-actor--s03-t03),
+sites and the installed-script gates in
+[actor-access-inventory.md](../../actor-access-inventory.md#control-sites--s03-t03),
+evidence in [S03-T03](../../validation/S03-T03.md).
 
-- `xrGame/CampaignActorAccess.{h,cpp}`: `local_view_actor()` (client only,
-  null on the server), participant lookups (`participant_actor`,
-  `participant_of`, `participant_actors`, `nearest_participant_actor`,
-  `context_actor`, `dialog_actor`), `sole_participant_actor(purpose)`, and
-  `Actor()` as the counted compatibility accessor (server: the one
-  participant actor, null + counted with none or two, every caller recorded
-  and symbolised from `xrGame.pdb`). A client gets a `Role::Client` registry
-  with its `CLevel`; every actor spawned on the server adopts a participant
-  (`adopt_spawned_actor`, by the spawn packet id); the harness binds fixture
-  player 1 before the level.
-- `xrGame/CampaignMessagePolicy.{h,cpp}`: `xrServer::OnMessage`,
-  `Process_event`, `Process_update`, `Process_save` refuse state imports,
-  world control and every game event from any sender but the bridge
-  (direct client), counted by type.
-- 54 files of call-site conversions (B21: phantom hunts the nearest
-  participant actor and goes idle with none; trader faces the nearest; psy
-  dog aura is the viewer's). Unchanged and recorded: 104 ability sites
-  (S03-T04/S10-T02), 38 `level.*` script sites (S03-T05), HUD/UI/camera.
-- Fixtures: `-Scope Identity` now runs `actor-access` (53 checks) and
-  `message-policy` (259 checks); GameState adds `campaign-authority-passed`
-  after `campaign-identity-passed` (63 checks: no view entity, lookups name
-  the saved actor only, a second actor-less participant context never
-  resolves it, forged remote `M_UPDATE`/events/world control refused with
-  state unchanged, the bridge's accepted). smoke-104 (Identity) and
-  smoke-106 (GameState, all 61 stages, hearing passed) pass from the final
-  source; smoke-105 failed only on fixture accounting (fixed).
-- Server-side `Actor()` callers observed (16): monster auras, IK legs, HUD
-  item/player_hud, luabind script bindings, the fixture itself; no
-  converted gameplay site.
+- `xrGame/CampaignActorControl.{h,cpp}`: `controls_actor(actor)` (the
+  server runs `CActor::shedule_Update`'s control path for every participant
+  actor; a client for its local control entity), the participant input
+  context `actor_input_hold/press/release/look(context, …)` (an authorized
+  `Scope::Self` context, forwarded to the actor's own `IR_*` handler;
+  refusals counted), `script_binding_allowed` (the installed `actor` Lua
+  binder attaches to the ALife actor only on the server; S03-T05 owns the
+  participant script context). `CampaignActorAccess`:
+  `assign_participant_actor(ref, engine_id)` names an entity's participant
+  before it spawns.
+- Two findings in the installed scripts, both recorded, neither hidden:
+  `se_actor:STATE_Read` reads its bytes only `if db.actor == nil`, so a
+  second actor's spawn packet was misparsed (health 0, position 10^29);
+  `CSE_Abstract::Spawn_Read` now resumes at the end of the length-prefixed
+  state frame and counts the mismatch (`g_spawn_state_resyncs`; also fires
+  once per `smart_terrain` at save load, 1 byte short, harmless there).
+  `_G.CActor__BeforeHitCallback` drops hits for 7 s after the binder's first
+  update and drops hits sourced from any actor as friendly fire against
+  `db.actor` (`IsStalker` includes actors); the fixture hits from an anomaly
+  zone after 9 s.
+- `level.*` camera/post-process bindings use the local view actor (23
+  sites); 10 `level.*` gameplay bindings and `_give_news` are null-guarded
+  (`level.remove_pp_effector` had faulted on the null `Actor()` and cleared
+  actor 1's binder); `ActorLookAtPoint` uses the object's own camera; the
+  moving-camera effector and the game-over sequence are the viewer's own.
+- Fixture `campaign-two-actors-passed` (GameState, after
+  `campaign-quest-persisted`): spawn, identity, condition, inventory,
+  control, death, lifecycle, slot reuse; 116 checks. smoke-117 (campaign-100)
+  passes all 62 stages; smoke-118 passes the Identity scope. The capture is
+  `server-two-actors.csv` (state rows per phase, the participant map,
+  every check).
+- Client build client-26: 0 errors; the client was not run against a
+  level this session (a client gameplay check of this build is due before
+  the next capture).
 
 ## Next steps
 
-1. **S03-T03** (two independent native actors), per plan.md: spawn a second
-   genuine `CSE_ALifeCreatureActor` through the server harness on
-   `k00_marsh`, let it adopt participant slot 1 (`on_actor_spawned`), give
-   each actor its own input/control context, and verify condition,
-   equipment, inventory, death and lifecycle independently. First action:
-   decide how the fixture spawns actor 2 (a cloned actor spawn packet with
-   a new section/position via `Process_spawn` from the bridge) and expect
-   `Actor()` to refuse (`compat_ambiguous`) once both exist: the audit table
-   in the log then lists every site that dereferences it; convert or guard
-   those. `g_actor` will be whichever spawned last (server forces
-   `M_SPAWN_OBJECT_LOCAL`); nothing gameplay-side should read it any more.
-2. Open items carried: `EntityId`s do not survive a checkpoint reload
+1. **S03-T04** (participant-aware ALife activation and basic AI), per
+   plan.md: the switch manager measures from the ALife actor alone
+   (`alife_switch_manager.cpp:111,122`, `CALifeGraphRegistry::actor()`);
+   make the online/offline policy use the participant set (the activity
+   anchors already do, `CampaignActivityRefreshAnchors`), check NPC
+   enemy selection and awareness for either actor, record each
+   player-bound ability (phantom, psy dog aura, controller, snork,
+   pseudogigant, scanning; the `Actor()` callers in the audit table are the
+   list) as participant-aware or uncovered for S10-T02, measure the tick
+   cost with the union. First action: extend the two-actor fixture (or a
+   new one) to walk actor 2 beyond the switch distance from actor 1 and
+   observe what switches offline; the hearing stage's `npc_walk_events=0`
+   variation (twice in a row in smoke-114/115) is on this task's list.
+2. **S03-T05** inputs collected this session: `se_actor` state gate,
+   the actor binder's `db.actor` globals, the pre-hit callback (window,
+   friendly fire, `db.actor` artefact immunities), news to "the" actor,
+   the `level.*` gameplay bindings behind null guards, god mode flags
+   (`psActorFlags`, process-wide).
+3. Open items carried: `EntityId`s do not survive a checkpoint reload
    (Stage 7); fixture `PlayerId`s only (S04-T04); detached-participant
-   release policy (S04-T05); hearing-stage footstep cause (S03-T04);
-   abilities list (S03-T04); script context (S03-T05); dropped script
-   effectors on the server (S03-T05 presentation callbacks).
+   release policy (S04-T05); dropped script effectors on the server
+   (S03-T05 presentation callbacks); friendly-fire policy (Stage 6).
 
 ## Tools and runs
 
-- Last run names: `campaign-89`, `client-25`, `smoke-106`, `capture-13`
-  (`patch-check-23a/b`). Next: `campaign-90`, `client-26`, `smoke-107`,
+- Last run names: `campaign-100`, `client-26`, `smoke-118`, `capture-13`
+  (`patch-check-24a/b`). Next: `campaign-101`, `client-27`, `smoke-119`,
   `capture-14`; next patch export is
-  `python3 tools/export-engine-patch.py <name> 24`.
+  `python3 tools/export-engine-patch.py <name> 25`.
 - Run PowerShell scripts with the Windows path in single quotes from bash
   (`-File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Stage2.ps1'`).
 - Smoke: `python3 tools/prepare-stage2-smoke.py <run>` then
   `Run-Stage2Smoke.ps1 -Run <run> -Scope Identity|GameState`. GameState
-  ~4 min; a hearing-stage `npc_walk_events=0` is recorded variation, rerun
-  once.
+  ~5 min now (the two-actor stage adds ~20 s); a hearing-stage
+  `npc_walk_events=0` is recorded variation, rerun.
 - Build: `Build-Stage2.ps1 -Run <name> -Product Campaign|Client`
-  (~6 min after a project-file change, ~1.5 min incremental). The client
-  product was not rebuilt this session (S03-T02 changes compile in the
-  campaign product; the client build is due before the next capture).
+  (~6 min after a project-file change, ~1.5 min incremental).
+- Two-actor fixture options: `-s03-actor-section`, `-s03-weapon-section`,
+  `-s03-consumable-section`, `-s03-actor-distance`.
 - Client captures, compare tools and quest fixture options: see the
   [S03-T01 snapshot](../done/snapshot-before-S03-T01.md#tools-and-runs).
-- Script files in the archives are cp1251/CRLF; use `grep -a`.
+- Script files in the archives are cp1251/CRLF; use `grep -a`, or
+  `python3 tools/xray-db-extract.py extract -m <name> -o <dir> <db>` /
+  `grep -g '*.script' <pattern> <db>` on
+  `builds/build_2/test-install/source-client/db/configs/scripts.db0`.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
 G02 carried limits are unchanged.
-Previous snapshot: [before S03-T03](../done/snapshot-before-S03-T03.md).
+Previous snapshot: [before S03-T04](../done/snapshot-before-S03-T04.md).

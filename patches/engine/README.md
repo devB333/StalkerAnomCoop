@@ -176,6 +176,24 @@ sites among them); the inventory is `docs/actor-access-inventory.md`.
 `message-policy` unit fixtures and the level authority check
 (`campaign-authority-passed`).
 
+`0023-two-independent-actors.patch` (S03-T03) adds per-participant actor
+control. `xrGame/CampaignActorControl.{h,cpp}`: `controls_actor` (the
+server runs the control path of every participant actor; a client its
+local control entity), the participant input context (`actor_input_*`
+under an authorized `Scope::Self` context, forwarded to the actor's own
+`IR_*` handlers), the single-player binder rule (`script_binding_allowed`:
+on the server the installed `actor` binder attaches to the ALife actor only)
+and their counters; `assign_participant_actor` names an entity's participant
+before it spawns. `CActor::shedule_Update` and six control sites use
+`controls_actor`; the moving-camera effector and the game-over sequence are
+the viewer's own. The `level.*` camera and post-process bindings use the
+local view actor, the remaining `level.*`/game-object bindings that
+dereferenced `Actor()` are null-guarded. `CSE_Abstract::Spawn_Read` resumes
+at the end of the length-prefixed state frame when a `STATE_Read` consumed a
+different number of bytes (the installed `se_actor.script` skips its bytes
+once `db.actor` exists), counted and logged. `xrGame/CampaignTwoActorFixture.cpp`
+is the level fixture (stage `campaign-two-actors-passed`).
+
 Reconstruct in a new, absent workspace directory (never overwrite an existing tree):
 
 ```sh

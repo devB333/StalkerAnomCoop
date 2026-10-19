@@ -1,4 +1,4 @@
-# Participant identity and authoritative contexts — S03-T01, S03-T02
+# Participant identity and authoritative contexts — S03-T01, S03-T02, S03-T03
 
 This document defines the identities the co-op server uses, how they map onto
 the engine's transient ids, who may create and resolve them, and the state a
@@ -216,6 +216,89 @@ Refusals are counted per type and the first 32 logged with the sender
 as by construction: a remote client can change nothing until Stage 4 gives
 it an intent protocol, and even then only through intents.
 
+## Per-participant control and the single-player script actor — S03-T03
+
+Besides the view, the engine has one *control* entity:
+`CActor::shedule_Update` (`xrGame/Actor.cpp:1825` before the change) runs the
+control path (`g_cl_CheckControls` from `mstate_wishful`, `g_cl_Orientate`
+from the actor's own camera yaw, `g_Physics`) only for
+`Level().CurrentControlEntity()`; every other actor is interpolated from
+network updates (`make_Interpolation`, `NET`). The campaign server adopts no
+control entity (S02-T05d), so until S03-T03 no actor on it moved by input
+(S02-T06b teleported). `xrGame/CampaignActorControl.h` replaces the test:
+
+| Access | Meaning | Server | Client |
+|---|---|---|---|
+| `controls_actor(actor)` | Whether this process runs the actor's control path | every participant actor (`is_participant_actor`) | `Level().CurrentControlEntity() == actor` (unchanged) |
+| `actor_input_hold/press/release/look(context, …)` | A participant's input context: the command goes to the actor the authorized `ActionContext` resolves (`Scope::Self`) through that actor's own `IR_*` handler; any other context moves nobody and is counted | the harness now, the client's intents in Stage 4 | — |
+| `script_binding_allowed(object)` | Whether the object's section-declared Lua binder attaches | an actor's binder only for the single-player script actor (the ALife actor, `CALifeGraphRegistry::actor()`, the `M_SPAWN_OBJECT_ASPLAYER` entity); other participant actors get none, counted and logged | always |
+| `assign_participant_actor(ref, engine_id)` (`CampaignActorAccess.h`) | The server names the participant an actor entity belongs to before the object exists; the adoption at `net_Spawn` then finds it held | explicit, refused when the id is not current, the reference stale, the participant already holding a live actor or another participant holding the entity | `WrongRole` |
+
+**Converted control sites** (`controls_actor(this)`): the control branch of
+`shedule_Update`; the sprint cut on a hit (`Actor.cpp:655`); the level-border
+callback (`:1045`) and the contact-damage hit (`:1075`), which the
+controlling side reports; the climb weapon-hide state
+(`Actor_Movement.cpp:153`); the sprint-disable and weapon-hide game events
+(`Actor_Weapon.cpp:150,161`). **View sites left on the view entity** (null on
+the server): the explosion shock effector and heavy-breath sound, HUD FOV,
+camera lookout, night-vision post-process, MP auto-pickup. The moving-camera
+effector (`Actor_Movement.cpp:339`) is now the viewer's own actor
+(`local_view_actor() == this`), and the single-player game-over sequence in
+`CActor::Die` (`start_tutorial("game_over")`, a `CUISequencer` that grabs
+input) runs for the viewer's own actor only: a participant's death on the
+server is a gameplay outcome whose client presentation is S03-T05.
+
+**Why the second actor gets no Lua binder yet.** The installed `actor`
+section binds `bind_stalker.actor_init`; `actor_binder:__init` sets
+`db.actor_binder`, `net_spawn` calls `db.add_actor` (`db.actor = obj`),
+resets the weather manager and enables input, and `net_destroy` finalizes
+the surge, psi-storm and weather managers and sets `db.actor = nil`
+(`gamedata/scripts/bind_stalker.script`, `db.script`). Bound to a second
+actor it would re-point the single-player globals at that actor and, on its
+destruction, tear down services participant 1 still uses. That is the Lua
+global-actor mutation D4 names and S03-T05 replaces with a participant
+context; until then the binder attaches to the script actor only and the
+refusal is counted (`binder_refused_actor`).
+
+**The second actor's spawn packet.** The installed `se_actor.script`
+(the `actor` section's server class, `class_registrator.script:24`) appends
+a save marker and a flag to `cse_alife_creature_actor.STATE_Write` and
+reads them back in `STATE_Read` only `if db.actor == nil`
+(`se_actor.script:40-54`): in single player the one actor's packet is read
+before its binder exists, so the gate never mattered. A second actor's
+packet is read with `db.actor` set, its `STATE_Read` stops 3 bytes short,
+and the update block that follows (`CSE_ALifeCreatureAbstract::UPDATE_Read`:
+health, position) is parsed from the wrong offset: smoke-107/108 saw the
+actor arrive with health 0 and a position of 10^29. `CSE_Abstract::Spawn_Read`
+(`xrServerEntities/xrServer_Object_Base.cpp`) now resumes at the end of the
+length-prefixed state frame it was already given, counts and logs the
+mismatch (`g_spawn_state_resyncs`); the normal client is unchanged when the
+sizes agree. The script gate itself is an S03-T05 input.
+
+**The installed hit gate.** `CActor::Hit` asks `_G.CActor__BeforeHitCallback`
+(`_g.script:1221`) before any actor takes damage; it ignores every hit for
+7 s after the actor binder's first update (`bind_stalker_ext.script:74-76`,
+one global window started by the single-player actor and applied to any
+actor), refuses hits from stalkers friendly to `db.actor`, and lets the
+`actor_on_before_hit` subscribers (`item_artefact.script`, `arszi_psy.script`)
+scale the damage by `db.actor`'s artefacts. Its `IsStalker` (`_g.script:2838`)
+includes `clsid.actor`, so a hit whose source is the other actor, or the
+victim itself, is ignored as friendly fire against `db.actor` (smoke-116:
+6 bridge events, 0 entity hits). The fixture sends its hits from an anomaly
+zone, the engine's own non-creature hit source, after 9 s of server ticks;
+the per-participant form of the gate (and the friendly-fire policy) is
+S03-T05 / Stage 6.
+
+**What is still single-player on the server** (recorded, not hidden): the
+ALife switch manager measures distance from the ALife actor alone
+(`alife_switch_manager.cpp:111,122`; the activation union is S03-T04); the god
+mode flags `psActorFlags` (`AF_GODMODE`, `AF_GODMODE_RT`) are process-global
+and apply to every actor (the fixture clears and restores them; a
+per-participant form is Stage 6); the `Actor()` compatibility accessor
+refuses while two participant actors live, so the presentation, script and
+ability callers listed by `report_actor_access` get null then (S03-T04,
+S03-T05, S10-T02).
+
 ## Ownership table
 
 | Thing | Owner (mints / mutates) | May resolve | Must never |
@@ -227,6 +310,9 @@ it an intent protocol, and even then only through intents.
 | Participant slot state | Registry under `ServerAuthority` | Anyone with the registry | Change hands without a generation bump |
 | Bridge session | Registry (`set_bridge_session` from the live server) | — | Attach as a participant |
 | `g_actor`, `Level().CurrentEntity()` | Engine | Client presentation only (`local_view_actor()`); the server's `Actor()` is the counted compatibility accessor (S03-T02) | Decide authority; choose a player when two exist |
+| `Level().CurrentControlEntity()` | Engine | The client's own control path; the server answers `controls_actor` from the participant registry (S03-T03) | Decide which actor the server simulates by input |
+| A participant's input | Its session (client intents, Stage 4) or the harness (`ServerInternal`) | `actor_input_*` under an authorized `Scope::Self` context | Reach another participant's actor |
+| The single-player Lua binder (`bind_stalker.actor_init`) | The installed scripts, for the script actor only (S03-T03) | `db.actor` on the client and, on the server, for the ALife actor | Attach to a second participant's actor before S03-T05 |
 | Server message dispatch | `xrServer::OnMessage` with the S03-T02 policy | The bridge client for state imports, world control and game events; remote clients for connection and input messages only | Accept a state import, world control or game event from a remote sender |
 
 ## Files
@@ -251,3 +337,8 @@ it an intent protocol, and even then only through intents.
 - `xrGame/CampaignAuthorityFixture.cpp` (S03-T02) — the `actor-access` and
   `message-policy` unit fixtures and the level authority check
   (`campaign-authority-passed`).
+- `xrGame/CampaignActorControl.{h,cpp}` (S03-T03) — `controls_actor`, the
+  per-participant input context, the single-player binder rule and their
+  counters; `assign_participant_actor` is in `CampaignActorAccess.{h,cpp}`.
+- `xrGame/CampaignTwoActorFixture.cpp` (S03-T03) — the two-actor level
+  fixture (`campaign-two-actors-passed`).

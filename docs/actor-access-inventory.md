@@ -224,3 +224,59 @@ the identity service's stop line print the table; the S03-T02 validation
 report records the callers observed in the fixture run. A caller that is
 not a script binding, a presentation site or a recorded ability is a
 defect.
+
+## Control sites — S03-T03
+
+`Level().CurrentControlEntity()` names the actor the process drives by
+input. 23 sites in `src/xrGame` (raw grep, 2026-10-19, before the change)
+outside `Level*.cpp`. Classes as above; "control" is new: the site decides
+something for the actor this process simulates by input.
+
+| File | Sites | Class | S03-T03 |
+|---|---|---|---|
+| `Actor.cpp:1825` (`shedule_Update`) | 1 | control | `campaign::controls_actor(this)`: the control path runs for every participant actor on the server |
+| `Actor.cpp:655,1045,1075` (sprint cut on hit, level-border callback, contact damage) | 3 | control | `controls_actor(this)` |
+| `Actor_Movement.cpp:153`, `Actor_Weapon.cpp:150,161` (climb weapon-hide, sprint-disable and weapon-hide events) | 3 | control | `controls_actor(this)` |
+| `Actor_Movement.cpp:339` (moving-camera effector) | 1 | view | the viewer's own actor (`local_view_actor() == this`), none on the server |
+| `Actor.cpp:621,1944,2416`, `ActorAnimation.cpp:728`, `ActorCameras.cpp:484,554`, `ActorNightVision.cpp:31,46,60`, `Actor_Feel.cpp:282` | 11 | view / debug / MP | unchanged (null on the server; the night-vision effector and auto-pickup compare with the view entity) |
+| `Level_input.cpp`, `Level.cpp`, `Level_network_spawn.cpp` | — | view | input and the spawn-time adoption of the local entity; unchanged (S02-T05d keeps the server from adopting one) |
+| `CampaignAuthorityFixture.cpp:310`, `CampaignServerStart.cpp` | 2 | fixture | the server's own no-control-entity checks |
+
+`CActor::Die` ran the single-player game-over sequence (`start_tutorial`)
+for any dying actor; it now runs for the viewer's own actor only. The
+installed actor Lua binder attaches to the single-player script actor only
+on the server (`script_binder.cpp`, `campaign::script_binding_allowed`).
+
+### Script bindings that dereferenced `Actor()` — S03-T03
+
+With two participant actors `Actor()` returns null on the server, and
+smoke-107 showed the first binding to dereference it:
+`level.remove_pp_effector` faulted inside actor 1's Lua binder update and
+the S02-T06 exception filter cleared that binder. The `level.*` and
+game-object bindings below are now null-safe; their participant context is
+still S03-T05.
+
+| File | Sites | Class | S03-T03 |
+|---|---|---|---|
+| `level_script.cpp` `add_cam_effector` (5), `remove_cam_effector`, `set/get/check_cam_effector_*` (4), `set_cam_position_direction`, `remove_cam_position_direction`, `remove_hud_motion_cam_effectors`, `add/remove_complex_effector`, `add_pp_effector`, `remove/set/check/get_pp_effector_*` (6) | 23 | view | the viewer's own actor (`local_view_actor()`); with none the effector is dropped (an added one is deleted, a query returns 0/false), the rule S03-T02 set for `pp_effector_custom.cpp` |
+| `level_script.cpp` `add_actor_points*`, `get_actor_points`, the Discord RPC updates, `get_pick(TT_ACTOR)`, `actor_safemode`, `actor_set_safemode`, `update_pda_news_from_uiwindow` | 10 | script (S03-T05) | null-guarded through the counted `Actor()`; a null returns 0/false/no-op |
+| `script_game_object_inventory_owner.cpp` `_give_news` | 2 | script (S03-T05) | null-guarded: news for "the" actor are dropped until S03-T05 names the receiving participant |
+| `script_game_object_inventory_owner.cpp` `ActorLookAtPoint`, `ActorStopLookAtPoint` | 2 | self | the game object's own camera (`smart_cast<CActor*>(&object())`) |
+
+### The installed `se_actor.script` state gate — S03-T03
+
+`se_actor:STATE_Read` reads its save marker and `start_position_filled`
+flag only `if db.actor == nil`, so a second actor's spawn packet is read 3
+bytes short and its update block (health, position) is misparsed.
+`CSE_Abstract::Spawn_Read` now resumes at the end of the state frame and
+counts the mismatch (`g_spawn_state_resyncs`, logged); see
+[participant-identity.md](participant-identity.md#per-participant-control-and-the-single-player-script-actor--s03-t03).
+
+### Installed script gates on the second actor — S03-T03
+
+| Script | Site | Effect on a second actor | Owner |
+|---|---|---|---|
+| `se_actor.script:40-54` | `STATE_Read` reads its bytes only `if db.actor == nil` | the spawn packet's update block is misparsed; neutralised by the state-frame resync in `CSE_Abstract::Spawn_Read` | S03-T05 |
+| `bind_stalker.script:29-142`, `db.script:102-112` | `actor_binder` sets `db.actor`, resets and finalizes the weather, surge and psi-storm managers | would re-point the globals at the second actor and tear them down on its destruction; the binder attaches to the script actor only (`script_binding_allowed`) | S03-T05 |
+| `_g.script:1221,2838`, `bind_stalker_ext.script:74-76` | `CActor__BeforeHitCallback`: 7 s invulnerability after the first binder update, a friend check against `db.actor` whose `IsStalker` includes actors, artefact immunities from `db.actor`'s belt | any actor's hits are dropped during the window, hits sourced from an actor (the other participant, or the victim itself) are dropped as friendly fire, damage is scaled by actor 1's belt | S03-T05 (per-participant gate), Stage 6 (friendly fire) |
+| `level_script.cpp` `show_indicators`/`hide_indicators` | set and clear the global `AF_GODMODE_RT` | god mode is process-wide; the fixture clears and restores it | Stage 6 |

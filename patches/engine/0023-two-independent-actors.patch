@@ -1,0 +1,1961 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 1231e04..ab9798e 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1018,6 +1018,10 @@ extern "C" bool __cdecl xrCampaignLevel_QuestCompleteBegin();
+ extern "C" bool __cdecl xrCampaignLevel_QuestCompleteTick();
+ extern "C" bool __cdecl xrCampaignLevel_QuestCompleteEnd(u32 ticks);
+ extern "C" bool __cdecl xrCampaignLevel_QuestPersisted();
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_TwoActorsTick();
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsDone();
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+ extern "C" void __cdecl xrCampaignLevel_Stop();
+ 
+ namespace
+@@ -1304,6 +1308,10 @@ LPCSTR g_campaign_quest_checkpoint_name = "s02-t06e-checkpoint";
+ u32 g_campaign_quest_approach_ticks = 1000;
+ u32 g_campaign_quest_ticks = 100;
+ u32 g_campaign_quest_complete_ticks = 1500;
++// Tick budget for the two-actor fixture (S03-T03): 3000 ticks are 60 s, more
++// than its two online waits (10 s each), four walks (1 s each) and the
++// event waits (3 s each).
++u32 g_campaign_two_actor_ticks = 3000;
+ CTimer g_campaign_wall;
+ 
+ bool StartCampaignFrameDriver()
+@@ -2146,6 +2154,38 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                         result = 28;
+                     }
+                 }
++                if (result == 0)
++                {
++                    // S03-T03: a second genuine actor beside the saved one,
++                    // explicitly participant 2's; both addressed, hit, equipped,
++                    // driven and ended independently, the slot reused.
++                    string_path capture;
++                    FS.update_path(capture, "$logs$", "s03-t03-two-actors.csv");
++                    bool ok = xrCampaignLevel_TwoActorsBegin(capture);
++                    const u64 ticks_before = g_campaign_clock->Stats().ticks;
++                    const u32 wall_before = g_campaign_wall.GetElapsed_ms();
++                    if (ok)
++                    {
++                        g_campaign_clock->Resume(wall_before);
++                        while (!xrCampaignLevel_TwoActorsDone() &&
++                            g_campaign_clock->Stats().ticks < ticks_before + g_campaign_two_actor_ticks)
++                        {
++                            RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
++                            xrCampaignLevel_TwoActorsTick();
++                        }
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                    }
++                    const u32 ran = u32(g_campaign_clock->Stats().ticks - ticks_before);
++                    ok = xrCampaignLevel_TwoActorsEnd(ran, ran * g_campaign_clock->TickMs(),
++                             g_campaign_wall.GetElapsed_ms() - wall_before) && ok;
++                    if (ok)
++                        stage("campaign-two-actors-passed");
++                    else
++                    {
++                        stage("campaign-two-actors-failed");
++                        result = 33;
++                    }
++                }
+             }
+             xrCampaignLevel_Stop();
+             stage("campaign-stopped");
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index 00d2da8..895702d 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -31,6 +31,8 @@
+ #include "../xrEngine/xr_input.h"
+ //
+ #include "Actor.h"
++#include "CampaignActorAccess.h" // S03-T03
++#include "CampaignActorControl.h"
+ #include "ActorAnimation.h"
+ #include "actor_anim_defs.h"
+ #include "HudItem.h"
+@@ -652,7 +654,7 @@ void CActor::Hit(SHit* pHDS)
+ 		HitSector(pLastHitter, pLastHittingWeapon);
+ 	}
+ 
+-	if ((mstate_real & mcSprint) && Level().CurrentControlEntity() == this && conditions().DisableSprint(pHDS))
++	if ((mstate_real & mcSprint) && campaign::controls_actor(this) && conditions().DisableSprint(pHDS)) // S03-T03
+ 	{
+ 		bool const is_special_burn_hit_2_self = (pHDS->who == this) && (pHDS->boneID == BI_NONE);
+ 		if (!is_special_burn_hit_2_self)
+@@ -978,7 +980,8 @@ void CActor::Die(CObject* who)
+ 		else
+ 			cam_Set(eacFreeLook);
+ 
+-		CurrentGameUI()->HideShownDialogs();
++		if (CurrentGameUI())
++			CurrentGameUI()->HideShownDialogs();
+ 
+ 		/* avo: attempt to set camera on timer */
+ 		/*CTimer T;
+@@ -998,7 +1001,11 @@ void CActor::Die(CObject* who)
+ 		}*/
+ 		/* avo: end */
+ 
+-		start_tutorial("game_over");
++		// S03-T03: the game-over sequence is presentation for the viewer's own
++		// actor; a participant's death on the server is a gameplay outcome
++		// (its client presentation callback is S03-T05).
++		if (campaign::local_view_actor() == this)
++			start_tutorial("game_over");
+ 	}
+ 	else
+ 	{
+@@ -1042,7 +1049,7 @@ void CActor::g_Physics(Fvector& _accel, float jump, float dt)
+ 			accel.set(0.f, 0.f, 0.f);
+ 		character_physics_support()->movement()->Calculate(accel, cameras[cam_active]->vDirection, 0, jump, dt, false);
+ 		bool new_border_state = character_physics_support()->movement()->isOutBorder();
+-		if (m_bOutBorder != new_border_state && Level().CurrentControlEntity() == this)
++		if (m_bOutBorder != new_border_state && campaign::controls_actor(this)) // S03-T03
+ 		{
+ 			SwitchOutBorder(new_border_state);
+ 		}
+@@ -1072,7 +1079,7 @@ void CActor::g_Physics(Fvector& _accel, float jump, float dt)
+ 			di->HitDir(hdir);
+ 			SetHitInfo(initiator, NULL, 0, Fvector().set(0, 0, 0), hdir);
+ 			//				Hit	(m_PhysicMovementControl->gcontact_HealthLost,hdir,di->DamageInitiator(),m_PhysicMovementControl->ContactBone(),di->HitPos(),0.f,ALife::eHitTypeStrike);//s16(6 + 2*::Random.randI(0,2))
+-			if (Level().CurrentControlEntity() == this)
++			if (campaign::controls_actor(this)) // S03-T03: the controlling side reports contact damage
+ 			{
+ 				SHit HDS = SHit(mctrl->gcontact_HealthLost,
+ 				                //.								0.0f,
+@@ -1822,7 +1829,9 @@ void CActor::shedule_Update(u32 DT)
+ 
+ 	//----------- for E3 -----------------------------
+ 	//	if (Local() && (OnClient() || Level().CurrentEntity()==this))
+-	if (Level().CurrentControlEntity() == this && !Level().IsDemoPlay())
++	// S03-T03: the control path runs for every actor this process controls: the
++	// local control entity on a client, every participant actor on the server.
++	if (campaign::controls_actor(this) && !Level().IsDemoPlay())
+ 		//------------------------------------------------
+ 	{
+ 		g_cl_CheckControls(mstate_wishful, NET_SavedAccel, NET_Jump, dt);
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index defec20..ee929fc 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -1,4 +1,6 @@
+ #include "stdafx.h"
++#include "CampaignActorAccess.h" // S03-T03
++#include "CampaignActorControl.h"
+ 
+ #include "actor.h"
+ #include "inventory.h"
+@@ -150,7 +152,7 @@ void CActor::g_cl_ValidateMState(float dt, u32 mstate_wf)
+ 		mstate_real ^= mcAccel;
+ 	};
+ 
+-	if (this == Level().CurrentControlEntity())
++	if (campaign::controls_actor(this)) // S03-T03
+ 	{
+ 		bool bOnClimbNow = !!(mstate_real & mcClimb);
+ 		bool bOnClimbOld = !!(mstate_old & mcClimb);
+@@ -336,7 +338,8 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
+ 		if (state_anm)
+ 		{
+ 			//play moving cam effect
+-			CActor* control_entity = static_cast_checked<CActor*>(Level().CurrentControlEntity());
++			// S03-T03: the moving-camera effect belongs to the viewer's own actor.
++			CActor* control_entity = campaign::local_view_actor() == this ? this : nullptr;
+ 			if (control_entity)
+ 			{
+ 				R_ASSERT2(control_entity, "current control entity is NULL");
+diff --git a/src/xrGame/Actor_Weapon.cpp b/src/xrGame/Actor_Weapon.cpp
+index 1f73c6c..ab44662 100644
+--- a/src/xrGame/Actor_Weapon.cpp
++++ b/src/xrGame/Actor_Weapon.cpp
+@@ -2,6 +2,7 @@
+ //////////////////////////////////////////////////////////////////////
+ 
+ #include "stdafx.h"
++#include "CampaignActorControl.h" // S03-T03
+ 
+ #include "actor.h"
+ #include "actoreffector.h"
+@@ -147,7 +148,7 @@ BOOL CActor::g_State(SEntityState& state) const
+ 
+ void CActor::SetCantRunState(bool bDisable)
+ {
+-	if (g_Alive() && this == Level().CurrentControlEntity())
++	if (g_Alive() && campaign::controls_actor(this)) // S03-T03
+ 	{
+ 		NET_Packet P;
+ 		u_EventGen(P, GEG_PLAYER_DISABLE_SPRINT, ID());
+@@ -158,7 +159,7 @@ void CActor::SetCantRunState(bool bDisable)
+ 
+ void CActor::SetWeaponHideState(u16 State, bool bSet)
+ {
+-	if (g_Alive() && this == Level().CurrentControlEntity())
++	if (g_Alive() && campaign::controls_actor(this)) // S03-T03
+ 	{
+ 		NET_Packet P;
+ 		u_EventGen(P, GEG_PLAYER_WEAPON_HIDE_STATE, ID());
+diff --git a/src/xrGame/CampaignActorAccess.cpp b/src/xrGame/CampaignActorAccess.cpp
+index e99d094..88fc7c3 100644
+--- a/src/xrGame/CampaignActorAccess.cpp
++++ b/src/xrGame/CampaignActorAccess.cpp
+@@ -365,4 +365,21 @@ void on_actor_spawned(CActor* actor, u16 id)
+ 		Msg("! S03-T02 actor %u spawned with no participant to hold it: %s", u32(id), refusal_name(refusal));
+ 	}
+ }
++
++Refusal assign_participant_actor(const ParticipantRef& ref, u16 engine_id)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	EngineEntityKey key;
++	if (!registry.current_key(engine_id, key))
++		return Refusal::StaleReference;
++	EngineEntityKey held;
++	if (registry.participant_actor_key(ref, held) == Refusal::None)
++		return held == key ? Refusal::None : Refusal::AlreadyBound;
++	const Refusal refusal = registry.bind_actor(registry.authority(), ref, key);
++	Msg("%sS03-T03 actor entity %u (generation %u) assigned to participant {%u,%u}: %s", refusal == Refusal::None ? "" : "! ",
++		u32(engine_id), key.generation, u32(ref.slot), ref.generation, refusal_name(refusal));
++	return refusal;
++}
+ } // namespace campaign
+diff --git a/src/xrGame/CampaignActorAccess.h b/src/xrGame/CampaignActorAccess.h
+index 78c6064..27a8214 100644
+--- a/src/xrGame/CampaignActorAccess.h
++++ b/src/xrGame/CampaignActorAccess.h
+@@ -87,4 +87,10 @@ void release_client_registry();
+ // CActor::net_Spawn on the server: the actor adopts a participant. id is the
+ // spawn packet's, since the object's own is set later in CGameObject::net_Spawn.
+ void on_actor_spawned(CActor* actor, u16 id);
++// S03-T03: the server names the participant an actor entity belongs to before
++// the object exists (the harness right after its ALife spawn; S04-T04 the
++// joining player). Explicit, never first-free-slot: refused when the engine id
++// is not current, the participant reference is stale, the participant already
++// holds a live actor or another participant holds this entity.
++Refusal assign_participant_actor(const ParticipantRef& ref, u16 engine_id);
+ } // namespace campaign
+diff --git a/src/xrGame/CampaignActorControl.cpp b/src/xrGame/CampaignActorControl.cpp
+new file mode 100644
+index 0000000..449cf68
+--- /dev/null
++++ b/src/xrGame/CampaignActorControl.cpp
+@@ -0,0 +1,126 @@
++#include "pch_script.h"
++#include "CampaignActorControl.h"
++
++// S03-T03: see CampaignActorControl.h.
++
++#include "CampaignActorAccess.h"
++#include "Actor.h"
++#include "Level.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_graph_registry.h"
++#include "xrServer_Objects_ALife_Monsters.h"
++
++using namespace campaign;
++
++namespace
++{
++ActorControlStats s_stats = {};
++
++bool server_role()
++{
++	return g_campaign_identity && g_campaign_identity->role() == Role::Server;
++}
++
++// The actor the context acts on, under Scope::Self; null and counted otherwise.
++CActor* input_actor(const ActionContext& context, Refusal& why)
++{
++	++s_stats.input_calls;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor)
++	{
++		++s_stats.input_refused;
++		if (s_stats.input_refused <= 16)
++			Msg("! S03-T03 actor input refused: %s (origin %u session %u participant {%u,%u})", refusal_name(why),
++				u32(context.origin), context.session, u32(context.actor.slot), context.actor.generation);
++	}
++	return actor;
++}
++} // namespace
++
++namespace campaign
++{
++bool controls_actor(const CActor* actor)
++{
++	++s_stats.control_checks;
++	if (!actor || !g_pGameLevel)
++		return false;
++	if (!server_role())
++		return Level().CurrentControlEntity() == actor;
++	const bool held = is_participant_actor(actor);
++	if (held)
++		++s_stats.control_server_true;
++	return held;
++}
++
++bool script_binding_allowed(const CGameObject* object)
++{
++	if (!server_role() || !object)
++	{
++		++s_stats.binder_allowed;
++		return true;
++	}
++	const CActor* actor = smart_cast<const CActor*>(object);
++	if (!actor)
++	{
++		++s_stats.binder_allowed;
++		return true;
++	}
++	const CSE_ALifeCreatureActor* sp_actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
++	if (sp_actor && sp_actor->ID == object->ID())
++	{
++		++s_stats.binder_allowed;
++		return true;
++	}
++	++s_stats.binder_refused_actor;
++	Msg("! S03-T03 actor %u gets no single-player Lua binder on the server: the script actor is %u (participant "
++		"script context is S03-T05)",
++		u32(object->ID()), sp_actor ? u32(sp_actor->ID) : u32(-1));
++	return false;
++}
++
++Refusal actor_input_hold(const ActionContext& context, int cmd)
++{
++	Refusal why = Refusal::None;
++	if (CActor* actor = input_actor(context, why))
++		actor->IR_OnKeyboardHold(cmd);
++	return why;
++}
++
++Refusal actor_input_press(const ActionContext& context, int cmd)
++{
++	Refusal why = Refusal::None;
++	if (CActor* actor = input_actor(context, why))
++		actor->IR_OnKeyboardPress(cmd);
++	return why;
++}
++
++Refusal actor_input_release(const ActionContext& context, int cmd)
++{
++	Refusal why = Refusal::None;
++	if (CActor* actor = input_actor(context, why))
++		actor->IR_OnKeyboardRelease(cmd);
++	return why;
++}
++
++Refusal actor_input_look(const ActionContext& context, int dx, int dy)
++{
++	Refusal why = Refusal::None;
++	if (CActor* actor = input_actor(context, why))
++		actor->IR_OnMouseMove(dx, dy);
++	return why;
++}
++
++const ActorControlStats& actor_control_stats()
++{
++	return s_stats;
++}
++
++void report_actor_control(LPCSTR tag)
++{
++	Msg("S03-T03 actor-control %s control_checks=%I64u control_server_true=%I64u input_calls=%I64u "
++		"input_refused=%I64u binder_allowed=%I64u binder_refused_actor=%I64u",
++		tag, s_stats.control_checks, s_stats.control_server_true, s_stats.input_calls, s_stats.input_refused,
++		s_stats.binder_allowed, s_stats.binder_refused_actor);
++}
++} // namespace campaign
+diff --git a/src/xrGame/CampaignActorControl.h b/src/xrGame/CampaignActorControl.h
+new file mode 100644
+index 0000000..09219ca
+--- /dev/null
++++ b/src/xrGame/CampaignActorControl.h
+@@ -0,0 +1,66 @@
++#pragma once
++
++// S03-T03: per-participant actor control, split from the one local control
++// entity.
++//
++// The engine drives an actor's movement from its own input state
++// (mstate_wishful, set by the actor's IR_* handlers, and its camera yaw) in
++// CActor::shedule_Update, but only for the object the process controls
++// (Level().CurrentControlEntity(), IGame_Level.h); every other actor is
++// interpolated from network updates. The campaign server controls no entity
++// and simulates two actors, so "is this actor controlled here" must be
++// answered by the participant model, not by the process's one control entity:
++//
++//  - controls_actor(actor): client: the actor is the local control entity
++//    (unchanged); server: the actor is a participant's (every participant
++//    actor runs its own control path from its own input state).
++//  - ActorInput: the input context of one participant. The server feeds a
++//    participant's commands to that participant's actor through the actor's
++//    own IR_* handlers, under an authorized ActionContext (Scope::Self): a
++//    context that does not resolve to the participant's actor moves nobody and
++//    is counted. The harness is the source here; Stage 4 delivers the client's
++//    intents to the same functions.
++//  - script_binding_allowed(object): the installed single-player scripts bind
++//    `bind_stalker.actor_init` to the `actor` section and treat the bound
++//    object as the one player (db.actor, db.actor_binder, the weather, surge
++//    and psi-storm managers reset in net_spawn and finalized in net_destroy).
++//    On the server that binder attaches to the single-player script actor
++//    only: the ALife actor (CALifeGraphRegistry::actor(), the entity flagged
++//    M_SPAWN_OBJECT_ASPLAYER). Another participant's actor gets no Lua binder
++//    until S03-T05 defines the per-participant script context; the refusal is
++//    counted and logged, never silent.
++
++#include "CampaignIdentity.h"
++
++class CActor;
++class CGameObject;
++
++namespace campaign
++{
++// Whether this process runs the actor's control path (CActor::shedule_Update).
++bool controls_actor(const CActor* actor);
++
++// Whether the object's section-declared Lua binder may attach here.
++bool script_binding_allowed(const CGameObject* object);
++
++// The input context of one participant: each call resolves the context's
++// actor (Scope::Self) and forwards to that actor's own handler. The refusal
++// is returned (None on success) and counted.
++Refusal actor_input_hold(const ActionContext& context, int cmd);
++Refusal actor_input_press(const ActionContext& context, int cmd);
++Refusal actor_input_release(const ActionContext& context, int cmd);
++Refusal actor_input_look(const ActionContext& context, int dx, int dy);
++
++struct ActorControlStats
++{
++	u64 control_checks; // controls_actor() calls
++	u64 control_server_true; // ...answered true on the server
++	u64 input_calls; // actor_input_* calls
++	u64 input_refused; // ...refused (no actor for the context)
++	u64 binder_allowed; // script bindings attached
++	u64 binder_refused_actor; // actor binders refused on the server (not the SP script actor)
++};
++
++const ActorControlStats& actor_control_stats();
++void report_actor_control(LPCSTR tag);
++} // namespace campaign
+diff --git a/src/xrGame/CampaignIdentityFixture.cpp b/src/xrGame/CampaignIdentityFixture.cpp
+index 135ad8c..e3d2985 100644
+--- a/src/xrGame/CampaignIdentityFixture.cpp
++++ b/src/xrGame/CampaignIdentityFixture.cpp
+@@ -2,6 +2,7 @@
+ #include "CampaignIdentityFixture.h"
+ #include "CampaignIdentity.h"
+ #include "CampaignActorAccess.h"
++#include "CampaignActorControl.h"
+ #include "CampaignMessagePolicy.h"
+ #include "id_generator.h"
+ 
+@@ -444,6 +445,7 @@ extern "C" void __cdecl xrCampaignIdentity_Stop()
+ 		stats.assigned, stats.freed, stats.freed_unbound, stats.reassigned_after_free, stats.continued, stats.live,
+ 		stats.incarnations, stats.max_generation, stats.next_entity, u32(g_campaign_identity->bound_count()));
+ 	campaign::report_actor_access("stop"); // S03-T02
++	campaign::report_actor_control("stop"); // S03-T03
+ 	campaign::report_message_policy("stop");
+ 	xr_delete(g_campaign_identity);
+ }
+diff --git a/src/xrGame/CampaignIdentityFixture.h b/src/xrGame/CampaignIdentityFixture.h
+index 06baa66..0f058c3 100644
+--- a/src/xrGame/CampaignIdentityFixture.h
++++ b/src/xrGame/CampaignIdentityFixture.h
+@@ -30,3 +30,9 @@ extern "C" bool __cdecl xrCampaignLevel_IdentityCheck();
+ // fixtures, and the authority check on the loaded level.
+ extern "C" bool __cdecl xrCampaignAuthority_Fixture(LPCSTR name);
+ extern "C" bool __cdecl xrCampaignLevel_AuthorityCheck();
++// S03-T03 (CampaignTwoActorFixture.cpp): two independent native actors on the
++// loaded level, phase by phase under the server ticks.
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsBegin(LPCSTR out_path);
++extern "C" void __cdecl xrCampaignLevel_TwoActorsTick();
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsDone();
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsEnd(u32 frames, u32 sim_ms, u32 wall_ms);
+diff --git a/src/xrGame/CampaignTwoActorFixture.cpp b/src/xrGame/CampaignTwoActorFixture.cpp
+new file mode 100644
+index 0000000..ab378ca
+--- /dev/null
++++ b/src/xrGame/CampaignTwoActorFixture.cpp
+@@ -0,0 +1,980 @@
++#include "pch_script.h"
++#include "CampaignIdentityFixture.h"
++#include "CampaignIdentity.h"
++#include "CampaignActorAccess.h"
++#include "CampaignActorControl.h"
++
++// S03-T03: two independent native actors on the loaded level, headless.
++//
++// The fixture creates a second genuine actor the way a script would
++// (CALifeSimulatorBase::spawn_item of the `actor` section beside the saved
++// actor, registered with ALife; the switch manager brings it online through
++// xrServer::Process_spawn and CActor::net_Spawn), names its participant
++// explicitly before the object exists (assign_participant_actor), and then
++// exercises both actors through the engine's own paths, in phases driven by
++// the server ticks:
++//
++//  0 spawn:     participant 2 bound and attached; the entity spawned and
++//               assigned; wait for the client object.
++//  1 identity:  both actors are participants, distinct and independently
++//               addressable; the single-actor accessors refuse; the engine
++//               globals (g_actor, the ALife actor, the view entity) did not
++//               move; the save-ready mapping (slot, player, entity, engine key,
++//               the entity id stored on the server entity) is logged.
++//  2 condition: a wound hit through the host's event loop (GE_HIT from the
++//               bridge, the server's GAME_EVENT_ON_HIT, the object's Hit)
++//               lowers actor 2's health; actor 1's is untouched.
++//  3 inventory: items spawned into actor 2 the way alife():create with a
++//               parent does land in actor 2's inventory (a weapon in a slot or
++//               the ruck, a consumable); actor 1's inventory is unchanged.
++//  4 control:   participant 2's input context holds forward for a second:
++//               actor 2 walks, actor 1 stands; then participant 1's: actor 1
++//               walks, actor 2 stands; a session context naming the other
++//               participant is refused and moves nobody.
++//  5 death:     a lethal hit kills actor 2 through the same event path; actor
++//               1 and the global services (ALife clock, scheduler, script
++//               engine) go on; participant 2 still holds its dead actor.
++//  6 lifecycle: actor 2 is released the way alife():release does (GE_DESTROY
++//               through the bridge); participant 2 holds no actor, the
++//               single-actor accessors name actor 1 again, the identity audit
++//               still balances; a third actor is spawned for participant 2.
++//  7 reuse:     participant 2 (same slot and generation) holds the new actor
++//               under a new entity id; it walks under participant 2's input.
++//
++// CSV rows (s03-t03-two-actors.csv):
++//   state,<phase>,<tick>,<frame>,<a1>,<a1_alive>,<a1_health>,<a1x>,<a1y>,<a1z>,<a1_items>,<a2>,<a2_alive>,
++//         <a2_health>,<a2x>,<a2y>,<a2z>,<a2_items>,<live_actors>,<compat_ambiguous>,<sole_refused>,<g_actor>,
++//         <alife_actor>,<view_entity>
++//   map,<phase>,<slot>,<generation>,<state>,<player_hi>,<player_lo>,<entity>,<engine_id>,<engine_generation>,<stored_entity>
++//   check,<phase>,<ok>,<what>
++//   end,<ticks>,<sim_ms>,<wall_ms>,<checks>,<failures>,<phase>,<ok>
++
++#include "Level.h"
++#include "xrServer.h"
++#include "xrMessages.h"
++#include "Actor.h"
++#include "Actor_Flags.h"
++#include "ActorCondition.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "alife_graph_registry.h"
++#include "alife_time_manager.h"
++#include "script_engine.h"
++#include "script_process.h"
++#include "level_graph.h"
++#include "ai_object_location.h"
++#include "inventory.h"
++#include "inventory_item.h"
++#include "CharacterPhysicsSupport.h"
++#include "PHMovementControl.h"
++#include "hit.h"
++#include "CustomZone.h"
++#include "CampaignCombatCapture.h"
++#include "CampaignMessagePolicy.h"
++#include "xr_level_controller.h"
++#include "xrServer_Objects_ALife_Monsters.h"
++#include "../xrEngine/xr_object.h"
++#include "../xrEngine/device.h"
++
++// alife_simulator_script.cpp: the alife():create(section, position, lvid,
++// gvid, parent) and alife():release(object) bindings.
++CSE_Abstract* CALifeSimulator__spawn_item2(CALifeSimulator* self, LPCSTR section, const Fvector& position,
++	u32 level_vertex_id, GameGraph::_GRAPH_ID game_vertex_id, ALife::_OBJECT_ID id_parent);
++void CALifeSimulator__release(CALifeSimulator* self, CSE_Abstract* object, bool);
++
++extern u32 g_spawn_state_resyncs; // xrServer_Object_Base.cpp
++
++using namespace campaign;
++
++namespace
++{
++const u16 no_id = u16(-1);
++LPCSTR default_actor_section = "actor";
++LPCSTR default_weapon_section = "wpn_pm";
++LPCSTR default_consumable_section = "bandage";
++const float default_distance = 3.f;
++const u32 online_budget_ticks = 500; // 10 s for the switch manager to bring an entity online
++const u32 event_budget_ticks = 150; // 3 s for an event to land through the host's loop
++const u32 walk_ticks = 50; // 1 s of held input per actor
++const float walk_min_m = 0.3f;
++// The installed scripts ignore every actor hit for 7 s after the actor's
++// first update (bind_stalker_ext.script:74-76, _g.script CActor__BeforeHitCallback,
++// one global window for any actor): the first hit waits that out.
++const u32 hit_ready_ticks = 450; // 9 s of server ticks since the fixture began
++// A walk is measured after a settle period with no input, so the previous
++// walk's momentum does not count as movement.
++const u32 settle_ticks = 25;
++const float stand_max_m = 0.05f;
++
++PlayerId player_id(u64 n)
++{
++	PlayerId id;
++	id.hi = 0x5303000000000001ull;
++	id.lo = n;
++	return id;
++}
++
++PartyId party_id(u64 n)
++{
++	PartyId id;
++	id.hi = 0x5303000000000002ull;
++	id.lo = n;
++	return id;
++}
++
++ActionContext context(Origin origin, u32 session, const ParticipantRef& actor, const PartyId& party)
++{
++	ActionContext c;
++	c.origin = origin;
++	c.session = session;
++	c.actor = actor;
++	c.party = party;
++	return c;
++}
++
++void option_string(LPCSTR name, LPCSTR fallback, string64& value)
++{
++	xr_strcpy(value, fallback);
++	LPCSTR at = strstr(Core.Params, name);
++	if (at)
++		sscanf_s(at + xr_strlen(name), "%63s", value, u32(sizeof(value)));
++}
++
++float option_float(LPCSTR name, float fallback)
++{
++	float value = fallback;
++	LPCSTR at = strstr(Core.Params, name);
++	if (at && sscanf_s(at + xr_strlen(name), "%f", &value) != 1)
++		value = fallback;
++	return value;
++}
++
++struct Fixture
++{
++	FILE* out;
++	bool running;
++	bool ok;
++	u32 phase;
++	u32 ticks;
++	u32 phase_tick; // tick at which the phase began
++	u32 checks;
++	u32 failures;
++	string64 actor_section;
++	string64 weapon_section;
++	string64 consumable_section;
++	float distance;
++
++	ParticipantRef p1;
++	ParticipantRef p2;
++	u32 session2;
++	u16 actor1_id;
++	u16 actor2_id; // the second actor, later the third (phase 7)
++	u16 first_actor2_id;
++	EntityId actor2_entity;
++	EngineEntityKey actor2_key;
++	u16 weapon_id;
++	u16 consumable_id;
++	float health1_begin;
++	float health2_begin;
++	u32 items1_begin;
++	u32 items2_begin;
++	u32 money1_begin;
++	Fvector pos1_begin;
++	Fvector pos2_begin;
++	u64 compat_ambiguous0;
++	u64 sole_refused0;
++	u64 game_time0;
++	u32 frame0;
++	bool godmode_was;
++	bool godmode_rt_was;
++	u32 walk_phase; // 0: actor 2 walks, 1: actor 1 walks, 2: refused context, 3: the third actor walks
++	bool walk_started;
++	u32 walk_tick;
++	bool hit_sent;
++	u32 resyncs0;
++	SCombatTrace trace; // every CEntityAlive::Hit while a hit is in flight
++	SCombatCounters counters0;
++	u64 bridge_events0;
++};
++
++Fixture g_fixture = {};
++
++CActor* actor_by_id(u16 id)
++{
++	if (id == no_id || !g_pGameLevel)
++		return nullptr;
++	return smart_cast<CActor*>(Level().Objects.net_Find(id));
++}
++
++CInventoryItem* item_by_id(u16 id)
++{
++	if (id == no_id || !g_pGameLevel)
++		return nullptr;
++	return smart_cast<CInventoryItem*>(Level().Objects.net_Find(id));
++}
++
++bool check(bool condition, LPCSTR what)
++{
++	Fixture& f = g_fixture;
++	++f.checks;
++	if (!condition)
++	{
++		++f.failures;
++		f.ok = false;
++		Msg("! S03-T03 two-actors phase %u failed: %s", f.phase, what);
++	}
++	if (f.out)
++		fprintf(f.out, "check,%u,%d,%s\n", f.phase, condition ? 1 : 0, what);
++	return condition;
++}
++
++bool expect(Refusal observed, Refusal expected, LPCSTR what)
++{
++	string256 text;
++	xr_sprintf(text, "%s: expected %s observed %s", what, refusal_name(expected), refusal_name(observed));
++	return check(observed == expected, text);
++}
++
++void write_state()
++{
++	Fixture& f = g_fixture;
++	if (!f.out)
++		return;
++	CActor* a1 = actor_by_id(f.actor1_id);
++	CActor* a2 = actor_by_id(f.actor2_id);
++	const CSE_ALifeCreatureActor* se_actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
++	const ActorAccessStats& s = actor_access_stats();
++	fprintf(f.out,
++		"state,%u,%u,%u,%u,%d,%.4f,%.3f,%.3f,%.3f,%u,%u,%d,%.4f,%.3f,%.3f,%.3f,%u,%u,%I64u,%I64u,%u,%u,%u\n", f.phase,
++		f.ticks, Device.dwFrame, u32(f.actor1_id), a1 && a1->g_Alive() ? 1 : 0, a1 ? a1->GetfHealth() : -1.f,
++		a1 ? a1->Position().x : 0.f, a1 ? a1->Position().y : 0.f, a1 ? a1->Position().z : 0.f,
++		a1 ? u32(a1->inventory().m_all.size()) : 0, u32(f.actor2_id), a2 && a2->g_Alive() ? 1 : 0,
++		a2 ? a2->GetfHealth() : -1.f, a2 ? a2->Position().x : 0.f, a2 ? a2->Position().y : 0.f,
++		a2 ? a2->Position().z : 0.f, a2 ? u32(a2->inventory().m_all.size()) : 0,
++		g_campaign_identity ? u32(g_campaign_identity->live_actor_count()) : 0, s.compat_ambiguous, s.sole_refused,
++		g_actor ? u32(g_actor->ID()) : u32(no_id), se_actor ? u32(se_actor->ID) : u32(no_id),
++		Level().CurrentEntity() ? u32(Level().CurrentEntity()->ID()) : u32(no_id));
++}
++
++// The save-ready mapping of one participant: slot, player, entity, engine key
++// and the entity id the server entity stores. Returns the stored entity.
++void write_map(const ParticipantRef& ref)
++{
++	Fixture& f = g_fixture;
++	const Participant* view = nullptr;
++	if (g_campaign_identity->participant(ref, view) != Refusal::None || !view)
++		return;
++	CSE_Abstract* entity = Level().Server ? Level().Server->ID_to_entity(view->actor_key.id) : nullptr;
++	const u64 stored = entity && view->actor.valid() ? entity->m_campaign_entity : 0;
++	Msg("S03-T03 map participant {%u,%u} state=%s player=%016I64x%016I64x entity=%I64u engine={%u,%u} stored=%I64u",
++		u32(ref.slot), ref.generation, participant_state_name(view->state), view->player.hi, view->player.lo,
++		view->actor.value, u32(view->actor_key.id), view->actor_key.generation, stored);
++	if (f.out)
++		fprintf(f.out, "map,%u,%u,%u,%s,%016I64x,%016I64x,%I64u,%u,%u,%I64u\n", f.phase, u32(ref.slot), ref.generation,
++			participant_state_name(view->state), view->player.hi, view->player.lo, view->actor.value,
++			u32(view->actor_key.id), view->actor_key.generation, stored);
++}
++
++// A level vertex about `distance` m from the actor: the position's own
++// vertex when the AI map has an accessible one there, else the actor's own.
++bool choose_position(CActor* actor, float distance, u32& vertex, Fvector& position)
++{
++	const CLevelGraph& graph = ai().level_graph();
++	const float yaw = -actor->Orientation().yaw;
++	Fvector side;
++	side.set(_cos(yaw), 0.f, -_sin(yaw)); // to the actor's right
++	for (u32 attempt = 0; attempt < 4; ++attempt)
++	{
++		Fvector target;
++		target.mad(actor->Position(), side, distance);
++		if (graph.valid_vertex_position(target))
++		{
++			const u32 at = graph.vertex_id(target);
++			if (graph.valid_vertex_id(at) && graph.is_accessible(at))
++			{
++				vertex = at;
++				position = graph.vertex_position(at);
++				return true;
++			}
++		}
++		// turn the side vector 90 degrees and try again
++		side.set(-side.z, 0.f, side.x);
++	}
++	vertex = actor->ai_location().level_vertex_id();
++	if (!graph.valid_vertex_id(vertex))
++		return false;
++	position = graph.vertex_position(vertex);
++	position.x += 1.5f;
++	return true;
++}
++
++// Spawns an actor entity beside actor 1 and assigns it to participant 2.
++bool spawn_second_actor(LPCSTR purpose)
++{
++	Fixture& f = g_fixture;
++	CActor* actor1 = actor_by_id(f.actor1_id);
++	const CSE_ALifeCreatureActor* se_actor = ai().alife().graph().actor();
++	if (!actor1 || !se_actor)
++		return check(false, "actor 1 and the ALife actor exist for the spawn");
++	u32 vertex = u32(-1);
++	Fvector position;
++	if (!choose_position(actor1, f.distance, vertex, position))
++		return check(false, "a level vertex beside actor 1");
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_Abstract* entity = alife->spawn_item(f.actor_section, position, vertex, se_actor->m_tGraphID, no_id);
++	CSE_ALifeCreatureActor* se_second = entity ? smart_cast<CSE_ALifeCreatureActor*>(entity) : nullptr;
++	if (!check(se_second != nullptr, "the actor section spawned a CSE_ALifeCreatureActor"))
++		return false;
++	check(!se_second->s_flags.is(M_SPAWN_OBJECT_ASPLAYER), "the second actor is not flagged as the player entity");
++	check(ai().alife().graph().actor() == se_actor, "the ALife actor is still the saved actor after the spawn");
++	f.actor2_id = entity->ID;
++	// Explicit: participant 2 owns this entity from now on; the adoption at
++	// its net_Spawn finds it already held.
++	expect(assign_participant_actor(f.p2, f.actor2_id), Refusal::None, "the entity is assigned to participant 2");
++	ParticipantRef stale = f.p2;
++	stale.generation += 1;
++	expect(assign_participant_actor(stale, f.actor2_id), Refusal::StaleReference,
++		"a stale participant reference cannot take the entity");
++	expect(assign_participant_actor(f.p1, f.actor2_id), Refusal::AlreadyBound,
++		"participant 1 cannot take participant 2's entity");
++	expect(assign_participant_actor(f.p2, 0x7eef), Refusal::StaleReference, "an unassigned engine id cannot be assigned");
++	EngineEntityKey key;
++	if (g_campaign_identity->current_key(f.actor2_id, key))
++	{
++		f.actor2_key = key;
++		g_campaign_identity->resolve(key, f.actor2_entity);
++	}
++	Msg("S03-T03 %s: spawned %s id=%u entity=%I64u at [%.2f,%.2f,%.2f] vertex %u, %.2f m from actor %u", purpose,
++		f.actor_section, u32(f.actor2_id), f.actor2_entity.value, VPUSH(position), vertex,
++		actor1->Position().distance_to(position), u32(f.actor1_id));
++	f.phase_tick = f.ticks;
++	return true;
++}
++
++// The hit's source: an anomaly zone on the level, the engine's own
++// non-creature hitter. The installed CActor__BeforeHitCallback (_g.script)
++// ignores hits whose source is a stalker or actor friendly to db.actor, so a
++// hit "from" the other actor or from the victim itself never lands (S03-T05).
++CGameObject* find_zone_hitter()
++{
++	CLevel& level = Level();
++	for (u32 i = 0; i < level.Objects.o_count(); ++i)
++	{
++		CObject* object = level.Objects.o_get_by_iterator(i);
++		if (object->getDestroy())
++			continue;
++		if (CCustomZone* zone = smart_cast<CCustomZone*>(object))
++			return zone;
++	}
++	return nullptr;
++}
++
++// A hit on `victim` through the host's event loop, as the bullet manager and
++// the zones send theirs: GE_HIT from the bridge, queued by the server as
++// GAME_EVENT_ON_HIT, broadcast and applied by CGameObject::OnEvent.
++void send_hit(CActor* victim, float power)
++{
++	CGameObject* hitter = find_zone_hitter();
++	if (!check(hitter != nullptr, "an anomaly zone on the level is the hit source"))
++		return;
++	Fvector dir;
++	dir.set(0.f, 0.f, 1.f);
++	SHit HDS(power, dir, hitter, 0, Fvector().set(0.f, 0.f, 0.f), 0.f, ALife::eHitTypeWound, 0.f, false);
++	HDS.whoID = hitter->ID();
++	HDS.weaponID = hitter->ID();
++	HDS.BulletID = 0;
++	HDS.SenderID = 0;
++	HDS.GenHeader(GE_HIT, victim->ID());
++	NET_Packet P;
++	HDS.Write_Packet(P);
++	Fixture& f = g_fixture;
++	f.trace = SCombatTrace();
++	g_combat_trace = &f.trace;
++	f.counters0 = g_combat_counters;
++	f.bridge_events0 = message_policy_stats().bridge_events;
++	Msg("S03-T03 hit: power %.1f to actor %u from zone %u (%s) godmode=%d health=%.4f", power, u32(victim->ID()),
++		u32(hitter->ID()), hitter->cName().c_str(), GodMode() ? 1 : 0, victim->GetfHealth());
++	Level().Send(P, net_flags(TRUE, TRUE));
++}
++
++// What a hit in flight did: the policy's bridge events, every CEntityAlive::Hit recorded, the counters.
++void report_hit(LPCSTR tag)
++{
++	Fixture& f = g_fixture;
++	g_combat_trace = nullptr;
++	Msg("S03-T03 hit %s: bridge_events=%I64u entity_hits=%u deaths=%u records=%u godmode=%d", tag,
++		message_policy_stats().bridge_events - f.bridge_events0, g_combat_counters.hits - f.counters0.hits,
++		g_combat_counters.deaths - f.counters0.deaths, u32(f.trace.hits.size()), GodMode() ? 1 : 0);
++	for (u32 i = 0; i < f.trace.hits.size() && i < 8; ++i)
++	{
++		const CombatHitRecord& r = f.trace.hits[i];
++		Msg("S03-T03 hit %s record victim=%u who=%u power=%.4f type=%d bone=%u health_after=%.4f", tag, u32(r.victim),
++			u32(r.who), r.power, r.hit_type, u32(r.bone), r.health_after);
++	}
++}
++
++void begin_phase(u32 phase)
++{
++	Fixture& f = g_fixture;
++	f.phase = phase;
++	f.phase_tick = f.ticks;
++	Msg("S03-T03 two-actors phase %u at tick %u", phase, f.ticks);
++	write_state();
++}
++
++u32 ticks_in_phase()
++{
++	return g_fixture.ticks - g_fixture.phase_tick;
++}
++
++void finish(bool ok)
++{
++	Fixture& f = g_fixture;
++	f.ok = f.ok && ok;
++	f.running = false;
++}
++
++// --- phase 1: identity -------------------------------------------------------
++
++void phase_identity(CActor* a1, CActor* a2)
++{
++	Fixture& f = g_fixture;
++	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	const ActorAccessStats& s = actor_access_stats();
++	ParticipantRef who;
++	Refusal why = Refusal::None;
++	check(a1 != a2 && a1->ID() != a2->ID(), "two distinct actor objects");
++	check(a2->Local() && a2->getEnabled() && a2->g_Alive(), "actor 2 is local, enabled and alive");
++	check(is_participant_actor(a1) && is_participant_actor(a2), "both actors are participant actors");
++	expect(participant_of(a1, who), Refusal::None, "actor 1 is held");
++	check(who == f.p1, "actor 1 is held by participant 1");
++	expect(participant_of(a2, who), Refusal::None, "actor 2 is held");
++	check(who == f.p2, "actor 2 is held by participant 2");
++	check(participant_actor(f.p1, &why) == a1, "participant 1 resolves actor 1");
++	check(participant_actor(f.p2, &why) == a2, "participant 2 resolves actor 2");
++	xr_vector<CActor*> actors;
++	check(participant_actors(actors) == 2 && actors[0] != actors[1] &&
++			((actors[0] == a1 && actors[1] == a2) || (actors[0] == a2 && actors[1] == a1)),
++		"participant_actors lists exactly the two");
++	check(registry.live_actor_count() == 2, "the registry counts two live actors");
++	const u64 ambiguous0 = s.compat_ambiguous;
++	const u64 sole0 = s.sole_refused;
++	check(Actor() == nullptr, "Actor() refuses with two participant actors");
++	check(s.compat_ambiguous == ambiguous0 + 1, "...and counts the ambiguity");
++	check(sole_participant_actor("two-actors") == nullptr, "sole_participant_actor refuses with two");
++	check(s.sole_refused == sole0 + 1, "...and counts the refusal");
++	check(g_actor == a1, "g_actor is still the saved actor (nothing reads it for gameplay)");
++	check(ai().alife().graph().actor() && ai().alife().graph().actor()->ID == a1->ID(),
++		"the ALife actor is still the saved actor");
++	check(!Level().CurrentEntity() && !Level().CurrentViewEntity() && !Level().CurrentControlEntity(),
++		"the server still has no view or control entity");
++	check(controls_actor(a1) && controls_actor(a2), "the server controls both participant actors");
++	Fvector near2 = a2->Position();
++	near2.y += 0.5f;
++	check(nearest_participant_actor(near2, &who) == a2 && who == f.p2, "the nearest participant actor to actor 2 is actor 2");
++	Fvector near1 = a1->Position();
++	near1.y += 0.5f;
++	check(nearest_participant_actor(near1, &who) == a1 && who == f.p1, "the nearest participant actor to actor 1 is actor 1");
++
++	// Distinct identities, save-ready.
++	const Participant* v1 = nullptr;
++	const Participant* v2 = nullptr;
++	registry.participant(f.p1, v1);
++	registry.participant(f.p2, v2);
++	check(v1 && v2 && v1->player != v2->player, "the two participants hold different players");
++	check(v1 && v2 && v1->actor.valid() && v2->actor.valid() && v1->actor != v2->actor,
++		"the two actors have different entity ids");
++	CSE_Abstract* se1 = Level().Server->ID_to_entity(a1->ID());
++	CSE_Abstract* se2 = Level().Server->ID_to_entity(a2->ID());
++	check(se1 && v1 && se1->m_campaign_entity == v1->actor.value, "actor 1's server entity stores its entity id");
++	check(se2 && v2 && se2->m_campaign_entity == v2->actor.value, "actor 2's server entity stores its entity id");
++	write_map(f.p1);
++	write_map(f.p2);
++
++	// Contexts resolve their own participant's actor only.
++	check(context_actor(context(Origin::ClientIntent, f.session2, f.p2, party_id(1)), Scope::Self, &why) == a2,
++		"a client intent on participant 2's session acts on actor 2");
++	check(context_actor(context(Origin::ClientIntent, f.session2, f.p1, party_id(1)), Scope::Self, &why) == nullptr &&
++			why == Refusal::NotAuthoritative,
++		"participant 2's session cannot act on actor 1");
++	check(context_actor(context(Origin::ServerInternal, 0, f.p1, party_id(1)), Scope::World, &why) == a1,
++		"a server-internal context for participant 1 resolves actor 1");
++	check(context_actor(context(Origin::ServerInternal, 0, f.p2, party_id(1)), Scope::World, &why) == a2,
++		"a server-internal context for participant 2 resolves actor 2");
++
++	// Condition baselines, then the first hit.
++	f.health1_begin = a1->GetfHealth();
++	f.health2_begin = a2->GetfHealth();
++	f.items1_begin = u32(a1->inventory().m_all.size());
++	f.items2_begin = u32(a2->inventory().m_all.size());
++	f.money1_begin = a1->get_money();
++	check(a2->GetfHealth() > 0.9f, "actor 2 spawned healthy");
++	check(!GodMode(), "god mode is off for the hits");
++	Msg("S03-T03 identity: actor1 health=%.4f items=%u money=%u; actor2 health=%.4f items=%u", f.health1_begin,
++		f.items1_begin, f.money1_begin, f.health2_begin, f.items2_begin);
++	f.hit_sent = false;
++	begin_phase(2);
++}
++
++// --- phase 2: condition --------------------------------------------------------
++
++void phase_condition_tick(CActor* a1, CActor* a2)
++{
++	Fixture& f = g_fixture;
++	if (!f.hit_sent)
++	{
++		if (f.ticks < hit_ready_ticks)
++			return;
++		f.health1_begin = a1->GetfHealth();
++		f.health2_begin = a2->GetfHealth();
++		send_hit(a2, 0.5f);
++		f.hit_sent = true;
++		f.phase_tick = f.ticks;
++		Msg("S03-T03 condition: wound hit sent to actor %u at tick %u (health %.4f)", u32(a2->ID()), f.ticks, f.health2_begin);
++		return;
++	}
++	const bool landed = a2->GetfHealth() < f.health2_begin - 0.01f;
++	if (!landed && ticks_in_phase() < event_budget_ticks)
++		return;
++	report_hit("wound");
++	check(landed, "the wound hit lowered actor 2's health");
++	check(fsimilar(a1->GetfHealth(), f.health1_begin), "actor 1's health is untouched by actor 2's hit");
++	check(a2->g_Alive() && a1->g_Alive(), "both actors are alive after the wound");
++	Msg("S03-T03 condition after %u ticks: actor1 health=%.4f actor2 health=%.4f", ticks_in_phase(), a1->GetfHealth(),
++		a2->GetfHealth());
++	// Items for actor 2, the way alife():create with a parent does.
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	const CSE_ALifeCreatureActor* se_actor = ai().alife().graph().actor();
++	f.weapon_id = f.consumable_id = no_id;
++	if (pSettings->section_exist(f.weapon_section))
++	{
++		CSE_Abstract* w = CALifeSimulator__spawn_item2(alife, f.weapon_section, a2->Position(),
++			a2->ai_location().level_vertex_id(), se_actor->m_tGraphID, a2->ID());
++		if (check(w != nullptr, "the weapon spawned for actor 2"))
++			f.weapon_id = w->ID;
++	}
++	else
++		check(false, "the weapon section exists");
++	if (pSettings->section_exist(f.consumable_section))
++	{
++		CSE_Abstract* c = CALifeSimulator__spawn_item2(alife, f.consumable_section, a2->Position(),
++			a2->ai_location().level_vertex_id(), se_actor->m_tGraphID, a2->ID());
++		if (check(c != nullptr, "the consumable spawned for actor 2"))
++			f.consumable_id = c->ID;
++	}
++	else
++		check(false, "the consumable section exists");
++	Msg("S03-T03 inventory: spawned %s id=%u and %s id=%u into actor %u", f.weapon_section, u32(f.weapon_id),
++		f.consumable_section, u32(f.consumable_id), u32(a2->ID()));
++	begin_phase(3);
++}
++
++// --- phase 3: inventory --------------------------------------------------------
++
++void phase_inventory_tick(CActor* a1, CActor* a2)
++{
++	Fixture& f = g_fixture;
++	CInventoryItem* weapon = item_by_id(f.weapon_id);
++	CInventoryItem* consumable = item_by_id(f.consumable_id);
++	const bool both = weapon && consumable && weapon->object().H_Parent() == a2 && consumable->object().H_Parent() == a2;
++	if (!both && ticks_in_phase() < online_budget_ticks)
++		return;
++	check(weapon != nullptr && consumable != nullptr, "both items came online");
++	check(both, "both items are actor 2's children");
++	check(u32(a2->inventory().m_all.size()) == f.items2_begin + 2, "actor 2's inventory grew by the two items");
++	check(u32(a1->inventory().m_all.size()) == f.items1_begin, "actor 1's inventory is unchanged");
++	check(weapon && (a2->inventory().InSlot(weapon) || a2->inventory().InRuck(weapon)),
++		"the weapon is in actor 2's slot or ruck");
++	check(consumable && (a2->inventory().InRuck(consumable) || a2->inventory().InBelt(consumable) ||
++							a2->inventory().InSlot(consumable)),
++		"the consumable is in one of actor 2's containers");
++	// CInventory::InSlot/InRuck test the item's place, not the owner; the owner is the item's inventory.
++	check(weapon && weapon->m_pInventory == &a2->inventory() && weapon->m_pInventory != &a1->inventory(),
++		"the weapon's inventory is actor 2's, not actor 1's");
++	check(consumable && consumable->m_pInventory == &a2->inventory(), "the consumable's inventory is actor 2's");
++	check(a1->get_money() == f.money1_begin, "actor 1's money is unchanged");
++	Msg("S03-T03 inventory after %u ticks: actor1 items=%u actor2 items=%u weapon_slot=%d weapon_ruck=%d active2=%u",
++		ticks_in_phase(), u32(a1->inventory().m_all.size()), u32(a2->inventory().m_all.size()),
++		weapon && a2->inventory().InSlot(weapon) ? 1 : 0, weapon && a2->inventory().InRuck(weapon) ? 1 : 0,
++		a2->inventory().ActiveItem() ? u32(a2->inventory().ActiveItem()->object().ID()) : u32(no_id));
++	f.walk_phase = 0;
++	f.walk_started = false;
++	begin_phase(4);
++}
++
++// --- phase 4: control ----------------------------------------------------------
++
++// Holds one command under a context for walk_ticks ticks, then measures how
++// far each actor moved. Returns true once the walk is over.
++bool hold_and_measure(const ActionContext& ctx, Refusal expected, LPCSTR reach, float& moved1, float& moved2)
++{
++	Fixture& f = g_fixture;
++	CActor* a1 = actor_by_id(f.actor1_id);
++	CActor* a2 = actor_by_id(f.actor2_id);
++	if (!f.walk_started)
++	{
++		f.walk_started = true;
++		f.walk_tick = f.ticks;
++		return false;
++	}
++	const u32 elapsed = f.ticks - f.walk_tick;
++	if (elapsed < settle_ticks)
++		return false; // settling, no input
++	if (elapsed == settle_ticks)
++	{
++		f.pos1_begin = a1->Position();
++		f.pos2_begin = a2->Position();
++		const ActorControlStats& cs = actor_control_stats();
++		const u64 refused0 = cs.input_refused;
++		expect(actor_input_hold(ctx, kFWD), expected, reach);
++		if (expected != Refusal::None)
++			check(cs.input_refused == refused0 + 1, "...and the refusal is counted");
++		return false;
++	}
++	if (elapsed < settle_ticks + walk_ticks)
++	{
++		actor_input_hold(ctx, kFWD);
++		return false;
++	}
++	moved1 = a1->Position().distance_to(f.pos1_begin);
++	moved2 = a2->Position().distance_to(f.pos2_begin);
++	f.walk_started = false;
++	return true;
++}
++
++void phase_control_tick(CActor* a1, CActor* a2)
++{
++	Fixture& f = g_fixture;
++	const ActionContext ctx1 = context(Origin::ServerInternal, 0, f.p1, party_id(1));
++	const ActionContext ctx2 = context(Origin::ClientIntent, f.session2, f.p2, party_id(1));
++	const ActionContext forged = context(Origin::ClientIntent, f.session2, f.p1, party_id(1));
++	float moved1 = 0.f, moved2 = 0.f;
++	if (f.walk_phase == 0)
++	{
++		if (!hold_and_measure(ctx2, Refusal::None, "participant 2's input reaches actor 2", moved1, moved2))
++			return;
++		Msg("S03-T03 control: participant 2 held forward %u ticks: actor2 moved %.3f m, actor1 moved %.3f m", walk_ticks,
++			moved2, moved1);
++		check(moved2 >= walk_min_m, "actor 2 walked under participant 2's input");
++		check(moved1 <= stand_max_m, "actor 1 stood while participant 2 walked");
++		f.walk_phase = 1;
++		return;
++	}
++	if (f.walk_phase == 1)
++	{
++		if (!hold_and_measure(ctx1, Refusal::None, "participant 1's input reaches actor 1", moved1, moved2))
++			return;
++		Msg("S03-T03 control: participant 1 held forward %u ticks: actor1 moved %.3f m, actor2 moved %.3f m", walk_ticks,
++			moved1, moved2);
++		check(moved1 >= walk_min_m, "actor 1 walked under participant 1's input");
++		check(moved2 <= stand_max_m, "actor 2 stood while participant 1 walked");
++		f.walk_phase = 2;
++		return;
++	}
++	// A forged context: participant 2's session naming participant 1 moves nobody.
++	if (!hold_and_measure(forged, Refusal::NotAuthoritative, "participant 2's session cannot drive actor 1", moved1, moved2))
++		return;
++	Msg("S03-T03 control: forged context held forward %u ticks: actor1 moved %.3f m, actor2 moved %.3f m", walk_ticks,
++		moved1, moved2);
++	check(moved1 <= stand_max_m && moved2 <= stand_max_m, "nobody moved under the forged context");
++	// The lethal hit.
++	f.health1_begin = a1->GetfHealth();
++	send_hit(a2, 100.f);
++	begin_phase(5);
++}
++
++// --- phase 5: death ------------------------------------------------------------
++
++void phase_death_tick(CActor* a1, CActor* a2)
++{
++	Fixture& f = g_fixture;
++	const bool dead = !a2->g_Alive();
++	if (!dead && ticks_in_phase() < event_budget_ticks)
++		return;
++	report_hit("lethal");
++	check(dead, "the lethal hit killed actor 2");
++	check(a1->g_Alive(), "actor 1 is alive after actor 2's death");
++	check(fsimilar(a1->GetfHealth(), f.health1_begin), "actor 1's health is untouched by actor 2's death");
++	check(participant_actor(f.p2) == a2, "participant 2 still holds its dead actor");
++	check(participant_actor(f.p1) == a1, "participant 1 still holds actor 1");
++	check(g_campaign_identity->live_actor_count() == 2, "the registry still counts two actors");
++	check(Actor() == nullptr, "Actor() still refuses (a dead participant actor is still held)");
++	check(g_actor == a1, "g_actor is unchanged by actor 2's death");
++	check(ai().alife().graph().actor() && ai().alife().graph().actor()->ID == a1->ID(),
++		"the ALife actor is unchanged by actor 2's death");
++	check(!Level().CurrentEntity() && !Level().CurrentViewEntity(), "no view entity appeared");
++	check(ai().alife().time_manager().game_time() > f.game_time0, "the ALife clock advanced");
++	check(Device.dwFrame > f.frame0, "the frame driver advanced");
++	check(a1->shedule_Needed() && a1->processing_enabled(), "actor 1 is still scheduled and processed");
++	check(ai().get_alife() != nullptr && Level().Server != nullptr, "ALife and the server exist");
++	check(ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel) != nullptr,
++		"the level script process exists");
++	Msg("S03-T03 death after %u ticks: actor2 alive=%d health=%.4f; actor1 alive=%d health=%.4f", ticks_in_phase(),
++		a2->g_Alive() ? 1 : 0, a2->GetfHealth(), a1->g_Alive() ? 1 : 0, a1->GetfHealth());
++	f.frame0 = Device.dwFrame;
++	f.game_time0 = ai().alife().time_manager().game_time();
++	// Release, as alife():release does.
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_Abstract* se2 = Level().Server->ID_to_entity(a2->ID());
++	if (check(se2 != nullptr, "actor 2's server entity exists for the release"))
++		CALifeSimulator__release(alife, se2, true);
++	f.first_actor2_id = f.actor2_id;
++	begin_phase(6);
++}
++
++// --- phase 6: lifecycle --------------------------------------------------------
++
++void phase_lifecycle_tick(CActor* a1)
++{
++	Fixture& f = g_fixture;
++	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	CActor* a2 = actor_by_id(f.actor2_id);
++	const bool gone = a2 == nullptr && Level().Server->ID_to_entity(f.actor2_id) == nullptr;
++	if (!gone && ticks_in_phase() < event_budget_ticks)
++		return;
++	check(gone, "actor 2's object and server entity are gone");
++	check(ai().alife().objects().object(f.actor2_id, true) == nullptr, "actor 2's ALife object is gone");
++	EntityId stale_entity;
++	check(registry.resolve(f.actor2_key, stale_entity) == Refusal::StaleReference,
++		"actor 2's engine key is stale (the u16 may be recycled; the entity id is not)");
++	Refusal why = Refusal::None;
++	check(participant_actor(f.p2, &why) == nullptr && why == Refusal::NoActor, "participant 2 holds no actor");
++	const Participant* v2 = nullptr;
++	registry.participant(f.p2, v2);
++	check(v2 && v2->state == ParticipantState::Attached && v2->player == player_id(2),
++		"participant 2 keeps its slot, player and session");
++	check(participant_actor(f.p1) == a1, "participant 1 still holds actor 1");
++	xr_vector<CActor*> actors;
++	check(participant_actors(actors) == 1 && actors[0] == a1, "actor 1 is the only participant actor");
++	check(registry.live_actor_count() == 1, "the registry counts one live actor");
++	check(sole_participant_actor("two-actors") == a1, "the sole participant actor is actor 1 again");
++	const ActorAccessStats& s = actor_access_stats();
++	const u64 none0 = s.compat_none;
++	check(Actor() == a1, "Actor() returns actor 1 again");
++	check(s.compat_none == none0, "...without a refusal");
++	check(a1->g_Alive() && fsimilar(a1->GetfHealth(), f.health1_begin), "actor 1 is alive with its health");
++	check(ai().alife().time_manager().game_time() > f.game_time0 && Device.dwFrame > f.frame0,
++		"the clock and the frame driver advanced through the release");
++	check(xrCampaignLevel_IdentityCheck(), "the identity audit balances after the release");
++	write_map(f.p1);
++	write_map(f.p2);
++	Msg("S03-T03 lifecycle after %u ticks: actor %u released; participant 2 state=%s", ticks_in_phase(),
++		u32(f.actor2_id), v2 ? participant_state_name(v2->state) : "-");
++	// The slot is reused: a third actor for participant 2.
++	const EntityId previous = f.actor2_entity;
++	if (!spawn_second_actor("reuse"))
++	{
++		finish(false);
++		return;
++	}
++	check(f.actor2_entity.valid() && f.actor2_entity.value > previous.value,
++		"the third actor has a new, larger entity id");
++	begin_phase(7);
++}
++
++// --- phase 7: reuse ------------------------------------------------------------
++
++void phase_reuse_tick(CActor* a1)
++{
++	Fixture& f = g_fixture;
++	CActor* a3 = actor_by_id(f.actor2_id);
++	if (f.walk_phase != 3)
++	{
++		if (!a3 && ticks_in_phase() < online_budget_ticks)
++			return;
++		if (!check(a3 != nullptr, "the third actor came online"))
++		{
++			finish(false);
++			return;
++		}
++		ParticipantRef who;
++		expect(participant_of(a3, who), Refusal::None, "the third actor is held");
++		check(who == f.p2, "...by participant 2, the same slot and generation");
++		check(participant_actor(f.p2) == a3, "participant 2 resolves the third actor");
++		check(participant_actor(f.p1) == a1, "participant 1 still resolves actor 1");
++		check(g_campaign_identity->live_actor_count() == 2, "two live actors again");
++		check(Actor() == nullptr, "Actor() refuses again with two");
++		const Participant* v2 = nullptr;
++		g_campaign_identity->participant(f.p2, v2);
++		CSE_Abstract* se3 = Level().Server->ID_to_entity(a3->ID());
++		check(v2 && se3 && v2->actor == f.actor2_entity && se3->m_campaign_entity == v2->actor.value,
++			"the third actor's entity id is stored on its server entity");
++		write_map(f.p2);
++		f.walk_phase = 3;
++		f.walk_started = false;
++		return;
++	}
++	const ActionContext ctx2 = context(Origin::ClientIntent, f.session2, f.p2, party_id(1));
++	float moved1 = 0.f, moved3 = 0.f;
++	if (!hold_and_measure(ctx2, Refusal::None, "participant 2's input reaches the third actor", moved1, moved3))
++		return;
++	Msg("S03-T03 reuse: participant 2 held forward %u ticks: actor3 moved %.3f m, actor1 moved %.3f m", walk_ticks,
++		moved3, moved1);
++	check(moved3 >= walk_min_m, "the third actor walked under participant 2's input");
++	check(moved1 <= stand_max_m, "actor 1 stood");
++	write_state();
++	finish(true);
++}
++} // namespace
++
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsBegin(LPCSTR out_path)
++{
++	Fixture& f = g_fixture;
++	f = Fixture();
++	f.ok = true;
++	f.actor1_id = f.actor2_id = f.first_actor2_id = f.weapon_id = f.consumable_id = no_id;
++	option_string("-s03-actor-section ", default_actor_section, f.actor_section);
++	option_string("-s03-weapon-section ", default_weapon_section, f.weapon_section);
++	option_string("-s03-consumable-section ", default_consumable_section, f.consumable_section);
++	f.distance = option_float("-s03-actor-distance ", default_distance);
++	if (!g_campaign_identity || g_campaign_identity->role() != Role::Server || !g_pGameLevel || !Level().Server ||
++		!ai().get_alife() || !ai().get_level_graph())
++	{
++		Msg("! S03-T03 two-actors: no server registry, level, ALife or level graph");
++		return false;
++	}
++	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	const ServerAuthority* authority = registry.authority();
++	CActor* actor1 = g_actor;
++	if (!actor1 || !actor1->g_Alive())
++	{
++		Msg("! S03-T03 two-actors: no alive saved actor");
++		return false;
++	}
++	f.out = fopen(out_path, "w");
++	if (!f.out)
++	{
++		Msg("! S03-T03 two-actors: cannot write %s", out_path);
++		return false;
++	}
++	f.actor1_id = actor1->ID();
++	f.running = true;
++	f.phase = 0;
++	f.frame0 = Device.dwFrame;
++	f.game_time0 = ai().alife().time_manager().game_time();
++	f.compat_ambiguous0 = actor_access_stats().compat_ambiguous;
++	f.resyncs0 = g_spawn_state_resyncs;
++	f.sole_refused0 = actor_access_stats().sole_refused;
++	// The single-player god-mode flags are global (every actor); off for the hits.
++	f.godmode_was = !!psActorFlags.test(AF_GODMODE);
++	f.godmode_rt_was = !!psActorFlags.test(AF_GODMODE_RT);
++	psActorFlags.set(AF_GODMODE, FALSE);
++	psActorFlags.set(AF_GODMODE_RT, FALSE);
++
++	expect(participant_of(actor1, f.p1), Refusal::None, "the saved actor is held by a participant");
++	ParticipantRef existing;
++	if (registry.find_player(player_id(2), existing) == Refusal::None)
++		expect(registry.release_participant(authority, existing, Device.dwFrame), Refusal::None,
++			"a leftover participant 2 is released first");
++	expect(registry.bind_participant(authority, player_id(2), party_id(1), Device.dwFrame, f.p2), Refusal::None,
++		"participant 2 is bound for player 2");
++	f.session2 = 0x53030002;
++	expect(registry.attach_session(authority, f.p2, f.session2, Device.dwFrame), Refusal::None,
++		"participant 2's session is attached");
++	Refusal why = Refusal::None;
++	check(participant_actor(f.p2, &why) == nullptr && why == Refusal::NoActor, "participant 2 holds no actor yet");
++	fprintf(f.out, "meta,%u,%u,%s,%u,%s,%s,%s,%.2f,%d,%d\n", Device.dwFrame, Device.dwTimeGlobal, *Level().name(),
++		u32(f.actor1_id), f.actor_section, f.weapon_section, f.consumable_section, f.distance, f.godmode_was ? 1 : 0,
++		f.godmode_rt_was ? 1 : 0);
++	if (!spawn_second_actor("spawn"))
++	{
++		finish(false);
++		return false;
++	}
++	begin_phase(0);
++	return f.ok;
++}
++
++extern "C" void __cdecl xrCampaignLevel_TwoActorsTick()
++{
++	Fixture& f = g_fixture;
++	if (!f.running)
++		return;
++	++f.ticks;
++	CActor* a1 = actor_by_id(f.actor1_id);
++	if (!a1)
++	{
++		check(false, "actor 1 disappeared");
++		finish(false);
++		return;
++	}
++	CActor* a2 = actor_by_id(f.actor2_id);
++	switch (f.phase)
++	{
++	case 0:
++		if (a2)
++		{
++			Msg("S03-T03 actor %u online at tick %u", u32(f.actor2_id), f.ticks);
++			begin_phase(1);
++			phase_identity(a1, a2);
++		}
++		else if (ticks_in_phase() >= online_budget_ticks)
++		{
++			check(false, "the second actor came online");
++			finish(false);
++		}
++		break;
++	case 2:
++		if (a2)
++			phase_condition_tick(a1, a2);
++		break;
++	case 3:
++		if (a2)
++			phase_inventory_tick(a1, a2);
++		break;
++	case 4:
++		if (a2)
++			phase_control_tick(a1, a2);
++		break;
++	case 5:
++		if (a2)
++			phase_death_tick(a1, a2);
++		break;
++	case 6:
++		phase_lifecycle_tick(a1);
++		break;
++	case 7:
++		phase_reuse_tick(a1);
++		break;
++	default:
++		break;
++	}
++	if (f.running && f.phase >= 2 && f.phase <= 5 && !a2)
++	{
++		check(false, "actor 2 exists during the phase");
++		finish(false);
++	}
++}
++
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsDone()
++{
++	return !g_fixture.running;
++}
++
++extern "C" bool __cdecl xrCampaignLevel_TwoActorsEnd(u32 ticks, u32 sim_ms, u32 wall_ms)
++{
++	Fixture& f = g_fixture;
++	if (f.running)
++	{
++		check(false, "the fixture finished within its tick budget");
++		f.running = false;
++	}
++	psActorFlags.set(AF_GODMODE, f.godmode_was ? TRUE : FALSE);
++	psActorFlags.set(AF_GODMODE_RT, f.godmode_rt_was ? TRUE : FALSE);
++	const ActorAccessStats& s = actor_access_stats();
++	Msg("S03-T03 two-actors end ticks=%u sim_ms=%u wall_ms=%u checks=%u failures=%u phase=%u actor1=%u actor2=%u "
++		"compat_ambiguous=%I64u sole_refused=%I64u spawn_state_resyncs=%u (total %u) ok=%d",
++		ticks, sim_ms, wall_ms, f.checks, f.failures, f.phase, u32(f.actor1_id), u32(f.actor2_id),
++		s.compat_ambiguous - f.compat_ambiguous0, s.sole_refused - f.sole_refused0, g_spawn_state_resyncs - f.resyncs0,
++		g_spawn_state_resyncs, f.ok ? 1 : 0);
++	if (f.out)
++	{
++		fprintf(f.out, "end,%u,%u,%u,%u,%u,%u,%d\n", ticks, sim_ms, wall_ms, f.checks, f.failures, f.phase, f.ok ? 1 : 0);
++		fclose(f.out);
++		f.out = nullptr;
++	}
++	report_actor_access("two-actors");
++	report_actor_control("two-actors");
++	return f.ok && f.failures == 0;
++}
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index a81f1d0..f8737de 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -9,6 +9,7 @@
+ #include "pch_script.h"
+ #include "level.h"
+ #include "actor.h"
++#include "CampaignActorAccess.h" // S03-T03
+ #include "script_game_object.h"
+ #include "patrol_path_storage.h"
+ #include "xrServer.h"
+@@ -832,13 +833,30 @@ void iterate_sounds2(LPCSTR prefix, u32 max_count, ::luabind::object object, ::l
+ 
+ #include "actoreffector.h"
+ 
++// S03-T03: script camera and post-process effectors are presentation on the
++// viewer's own actor (none on the campaign server, where they are dropped);
++// see docs/actor-access-inventory.md. The gameplay bindings below keep the
++// counted compatibility accessor behind a null guard until S03-T05 gives
++// them a participant context.
++static CEffectorCam* viewer_cam_effector(int id)
++{
++	CActor* viewer = campaign::local_view_actor();
++	return viewer ? viewer->Cameras().GetCamEffector((ECamEffectorType)id) : nullptr;
++}
++
+ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func)
+ {
+ 	CAnimatorCamEffectorScriptCB* e = xr_new<CAnimatorCamEffectorScriptCB>(cb_func);
+ 	e->SetType((ECamEffectorType)id);
+ 	e->SetCyclic(cyclic);
+ 	e->Start(fn);
+-	Actor()->Cameras().AddCamEffector(e);
++	CActor* viewer = campaign::local_view_actor();
++	if (!viewer)
++	{
++		xr_delete(e);
++		return 0.f;
++	}
++	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+ }
+ 
+@@ -853,7 +871,13 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	e->SetType((ECamEffectorType)id);
+ 	e->SetCyclic(cyclic);
+ 	e->Start(fn);
+-	Actor()->Cameras().AddCamEffector(e);
++	CActor* viewer = campaign::local_view_actor();
++	if (!viewer)
++	{
++		xr_delete(e);
++		return 0.f;
++	}
++	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+ }
+ 
+@@ -869,7 +893,13 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	e->SetType((ECamEffectorType)id);
+ 	e->SetCyclic(cyclic);
+ 	e->Start(fn);
+-	Actor()->Cameras().AddCamEffector(e);
++	CActor* viewer = campaign::local_view_actor();
++	if (!viewer)
++	{
++		xr_delete(e);
++		return 0.f;
++	}
++	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+ }
+ 
+@@ -889,7 +919,13 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	e->SetType((ECamEffectorType)id);
+ 	e->SetCyclic(cyclic);
+ 	e->Start(fn);
+-	Actor()->Cameras().AddCamEffector(e);
++	CActor* viewer = campaign::local_view_actor();
++	if (!viewer)
++	{
++		xr_delete(e);
++		return 0.f;
++	}
++	viewer->Cameras().AddCamEffector(e);
+ 	return e->GetAnimatorLength();
+ }
+ 
+@@ -913,7 +949,13 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+     e->SetType((ECamEffectorType)id);
+     e->SetCyclic(cyclic);
+     e->Start(fn);
+-    Actor()->Cameras().AddCamEffector(e);
++    CActor* viewer = campaign::local_view_actor();
++    if (!viewer)
++    {
++    	xr_delete(e);
++    	return 0.f;
++    }
++    viewer->Cameras().AddCamEffector(e);
+     return e->GetAnimatorLength();
+ }
+ 
+@@ -985,7 +1027,9 @@ bool getCamEffectorTransformData(::luabind::object& t, LPCSTR animationFile)
+ // demonized: Set custom camera position and direction with movement smoothing (for cutscenes, etc)
+ void set_cam_position_direction(Fvector& position, Fvector& direction, unsigned int smoothing, bool hudEnabled, bool hudAffect)
+ {
+-	CActor* actor = Actor();
++	CActor* actor = campaign::local_view_actor();
++	if (!actor)
++		return;
+ 	actor->initFPCam();
+ 	actor->m_FPCam->m_HPB.set(direction);
+ 	actor->m_FPCam->m_Position.set(position);
+@@ -1011,38 +1055,40 @@ void set_cam_position_direction(Fvector& position, Fvector& direction, unsigned
+ 
+ void remove_cam_position_direction() 
+ {
+-	CActor* actor = Actor();
+-	actor->removeFPCam();
++	CActor* actor = campaign::local_view_actor();
++	if (actor)
++		actor->removeFPCam();
+ }
+ 
+ void remove_cam_effector(int id)
+ {
+-	Actor()->Cameras().RemoveCamEffector((ECamEffectorType)id);
++	if (CActor* viewer = campaign::local_view_actor())
++		viewer->Cameras().RemoveCamEffector((ECamEffectorType)id);
+ }
+ 
+ void set_cam_effector_factor(int id, float factor)
+ {
+-	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(Actor()->Cameras().GetCamEffector((ECamEffectorType)id));
++	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(viewer_cam_effector(id));
+ 	if (e)
+ 		e->SetPower(factor);
+ }
+ 
+ float get_cam_effector_factor(int id)
+ {
+-	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(Actor()->Cameras().GetCamEffector((ECamEffectorType)id));
++	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(viewer_cam_effector(id));
+ 	return e ? e->GetPower() : 0.0f;
+ }
+ 
+ float get_cam_effector_length(int id)
+ {
+-	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(Actor()->Cameras().GetCamEffector((ECamEffectorType)id));
++	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(viewer_cam_effector(id));
+ 	return e ? e->GetAnimatorLength() : 0.0f;
+ }
+ 
+ 
+ bool check_cam_effector(int id)
+ {
+-	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(Actor()->Cameras().GetCamEffector((ECamEffectorType)id));
++	CAnimatorCamEffectorScriptCB* e = smart_cast<CAnimatorCamEffectorScriptCB*>(viewer_cam_effector(id));
+ 	if (e)
+ 	{
+ 		return e->Valid();
+@@ -1052,7 +1098,7 @@ bool check_cam_effector(int id)
+ 
+ void remove_hud_motion_cam_effectors()
+ {
+-	CActor* actor = Actor();
++	CActor* actor = campaign::local_view_actor();
+ 	if (actor)
+ 		actor->Cameras().RemoveHudMotionEffectors();
+ }
+@@ -1087,17 +1133,20 @@ void set_music_volume(float v) {
+ 
+ void add_actor_points(LPCSTR sect, LPCSTR detail_key, int cnt, int pts)
+ {
+-	return Actor()->StatisticMgr().AddPoints(sect, detail_key, cnt, pts);
++	if (CActor* actor = Actor()) // S03-T03: null with two participant actors (S03-T05)
++		actor->StatisticMgr().AddPoints(sect, detail_key, cnt, pts);
+ }
+ 
+ void add_actor_points_str(LPCSTR sect, LPCSTR detail_key, LPCSTR str_value)
+ {
+-	return Actor()->StatisticMgr().AddPoints(sect, detail_key, str_value);
++	if (CActor* actor = Actor())
++		actor->StatisticMgr().AddPoints(sect, detail_key, str_value);
+ }
+ 
+ int get_actor_points(LPCSTR sect)
+ {
+-	return Actor()->StatisticMgr().GetSectionPoints(sect);
++	CActor* actor = Actor();
++	return actor ? actor->StatisticMgr().GetSectionPoints(sect) : 0;
+ }
+ 
+ 
+@@ -1105,47 +1154,58 @@ int get_actor_points(LPCSTR sect)
+ 
+ void add_complex_effector(LPCSTR section, int id)
+ {
+-	AddEffector(Actor(), id, section);
++	if (CActor* viewer = campaign::local_view_actor())
++		AddEffector(viewer, id, section);
+ }
+ 
+ void remove_complex_effector(int id)
+ {
+-	RemoveEffector(Actor(), id);
++	if (CActor* viewer = campaign::local_view_actor())
++		RemoveEffector(viewer, id);
+ }
+ 
+ #include "postprocessanimator.h"
+ 
++static CEffectorPP* viewer_pp_effector(int id)
++{
++	CActor* viewer = campaign::local_view_actor();
++	return viewer ? viewer->Cameras().GetPPEffector((EEffectorPPType)id) : nullptr;
++}
++
+ void add_pp_effector(LPCSTR fn, int id, bool cyclic)
+ {
++	CActor* viewer = campaign::local_view_actor();
++	if (!viewer)
++		return;
+ 	CPostprocessAnimator* pp = xr_new<CPostprocessAnimator>(id, cyclic);
+ 	pp->Load(fn);
+-	Actor()->Cameras().AddPPEffector(pp);
++	viewer->Cameras().AddPPEffector(pp);
+ }
+ 
+ void remove_pp_effector(int id)
+ {
+-	CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(Actor()->Cameras().GetPPEffector((EEffectorPPType)id));
++	CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+ 
+ 	if (pp) pp->Stop(1.0f);
+ }
+ 
+ void set_pp_effector_factor(int id, float f, float f_sp)
+ {
+-    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(Actor()->Cameras().GetPPEffector((EEffectorPPType)id));
++    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+ 
+     if (pp) pp->SetDesiredFactor(f, f_sp);
+ }
+ 
+ void set_pp_effector_factor2(int id, float f)
+ {
+-    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(Actor()->Cameras().GetPPEffector((EEffectorPPType)id));
++    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+ 
+     if (pp) pp->SetCurrentFactor(f);
+ }
+ 
+ bool check_pp_effector(int id)
+ {
+-    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(Actor()->Cameras().GetPPEffector((EEffectorPPType)id));
++    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+     if (pp)
+     {
+         return pp->Valid();
+@@ -1155,13 +1215,13 @@ bool check_pp_effector(int id)
+ 
+ float get_pp_effector_factor(int id)
+ {
+-    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(Actor()->Cameras().GetPPEffector((EEffectorPPType)id));
++    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+     return pp ? pp->GetCurrentFactor() : 0.0f;
+ }
+ 
+ float get_pp_effector_length(int id)
+ {
+-    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(Actor()->Cameras().GetPPEffector((EEffectorPPType)id));
++    CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+     return pp ? pp->GetLength() : 0.0f;
+ }
+ 
+@@ -1255,9 +1315,12 @@ void refresh_npc_names()
+ 
+ 	if (psDeviceFlags2.test(rsDiscord))
+ 	{
+-		Actor()->RPC_UpdateFaction();
+-		Actor()->RPC_UpdateRank();
+-		Actor()->RPC_UpdateReputation();
++		if (CActor* actor = Actor())
++		{
++			actor->RPC_UpdateFaction();
++			actor->RPC_UpdateRank();
++			actor->RPC_UpdateReputation();
++		}
+ 
+ 		Level().GameTaskManager().RPC_UpdateTaskName();
+ 	}
+@@ -2088,7 +2151,10 @@ static SPickParam* get_pick(ETraceTarget tt)
+ 		item = g_player_hud->attached_item(1);
+ 		break;
+ 	case TT_ACTOR:
+-		return &Actor()->GetPick();
++	{
++		CActor* actor = Actor();
++		return actor ? &actor->GetPick() : nullptr;
++	}
+ 	}
+ 
+ 	if (!item)
+@@ -2212,18 +2278,20 @@ void reload_hud_xml()
+ 
+ bool actor_safemode()
+ {
+-	return Actor()->is_safemode();
++	CActor* actor = Actor();
++	return actor && actor->is_safemode();
+ }
+ 
+ void actor_set_safemode(bool status)
+ {
+-	if (Actor()->is_safemode() != status)
++	CActor* actor = Actor();
++	if (actor && actor->is_safemode() != status)
+ 	{
+-		CWeapon* wep = smart_cast<CWeapon*>(Actor()->inventory().ActiveItem());
++		CWeapon* wep = smart_cast<CWeapon*>(actor->inventory().ActiveItem());
+ 		if (wep && wep->m_bCanBeLowered)
+ 		{
+ 			wep->Action(kSAFEMODE, CMD_START);
+-			Actor()->set_safemode(status);
++			actor->set_safemode(status);
+ 		}
+ 	}
+ }
+@@ -2507,7 +2575,10 @@ void update_pda_news_from_uiwindow(CUIWindow* CUIWindowPItem) {
+ 		Msg("![update_pda_news_from_uiwindow] cannot get news from pItem");
+ 	}
+ 
+-	GAME_NEWS_VECTOR& news_vector = Actor()->game_news_registry->registry().objects();
++	CActor* actor = Actor();
++	if (!actor)
++		return;
++	GAME_NEWS_VECTOR& news_vector = actor->game_news_registry->registry().objects();
+ 	GAME_NEWS_IT newsVectorRes = std::find_if(news_vector.begin(), news_vector.end(), [&news](const GAME_NEWS_DATA& d) {
+ 		return d.receive_time == news->receive_time;
+ 	});
+diff --git a/src/xrGame/script_binder.cpp b/src/xrGame/script_binder.cpp
+index 59aa2c9..7381d2e 100644
+--- a/src/xrGame/script_binder.cpp
++++ b/src/xrGame/script_binder.cpp
+@@ -15,6 +15,7 @@
+ #include "script_game_object.h"
+ #include "gameobject.h"
+ #include "level.h"
++#include "CampaignActorControl.h" // S03-T03
+ 
+ // comment next string when commiting
+ //#define DBG_DISABLE_SCRIPTS
+@@ -149,6 +150,10 @@ void CScriptBinder::reload(LPCSTR section)
+ 	VERIFY(!m_object);
+ 	if (!pSettings->line_exist(section, "script_binding"))
+ 		return;
++	// S03-T03: on the campaign server the installed single-player actor binder
++	// attaches to the script actor only (CampaignActorControl.h).
++	if (!campaign::script_binding_allowed(smart_cast<CGameObject*>(this)))
++		return;
+ 
+ 	::luabind::functor<void> lua_function;
+ 	if (!ai().script_engine().functor(pSettings->r_string(section, "script_binding"), lua_function))
+diff --git a/src/xrGame/script_game_object_inventory_owner.cpp b/src/xrGame/script_game_object_inventory_owner.cpp
+index cb115f4..11aba35 100644
+--- a/src/xrGame/script_game_object_inventory_owner.cpp
++++ b/src/xrGame/script_game_object_inventory_owner.cpp
+@@ -131,10 +131,15 @@ void _give_news(LPCSTR caption, LPCSTR text, LPCSTR texture_name, int delay, int
+ 
+ 	news_data.texture_name = texture_name;
+ 
++	// S03-T03: news go to "the" actor; null with two participant actors until
++	// S03-T05 names the receiving participant.
++	CActor* actor = Actor();
++	if (!actor)
++		return;
+ 	if (delay == 0)
+-		Actor()->AddGameNews(news_data);
++		actor->AddGameNews(news_data);
+ 	else
+-		Actor()->AddGameNews_deffered(news_data, delay);
++		actor->AddGameNews_deffered(news_data, delay);
+ }
+ 
+ bool CScriptGameObject::HasInfo(LPCSTR info_id)
+@@ -1172,16 +1177,22 @@ void CScriptGameObject::RunTalkDialog(CScriptGameObject* pToWho, bool disable_br
+ 
+ void CScriptGameObject::ActorLookAtPoint(Fvector point)
+ {
+-	CCameraBase* c = Actor()->cam_FirstEye();
+-	CCameraFirstEye* cf = smart_cast<CCameraFirstEye*>(c);
+-	cf->LookAtPoint(point);
++	CActor* actor = smart_cast<CActor*>(&object()); // S03-T03: this object's own camera
++	if (!actor)
++		return;
++	CCameraFirstEye* cf = smart_cast<CCameraFirstEye*>(actor->cam_FirstEye());
++	if (cf)
++		cf->LookAtPoint(point);
+ }
+ 
+ void CScriptGameObject::ActorStopLookAtPoint()
+ {
+-	CCameraBase* c = Actor()->cam_FirstEye();
+-	CCameraFirstEye* cf = smart_cast<CCameraFirstEye*>(c);
+-	cf->StopLookAtPoint();
++	CActor* actor = smart_cast<CActor*>(&object());
++	if (!actor)
++		return;
++	CCameraFirstEye* cf = smart_cast<CCameraFirstEye*>(actor->cam_FirstEye());
++	if (cf)
++		cf->StopLookAtPoint();
+ }
+ 
+ //////////////////////////////////////////////////////////////////////////
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 0f27acb..6d02e9b 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2009,6 +2009,7 @@
+     <ClInclude Include="CampaignIdentityHooks.h" />
+     <ClInclude Include="CampaignIdentityFixture.h" />
+     <ClInclude Include="CampaignActorAccess.h" />
++    <ClInclude Include="CampaignActorControl.h" />
+     <ClInclude Include="CampaignMessagePolicy.h" />
+     <ClInclude Include="xrServer.h" />
+     <ClInclude Include="xrServerMapSync.h" />
+@@ -4393,6 +4394,14 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CampaignActorControl.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
++    <ClCompile Include="CampaignTwoActorFixture.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="xrServer.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+diff --git a/src/xrServerEntities/xrServer_Object_Base.cpp b/src/xrServerEntities/xrServer_Object_Base.cpp
+index c74e41e..fea8f0e 100644
+--- a/src/xrServerEntities/xrServer_Object_Base.cpp
++++ b/src/xrServerEntities/xrServer_Object_Base.cpp
+@@ -196,6 +196,7 @@ CInifile& CSE_Abstract::spawn_ini()
+ 	return (*m_ini_file);
+ }
+ 
++
+ void CSE_Abstract::Spawn_Write(NET_Packet& tNetPacket, BOOL bLocal)
+ {
+ 	// generic
+@@ -273,6 +274,8 @@ static enum EGameTypes
+ 	GAME_DUMMY = 255 // temporary game type
+ };
+ 
++u32 g_spawn_state_resyncs = 0; // S03-T03: spawn state frames re-synchronised after a short STATE_Read
++
+ BOOL CSE_Abstract::Spawn_Read(NET_Packet& tNetPacket)
+ {
+ 	u16 dummy16;
+@@ -365,11 +368,31 @@ BOOL CSE_Abstract::Spawn_Read(NET_Packet& tNetPacket)
+ 	}
+ 
+ 	u16 size;
++	const u32 state_begin = tNetPacket.r_tell();
+ 	tNetPacket.r_u16(size); // size
+ 	bool b1 = (m_tClassID == CLSID_SPECTATOR);
+ 	bool b2 = (size > sizeof(size)) || (tNetPacket.inistream != NULL);
+ 	R_ASSERT3((b1 || b2), "cannot read object, which is not successfully saved :(", name_replace());
+ 	STATE_Read(tNetPacket, size);
++	// S03-T03: the state block is length-prefixed (written above as
++	// size = w_tell() - position, the prefix included). A STATE_Read that
++	// consumes a different number of bytes than STATE_Write produced would
++	// leave the update block that follows misaligned, so the read resumes at
++	// the frame's end and the mismatch is counted and logged. The installed
++	// se_actor.script skips its own bytes once db.actor exists (a second
++	// actor's spawn packet); see docs/actor-access-inventory.md.
++	if (!tNetPacket.inistream)
++	{
++		const u32 state_end = state_begin + size;
++		if (tNetPacket.r_tell() != state_end)
++		{
++			++g_spawn_state_resyncs;
++			if (g_spawn_state_resyncs <= 16)
++				Msg("! spawn state of %s [%s] id=%u: STATE_Read consumed %u of %u bytes, resynced", *s_name, name_replace(),
++					u32(ID), tNetPacket.r_tell() - state_begin, u32(size));
++			tNetPacket.r_seek(state_end);
++		}
++	}
+ 	return TRUE;
+ }
+ 

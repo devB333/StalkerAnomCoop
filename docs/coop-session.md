@@ -145,3 +145,32 @@ Validation: [S05-T03](validation/S05-T03.md).
   length, weather`): clients follow the server's game time and weather.
 - No script binder updates on a replica; unattended test clients use
   `keypress_on_start off` and `g_always_active on`.
+- Input sequences are per connection. Every join is a new connection, so the
+  server forgets the player's last input sequence and held input on join
+  (S05-T04: before this, a rejoined player's inputs were all refused as old).
+
+## Bounded shared-world session (S05-T04)
+
+Validation: [S05-T04](validation/S05-T04.md), gate [G05](validation/G05.md).
+The repeatable minimal scenario (one host, loopback, level `k00_marsh` from
+the fixture save):
+
+```
+python3 tools/prepare-coop-session.py <run> --task S05-T04 --churn 10 --script c1,c2
+powershell.exe ... Run-CoopSession.ps1 -Run <run> -Task S05-T04 -ServerAloneSeconds 10 -ClientStarts '0,45' -ClientSeconds '220,80' -Restart 'c2:20:90' -AfterSeconds 10
+python3 tools/compare-coop-world.py <logs>/server/coop-lifecycle.csv <logs>/<c1|c2-first-run|c2>/coop-world-final.csv
+python3 tools/compare-coop-actors.py <logs> --lag-ms 120
+```
+
+Server alone 10 s; c1 joins; c2 joins 45 s later (late join), quits after
+80 s, rejoins 20 s later for 90 s; the server spawns a medkit every 10 s and
+releases it 5 s later (server-owned entity changes). Each client faces the
+other player, takes screenshots and walks back 1.5 s (the test driver,
+profile `script = 1`; a client that was alone at its facings faces the other
+player 3 s after it appears and takes one more screenshot).
+
+Supported in the session: joining (native checkpoint + lifecycle stream),
+seeing both participant actors, walking one's own actor through the server,
+the server's world clock and weather, server-owned spawn/release, leaving
+and rejoining. Not supported yet: any action other than movement, moving
+NPCs and items on clients, gameplay scripts on clients (see S05-T04 limits).

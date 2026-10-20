@@ -1,0 +1,80 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index f9319bd..8a3e691 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -126,6 +126,9 @@ struct Link
+ 	u32 script_t0 = 0; // when the loading screen went away
+ 	u32 walk_until = 0;
+ 	u32 screenshots = 0;
++	bool script_saw_other = false; // the other actor was there at a facing
++	u32 other_since = 0; // script time the other actor first appeared (S05-T04)
++	u32 script_mark = 0;
+ 	FILE* actors_csv = nullptr;
+ 	u32 last_actor_log_ms = 0;
+ 	u64 clock_events = 0, clock_steps = 0, weather_changes = 0;
+@@ -712,17 +715,24 @@ void present_actors()
+ 	}
+ }
+ 
+-void face_other_actor(bool check)
++CActor* other_actor()
+ {
+ 	CActor* other = nullptr;
+ 	for (const auto& entry : g_link->tracks)
+ 		if (!g_actor || entry.first != g_actor->ID())
+ 			other = smart_cast<CActor*>(Level().Objects.net_Find(entry.first));
++	return other;
++}
++
++void face_other_actor(bool check)
++{
++	CActor* other = other_actor();
+ 	if (!other || !g_actor)
+ 	{
+ 		g_link->log.line("script-face no-other-actor");
+ 		return;
+ 	}
++	g_link->script_saw_other = true;
+ 	Fvector to;
+ 	to.sub(other->Position(), g_actor->Position());
+ 	to.y = 0;
+@@ -790,6 +800,24 @@ void run_script()
+ 	case 4: if (t >= 21000) { face_other_actor(false); ++g_link->script_phase; } break;
+ 	case 5: if (t >= 22000) { face_other_actor(true); ++g_link->script_phase; } break;
+ 	case 6: if (t >= 23500) { screenshot("after-walks"); ++g_link->script_phase; } break;
++	// S05-T04: a player alone at its facings (the other joined later) faces
++	// the other actor 3 s after it appears and takes one more screenshot.
++	case 7:
++		if (g_link->script_saw_other)
++			g_link->script_phase = 10;
++		else if (!other_actor())
++			g_link->other_since = 0;
++		else if (!g_link->other_since)
++			g_link->other_since = t;
++		else if (t >= g_link->other_since + 3000)
++		{
++			face_other_actor(false);
++			g_link->script_mark = t;
++			++g_link->script_phase;
++		}
++		break;
++	case 8: if (t >= g_link->script_mark + 1000) { face_other_actor(true); ++g_link->script_phase; } break;
++	case 9: if (t >= g_link->script_mark + 2500) { screenshot("other-joined"); ++g_link->script_phase; } break;
+ 	default: break;
+ 	}
+ }
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 01c119d..93f6fb2 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -916,6 +916,10 @@ void on_joined(const coop::session::SessionEvent& e)
+ 	link->world = WorldPending;
+ 	link->outbox.clear();
+ 	link->blob.clear();
++	// S05-T04: input sequences are per connection and every join is a new
++	// connection, so the previous connection's watermark would refuse them all.
++	link->input_last = 0;
++	link->has_held = false;
+ 	g_host->log.line("joined player=%s name=%s session_slot=%u participant=%u/%u registry_session=%08x resumed=%d "
+ 		"attach=%s",
+ 		coop_uuid_hex(e.player).c_str(), link->name.c_str(), u32(e.slot), u32(link->ref.slot), link->ref.generation,

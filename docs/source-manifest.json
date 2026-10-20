@@ -125,6 +125,10 @@
     {
       "path": "patches/engine/0029-coop-participant-views.patch",
       "sha256": "30cf95cabbc742471e2ef0e88ece4f79c5bfeaf4b5be008d132158891453c035"
+    },
+    {
+      "path": "patches/engine/0030-coop-rejoin-input.patch",
+      "sha256": "0868929701ad39f154bc70d424ae3556a113a9bf679791451583231e3e163c6c"
     }
   ],
   "submodules": [

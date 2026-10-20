@@ -9,6 +9,7 @@ with clients running the S05-T03 script (profile script = 1):
   cN/coop-actors-client.csv       what client N showed (UTC ms, engine id, local)
   cN/coop-world-final.csv         engine id -> entity id on client N
   cN/coop-cN.log                  the script's walk start ("script-walk", UTC ms)
+  cN-first-run/                   the same for a client's run before a rejoin
 
 Checks:
   ownership     in each client's walk window (start .. start + 2.5 s) its own
@@ -76,7 +77,9 @@ def main():
     args = parser.parse_args()
     root = Path(args.session)
     server = load_server(root / "server/coop-actors.csv")
-    clients = sorted(p.name for p in root.iterdir() if p.is_dir() and p.name.startswith("c") and "-" not in p.name)
+    # cN, and cN-first-run for a client that rejoined (S05-T04)
+    clients = sorted(p.name for p in root.iterdir() if p.is_dir() and p.name.startswith("c")
+                     and ("-" not in p.name or p.name.endswith("-first-run")))
     result = {"clients": {}, "ownership": [], "lag_ms": args.lag_ms}
     own_entity = {}
     walks = {}
@@ -87,7 +90,7 @@ def main():
         remote = {int(r["id"]) for r in rows if r["local"] == "0"}
         if len(local) == 1:
             own_entity[c] = ids.get(next(iter(local)))
-        for line in open(root / c / f"coop-{c}.log"):
+        for line in open(root / c / f"coop-{c.split('-')[0]}.log"):
             if "script-walk" in line:
                 walks[c] = int(line.split()[0])
         errors_still, errors_all = [], []

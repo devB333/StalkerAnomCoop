@@ -52,6 +52,8 @@ public:
     bool parse(const std::string& text, std::string* error = nullptr);
     const RosterEntry* find(const proto::Uuid128& player) const;
     std::size_t size() const { return entries_.size(); }
+    // In file order: the campaign server binds participant slots in this order (S05-T01).
+    const std::vector<RosterEntry>& entries() const { return entries_; }
     static std::string line(const RosterEntry& e);
 
 private:

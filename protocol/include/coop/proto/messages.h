@@ -22,7 +22,9 @@ namespace coop::proto
 {
 constexpr std::uint32_t kMagic = 0x504F4F43; // "COOP" little-endian
 constexpr std::uint16_t kProtocolMajor = 1;
-constexpr std::uint16_t kProtocolMinor = 0;
+// 1.1 (S05-T02): Spawn state up to 16 KiB (a native spawn packet), lifecycle
+// messages up to 20 KiB with a 1 MiB backlog.
+constexpr std::uint16_t kProtocolMinor = 1;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -41,7 +43,7 @@ enum Channel : net::ChannelId
 net::TransportConfig transport_config();
 
 // ------------------------------------------------------------- limits
-constexpr std::size_t kMaxMessageBytes[kChannelCount] = {1024, 512, 4096, 64 * 1024, 1200, 512};
+constexpr std::size_t kMaxMessageBytes[kChannelCount] = {1024, 512, 20 * 1024, 64 * 1024, 1200, 512};
 constexpr std::size_t kMaxDisplayName = 32;
 constexpr std::size_t kSignatureBytes = 64; // ECDSA P-256 r||s
 constexpr std::size_t kMinResumeToken = 16;
@@ -50,7 +52,7 @@ constexpr std::size_t kMaxRejectDetail = 128;
 constexpr std::size_t kMaxActionParams = 256;
 constexpr std::uint16_t kMaxActionKind = 1023;
 constexpr std::size_t kMaxArchetype = 64;
-constexpr std::size_t kMaxSpawnState = 2048;
+constexpr std::size_t kMaxSpawnState = 16 * 1024;
 constexpr std::size_t kMaxEventPayload = 1024;
 constexpr std::size_t kMaxInputsPerBatch = 8;
 constexpr std::size_t kMaxSnapshotEntities = 64;

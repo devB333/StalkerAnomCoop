@@ -533,6 +533,20 @@ void Server::shutdown(std::uint32_t flush_timeout_ms, std::vector<SessionEvent>&
     t_.shutdown(flush_timeout_ms);
 }
 
+bool Server::backlog(const proto::Uuid128& player, net::ChannelId channel, net::ChannelBacklog& out) const
+{
+    for (const Slot& s : slots_)
+        if (s.bound && s.player == player && s.conn != net::kNoConnection)
+        {
+            net::ConnectionStatus status;
+            if (!t_.status(s.conn, status) || channel >= status.channels.size())
+                return false;
+            out = status.channels[channel];
+            return true;
+        }
+    return false;
+}
+
 std::vector<PlayerView> Server::players() const
 {
     std::vector<PlayerView> v;

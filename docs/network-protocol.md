@@ -1,6 +1,6 @@
 # Network protocol
 
-Status: the transport adapter (S04-T02), the v1 wire format and codec (S04-T03, [below](#wire-format-v1)) and authenticated sessions (S04-T04, [sessions](session-authentication.md)) are implemented and tested; liveness, reconnect and replication are not. The sections before the wire format are the original design proposal; it is not wire-compatible with X-Ray. Engine evidence is in [network findings](network-findings.md). Exactly two authenticated active players initially; slot count is policy, not embedded in entity identifiers.
+Status: the transport adapter (S04-T02), the v1 wire format and codec (S04-T03, [below](#wire-format-v1)), authenticated sessions (S04-T04, [sessions](session-authentication.md)) and liveness/reconnect (S04-T05) are implemented and tested, and run inside the engine since S05-T01 ([co-op session](coop-session.md)); replication is Stage 5/6 work. The sections before the wire format are the original design proposal; it is not wire-compatible with X-Ray. Engine evidence is in [network findings](network-findings.md). Exactly two authenticated active players initially; slot count is policy, not embedded in entity identifiers.
 
 ## Transport decision
 
@@ -62,7 +62,9 @@ Cap message sizes, command rates, outstanding operations, entity counts and resy
 
 Implemented 2026-10-20 (S04-T03, [validation](validation/S04-T03.md)) in
 `protocol/include/coop/proto/` (`wire.h`, `messages.h`, `guard.h`) and
-`protocol/src/proto/`. Version **1.0**. The code is the reference; this
+`protocol/src/proto/`. Version **1.1** (1.0 in S04-T03; 1.1 in S05-T01 raised the
+Spawn state to 16 KiB for native spawn packets, lifecycle messages to 20 KiB
+with a 1 MiB backlog, and the send buffer to 2 MiB). The code is the reference; this
 section is its summary.
 
 ### Encoding
@@ -100,7 +102,7 @@ violation (the receiver closes with transport code 1003).
 |---|---|---|---|---|---|
 | 0 | control | Critical, p0 | 1,024 | 64 KB | Hello, AuthProof (C), AuthChallenge, Welcome, Reject, ResyncBegin, ResyncEnd (S), Heartbeat (both) |
 | 1 | actions | Critical, p0 | 512 | 64 KB | ActionIntent (C), ActionResult (S) |
-| 2 | lifecycle | Critical, p0 | 4,096 | 128 KB | Spawn, Despawn, CampaignEvent (S) |
+| 2 | lifecycle | Critical, p0 | 20,480 | 1 MB | Spawn, Despawn, CampaignEvent (S) |
 | 3 | bulk | Bulk, p2 | 65,536 | 192 KB | ResyncChunk (S) |
 | 4 | snapshot | Transient, p1, 50 ms | 1,200 | 16 KB | Snapshot (S), SnapshotAck (C) |
 | 5 | input | Transient, p0, 50 ms | 512 | 8 KB | InputBatch (C) |
@@ -119,7 +121,7 @@ violation (the receiver closes with transport code 1003).
 | Heartbeat | nonce, echo, sent tick | nonce ≠ 0 |
 | ActionIntent | operation id, kind, target ref, expected revision, params | operation id ≠ 0; kind 1–1023; params ≤ 256 (decoded per kind later, with its own bounds) |
 | ActionResult | operation id, outcome, reason, commit id, tick, revision | outcome 1–3; accepted ⇔ reason 0 (duplicate: either) |
-| Spawn | entity ref, archetype, level, transform, parent ref, commit id, state | archetype 1–64; parent ≠ self; state ≤ 2,048 (opaque, decoded later with bounds) |
+| Spawn | entity ref, archetype, level, transform, parent ref, commit id, state | archetype 1–64; parent ≠ self; state ≤ 16,384 (opaque, decoded later with bounds) |
 | Despawn | entity ref, reason, commit id | reason 1–3 |
 | CampaignEvent | event id, kind, revision, payload | ids non-zero; payload ≤ 1,024 |
 | Snapshot | server tick, baseline, last input, part, part count, entities | baseline < this sequence; part < count ≤ 16; ≤ 64 entities, each once; component bits known; health ≤ 10,000 |

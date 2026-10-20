@@ -113,6 +113,10 @@
     {
       "path": "patches/engine/0026-server-light-model.patch",
       "sha256": "0e7a46aa458566d656ca44865357756a317902c3ab2ba4ad6895a8819238776e"
+    },
+    {
+      "path": "patches/engine/0027-coop-roles.patch",
+      "sha256": "70bc474184a4a92131ad5d5741e05483915d0dc946361ca58516a0fdcfc3e860"
     }
   ],
   "submodules": [

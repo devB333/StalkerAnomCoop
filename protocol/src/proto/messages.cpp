@@ -54,11 +54,14 @@ net::TransportConfig transport_config()
     c.channels = {
         {"control", Delivery::Critical, 0, 1, std::uint32_t(kMaxMessageBytes[kControl]), 64 * 1024, 0},
         {"actions", Delivery::Critical, 0, 1, std::uint32_t(kMaxMessageBytes[kActions]), 64 * 1024, 0},
-        {"lifecycle", Delivery::Critical, 0, 1, std::uint32_t(kMaxMessageBytes[kLifecycle]), 128 * 1024, 0},
+        {"lifecycle", Delivery::Critical, 0, 1, std::uint32_t(kMaxMessageBytes[kLifecycle]), 1024 * 1024, 0},
         {"bulk", Delivery::Bulk, 2, 1, std::uint32_t(kMaxMessageBytes[kBulk]), 192 * 1024, 0},
         {"snapshot", Delivery::Transient, 1, 1, std::uint32_t(kMaxMessageBytes[kSnapshot]), 16 * 1024, 50},
         {"input", Delivery::Transient, 0, 1, std::uint32_t(kMaxMessageBytes[kInput]), 8 * 1024, 50},
     };
+    // v1.1: a burst of objects switching online is ~100 spawns of a few KiB.
+    c.send_buffer_bytes = 2 * 1024 * 1024;
+    c.recv_buffer_bytes = 4 * 1024 * 1024;
     return c;
 }
 

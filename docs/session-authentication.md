@@ -118,16 +118,22 @@ for release qualification (G11, R06).
 
 The Hello's `build_id` and `content_digest` must equal the server's.
 
-- `build_id`: SHA-256 of the engine source pin and the ordered engine patch
-  series (`docs/source-manifest.json`: upstream revision plus each patch's
-  SHA-256, in `series` order) and the protocol major. Two builds made from the
-  same pin and patches match; any engine change makes them differ.
-- `content_digest`: SHA-256 of the sorted (path, SHA-256) list of the game
-  content both sides load: the installed `gamedata` archives and the co-op
-  scripts and configs.
+Implemented in S05-T01 ([co-op session](coop-session.md#build-and-content-identity)):
 
-Computing both at start-up belongs to S05-T01, which first runs the session
-layer inside the engine. The tests use fixed digests.
+- `build_id`: SHA-256 over the engine source pin, every engine-work file that
+  differs from it (path and SHA-256: exactly what the patch series produces,
+  including changes not yet exported), every protocol source file and the
+  protocol major. `tools/Build-Stage2.ps1` computes it and compiles it in.
+  Two builds made from the same tree match; any engine or protocol change
+  makes them differ.
+- `content_digest`: SHA-256 over the game content the process actually
+  mounted under `$game_data$`: archive entries by name, sizes and the
+  archive's CRC-32, loose files by name, size and SHA-256 of their bytes; the
+  MCM options file (a player setting the scripts rewrite) and editor
+  dot-folders are left out. Each process computes it itself at start (the
+  server before its scripts run).
+
+The protocol tests use fixed digests.
 
 ## Liveness and reconnect
 

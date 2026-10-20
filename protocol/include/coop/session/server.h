@@ -184,6 +184,9 @@ public:
     void shutdown(std::uint32_t flush_timeout_ms, std::vector<SessionEvent>& out);
 
     std::vector<PlayerView> players() const;
+    // S05-T02: the transport's backlog on one channel of a connected player's
+    // connection, so a producer can pace critical traffic below its bound.
+    bool backlog(const proto::Uuid128& player, net::ChannelId channel, net::ChannelBacklog& out) const;
     const ServerCounters& counters() const { return counters_; }
     // Diagnostic lines (never contain credentials, nonces or tokens).
     const std::vector<std::string>& log() const { return log_; }

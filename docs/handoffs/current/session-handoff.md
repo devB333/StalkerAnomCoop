@@ -1,83 +1,66 @@
-# Session handoff — G04 accepted; next: S05-T01
+# Session handoff — S05-T01 done; next: S05-T02
 
-## State at the end of the session (2026-10-20)
+## State (2026-10-20)
 
-**Stage 4 Completed.** The user accepted [G04](../../validation/G04.md) for
-development on 2026-10-20, including:
-- the handshake's man-in-the-middle limit (a G11/R06 release item);
-- the provisional liveness defaults;
-- the v1.0 header without per-message session ids.
+Stage 5 In Progress. **S05-T01 Completed** ([report](../../validation/S05-T01.md),
+[design](../../coop-session.md)): engine `c57fe5b9` + patches 0001–0027;
+protocol v1.1 (`proto-build-15`). A serving campaign server
+(`-campaign-serve`) and two real clients connect over GNS loopback with
+matched build and content; clients refuse local game starts; injected
+outcomes are refused; detached actors stay. Regressions: smoke-146 (66
+stages), capture-25 (single-player checkpoint match).
 
-Stage 5 is Not Started. No engine change in Stage 4: the engine stays at
-`c57fe5b9` + patches 0001–0026. G03's carried limits are unchanged.
+## Next: S05-T02 — entity lifecycle and initial world snapshot
 
-Networking is project-owned code in `protocol/` (Stage 1 compiler, `/MD`,
-C++17, 0 warnings), tested in `tests/`:
+Design (in progress, write it into `docs/coop-session.md` as it lands):
 
-| Library | What | Report |
-|---|---|---|
-| `coop_net`, `coop_net_gns` | transport adapter: GNS in one file, owner-thread delivery via `poll()`, per-channel overload policy, in-memory fake | [S04-T02](../../validation/S04-T02.md) |
-| `coop_protocol` | wire format v1.0: 17 types, 6 channels, bounded decoder, canonical encoder, stream guard | [S04-T03](../../validation/S04-T03.md), [spec](../../network-protocol.md#wire-format-v1) |
-| `coop_session`, `coop-keytool` | ECDSA P-256 challenge-response, DPAPI key files, public-key roster, player-owned slots, rate limits, heartbeats, rotated-token resume, stale-connection fencing, shutdown | [S04-T04](../../validation/S04-T04.md), [S04-T05](../../validation/S04-T05.md), [design](../../session-authentication.md) |
+- **Initial world = a native checkpoint.** On a player's join (once their
+  actor is online) the server saves `coop-join-N` (`M_SAVE_GAME`, as
+  `xrCampaignLevel_CheckpointSave`), records the lifecycle watermark W and
+  streams a blob (scop + scoc + manifest: online set u16→EntityRef, each
+  participant's actor id, the player's slot) as ResyncBegin/Chunk/End
+  (epoch unchanged for a join). Clients hold ResyncEnd until all chunks
+  arrive (different lanes).
+- **Lifecycle:** each tick the host diffs the server level's ALife objects
+  against what it published: Spawn (EntityRef from the registry, section,
+  transform, state = `Spawn_Write`+`UPDATE_Write`) / Despawn (OutOfRange if
+  the ALife object remains, else Destroyed), commit id increasing; sent to
+  every player whose resync started; paced by `Server::backlog()`.
+- **Client replica:** writes the checkpoint as `coop-world`, starts it through
+  the role guard (one permitted start), pumps the link during loading
+  (`device.cpp` loading branch), applies buffered events with commit > W.
+  Hooks: ALife `update_scheduled` off; `switch_object` follows the replica
+  online set; `register_object` gives `M_SPAWN_OBJECT_ASPLAYER` to the
+  local participant's actor only; `spawn_item`/`release`/Lua create refused
+  except by replication; the local xrServer spawns everything except the
+  local actor (and its items) as non-local, so NPCs take the engine's
+  `Remote()` path (no Think, NET interpolation); M_EVENT/M_SPAWN from the
+  client's own level refused; script binders: no update for remote objects,
+  actor binder only on the local actor.
+- **Validation:** server/client online-set summaries at the same commit;
+  late join; a server-side churn (spawn/release on a timer) during joins.
 
-Last runs: `proto-build-13`; `pt-9` 61/61; `pt-10/11` liveness repeats;
-`tr-9` 51/51.
-
-## Carried into Stage 5
-
-- Owned by S05-T01:
-  - linking `protocol/` into the engine;
-  - computing `build_id` / `content_digest` (defined in
-    [sessions](../../session-authentication.md#build-and-content-identity));
-  - attaching each session to its participant slot (S03-T01 registry,
-    `attach_session`/`detach_session`);
-  - applying the detached-actor policy (no input, stays vulnerable);
-  - the headless server's power throttling and `Sleep` granularity
-    (S04-T01 finding 5).
-- Wire entity generations ↔ the registry's `EngineEntityKey` (S05-T02).
-- Loopback only so far (S05 is the first two-process, two-client run;
-  S11-T01 for real networks). No sanitizer. No recovery across a restart
-  (Stage 7).
-- Later security fix (G11/R06): an application-level key exchange signed by a
-  pinned server key and the player keys, with game messages encrypted under
-  it.
-
-## Next
-
-1. **S05-T01 — Integrate matched client and dedicated roles** (plan.md
-   Stage 5). First action: decide how the engine links `protocol/`. Options:
-   - build it as static libraries with the same CMake/toolchain and add them
-     to the engine projects' link inputs;
-   - add its sources to the engine projects.
-
-   Record the choice. Then:
-   - the campaign server owns a `session::Server` on its tick (opting out of
-     power throttling), mapping `Joined`/`Left` to `attach_session` /
-     `detach_session`;
-   - the client owns a `session::Client`;
-   - role guards: no client authority over shared AI/ALife/campaign state,
-     each process with its own isolated launch profile.
-
-   Validation per plan: all three processes start and connect; only the
-   server advances shared gameplay; deliberate client outcome injection is
-   refused; the server runs without clients.
+Then S05-T03 (local view per participant, input to the server, actor
+snapshots through `CActor::net_Import`), S05-T04 (bounded session, G05).
+Stop for G05 acceptance before Stage 6.
 
 ## Tools and runs
 
-- Protocol build: `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Protocol.ps1' -Run <name> -Task <task>`;
-  tests: `python3 tools/run-protocol-tests.py <run> --build <build-run> --task <task> [--exe protocol-tests] [--filter a,b]`.
-- Engine build and smoke: `Build-Stage2.ps1 -Run <name> -Product Client|Campaign`;
-  `python3 tools/prepare-stage2-smoke.py <run>` then
-  `Run-Stage2Smoke.ps1 -Run <run> -Scope Identity|GameState`.
-- Last run names: `proto-build-13`, `pt-11`, `tr-9`, `keytool-1`,
-  `net-build-7`, `net-8`, `campaign-122`, `client-32`, `smoke-145`,
-  `capture-24`, `patch-check-29a/b`. Next: `proto-build-14`, `pt-12`,
-  `tr-10`, `campaign-123`, `client-33`, `smoke-146`, `capture-25`, patch
-  check `30`.
-- Run PowerShell scripts with the Windows path in single quotes from bash.
-  Don't build while a GameState smoke runs.
+- `python3 tools/prepare-coop-session.py <run> [--task S05-T0N] [--inject c1]`
+  then `Run-CoopSession.ps1 -Run <run> -Task <task> -ClientStarts '0,15'
+  -ClientSeconds '90,75' [-Restart 'c2:40:30']`; logs in
+  `builds/logs/<task>/run-<run>/{server,c1,c2}`.
+- Builds: `Build-Stage2.ps1 -Run <name> -Product Client|Campaign`
+  (`-ProtocolBuild proto-build-15` default). Rebuild **both** products after
+  any engine change (build ids must match).
+- Last runs: `proto-build-15`, `pt-13`, `tr-10`, `campaign-131`, `client-39`,
+  `coop-9`, `smoke-146`, `capture-25`, patch check 30. Next:
+  `proto-build-16`, `pt-14`, `tr-11`, `campaign-132`, `client-40`,
+  `coop-10`, `smoke-147`, `capture-26`, patch check 31.
+- Don't build while a session or smoke runs. The user may click in client
+  windows; refused starts are logged (`role-guard`).
 
 Preserve the original installation, the reference checkout, the accepted
-source-client runtime and the saved-game fixture. The two G01 waivers and the
-G02–G04 carried limits are unchanged.
-Previous snapshot: [before S05-T01](../done/snapshot-before-S05-T01.md).
+source-client runtime and the saved-game fixture. G01 waivers and G02–G04
+carried limits unchanged.
+Previous snapshot: [before S05-T02](../done/snapshot-before-S05-T02.md).

@@ -4,6 +4,8 @@
 #
 # coop_net      transport interface, shared policy and the in-memory fake.
 #               No transport library on its include or link path.
+# coop_protocol protocol v1 messages, codec and stateful guard (S04-T03);
+#               uses coop_net only for the channel layout types.
 # coop_net_gns  the GameNetworkingSockets backend (src/net/gns_transport.cpp
 #               is the only file that includes the library).
 
@@ -24,3 +26,10 @@ target_include_directories(coop_net_gns PRIVATE src/net)
 target_compile_options(coop_net_gns PRIVATE ${COOP_WARNINGS})
 target_compile_definitions(coop_net_gns PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(coop_net_gns PUBLIC coop_net PRIVATE GameNetworkingSockets::shared)
+
+add_library(coop_protocol STATIC
+    src/proto/messages.cpp
+    src/proto/guard.cpp)
+target_include_directories(coop_protocol PUBLIC include)
+target_compile_options(coop_protocol PRIVATE ${COOP_WARNINGS})
+target_link_libraries(coop_protocol PUBLIC coop_net)

@@ -1,66 +1,59 @@
-# Session handoff — S04-T02 complete; next: S04-T03
+# Session handoff — S04-T03 complete; next: S04-T04
 
 ## State at the end of the session (2026-10-20)
 
-**Stage 4 In Progress.** S04-T01 and S04-T02 Completed. No engine change, no
-patch since 0026. G03's carried limits are unchanged.
+**Stage 4 In Progress.** S04-T01, S04-T02 and S04-T03 Completed. No engine
+change, no patch since 0026. G03's carried limits are unchanged.
 
-**S04-T02** — bounded transport adapter ([report](../../validation/S04-T02.md)).
-`protocol/` builds two static libraries with the Stage 1 compiler (`/MD`,
-C++17, 0 warnings): `coop_net` (`coop/net/transport.h`, shared policy,
-in-memory `FakeNetwork`) and `coop_net_gns` (`src/net/gns_transport.cpp`, the
-only file that includes GNS).
-- Only the owner thread can use a transport; network input arrives only
-  through `poll()`. Library callbacks just route notices to the owner's
-  locked inbox.
-- Per-channel classes: Critical overflow closes the connection (1002), Bulk
-  refuses the send, Transient is dropped when stale or over budget.
-- Peers that send on an unknown channel, with the wrong class or oversize are
-  closed (1003). Shutdown flushes, then closes (1004).
-- tr-4: 51/51 tests (25 scenarios on the fake and on GNS over loopback, 7
-  race tests, 6 policy tests); tr-5, tr-6 and tr-race-1..8 repeated them.
+- **S04-T02** — bounded transport adapter
+  ([report](../../validation/S04-T02.md)): `coop::net::Transport` in
+  `protocol/`, GNS confined to `src/net/gns_transport.cpp`, owner-thread-only
+  delivery through `poll()`, per-channel overload policy. tr-4..7: 51/51.
+- **S04-T03** — protocol codec v1.0 ([report](../../validation/S04-T03.md),
+  [wire format](../../network-protocol.md#wire-format-v1)): `coop_protocol`
+  (`protocol/include/coop/proto/`) has 15 types on 6 channels
+  (`transport_config()`) and a 24-byte header. The decoder bounds every
+  field; the encoder refuses what the decoder refuses. The per-connection
+  guard (`guard.h`) checks epochs, sequences, entity generations, resync
+  and fresh inputs. pt-3: 20/20 with 2.0 M guarded fuzz mutations.
 
-## Found this session (inputs to later tasks)
+## Found (inputs to later tasks)
 
-1. GNS's simulated impairments survive `Kill`/`Init` (static globals); the
-   test rig clears them.
-2. Closing a listen socket destroys its connections without a close packet;
-   the adapter closes each connection and waits 30 ms first.
-3. A critical burst overloads before any acknowledgement returns. Producers
-   must pace on `status()` below the send rate (S04-T03/S05 budgets).
-4. Unverified: loopback on one host only, no sanitizer; the notice inbox is
-   unbounded under a connection-attempt flood (S04-T04 rate limits); not yet
-   linked into the engine (S05-T01, together with S04-T01 finding 5, power
-   throttling).
-5. Carried from G03 and S04-T01, unchanged: liveness heartbeat and reconnect
-   binding (S04-T04/T05), unauthenticated encryption (S04-T04), protobuf
-   3.21.12 age, and the G03 limits.
+1. Critical producers must pace below the send rate (S04-T02 finding 3).
+2. GNS impairments survive Kill/Init; closing a listen socket drops its
+   connections silently (handled by the adapter).
+3. The session's ids bind once in Hello/Welcome. Hello's layout is frozen
+   across majors, so a mismatch can be answered.
+4. Unverified or passed on: what build id/content digest cover, the auth
+   proof and rate limits (S04-T04); heartbeat timing (S04-T05); wire entity
+   generation mapping (S05-T02); one host, loopback, no sanitizer; the
+   notice inbox is unbounded under a connection flood (S04-T04); engine
+   linkage and power throttling (S05-T01).
 
 ## Next
 
-1. **S04-T03 — Define and validate the initial protocol codec.** First
-   action: write `docs/network-protocol.md`'s wire section (byte order, the
-   envelope from that doc, length/count limits, the channel layout that
-   replaces the tests' illustrative one), then a `coop_protocol` library in
-   `protocol/` with bounded readers/writers, hello/welcome, input/action
-   envelopes, result, entity spawn/despawn, snapshot/baseline ack and resync
-   framing. Tests: round trip, truncation, oversize, unknown version/type,
-   stale epoch, recycled entity generation, and a deterministic fuzz pass.
-   No native serializer behind an unchecked read.
+1. **S04-T04 — Bind authenticated sessions to canonical players.** First
+   action: decide the initial deployment/authentication scheme (plan.md R06;
+   GNS encryption is unauthenticated, S04-T01) and write it down. Then build
+   a session manager in `protocol/` on top of `Transport` + codec + guard:
+   join state machine (Hello → check → auth → Welcome/Reject), two active
+   slots bound to stable player ids, build/content match, per-connection and
+   per-address rate limits, a bounded pending-handshake count, no privileged
+   role for remote peers, and no logged tokens. Tests: two legitimate joins,
+   impersonation, replay, a third client, mismatched builds, floods.
 
 ## Tools and runs
 
-- Build: `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Protocol.ps1' -Run <name> [-Task S04-T03]`
-  (full build about 1 min; uses the net-build-7 GNS install).
-- Tests: `python3 tools/run-protocol-tests.py <run> --build <build-run> [--task S04-T03] [--filter a,b]`
-  (full transport suite about 45 s).
-- Last run names: `proto-build-4`, `tr-6`, `tr-race-8`, `net-build-7`, `net-8`;
-  unchanged: `campaign-122`, `client-32`, `smoke-145`, `capture-24`,
-  `patch-check-29a/b`. Next: `proto-build-5`, `tr-7`, `campaign-123`,
-  `client-33`, `smoke-146`, `capture-25`, patch check `30`.
+- Build: `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Protocol.ps1' -Run <name> -Task <task>`
+- Tests: `python3 tools/run-protocol-tests.py <run> --build <build-run> --task <task> [--exe protocol-tests] [--filter a,b]`
+  (transport suite about 45 s, protocol suite about 3 s).
+- Last run names: `proto-build-7`, `pt-3`, `tr-7`, `tr-race-8`; unchanged:
+  `net-build-7`, `net-8`, `campaign-122`, `client-32`, `smoke-145`,
+  `capture-24`, `patch-check-29a/b`. Next: `proto-build-8`, `pt-4`, `tr-8`,
+  `campaign-123`, `client-33`, `smoke-146`, `capture-25`, patch check `30`.
 - Run PowerShell scripts with the Windows path in single quotes from bash.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
 G02/G03 carried limits are unchanged.
-Previous snapshot: [before S04-T03](../done/snapshot-before-S04-T03.md).
+Previous snapshot: [before S04-T04](../done/snapshot-before-S04-T04.md).

@@ -1,6 +1,6 @@
-# Preliminary network protocol — investigation only
+# Network protocol
 
-Status: design proposal, not implemented or wire-compatible with X-Ray. Engine evidence is in [network findings](network-findings.md). Exactly two authenticated active players initially; slot count is policy, not embedded in entity identifiers.
+Status: the transport adapter (S04-T02) and the v1 wire format and codec (S04-T03, [below](#wire-format-v1)) are implemented and tested; sessions, liveness and replication are not. The sections before the wire format are the original design proposal; it is not wire-compatible with X-Ray. Engine evidence is in [network findings](network-findings.md). Exactly two authenticated active players initially; slot count is policy, not embedded in entity identifiers.
 
 ## Transport decision
 
@@ -11,6 +11,8 @@ ENet is a viable simpler alternative, especially for a controlled LAN experiment
 Retain useful X-Ray packet serializers and event meanings behind adapters, but replace DirectPlay as the external transport. Retained networking is not merely a stub; its local-client trust model and campaign direct-connect shortcuts need changes regardless of transport. Do not tunnel arbitrary legacy events from unauthenticated clients. No custom reliable UDP implementation is proposed.
 
 ## Identity and envelope
+
+**Superseded on the wire by [Wire format v1](#wire-format-v1) (S04-T03):** the session's 128-bit identities travel once in Hello/Welcome, not in every message. Original proposal, kept for its rules:
 
 Proposed logical envelope: `protocol_major:u16, protocol_minor:u16, message_type:u16, payload_bytes:u32, campaign_id:128bits, session_id:128bits, authority_epoch:u64, stream_id:u16, sequence:u64, server_tick:u64` plus a typed payload. Negotiate supported minor features; reject incompatible major/content/schema versions before spawning. Define byte order, length limits and schema encodings before implementation; never transmit native struct layouts.
 
@@ -54,4 +56,108 @@ Begin with server-present-time combat. If latency testing requires hitscan rewin
 
 Provisional liveness policy: 1-second heartbeat, suspect after 5 seconds, disconnected after 15 seconds; tune with loss tests. Grace period retains player identity/slot, but defines server behavior for the unattended actor (neutral input, normal vulnerability unless game policy says otherwise). Reconnect authenticates, rotates token, and reconstructs from canonical checkpoint plus committed event suffix. If history/baseline has expired, use a full snapshot. Pause client action acceptance until spawn, state and event watermark agree. Client saves never enter this path.
 
-Cap message sizes, command rates, outstanding operations, entity counts and resync retries before allocation. Reject NaN/infinite coordinates, invalid IDs and malformed enums. Rate-limit requests per action and connection. Test loss, duplication, reordering, jitter, stale epochs, concurrent pickup and reconnect during death/transition. The transport adapter exists (S04-T02); the codec, sessions and liveness rules above are not implemented yet.
+Cap message sizes, command rates, outstanding operations, entity counts and resync retries before allocation. Reject NaN/infinite coordinates, invalid IDs and malformed enums. Rate-limit requests per action and connection. Test loss, duplication, reordering, jitter, stale epochs, concurrent pickup and reconnect during death/transition. The transport adapter (S04-T02) and the wire codec (S04-T03) exist; the session, liveness and replication rules above are not implemented yet.
+
+## Wire format v1
+
+Implemented 2026-10-20 (S04-T03, [validation](validation/S04-T03.md)) in
+`protocol/include/coop/proto/` (`wire.h`, `messages.h`, `guard.h`) and
+`protocol/src/proto/`. Version **1.0**. The code is the reference; this
+section is its summary.
+
+### Encoding
+
+- Little-endian integers; `f32` is IEEE-754 binary32 and must be finite and
+  inside the field's range; no padding, no native struct layouts.
+- Strings: `u8` length then bytes, with a per-field character set (display
+  names and details are printable ASCII; archetypes are `[a-z0-9_.-]`).
+  Byte blobs: `u16` or `u32` length then bytes, each with its own maximum.
+- Identities: `Uuid128` (two `u64`), `EntityRef {u64 id, u32 generation}`.
+  Zero is never a valid identity; a reference is either fully zero ("none",
+  where allowed) or fully set.
+- One canonical form: anything `decode()` accepts re-encodes to the same
+  bytes, and `encode()` refuses anything `decode()` would reject.
+
+### Header (24 bytes, every message)
+
+| Field | Type | Rule |
+|---|---|---|
+| type | u16 | known type, or bit `0x8000` set (optional: skipped if unknown) |
+| flags | u16 | 0 in v1 |
+| payload_bytes | u32 | exactly the bytes after the header |
+| epoch | u64 | 0 for Hello/Welcome/Reject; the session's authority epoch otherwise |
+| sequence | u64 | per channel and direction, from 1 |
+
+The session (campaign, session, player ids) is bound to the transport
+connection by the handshake, so later messages do not repeat it.
+
+### Channels
+
+Each type has one channel and one sending role; anything else is a protocol
+violation (the receiver closes with transport code 1003).
+
+| # | Channel | Class | Max message | Backlog | Carries |
+|---|---|---|---|---|---|
+| 0 | control | Critical, p0 | 1,024 | 64 KB | Hello (C), Welcome, Reject, ResyncBegin, ResyncEnd (S), Heartbeat (both) |
+| 1 | actions | Critical, p0 | 512 | 64 KB | ActionIntent (C), ActionResult (S) |
+| 2 | lifecycle | Critical, p0 | 4,096 | 128 KB | Spawn, Despawn, CampaignEvent (S) |
+| 3 | bulk | Bulk, p2 | 65,536 | 192 KB | ResyncChunk (S) |
+| 4 | snapshot | Transient, p1, 50 ms | 1,200 | 16 KB | Snapshot (S), SnapshotAck (C) |
+| 5 | input | Transient, p0, 50 ms | 512 | 8 KB | InputBatch (C) |
+
+`coop::proto::transport_config()` returns this layout for the transport.
+
+### Messages and limits
+
+| Message | Body | Bounds |
+|---|---|---|
+| Hello | magic `COOP`, major, minor, build id (32 B), content digest (32 B), player id, display name, auth proof, resume flag [+ session id, token, last event, last snapshot] | name 1–32; proof ≤ 256; token 16–64; layout frozen across majors so a mismatch can be answered |
+| Welcome | major (must match), negotiated minor, campaign/session/player/party ids, slot, slot generation, authority epoch, server tick, tick and snapshot rates, resume token | ids non-zero; slot < 8; epoch ≥ 1; 1 ≤ snapshot rate ≤ tick rate ≤ 240; token 16–64 |
+| Reject | reason, server major/minor, detail | reason ≠ 0 (unknown values kept); detail ≤ 128 |
+| Heartbeat | nonce, echo, sent tick | nonce ≠ 0 |
+| ActionIntent | operation id, kind, target ref, expected revision, params | operation id ≠ 0; kind 1–1023; params ≤ 256 (decoded per kind later, with its own bounds) |
+| ActionResult | operation id, outcome, reason, commit id, tick, revision | outcome 1–3; accepted ⇔ reason 0 (duplicate: either) |
+| Spawn | entity ref, archetype, level, transform, parent ref, commit id, state | archetype 1–64; parent ≠ self; state ≤ 2,048 (opaque, decoded later with bounds) |
+| Despawn | entity ref, reason, commit id | reason 1–3 |
+| CampaignEvent | event id, kind, revision, payload | ids non-zero; payload ≤ 1,024 |
+| Snapshot | server tick, baseline, last input, part, part count, entities | baseline < this sequence; part < count ≤ 16; ≤ 64 entities, each once; component bits known; health ≤ 10,000 |
+| SnapshotAck | snapshot id, baseline, event cursor | baseline ≤ snapshot |
+| InputBatch | 1–8 inputs, newest first (input *i* has sequence `header.sequence − i`) | ticks strictly decreasing; axes −1..1; angles bounded; buttons ≤ 16 bits; stance 0–3 |
+| ResyncBegin | resync id, checkpoint id, next epoch, content hash, event watermark, total bytes, chunk size, chunk count | total ≤ 256 MiB; chunk ≤ 60 KiB; count = ⌈total/chunk⌉ ≤ 65,536 |
+| ResyncChunk | resync id, index, CRC-32, data | 1–60 KiB; CRC checked on decode |
+| ResyncEnd | resync id, chunk count, CRC-32 of all data | count ≥ 1 |
+
+Positions are within ±100 km of the level origin, speeds within ±1 km/s and
+angles within ±4 rad (pitch ±2): wide enough for any level, narrow enough to
+refuse garbage.
+
+### Compatibility
+
+- **Major** must match. A server answers a Hello of another major with
+  Reject `VersionMismatch` (1); a client refuses a Welcome of another major.
+- **Minor**: both sides use the lower one. Additions in a later minor are
+  optional message types (bit `0x8000`), which older peers skip.
+- **Build and content**: the Hello's build id and content digest must equal
+  the server's (`check_hello`), else Reject `BuildMismatch` (2) or
+  `ContentMismatch` (3). What the digests cover is fixed by S04-T04.
+
+### Stateful rules (`guard.h`, one set per connection)
+
+- Sequences: reliable channels count 1, 2, 3, ... with no gap or repeat (a
+  violation); transient channels only move forward, and older or repeated
+  ones are dropped.
+- Epoch: only Hello/Welcome/Reject before the session, and never inside it.
+  After the Welcome every message carries the session's epoch; an older one
+  (in flight across a resync or recovery) is dropped; a newer one is a
+  violation. A resync announces the next epoch in ResyncBegin's body, sent
+  under the current one, and both sides then advance.
+- Entities: a generation only moves forward. A spawn that does not move it
+  forward is a recycled generation and is refused; a reference to an older
+  generation, or to a despawned entity, is stale; a newer one not yet
+  spawned is unknown (buffer within a bound, then repair). Tombstones are
+  kept up to a capacity, oldest forgotten first; live entities are never
+  evicted.
+- Resync: chunks in order with the announced sizes, then the end with the
+  matching count and CRC; data is streamed, never buffered whole.
+- Inputs: only inputs newer than the last processed one are applied, oldest
+  first.

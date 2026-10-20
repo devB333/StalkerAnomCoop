@@ -38,7 +38,28 @@ constexpr int kHandshakeTimeout = net::close_code::kSessionMin + 1;
 constexpr int kRateLimited = net::close_code::kSessionMin + 2;
 constexpr int kReplaced = net::close_code::kSessionMin + 3;          // the player connected again
 constexpr int kReleased = net::close_code::kSessionMin + 4;          // the server released the player
+constexpr int kTimeout = net::close_code::kSessionMin + 5;           // nothing heard within the timeout
 } // namespace close_code
+
+// S04-T05 liveness (docs/session-authentication.md "Liveness and reconnect").
+// The client sends a reliable heartbeat every interval and the server echoes
+// it; any message counts as hearing from the peer. Provisional values,
+// measured in docs/validation/S04-T05.md.
+struct LivenessConfig
+{
+    std::uint32_t heartbeat_interval_ms = 1000;
+    std::uint32_t suspect_after_ms = 5000;
+    std::uint32_t timeout_ms = 15000;
+    // How long after a session ends its resume token still continues it.
+    std::uint32_t resume_window_ms = 10 * 60 * 1000;
+    // Free a disconnected player's slot after this long; 0 keeps it for the
+    // life of the process (the default: a roster of two needs no reuse).
+    std::uint32_t release_after_ms = 0;
+};
+
+// The transport layout with the transport's own timeout just above the
+// session's, so the session layer decides when a peer is gone.
+net::TransportConfig transport_config(const LivenessConfig& liveness);
 
 struct RateLimit
 {
@@ -56,6 +77,7 @@ struct ServerConfig
     std::uint16_t tick_rate_hz = 30;
     std::uint16_t snapshot_rate_hz = 20;
     std::uint32_t handshake_timeout_ms = 5000;
+    LivenessConfig liveness;
     // Handshakes started per remote address (port ignored) per window.
     std::uint32_t max_handshakes_per_address = 6;
     std::uint32_t address_window_ms = 60000;
@@ -74,9 +96,23 @@ struct ServerConfig
 
 enum class SessionEventType : std::uint8_t
 {
-    Joined,  // a player's session started (or replaced an older one)
-    Left,    // a player's session ended; the slot stays theirs
-    Message, // a message from a joined player
+    Joined,    // a player's session started, resumed, or replaced an older connection
+    Left,      // a player's connection ended; the slot stays theirs
+    Message,   // a message from a joined player
+    Suspect,   // nothing heard for suspect_after_ms
+    Recovered, // heard again after Suspect
+    Released,  // the slot was freed (release() or release_after_ms)
+};
+
+enum class LeftReason : std::uint8_t
+{
+    Closed,      // the peer or the transport closed it
+    Timeout,     // nothing heard for timeout_ms
+    Replaced,    // a newer connection of the same player took over
+    Released,    // the server released the player
+    RateLimited,
+    Violation,
+    Shutdown,    // the server shut down
 };
 
 struct SessionEvent
@@ -87,8 +123,15 @@ struct SessionEvent
     std::uint32_t slot_generation = 0;
     proto::Uuid128 session_id;
     net::ChannelId channel = 0;
+    // Each Joined gets a new serial; every Message carries the serial of the
+    // connection it arrived on, so nothing from a replaced connection can be
+    // mistaken for the current one.
+    std::uint64_t join_serial = 0;
     proto::Decoded message; // Message
-    bool replaced = false;  // Left: a newer connection of the same player took over
+    bool resumed = false;   // Joined: continues the previous session (same session id)
+    std::uint64_t last_event = 0, last_snapshot = 0; // Joined, resumed: the client's cursors
+    LeftReason reason = LeftReason::Closed; // Left
+    bool replaced = false;  // Left: reason == Replaced
     std::string detail;     // Left: why (never contains credentials)
 };
 
@@ -104,6 +147,11 @@ struct ServerCounters
     std::uint64_t rate_limited_closes = 0;
     std::uint64_t rate_limited_drops = 0;
     std::uint64_t dropped_by_guard = 0;
+    std::uint64_t resumed = 0;
+    std::uint64_t resume_refused = 0; // asked to resume, got a fresh session
+    std::uint64_t timeouts = 0;
+    std::uint64_t heartbeats = 0;
+    std::uint64_t auto_released = 0;
 };
 
 struct PlayerView
@@ -112,7 +160,10 @@ struct PlayerView
     std::uint8_t slot = 0;
     std::uint32_t slot_generation = 0;
     bool connected = false;
+    bool suspect = false;
     proto::Uuid128 session_id;
+    std::uint64_t join_serial = 0;
+    int ping_ms = -1; // transport's estimate
 };
 
 class Server
@@ -127,6 +178,10 @@ public:
     // Frees a player's slot (closing their connection if any); the slot's
     // generation moves on, so references to the old binding go stale.
     bool release(const proto::Uuid128& player);
+    // Ends every session (peers see the transport's shutdown) after flushing
+    // up to flush_timeout_ms. Slots and tokens die with the process: there is
+    // no recovery across a restart yet (Stage 7).
+    void shutdown(std::uint32_t flush_timeout_ms, std::vector<SessionEvent>& out);
 
     std::vector<PlayerView> players() const;
     const ServerCounters& counters() const { return counters_; }
@@ -158,6 +213,9 @@ private:
         proto::AuthChallenge challenge;
         int slot = -1;
         std::array<Bucket, proto::kChannelCount> buckets{};
+        std::int64_t last_heard_us = 0;
+        bool suspect = false;
+        std::uint64_t join_serial = 0;
     };
     struct Slot
     {
@@ -166,11 +224,14 @@ private:
         std::uint32_t generation = 0;
         net::ConnectionId conn = net::kNoConnection;
         proto::Uuid128 session_id;
-        proto::Digest resume_token_hash{}; // S04-T05 uses it; the token itself is never stored
+        proto::Digest resume_token_hash{}; // the token itself is never stored
+        std::int64_t detached_since_us = -1; // -1 while connected
+        std::uint64_t join_serial = 0;
     };
 
     void onConnected(net::ConnectionId id);
-    void onDisconnected(net::ConnectionId id, const std::string& why, std::vector<SessionEvent>& out);
+    void onDisconnected(net::ConnectionId id, LeftReason reason, const std::string& why, std::vector<SessionEvent>& out);
+    void checkLiveness(std::vector<SessionEvent>& out);
     void onMessage(Conn& c, const net::Event& e, std::vector<SessionEvent>& out);
     void onHello(Conn& c, const proto::Hello& h);
     void onProof(Conn& c, const proto::AuthProof& p, std::vector<SessionEvent>& out);
@@ -178,7 +239,8 @@ private:
     void reject(Conn& c, proto::RejectReason reason, const char* detail);
     void violation(Conn& c, const std::string& why, std::vector<SessionEvent>& out);
     void closeConn(net::ConnectionId id, int code, const char* detail, bool flush, std::vector<SessionEvent>* out,
-        const std::string& why);
+        LeftReason reason, const std::string& why);
+    void emitLeft(int slot, LeftReason reason, const std::string& why, std::vector<SessionEvent>& out);
     bool allow(Conn& c, net::ChannelId ch);
     void note(const std::string& line);
     static std::string AddressOf(const std::string& remote);
@@ -192,5 +254,6 @@ private:
     std::vector<net::Event> events_;
     ServerCounters counters_;
     std::vector<std::string> log_;
+    std::uint64_t nextJoinSerial_ = 1;
 };
 } // namespace coop::session

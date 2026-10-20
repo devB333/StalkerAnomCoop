@@ -4,6 +4,39 @@
 
 namespace coop::session
 {
+namespace
+{
+bool SameDigest(const proto::Digest& a, const proto::Digest& b)
+{
+    std::uint8_t diff = 0; // constant time
+    for (std::size_t i = 0; i < a.size(); ++i)
+        diff |= std::uint8_t(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+const char* ToString(LeftReason r)
+{
+    switch (r)
+    {
+    case LeftReason::Closed: return "closed";
+    case LeftReason::Timeout: return "timeout";
+    case LeftReason::Replaced: return "replaced";
+    case LeftReason::Released: return "released";
+    case LeftReason::RateLimited: return "rate limited";
+    case LeftReason::Violation: return "protocol violation";
+    case LeftReason::Shutdown: return "server shutdown";
+    }
+    return "?";
+}
+} // namespace
+
+net::TransportConfig transport_config(const LivenessConfig& liveness)
+{
+    net::TransportConfig c = proto::transport_config();
+    c.connected_timeout_ms = liveness.timeout_ms + 1000;
+    return c;
+}
+
 Server::Server(net::Transport& transport, const ServerConfig& config, Roster roster)
     : t_(transport), config_(config), roster_(std::move(roster))
 {
@@ -35,10 +68,13 @@ void Server::update(std::vector<SessionEvent>& out)
                 onConnected(e.connection);
             break;
         case net::EventType::Disconnected:
-            onDisconnected(e.connection, std::string(net::to_string(e.reason)) + " (" + std::to_string(e.code) + ")", out);
+            onDisconnected(e.connection, e.reason == net::CloseReason::Timeout ? LeftReason::Timeout : LeftReason::Closed,
+                std::string(net::to_string(e.reason)) + " (" + std::to_string(e.code) + ")", out);
             break;
         case net::EventType::Message:
         {
+            // A connection already closed here (replaced, timed out) is gone
+            // from conns_: whatever it still had in flight is dropped.
             auto it = conns_.find(e.connection);
             if (it != conns_.end())
                 onMessage(it->second, e, out);
@@ -57,8 +93,65 @@ void Server::update(std::vector<SessionEvent>& out)
     for (net::ConnectionId id : late)
     {
         ++counters_.handshake_timeouts;
-        closeConn(id, close_code::kHandshakeTimeout, "handshake timeout", false, nullptr, "handshake timeout");
+        closeConn(id, close_code::kHandshakeTimeout, "handshake timeout", false, nullptr, LeftReason::Closed,
+            "handshake timeout");
     }
+    checkLiveness(out);
+}
+
+void Server::checkLiveness(std::vector<SessionEvent>& out)
+{
+    const std::int64_t now = t_.now_us();
+    const LivenessConfig& l = config_.liveness;
+    std::vector<net::ConnectionId> dead;
+    for (auto& kv : conns_)
+    {
+        Conn& c = kv.second;
+        if (c.state != State::Active)
+            continue;
+        const std::int64_t silent = now - c.last_heard_us;
+        if (silent > std::int64_t(l.timeout_ms) * 1000)
+            dead.push_back(c.id);
+        else if (!c.suspect && silent > std::int64_t(l.suspect_after_ms) * 1000)
+        {
+            c.suspect = true;
+            const Slot& s = slots_[std::size_t(c.slot)];
+            SessionEvent e;
+            e.type = SessionEventType::Suspect;
+            e.player = s.player;
+            e.slot = std::uint8_t(c.slot);
+            e.slot_generation = s.generation;
+            e.session_id = s.session_id;
+            e.join_serial = c.join_serial;
+            out.push_back(std::move(e));
+        }
+    }
+    for (net::ConnectionId id : dead)
+    {
+        ++counters_.timeouts;
+        closeConn(id, close_code::kTimeout, "timed out", false, &out, LeftReason::Timeout, "nothing heard within the timeout");
+    }
+    // Optional release of slots left empty for too long.
+    if (l.release_after_ms > 0)
+        for (std::size_t i = 0; i < slots_.size(); ++i)
+        {
+            Slot& s = slots_[i];
+            if (s.bound && s.conn == net::kNoConnection && s.detached_since_us >= 0 &&
+                now - s.detached_since_us > std::int64_t(l.release_after_ms) * 1000)
+            {
+                ++counters_.auto_released;
+                SessionEvent e;
+                e.type = SessionEventType::Released;
+                e.player = s.player;
+                e.slot = std::uint8_t(i);
+                e.slot_generation = s.generation;
+                e.session_id = s.session_id;
+                out.push_back(std::move(e));
+                const std::uint32_t generation = s.generation;
+                s = Slot{};
+                s.generation = generation;
+            }
+        }
 }
 
 void Server::onConnected(net::ConnectionId id)
@@ -86,10 +179,27 @@ void Server::onConnected(net::ConnectionId id)
     c.id = id;
     c.address = address;
     c.started_us = now;
+    c.last_heard_us = now;
     ++counters_.handshakes_started;
 }
 
-void Server::onDisconnected(net::ConnectionId id, const std::string& why, std::vector<SessionEvent>& out)
+void Server::emitLeft(int slot, LeftReason reason, const std::string& why, std::vector<SessionEvent>& out)
+{
+    Slot& s = slots_[std::size_t(slot)];
+    SessionEvent e;
+    e.type = SessionEventType::Left;
+    e.player = s.player;
+    e.slot = std::uint8_t(slot);
+    e.slot_generation = s.generation;
+    e.session_id = s.session_id;
+    e.join_serial = s.join_serial;
+    e.reason = reason;
+    e.replaced = reason == LeftReason::Replaced;
+    e.detail = std::string(ToString(reason)) + ": " + why;
+    out.push_back(std::move(e));
+}
+
+void Server::onDisconnected(net::ConnectionId id, LeftReason reason, const std::string& why, std::vector<SessionEvent>& out)
 {
     auto it = conns_.find(id);
     if (it == conns_.end())
@@ -100,32 +210,26 @@ void Server::onDisconnected(net::ConnectionId id, const std::string& why, std::v
         if (s.conn == id)
         {
             s.conn = net::kNoConnection;
-            SessionEvent e;
-            e.type = SessionEventType::Left;
-            e.player = s.player;
-            e.slot = std::uint8_t(it->second.slot);
-            e.slot_generation = s.generation;
-            e.session_id = s.session_id;
-            e.detail = why;
-            out.push_back(std::move(e));
+            s.detached_since_us = t_.now_us();
+            emitLeft(it->second.slot, reason, why, out);
         }
     }
     conns_.erase(it);
 }
 
 void Server::closeConn(net::ConnectionId id, int code, const char* detail, bool flush, std::vector<SessionEvent>* out,
-    const std::string& why)
+    LeftReason reason, const std::string& why)
 {
     t_.close(id, code, detail, flush);
     std::vector<SessionEvent> scratch;
-    onDisconnected(id, why, out ? *out : scratch);
+    onDisconnected(id, reason, why, out ? *out : scratch);
 }
 
 void Server::violation(Conn& c, const std::string& why, std::vector<SessionEvent>& out)
 {
     ++counters_.violations;
     note("protocol violation from " + c.address + ": " + why);
-    closeConn(c.id, net::close_code::kProtocolViolation, "protocol violation", false, &out, "protocol violation: " + why);
+    closeConn(c.id, net::close_code::kProtocolViolation, "protocol violation", false, &out, LeftReason::Violation, why);
 }
 
 bool Server::sendTo(Conn& c, const proto::Message& m)
@@ -146,7 +250,7 @@ void Server::reject(Conn& c, proto::RejectReason reason, const char* detail)
     sendTo(c, r);
     note(std::string("rejected ") + c.address + ": " + detail);
     // Flush so the Reject arrives before the close.
-    closeConn(c.id, close_code::kRejected, detail, true, nullptr, detail);
+    closeConn(c.id, close_code::kRejected, detail, true, nullptr, LeftReason::Closed, detail);
 }
 
 bool Server::allow(Conn& c, net::ChannelId ch)
@@ -206,15 +310,46 @@ void Server::onMessage(Conn& c, const net::Event& e, std::vector<SessionEvent>& 
             }
             ++counters_.rate_limited_closes;
             note("rate limit on channel " + std::to_string(e.channel) + " from " + c.address);
-            return closeConn(c.id, close_code::kRateLimited, "rate limit", false, &out, "rate limit");
+            return closeConn(c.id, close_code::kRateLimited, "rate limit", false, &out, LeftReason::RateLimited,
+                "channel " + std::to_string(e.channel));
         }
         const Slot& s = slots_[std::size_t(c.slot)];
+        c.last_heard_us = t_.now_us();
+        if (c.suspect)
+        {
+            c.suspect = false;
+            SessionEvent ev;
+            ev.type = SessionEventType::Recovered;
+            ev.player = s.player;
+            ev.slot = std::uint8_t(c.slot);
+            ev.slot_generation = s.generation;
+            ev.session_id = s.session_id;
+            ev.join_serial = c.join_serial;
+            out.push_back(std::move(ev));
+        }
+        if (auto* hb = std::get_if<proto::Heartbeat>(&d.body))
+        {
+            // Liveness is the session layer's: answer at once, so the client
+            // measures a round trip and the server has traffic that the
+            // transport must acknowledge (S04-T01 finding 1).
+            ++counters_.heartbeats;
+            if (hb->echo == 0)
+            {
+                proto::Heartbeat reply;
+                random_bytes(&reply.nonce, sizeof(reply.nonce));
+                reply.nonce |= 1; // non-zero
+                reply.echo = hb->nonce;
+                sendTo(c, reply);
+            }
+            return;
+        }
         SessionEvent ev;
         ev.type = SessionEventType::Message;
         ev.player = s.player; // from the binding, never from the message
         ev.slot = std::uint8_t(c.slot);
         ev.slot_generation = s.generation;
         ev.session_id = s.session_id;
+        ev.join_serial = c.join_serial;
         ev.channel = e.channel;
         ev.message = std::move(d);
         out.push_back(std::move(ev));
@@ -279,25 +414,35 @@ void Server::onProof(Conn& c, const proto::AuthProof& p, std::vector<SessionEven
         ++s.generation;
     }
     Slot& s = slots_[std::size_t(slot)];
+    const std::int64_t now = t_.now_us();
+    // Resume: the previous session continues if this connection holds its
+    // current token (one use: rotated below), within the window. The key
+    // proof above is still required; a token alone is never enough.
+    bool resumed = false;
+    if (c.hello.resume)
+    {
+        const proto::ResumeRequest& rq = c.hello.resume_request;
+        const bool inWindow = s.detached_since_us < 0 ||
+                              now - s.detached_since_us <= std::int64_t(config_.liveness.resume_window_ms) * 1000;
+        resumed = !s.session_id.zero() && rq.session_id == s.session_id &&
+                  SameDigest(sha256(rq.token.data(), rq.token.size()), s.resume_token_hash) && inWindow;
+        if (resumed)
+            ++counters_.resumed;
+        else
+            ++counters_.resume_refused;
+    }
     if (s.conn != net::kNoConnection)
     {
         // The same player again: the new authenticated connection replaces
         // the old one, which may be dead and waiting for its timeout
-        // (S04-T01 finding 2).
+        // (S04-T01 finding 2). Whatever the old one still has in flight is
+        // dropped with it.
         ++counters_.replaced;
         const net::ConnectionId old = s.conn;
         auto oldIt = conns_.find(old);
-        std::string oldAddress = oldIt != conns_.end() ? oldIt->second.address : "?";
+        const std::string oldAddress = oldIt != conns_.end() ? oldIt->second.address : "?";
         t_.close(old, close_code::kReplaced, "replaced by a new connection", false);
-        SessionEvent left;
-        left.type = SessionEventType::Left;
-        left.player = s.player;
-        left.slot = std::uint8_t(slot);
-        left.slot_generation = s.generation;
-        left.session_id = s.session_id;
-        left.replaced = true;
-        left.detail = "replaced by a new connection";
-        out.push_back(std::move(left));
+        emitLeft(slot, LeftReason::Replaced, "a new connection of the same player", out);
         s.conn = net::kNoConnection;
         conns_.erase(old);
         note("player in slot " + std::to_string(slot) + " reconnected from " + c.address + "; closed " + oldAddress);
@@ -305,7 +450,7 @@ void Server::onProof(Conn& c, const proto::AuthProof& p, std::vector<SessionEven
     proto::Welcome w;
     w.minor = std::min(c.hello.minor, config_.build.minor);
     w.campaign_id = config_.campaign_id;
-    w.session_id = random_uuid();
+    w.session_id = resumed ? s.session_id : random_uuid();
     w.player_id = who->player_id;
     w.party_id = config_.party_id;
     w.slot = std::uint8_t(slot);
@@ -316,23 +461,34 @@ void Server::onProof(Conn& c, const proto::AuthProof& p, std::vector<SessionEven
     w.snapshot_rate_hz = config_.snapshot_rate_hz;
     w.resume_token.resize(32);
     random_bytes(w.resume_token.data(), w.resume_token.size());
-    s.resume_token_hash = sha256(w.resume_token.data(), w.resume_token.size());
+    s.resume_token_hash = sha256(w.resume_token.data(), w.resume_token.size()); // rotated: the old token is dead
     if (!sendTo(c, w))
         return violation(c, "welcome could not be sent", out);
     std::fill(w.resume_token.begin(), w.resume_token.end(), std::uint8_t(0));
     c.guard.begin_session(config_.authority_epoch);
     c.state = State::Active;
     c.slot = slot;
+    c.last_heard_us = now;
+    c.join_serial = nextJoinSerial_++;
     s.conn = c.id;
     s.session_id = w.session_id;
+    s.detached_since_us = -1;
+    s.join_serial = c.join_serial;
     ++counters_.joins;
-    note("player in slot " + std::to_string(slot) + " joined from " + c.address);
+    note("player in slot " + std::to_string(slot) + (resumed ? " resumed from " : " joined from ") + c.address);
     SessionEvent j;
     j.type = SessionEventType::Joined;
     j.player = s.player;
     j.slot = std::uint8_t(slot);
     j.slot_generation = s.generation;
     j.session_id = s.session_id;
+    j.join_serial = c.join_serial;
+    j.resumed = resumed;
+    if (resumed)
+    {
+        j.last_event = c.hello.resume_request.last_event;
+        j.last_snapshot = c.hello.resume_request.last_snapshot;
+    }
     out.push_back(std::move(j));
 }
 
@@ -365,13 +521,41 @@ bool Server::release(const proto::Uuid128& player)
     return false;
 }
 
+void Server::shutdown(std::uint32_t flush_timeout_ms, std::vector<SessionEvent>& out)
+{
+    for (std::size_t i = 0; i < slots_.size(); ++i)
+        if (slots_[i].bound && slots_[i].conn != net::kNoConnection)
+        {
+            slots_[i].conn = net::kNoConnection;
+            emitLeft(int(i), LeftReason::Shutdown, "server shutdown", out);
+        }
+    conns_.clear();
+    t_.shutdown(flush_timeout_ms);
+}
+
 std::vector<PlayerView> Server::players() const
 {
     std::vector<PlayerView> v;
     for (std::size_t i = 0; i < slots_.size(); ++i)
-        if (slots_[i].bound)
-            v.push_back({slots_[i].player, std::uint8_t(i), slots_[i].generation, slots_[i].conn != net::kNoConnection,
-                slots_[i].session_id});
+    {
+        const Slot& s = slots_[i];
+        if (!s.bound)
+            continue;
+        PlayerView p;
+        p.player = s.player;
+        p.slot = std::uint8_t(i);
+        p.slot_generation = s.generation;
+        p.connected = s.conn != net::kNoConnection;
+        p.session_id = s.session_id;
+        p.join_serial = s.join_serial;
+        auto it = conns_.find(s.conn);
+        if (it != conns_.end())
+            p.suspect = it->second.suspect;
+        net::ConnectionStatus st;
+        if (p.connected && t_.status(s.conn, st))
+            p.ping_ms = st.ping_ms;
+        v.push_back(p);
+    }
     return v;
 }
 } // namespace coop::session

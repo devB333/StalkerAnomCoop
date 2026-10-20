@@ -5,7 +5,8 @@ How a remote player becomes a session bound to a canonical player (S04-T04,
 (`crypto.h`, `auth.h`, `server.h`, `client.h`), `protocol/src/session/`,
 `protocol/tools/coop_keytool.cpp`. Wire messages:
 [wire format v1](network-protocol.md#wire-format-v1). Liveness, resume and
-token rotation are S04-T05.
+token rotation: [below](#liveness-and-reconnect) (S04-T05,
+[validation](validation/S04-T05.md)).
 
 ## Supported deployment (initial)
 
@@ -128,6 +129,54 @@ The Hello's `build_id` and `content_digest` must equal the server's.
 Computing both at start-up belongs to S05-T01, which first runs the session
 layer inside the engine. The tests use fixed digests.
 
+## Liveness and reconnect
+
+Settings (`LivenessConfig`; provisional defaults, measured in
+[S04-T05](validation/S04-T05.md)):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `heartbeat_interval_ms` | 1,000 | the client sends a reliable Heartbeat; the server echoes it at once |
+| `suspect_after_ms` | 5,000 | nothing heard: `Suspect` (game may show "connection problem"); `Recovered` when heard again |
+| `timeout_ms` | 15,000 | nothing heard: the connection is closed (1105) and the player `Left{Timeout}` |
+| `resume_window_ms` | 600,000 | how long after a session ends its token still resumes it |
+| `release_after_ms` | 0 (never) | free a disconnected player's slot after this long |
+
+- **Who decides.** Each side runs its own "last heard" timer; any message
+  counts. The transport's own timeout is set 1 s above `timeout_ms`
+  (`session::transport_config(liveness)`), so the session layer decides.
+  Heartbeats are reliable because GNS only starts its dead-peer clock on
+  traffic that expects an acknowledgement (S04-T01 finding 1). The echo gives
+  the client a round-trip time. The heartbeat rate must stay under the control
+  channel's rate limit (10/s).
+- **While a player is disconnected** their slot, player id and party stay
+  bound (the participant model's "detached" state). A third player cannot
+  take the slot. The actor stays in the world, receives no input (it stands
+  still), stays vulnerable and keeps its area online (S03-T04). Applying that
+  is the simulation's job from S05-T01 on; the session layer only reports
+  `Left` and keeps the slot. If `release_after_ms` is set, the slot is freed
+  after that long (`Released`) and the next owner gets a new generation.
+- **Reconnect** always needs the key proof again. A Hello may also ask to
+  resume, with the session id and the latest token from the last Welcome and
+  the client's event and snapshot cursors. If the token's SHA-256 matches the
+  stored hash (compared in constant time) within the window, the same session
+  id continues and the game receives `Joined{resumed, last_event,
+  last_snapshot}` to continue from those cursors. Otherwise the player gets a
+  fresh session (new session id: the game resynchronises them).
+- **Token rotation.** Every Welcome issues a new token and the server keeps
+  only its hash, so each token works once. A captured old token resumes
+  nothing; it gets a fresh session, and even that needs the player's key.
+- **Stale connections cannot submit.** When the same player connects again,
+  the older connection is closed (1103) and dropped from the server's tables
+  before the new Welcome. Messages still in flight on it, or queued behind the
+  close, are discarded by the transport. Every message the game sees carries
+  the `join_serial` of the connection it arrived on, so nothing can be
+  confused across connections.
+- **Server shutdown** (`Server::shutdown`) ends every session (`Left
+  {Shutdown}`); clients see `PeerShutdown` (1004). Sessions, slots and tokens
+  live in memory only. After a restart, a resume gets a fresh session: there
+  is no recovery across a restart until Stage 7.
+
 ## Close codes (transport range 1100–1999)
 
 | Code | Meaning |
@@ -137,3 +186,4 @@ layer inside the engine. The tests use fixed digests.
 | 1102 | Rate limited |
 | 1103 | Replaced by a newer connection of the same player |
 | 1104 | Released by the server |
+| 1105 | Timeout: nothing heard within `timeout_ms` |

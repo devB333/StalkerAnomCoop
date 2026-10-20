@@ -104,6 +104,14 @@ if ($listening) {
             $proc = $session.processes.($p.name)
             $runtime = Join-Path $workspace ($proc.runtime -replace '/', '\')
             if (-not $p.started -and $now -ge $p.start) {
+                if ($p.restarts -gt 0) {
+                    # a rejoin: wait for the first run to exit, keep its logs
+                    $previous = $clients["$($p.name)#0"]
+                    if ($previous -and -not $previous.HasExited) { continue }
+                    $keep = Join-Path $logDir "$($p.name)-first-run"
+                    New-Item -ItemType Directory $keep -Force | Out-Null
+                    Get-ChildItem (Join-Path $runtime 'appdata\logs') -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $keep }
+                }
                 if (Test-Path $proc.stop_file) { Remove-Item $proc.stop_file }
                 $exe = Join-Path $runtime 'bin\AnomalyDX11.exe'
                 $arguments = '-fsltx ' + $proc.fsgame + ' -coop-config ' + $proc.profile + ' -nointro'

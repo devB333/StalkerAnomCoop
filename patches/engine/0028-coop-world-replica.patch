@@ -1,0 +1,1788 @@
+diff --git a/src/xrEngine/device.cpp b/src/xrEngine/device.cpp
+index 71d016a..479c8ec 100644
+--- a/src/xrEngine/device.cpp
++++ b/src/xrEngine/device.cpp
+@@ -399,6 +399,8 @@ void mt_FreezeThread(void *ptr) {
+ 	}
+ }
+ 
++extern "C" void __cdecl xrCoopClient_LoadingPump(); // xrGame/CoopClientLink.cpp
++
+ void CRenderDevice::on_idle()
+ {
+ 	FreezeTimer.Start();
+@@ -428,6 +430,7 @@ void CRenderDevice::on_idle()
+ 		if (g_loading_events.front()())
+ 			g_loading_events.pop_front();
+ 		pApp->LoadDraw();
++		xrCoopClient_LoadingPump(); // S05-T02: no frame callback runs while a level loads
+ 		return;
+ 	}
+ 
+diff --git a/src/xrGame/CampaignActorControl.cpp b/src/xrGame/CampaignActorControl.cpp
+index 449cf68..8744e8f 100644
+--- a/src/xrGame/CampaignActorControl.cpp
++++ b/src/xrGame/CampaignActorControl.cpp
+@@ -1,4 +1,5 @@
+ #include "pch_script.h"
++#include "CoopReplica.h"
+ #include "CampaignActorControl.h"
+ 
+ // S03-T03: see CampaignActorControl.h.
+@@ -55,7 +56,9 @@ bool controls_actor(const CActor* actor)
+ 
+ bool script_binding_allowed(const CGameObject* object)
+ {
+-	if (!server_role() || !object)
++	// S05-T02: a co-op client applies the same rule: its ALife actor is its
++	// own participant's actor, every other actor is remote.
++	if ((!server_role() && !replica_active()) || !object)
+ 	{
+ 		++s_stats.binder_allowed;
+ 		return true;
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index df711cc..11d1802 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -7,6 +7,16 @@
+ #include "CoopIdentity.h"
+ #include "../xrEngine/xr_ioconsole.h"
+ #include "../xrEngine/IGame_Level.h"
++#include "CoopReplica.h"
++#include "Level.h"
++#include "Actor.h"
++#include "xrServer.h"
++#include "xrMessages.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++#include "../xrServerEntities/xrServer_Objects_ALife.h"
++#include "coop/proto/guard.h"
+ 
+ #include "coop/net/transport.h"
+ #include "coop/session/client.h"
+@@ -58,6 +68,39 @@ struct Link
+ 	u64 inject_operation = 0;
+ 	u32 inject_ok = 0;
+ 	u32 inject_failed = 0;
++	// S05-T02: the world
++	u8 world = 0; // World
++	coop::proto::ResyncTracker tracker;
++	coop::proto::ResyncBegin begin;
++	xr_vector<u8> blob;
++	xr_deque<coop::proto::ResyncChunk> early_chunks;
++	bool have_end = false;
++	coop::proto::ResyncEnd end;
++	xr_vector<coop::proto::Message> buffered; // lifecycle before the world is live
++	u64 watermark = 0;
++	u64 applied = 0; // last commit applied
++	string64 save_name = "";
++	u8 local_slot = 0;
++	u16 local_actor = 0xffff;
++	bool start_permitted = false;
++	xr_map<u16, coop::proto::EntityRef> refs; // what each engine id is on the server
++	xr_map<u64, u16> by_entity;
++	coop::proto::EntityTable table{65536};
++	u32 world_started_ms = 0, load_started_ms = 0, live_ms = 0;
++	u64 spawns_known = 0, spawns_created = 0, spawns_offline_created = 0, spawns_failed = 0;
++	u64 despawns_range = 0, despawns_destroyed = 0, events_stale = 0, events_unknown = 0;
++	u32 last_summary_ms = 0;
++	u32 last_reconcile_ms = 0;
++	u64 reconciled = 0;
++};
++
++enum World : u8
++{
++	WorldMenu, // connected or not; no world yet
++	WorldReceiving, // the checkpoint is arriving
++	WorldLoading, // the replica level is loading
++	WorldLive, // the replica follows the lifecycle stream
++	WorldFailed,
+ };
+ 
+ Link* g_link = nullptr;
+@@ -162,8 +205,426 @@ void inject_step()
+ 	}
+ }
+ 
++
++// ------------------------------------------------------------ S05-T02
++template <typename T>
++bool take(const xr_vector<u8>& in, size_t& at, T& out)
++{
++	if (at + sizeof(T) > in.size())
++		return false;
++	memcpy(&out, in.data() + at, sizeof(T));
++	at += sizeof(T);
++	return true;
++}
++
++void world_failed(LPCSTR why)
++{
++	g_link->world = WorldFailed;
++	g_link->log.line("world-failed %s", why);
++}
++
++// The checkpoint is complete: write it as this client's saved game, set the
++// replica up and start the level from it (the one start the role guard lets
++// through).
++void world_received()
++{
++	const coop::proto::GuardResult g = g_link->tracker.end(g_link->end);
++	if (g.verdict != coop::proto::Verdict::Accept)
++		return world_failed(g.why);
++	if (coop::session::sha256(g_link->blob.data(), g_link->blob.size()) != g_link->begin.content_hash)
++		return world_failed("content hash mismatch");
++	const xr_vector<u8>& b = g_link->blob;
++	size_t at = 0;
++	u32 magic = 0, format = 0;
++	u8 slot = 0, name_len = 0, actors = 0;
++	if (!take(b, at, magic) || magic != 0x444C5743 || !take(b, at, format) || format != 1 || !take(b, at, slot) ||
++		!take(b, at, name_len) || name_len == 0 || name_len >= sizeof(g_link->save_name) || at + name_len > b.size())
++		return world_failed("bad header");
++	memcpy(g_link->save_name, b.data() + at, name_len);
++	g_link->save_name[name_len] = 0;
++	at += name_len;
++	for (LPCSTR c = g_link->save_name; *c; ++c)
++		if (!isalnum(u8(*c)) && *c != '-' && *c != '_')
++			return world_failed("bad save name");
++	g_link->local_slot = slot;
++	g_link->local_actor = 0xffff;
++	if (!take(b, at, actors))
++		return world_failed("bad actors");
++	for (u8 i = 0; i < actors; ++i)
++	{
++		u8 actor_slot = 0;
++		u16 id = 0;
++		if (!take(b, at, actor_slot) || !take(b, at, id))
++			return world_failed("bad actor");
++		if (actor_slot == slot)
++			g_link->local_actor = id;
++	}
++	if (g_link->local_actor == 0xffff)
++		return world_failed("no actor for this player's slot");
++	u32 online = 0;
++	if (!take(b, at, online) || online > 65536)
++		return world_failed("bad online count");
++	xr_vector<u16> ids;
++	ids.reserve(online);
++	for (u32 i = 0; i < online; ++i)
++	{
++		u16 id = 0;
++		coop::proto::EntityRef ref;
++		if (!take(b, at, id) || !take(b, at, ref.id) || !take(b, at, ref.generation))
++			return world_failed("bad online entry");
++		ids.push_back(id);
++		g_link->refs[id] = ref;
++		g_link->by_entity[ref.id] = id;
++		g_link->table.spawn(ref);
++	}
++	for (LPCSTR extension : {".scop", ".scoc"})
++	{
++		u32 size = 0;
++		if (!take(b, at, size) || at + size > b.size())
++			return world_failed("bad checkpoint section");
++		string_path name, path;
++		xr_sprintf(name, "%s%s", g_link->save_name, extension);
++		FS.update_path(path, "$game_saves$", name);
++		FILE* file = fopen(path, "wb");
++		if (!file || fwrite(b.data() + at, 1, size, file) != size)
++		{
++			if (file)
++				fclose(file);
++			return world_failed("cannot write the checkpoint");
++		}
++		fclose(file);
++		at += size;
++	}
++	FS.rescan_path(FS.get_path("$game_saves$")->m_Path, FALSE);
++	g_link->watermark = g_link->begin.event_watermark;
++	g_link->applied = g_link->watermark;
++	g_link->log.line("world-received resync=%I64u bytes=%u ms=%u save=%s slot=%u local_actor=%u online=%u "
++		"watermark=%I64u buffered=%u",
++		g_link->begin.resync_id, u32(b.size()), g_link->wall.GetElapsed_ms() - g_link->world_started_ms,
++		g_link->save_name, u32(slot), u32(g_link->local_actor), online, g_link->watermark,
++		u32(g_link->buffered.size()));
++	g_link->blob.clear();
++	g_link->blob.shrink_to_fit();
++	campaign::replica_begin(g_link->local_actor, ids);
++	g_link->start_permitted = true;
++	g_link->world = WorldLoading;
++	g_link->load_started_ms = g_link->wall.GetElapsed_ms();
++	string512 command;
++	xr_sprintf(command, "start server(%s/single/alife/load) client(localhost)", g_link->save_name);
++	Console->Execute(command);
++}
++
++void on_chunk(const coop::proto::ResyncChunk& chunk)
++{
++	const coop::proto::GuardResult g = g_link->tracker.chunk(chunk);
++	if (g.verdict != coop::proto::Verdict::Accept)
++		return world_failed(g.why);
++	g_link->blob.insert(g_link->blob.end(), chunk.data.begin(), chunk.data.end());
++	if (g_link->have_end && g_link->blob.size() == g_link->begin.total_bytes)
++		world_received();
++}
++
++// The native spawn packet's id, parent and section (written by the server's
++// CSE_Abstract::Spawn_Write; read like CSE_Abstract::Spawn_Read).
++bool spawn_header(const coop::proto::Spawn& s, NET_Packet& packet, shared_str& section, u16& id, u16& parent,
++	Fvector& position, Fvector& angle)
++{
++	if (s.state.size() < 16 || s.state.size() > sizeof(packet.B.data))
++		return false;
++	packet.B.count = u32(s.state.size());
++	memcpy(packet.B.data, s.state.data(), s.state.size());
++	u16 type = 0;
++	packet.r_begin(type);
++	if (type != M_SPAWN)
++		return false;
++	string256 text;
++	packet.r_stringZ(text);
++	section = text;
++	packet.r_stringZ(text);
++	u8 b;
++	packet.r_u8(b);
++	packet.r_u8(b);
++	packet.r_vec3(position);
++	packet.r_vec3(angle);
++	u16 respawn;
++	packet.r_u16(respawn);
++	packet.r_u16(id);
++	packet.r_u16(parent);
++	return !packet.r_eof();
++}
++
++void apply_spawn(const coop::proto::Spawn& s)
++{
++	if (s.commit_id <= g_link->applied)
++		return;
++	g_link->applied = s.commit_id;
++	NET_Packet packet;
++	shared_str section;
++	u16 id = 0xffff, parent = 0xffff;
++	Fvector position, angle;
++	if (!spawn_header(s, packet, section, id, parent, position, angle))
++	{
++		++g_link->spawns_failed;
++		g_link->log.line("spawn-bad-packet entity=%I64u/%u", s.entity.id, s.entity.generation);
++		return;
++	}
++	const coop::proto::EntityTable::Apply table = g_link->table.spawn(s.entity);
++	if (table != coop::proto::EntityTable::Apply::Ok)
++	{
++		++g_link->events_stale;
++		g_link->log.line("spawn-refused entity=%I64u/%u id=%u table=%u", s.entity.id, s.entity.generation, u32(id),
++			u32(table));
++		return;
++	}
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_ALifeDynamicObject* known = ai().alife().objects().object(id, true);
++	if (known && known->s_name != section)
++	{
++		// the engine id now names another entity: the old one is gone
++		g_link->log.line("spawn-replaces id=%u old=%s new=%s", u32(id), *known->s_name, *section);
++		campaign::ReplicaPermit permit;
++		alife->release(known, true);
++		known = nullptr;
++	}
++	if (known)
++	{
++		if (!known->m_bOnline)
++		{
++			known->o_Position = position;
++			known->o_Angle = angle;
++		}
++		++g_link->spawns_known;
++	}
++	else
++	{
++		CSE_ALifeDynamicObject* parent_object = parent == 0xffff ? nullptr : ai().alife().objects().object(parent, true);
++		if (parent != 0xffff && !parent_object)
++		{
++			++g_link->spawns_failed;
++			g_link->log.line("spawn-no-parent id=%u parent=%u section=%s", u32(id), u32(parent), *section);
++			return;
++		}
++		campaign::ReplicaPermit permit;
++		if (!parent_object || parent_object->m_bOnline)
++		{
++			// online now, as on the server: the engine's own path for a new entity
++			u16 type = 0;
++			packet.r_begin(type);
++			CSE_Abstract* entity = Level().Server->Process_spawn(packet, ClientID(0xffff));
++			if (!entity || entity->ID != id)
++			{
++				++g_link->spawns_failed;
++				g_link->log.line("spawn-failed id=%u section=%s got=%u", u32(id), *section, entity ? u32(entity->ID) : 0xffffu);
++				return;
++			}
++			++g_link->spawns_created;
++		}
++		else
++		{
++			// inside an offline parent: registered offline; it comes online with it
++			CSE_Abstract* entity = F_entity_Create(*section);
++			CSE_ALifeDynamicObject* dynamic = entity ? smart_cast<CSE_ALifeDynamicObject*>(entity) : nullptr;
++			if (!dynamic)
++			{
++				if (entity)
++					F_entity_Destroy(entity);
++				++g_link->spawns_failed;
++				return;
++			}
++			entity->Spawn_Read(packet);
++			entity->ID = Level().Server->PerformIDgen(id, entity);
++			alife->register_object(dynamic, true);
++			++g_link->spawns_offline_created;
++		}
++	}
++	g_link->refs[id] = s.entity;
++	g_link->by_entity[s.entity.id] = id;
++	campaign::replica_set_online(id, true);
++	campaign::replica_apply_switch(id);
++}
++
++void apply_despawn(const coop::proto::Despawn& d)
++{
++	if (d.commit_id <= g_link->applied)
++		return;
++	g_link->applied = d.commit_id;
++	const auto it = g_link->by_entity.find(d.entity.id);
++	if (it == g_link->by_entity.end())
++	{
++		++g_link->events_unknown;
++		return;
++	}
++	const u16 id = it->second;
++	if (!(g_link->refs[id] == d.entity) || g_link->table.despawn(d.entity) != coop::proto::EntityTable::Apply::Ok)
++	{
++		++g_link->events_stale;
++		return;
++	}
++	campaign::replica_set_online(id, false);
++	if (d.reason == coop::proto::DespawnReason::OutOfRange)
++	{
++		++g_link->despawns_range;
++		campaign::replica_apply_switch(id);
++	}
++	else
++	{
++		++g_link->despawns_destroyed;
++		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++		CSE_ALifeDynamicObject* object = ai().alife().objects().object(id, true);
++		campaign::ReplicaPermit permit;
++		if (object && object->m_bOnline)
++		{
++			NET_Packet packet;
++			packet.w_begin(M_EVENT);
++			packet.w_u32(Level().timeServer());
++			packet.w_u16(GE_DESTROY);
++			packet.w_u16(id);
++			Level().Send(packet, net_flags(TRUE, TRUE));
++		}
++		else if (object)
++			alife->release(object, true);
++		g_link->refs.erase(id);
++		g_link->by_entity.erase(it);
++	}
++}
++
++void apply_lifecycle(const coop::proto::Message& m)
++{
++	if (const auto* s = std::get_if<coop::proto::Spawn>(&m))
++		apply_spawn(*s);
++	else if (const auto* d = std::get_if<coop::proto::Despawn>(&m))
++		apply_despawn(*d);
++}
++
++// What the replica holds, for comparison with the server's lifecycle log.
++void write_world_summary(LPCSTR tag)
++{
++	string_path path;
++	string64 name;
++	xr_sprintf(name, "coop-world-%s.csv", tag);
++	FS.update_path(path, "$logs$", name);
++	FILE* file = fopen(path, "w");
++	if (!file)
++		return;
++	fprintf(file, "# applied_commit=%I64u watermark=%I64u\nid,entity,generation,section,in_set,online_object,alife_online\n",
++		g_link->applied, g_link->watermark);
++	u32 in_set = 0, objects = 0;
++	for (const auto& r : g_link->refs)
++	{
++		const bool wanted = campaign::replica_wants_online(r.first);
++		CSE_ALifeDynamicObject* object = ai().get_alife() ? ai().alife().objects().object(r.first, true) : nullptr;
++		const bool online_object = g_pGameLevel && Level().Objects.net_Find(r.first) != nullptr;
++		in_set += wanted ? 1 : 0;
++		objects += online_object && wanted ? 1 : 0;
++		fprintf(file, "%u,%I64u,%u,%s,%d,%d,%d\n", u32(r.first), r.second.id, r.second.generation,
++			object ? *object->s_name : "-", wanted ? 1 : 0, online_object ? 1 : 0, object && object->m_bOnline ? 1 : 0);
++	}
++	fclose(file);
++	g_link->log.line("world-summary tag=%s applied=%I64u set=%u present=%u level_objects=%u reconciled=%I64u "
++		"spawns_known=%I64u created=%I64u offline_created=%I64u failed=%I64u despawns=%I64u/%I64u stale=%I64u unknown=%I64u",
++		tag, g_link->applied, in_set, objects, g_pGameLevel ? Level().Objects.o_count() : 0u, g_link->reconciled,
++		g_link->spawns_known, g_link->spawns_created, g_link->spawns_offline_created, g_link->spawns_failed,
++		g_link->despawns_range, g_link->despawns_destroyed, g_link->events_stale, g_link->events_unknown);
++}
++
++void world_frame()
++{
++	// The level goes away on quit (or a disconnect): the replica ends with it.
++	if (g_link->world == WorldLive && (g_link->quitting || !g_pGameLevel || !ai().get_alife()))
++	{
++		g_link->world = WorldMenu;
++		campaign::replica_end();
++		g_link->log.line("world-ended quitting=%d level=%d", g_link->quitting ? 1 : 0, g_pGameLevel ? 1 : 0);
++		return;
++	}
++	if (g_link->world == WorldLoading && g_pGameLevel && g_pGameLevel->bReady && ai().get_alife() && g_actor)
++	{
++		g_link->world = WorldLive;
++		g_link->live_ms = g_link->wall.GetElapsed_ms();
++		const u32 buffered = u32(g_link->buffered.size());
++		for (const coop::proto::Message& m : g_link->buffered)
++			apply_lifecycle(m);
++		g_link->buffered.clear();
++		g_link->log.line("world-live load_ms=%u applied_buffered=%u applied=%I64u actor=%u",
++			g_link->live_ms - g_link->load_started_ms, buffered, g_link->applied, u32(g_actor->ID()));
++		campaign::report_replica("live");
++	}
++	// Anything whose switch did not take (a squad's member order, an object
++	// still loading) is switched again; counted.
++	if (g_link->world == WorldLive && g_link->wall.GetElapsed_ms() - g_link->last_reconcile_ms >= 2000)
++	{
++		g_link->last_reconcile_ms = g_link->wall.GetElapsed_ms();
++		for (const auto& r : g_link->refs)
++		{
++			const bool wanted = campaign::replica_wants_online(r.first);
++			CSE_ALifeDynamicObject* object = ai().alife().objects().object(r.first, true);
++			if (object && object->ID_Parent == 0xffff && wanted != !!object->m_bOnline)
++			{
++				campaign::replica_apply_switch(r.first);
++				++g_link->reconciled;
++			}
++		}
++	}
++	if (g_link->world == WorldLive && g_link->wall.GetElapsed_ms() - g_link->last_summary_ms >= 10000)
++	{
++		g_link->last_summary_ms = g_link->wall.GetElapsed_ms();
++		write_world_summary("latest");
++		campaign::report_replica("status");
++	}
++}
++
+ void on_message(const coop::session::ClientEvent& e)
+ {
++	// S05-T02: the world stream
++	if (const auto* begin = std::get_if<coop::proto::ResyncBegin>(&e.message.body))
++	{
++		if (g_link->world != WorldMenu)
++		{
++			g_link->log.line("resync-ignored world=%u", u32(g_link->world));
++			return;
++		}
++		const coop::proto::GuardResult g = g_link->tracker.begin(*begin);
++		if (g.verdict != coop::proto::Verdict::Accept)
++			return world_failed(g.why);
++		g_link->begin = *begin;
++		g_link->blob.reserve(size_t(begin->total_bytes));
++		g_link->world = WorldReceiving;
++		g_link->world_started_ms = g_link->wall.GetElapsed_ms();
++		g_link->log.line("resync-begin resync=%I64u bytes=%I64u chunks=%u watermark=%I64u", begin->resync_id,
++			begin->total_bytes, begin->chunk_count, begin->event_watermark);
++		while (!g_link->early_chunks.empty() && g_link->world == WorldReceiving)
++		{
++			on_chunk(g_link->early_chunks.front());
++			g_link->early_chunks.pop_front();
++		}
++		return;
++	}
++	if (const auto* chunk = std::get_if<coop::proto::ResyncChunk>(&e.message.body))
++	{
++		if (g_link->world == WorldMenu && g_link->early_chunks.size() < 64)
++			g_link->early_chunks.push_back(*chunk); // the bulk lane can overtake the control lane
++		else if (g_link->world == WorldReceiving)
++			on_chunk(*chunk);
++		return;
++	}
++	if (const auto* end = std::get_if<coop::proto::ResyncEnd>(&e.message.body))
++	{
++		if (g_link->world != WorldReceiving)
++			return;
++		g_link->end = *end;
++		g_link->have_end = true;
++		if (g_link->blob.size() == g_link->begin.total_bytes)
++			world_received();
++		return;
++	}
++	if (std::get_if<coop::proto::Spawn>(&e.message.body) || std::get_if<coop::proto::Despawn>(&e.message.body))
++	{
++		if (g_link->world == WorldLive && g_pGameLevel && ai().get_alife())
++			apply_lifecycle(e.message.body);
++		else if (g_link->world != WorldFailed && g_link->buffered.size() < 200000)
++			g_link->buffered.push_back(e.message.body);
++		return;
++	}
+ 	if (const auto* result = std::get_if<coop::proto::ActionResult>(&e.message.body))
+ 	{
+ 		g_link->log.line("action-result operation=%I64u outcome=%u reason=%u", result->operation_id,
+@@ -298,6 +759,7 @@ void coop_client_frame()
+ 			on_event(e);
+ 	}
+ 	inject_step();
++	world_frame();
+ 	const u32 now = g_link->wall.GetElapsed_ms();
+ 	if (now - g_link->last_status_ms >= 5000)
+ 	{
+@@ -314,6 +776,11 @@ void coop_client_frame()
+ 			g_link->quitting = true;
+ 			g_link->log.line("client-exit reason=%s", stop_file ? "stop-file" : "time");
+ 			log_status("final");
++			if (g_link->world == WorldLive)
++			{
++				write_world_summary("final");
++				campaign::report_replica("final");
++			}
+ 			Console->Execute("quit");
+ 		}
+ 	}
+@@ -323,6 +790,7 @@ void coop_client_app_end()
+ {
+ 	if (!g_link)
+ 		return;
++	campaign::replica_end();
+ 	if (g_link->client)
+ 		g_link->client->close(coop::net::close_code::kNormal, "client exit");
+ 	if (g_link->transport)
+@@ -339,9 +807,23 @@ extern "C" bool __cdecl xrCoopClient_AllowLocalStart(LPCSTR op_server)
+ {
+ 	if (!coop_client_active())
+ 		return true;
++	// S05-T02: the replica level the link asked for, once.
++	if (g_link->start_permitted && op_server && strstr(op_server, g_link->save_name) == op_server)
++	{
++		g_link->start_permitted = false;
++		g_link->log.line("role-guard allowed-replica-start server_options=%s", op_server);
++		return true;
++	}
+ 	// S05-T02 adds the one start a co-op client may make: the replica level
+ 	// the link requests itself.
+ 	++g_link->local_starts_refused;
+ 	g_link->log.line("role-guard refused-local-start server_options=%s", op_server ? op_server : "");
++	// The menu hid itself for the start; bring it back.
++	Console->Execute("main_menu on");
+ 	return false;
+ }
++
++// From the engine's loading loop (device.cpp): one level loading stage runs
++// per frame and no frame callback does, so the link is pumped from here and
++// liveness keeps going while the replica loads.
++extern "C" void __cdecl xrCoopClient_LoadingPump() { campaign::coop_client_frame(); }
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index f3c2be7..89e88be 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -123,6 +123,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 			ok = false;
+ 		}
+ 		out.serve_seconds = ini.line_exist("coop", "serve_seconds") ? ini.r_u32("coop", "serve_seconds") : 0;
++		out.churn = ini.line_exist("coop", "churn") ? ini.r_u32("coop", "churn") : 0;
+ 		if (ok && !absolute(out.roster_path))
+ 		{
+ 			Msg("! S05-T01 coop config: roster must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 98b2c79..1d623a0 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -9,7 +9,8 @@
+ //   log           absolute path of this process's co-op event log
+ //   stop_file     absolute path; when it exists the process ends cleanly
+ //   server only:  listen (ip:port), roster (absolute path), party_id (32 hex),
+-//                 save (saved game to serve), serve_seconds (0: until stop_file)
++//                 save (saved game to serve), serve_seconds (0: until stop_file),
++//                 churn (seconds between S05-T02 server-side entity changes; 0 off)
+ //   client only:  server (ip:port), key (absolute DPAPI key file), name,
+ //                 exit_after_seconds (0: never), inject (0/1: S05-T01 refusal test)
+ //
+@@ -33,6 +34,7 @@ struct CoopConfig
+ 	string_path roster_path;
+ 	string64 save_name;
+ 	u32 serve_seconds;
++	u32 churn; // S05-T02: seconds between server-controlled entity changes (fixture; 0 off)
+ 	// client
+ 	string64 server_address;
+ 	string_path key_path;
+diff --git a/src/xrGame/CoopReplica.cpp b/src/xrGame/CoopReplica.cpp
+new file mode 100644
+index 0000000..974758c
+--- /dev/null
++++ b/src/xrGame/CoopReplica.cpp
+@@ -0,0 +1,271 @@
++#include "pch_script.h"
++#include "CoopReplica.h"
++
++// S05-T02: see CoopReplica.h.
++
++#include "CampaignMessagePolicy.h"
++#include "alife_switch_manager.h"
++#include "xrServer.h"
++#include "GameObject.h"
++#include "../xrServerEntities/xrServer_Objects_ALife_Monsters.h"
++#include "xrMessages.h"
++#include "ai_space.h"
++#include "alife_simulator.h"
++#include "alife_object_registry.h"
++
++#include <unordered_set>
++
++namespace campaign
++{
++namespace
++{
++bool g_active = false;
++u16 g_local_actor = u16(-1);
++int g_permits = 0;
++// Created by replica_begin, deleted by replica_end: a static container would
++// allocate through the engine's allocator before main and free after it is
++// torn down (an access violation at a single-player client's exit, capture-26).
++std::unordered_set<u16>* g_online = nullptr;
++ReplicaStats g_stats = {};
++u32 g_logged = 0;
++
++void note(LPCSTR what, LPCSTR detail, u32 value)
++{
++	if (g_logged >= 32)
++		return;
++	++g_logged;
++	Msg("S05-T02 replica refused %s %s %u", what, detail ? detail : "", value);
++}
++} // namespace
++
++bool replica_active() { return g_active; }
++
++void replica_begin(u16 local_actor, const xr_vector<u16>& online)
++{
++	g_active = true;
++	g_local_actor = local_actor;
++	if (!g_online)
++		g_online = xr_new<std::unordered_set<u16>>();
++	g_online->clear();
++	g_online->insert(online.begin(), online.end());
++	g_stats = ReplicaStats{};
++	g_logged = 0;
++	Msg("S05-T02 replica begin local_actor=%u online=%u", u32(local_actor), replica_online_count());
++}
++
++void replica_end()
++{
++	if (!g_active)
++		return;
++	report_replica("end");
++	g_active = false;
++	g_local_actor = u16(-1);
++	xr_delete(g_online);
++}
++
++u16 replica_local_actor() { return g_local_actor; }
++
++bool replica_permitted() { return g_permits > 0; }
++ReplicaPermit::ReplicaPermit() { ++g_permits; }
++ReplicaPermit::~ReplicaPermit() { --g_permits; }
++
++bool replica_wants_online(u16 id) { return g_online && g_online->count(id) != 0; }
++
++void replica_set_online(u16 id, bool online)
++{
++	if (!g_online)
++		return;
++	if (online)
++		g_online->insert(id);
++	else
++		g_online->erase(id);
++}
++
++u32 replica_online_count() { return g_online ? u32(g_online->size()) : 0; }
++
++void replica_note_alife(int what)
++{
++	if (!g_active)
++		return;
++	if (what == 0)
++		++g_stats.alife_shedule_calls;
++	else
++		++g_stats.alife_updates;
++}
++
++void replica_apply_switch(u16 id)
++{
++	if (!g_active || !ai().get_alife())
++		return;
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_ALifeDynamicObject* object = ai().alife().objects().object(id, true);
++	if (!object)
++		return;
++	if (CSE_ALifeMonsterAbstract* monster = smart_cast<CSE_ALifeMonsterAbstract*>(object))
++		if (monster->m_group_id != 0xffff)
++			if (CSE_ALifeDynamicObject* group = ai().alife().objects().object(monster->m_group_id, true))
++				object = group;
++	CALifeSwitchManager& switches = *alife;
++	replica_switch_object(switches, object);
++}
++
++bool replica_alife_scheduled_allowed()
++{
++	if (!g_active)
++		return true;
++	++g_stats.scheduled_skipped;
++	return false;
++}
++
++bool replica_switch_object(CALifeSwitchManager& switches, CSE_ALifeDynamicObject* object)
++{
++	if (!g_active)
++		return false;
++	++g_stats.switch_calls;
++	// Items in an inventory go online and offline with their owner.
++	if (object->ID_Parent != 0xffff)
++		return true;
++	bool want = replica_wants_online(object->ID);
++	if (CSE_ALifeOnlineOfflineGroup* group = smart_cast<CSE_ALifeOnlineOfflineGroup*>(object))
++	{
++		// A squad is online on the server when its members are.
++		for (const auto& member : group->squad_members())
++			if (replica_wants_online(member.first))
++			{
++				want = true;
++				break;
++			}
++	}
++	ReplicaPermit permit;
++	if (want && !object->m_bOnline)
++	{
++		switches.switch_online(object);
++		++g_stats.switched_online;
++	}
++	else if (!want && object->m_bOnline)
++	{
++		switches.switch_offline(object);
++		++g_stats.switched_offline;
++	}
++	return true;
++}
++
++void replica_on_register(CSE_ALifeDynamicObject* object)
++{
++	if (!g_active || !smart_cast<CSE_ALifeCreatureActor*>(object))
++		return;
++	// This client's own participant actor is its player entity, whichever
++	// slot it holds on the server; every other actor is a remote one.
++	if (object->ID == g_local_actor)
++	{
++		if (!object->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
++			++g_stats.player_flag_set;
++		object->s_flags.or(M_SPAWN_OBJECT_ASPLAYER);
++	}
++	else if (object->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
++	{
++		object->s_flags.and(u16(-1) ^ M_SPAWN_OBJECT_ASPLAYER);
++		++g_stats.player_flag_cleared;
++	}
++	Msg("S05-T02 replica actor %u registered as %s", u32(object->ID),
++		object->ID == g_local_actor ? "the local player" : "a remote participant");
++}
++
++bool replica_refuse_create(LPCSTR section)
++{
++	if (!g_active || replica_permitted())
++		return false;
++	++g_stats.creates_refused;
++	note("create", section, 0);
++	return true;
++}
++
++bool replica_refuse_release(u16 id)
++{
++	if (!g_active || replica_permitted())
++		return false;
++	++g_stats.releases_refused;
++	note("release", "id", id);
++	return true;
++}
++
++bool replica_spawn_local(xrServer& server, const CSE_Abstract* entity)
++{
++	if (!g_active)
++		return true;
++	// The local actor and everything it carries stay local; the rest is
++	// presented from the server's state.
++	for (const CSE_Abstract* e = entity; e; e = e->ID_Parent == 0xffff ? nullptr : server.ID_to_entity(e->ID_Parent))
++		if (e->ID == g_local_actor)
++		{
++			++g_stats.spawns_local;
++			return true;
++		}
++	++g_stats.spawns_remote;
++	return false;
++}
++
++bool replica_refuse_message(u16 type, bool bridge)
++{
++	if (!g_active || replica_permitted() || !bridge)
++		return false;
++	switch (classify_message(type))
++	{
++	case MessageClass::StateImport:
++		if (type != M_SPAWN)
++			return false; // the local actor's own state into its local entity
++		break;
++	case MessageClass::WorldControl: break;
++	case MessageClass::Outcome:
++		if (type == M_EVENT || type == M_EVENT_PACK)
++			return false; // policed per event in Process_event
++		break;
++	default: return false;
++	}
++	++g_stats.messages_refused;
++	note("message", message_name(type), type);
++	return true;
++}
++
++bool replica_refuse_event(u16 type, bool bridge)
++{
++	if (!g_active || replica_permitted() || !bridge)
++		return false;
++	++g_stats.events_refused;
++	if (type < 64)
++		++g_stats.event_types_refused[type];
++	note("event", game_event_name(type), type);
++	return true;
++}
++
++bool replica_binder_update_allowed(const CGameObject* object)
++{
++	if (!g_active || !object || object->Local())
++		return true;
++	++g_stats.binder_updates_skipped;
++	return false;
++}
++
++const ReplicaStats& replica_stats() { return g_stats; }
++
++void report_replica(LPCSTR tag)
++{
++	const ReplicaStats& s = g_stats;
++	string512 events = "";
++	for (u32 i = 0; i < 64; ++i)
++		if (s.event_types_refused[i])
++		{
++			string64 one;
++			xr_sprintf(one, " %s=%u", game_event_name(u16(i)), s.event_types_refused[i]);
++			xr_strcat(events, one);
++		}
++	Msg("S05-T02 replica %s active=%d local_actor=%u online_set=%u scheduled_skipped=%I64u switched_online=%I64u "
++		"switched_offline=%I64u player_flag_set=%I64u player_flag_cleared=%I64u creates_refused=%I64u "
++		"releases_refused=%I64u spawns_local=%I64u spawns_remote=%I64u messages_refused=%I64u events_refused=%I64u "
++		"binder_updates_skipped=%I64u alife_shedule=%I64u alife_updates=%I64u switch_calls=%I64u events:%s",
++		tag, g_active ? 1 : 0, u32(g_local_actor), replica_online_count(), s.scheduled_skipped, s.switched_online,
++		s.switched_offline, s.player_flag_set, s.player_flag_cleared, s.creates_refused, s.releases_refused,
++		s.spawns_local, s.spawns_remote, s.messages_refused, s.events_refused, s.binder_updates_skipped,
++		s.alife_shedule_calls, s.alife_updates, s.switch_calls, events);
++}
++} // namespace campaign
+diff --git a/src/xrGame/CoopReplica.h b/src/xrGame/CoopReplica.h
+new file mode 100644
+index 0000000..51c4e14
+--- /dev/null
++++ b/src/xrGame/CoopReplica.h
+@@ -0,0 +1,92 @@
++#pragma once
++
++// S05-T02: a co-op client's replica of the server's world.
++//
++// The client starts the level from the server's checkpoint (the initial
++// world snapshot), with its own in-process xrServer and ALife as storage
++// and presentation only. While the replica is active nothing in the client
++// advances shared state on its own:
++//
++// - ALife: no offline simulation (update_scheduled); online/offline follows
++//   the server's lifecycle stream (the replica online set), not distance.
++// - Entities: only replication creates or releases them (spawn_item, release
++//   and the client level's M_SPAWN are refused otherwise), so the client's
++//   engine ids stay the server's.
++// - Every object except the local participant's actor and what it carries is
++//   spawned non-local: the engine's Remote() path (no AI think, positions
++//   interpolated from network updates; CCustomMonster, CAI_Stalker,
++//   CBaseMonster, CActor).
++// - Game events (hits, deaths, ownership, ...) and world control from the
++//   client's own level are refused by its in-process server.
++// - Script binders: the single-player actor binder attaches to the local
++//   participant's actor only; remote objects' binders do not update.
++// - The local participant's actor carries M_SPAWN_OBJECT_ASPLAYER on this
++//   client (it is the ALife actor and the view), whichever slot it holds.
++//
++// Every refusal is counted and reported (report_replica).
++
++class CSE_Abstract;
++class CSE_ALifeDynamicObject;
++class CALifeSwitchManager;
++class CGameObject;
++class xrServer;
++
++namespace campaign
++{
++// The replica exists from the permitted level start to the level's end.
++bool replica_active();
++void replica_begin(u16 local_actor, const xr_vector<u16>& online);
++void replica_end();
++u16 replica_local_actor();
++
++// Replication applies a change: the hooks let it through.
++bool replica_permitted();
++struct ReplicaPermit
++{
++	ReplicaPermit();
++	~ReplicaPermit();
++};
++
++// The server's online set as the client knows it.
++bool replica_wants_online(u16 id);
++void replica_set_online(u16 id, bool online);
++u32 replica_online_count();
++// Switches the object (or the squad it belongs to) online or offline now, to
++// match the replica online set; the client's ALife update is not relied on.
++void replica_apply_switch(u16 id);
++
++// Hooks.
++bool replica_alife_scheduled_allowed(); // CALifeUpdateManager::update_scheduled
++bool replica_switch_object(CALifeSwitchManager& switches, CSE_ALifeDynamicObject* object); // true: handled
++void replica_on_register(CSE_ALifeDynamicObject* object); // the player flag, before graph registration
++bool replica_refuse_create(LPCSTR section); // spawn_item
++bool replica_refuse_release(u16 id); // CALifeSimulatorBase::release
++bool replica_spawn_local(xrServer& server, const CSE_Abstract* entity); // the in-process spawn writer
++bool replica_refuse_message(u16 type, bool bridge); // xrServer::OnMessage
++bool replica_refuse_event(u16 type, bool bridge); // xrServer::Process_event
++bool replica_binder_update_allowed(const CGameObject* object); // CScriptBinder::shedule_Update
++// Diagnostics of the replica's ALife driving: 0 shedule_Update, 1 update().
++void replica_note_alife(int what);
++
++struct ReplicaStats
++{
++	u64 scheduled_skipped;
++	u64 switched_online;
++	u64 switched_offline;
++	u64 player_flag_set;
++	u64 player_flag_cleared;
++	u64 creates_refused;
++	u64 releases_refused;
++	u64 spawns_remote;
++	u64 spawns_local;
++	u64 messages_refused;
++	u64 events_refused;
++	u64 binder_updates_skipped;
++	u64 alife_shedule_calls;
++	u64 alife_updates;
++	u64 switch_calls;
++	u32 event_types_refused[64]; // first 64 GE_* type ids
++};
++const ReplicaStats& replica_stats();
++void report_replica(LPCSTR tag);
++} // namespace campaign
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index b1cd698..37ffc96 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -22,6 +22,9 @@
+ 
+ #include "coop/net/transport.h"
+ #include "coop/session/server.h"
++#include "coop/session/crypto.h"
++#include "xrMessages.h"
++#include "xrServer.h"
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -46,6 +49,33 @@ struct PlayerLink
+ 	u32 joins;
+ 	u32 leaves;
+ 	u16 pending_actor; // spawned for this participant, not online yet (0xffff: none)
++	// S05-T02: the world stream to this player.
++	u8 world; // WorldState
++	u64 resync_id;
++	u64 watermark; // lifecycle commit the player's checkpoint contains
++	xr_vector<u8> blob; // the checkpoint being streamed
++	u32 next_chunk;
++	u32 chunk_count;
++	u32 crc;
++	u32 resync_started_ms;
++	xr_deque<coop::proto::Message> outbox; // lifecycle messages, commit order
++	u64 events_sent;
++	u64 outbox_peak;
++};
++
++enum WorldState : u8
++{
++	WorldNone, // not joined, or left: nothing is sent
++	WorldPending, // joined; the checkpoint is taken once its actor is online
++	WorldStreaming, // checkpoint chunks going out; lifecycle after the watermark follows
++	WorldLive, // checkpoint sent; lifecycle streams
++};
++
++// One online ALife object as the clients were told.
++struct Published
++{
++	coop::proto::EntityRef ref;
++	shared_str section;
+ };
+ 
+ struct Host
+@@ -72,6 +102,17 @@ struct Host
+ 	u64 acks = 0;
+ 	u64 other_messages = 0;
+ 	u64 actors_spawned = 0;
++	// S05-T02 lifecycle
++	u64 commit = 0;
++	xr_map<u16, Published> published;
++	FILE* lifecycle_csv = nullptr;
++	u64 spawns = 0, despawns_range = 0, despawns_destroyed = 0, spawn_oversize = 0, spawn_unencodable = 0;
++	u64 resyncs = 0;
++	// churn fixture: a server-controlled entity change every few seconds
++	u32 churn_next_ms = 0;
++	u16 churn_id = 0xffff;
++	u32 churn_release_ms = 0;
++	u32 churn_spawned = 0, churn_released = 0;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -229,6 +270,390 @@ void give_actor(PlayerLink& link)
+ 		int(ai().alife().objects().objects().size()) - int(objects_before));
+ }
+ 
++// ------------------------------------------------------------ S05-T02
++// Lifecycle: the clients' world is the set of the server's online ALife
++// objects. Each tick the host compares it with what it published and turns
++// the difference into Spawn (the object came online: its native spawn packet)
++// and Despawn (offline: OutOfRange; gone from ALife: Destroyed) messages, each
++// with the next commit id. A player whose world stream started gets every
++// message after its checkpoint's watermark, in commit order, paced below the
++// lifecycle channel's backlog bound.
++
++const u32 kChunkBytes = coop::proto::kMaxResyncChunk;
++const u32 kLifecycleBacklogLimit = 512 * 1024;
++const u32 kBulkBacklogLimit = 160 * 1024;
++
++bool entity_ref_of(u16 id, coop::proto::EntityRef& out)
++{
++	EngineEntityKey key;
++	EntityId entity;
++	if (!g_campaign_identity->current_key(id, key) || g_campaign_identity->resolve(key, entity) != Refusal::None)
++		return false;
++	out.id = entity.value;
++	out.generation = key.generation;
++	return out.id != 0 && out.generation != 0;
++}
++
++// The protocol's archetype alphabet is [a-z0-9_.-]; the native packet carries
++// the real section.
++std::string archetype_of(LPCSTR section)
++{
++	std::string out;
++	for (LPCSTR c = section; c && *c && out.size() < coop::proto::kMaxArchetype; ++c)
++	{
++		char ch = char(tolower(*c));
++		if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' || ch == '-'))
++			ch = '_';
++		out += ch;
++	}
++	return out.empty() ? std::string("x") : out;
++}
++
++u32 depth_of(u16 id)
++{
++	u32 depth = 0;
++	for (CSE_Abstract* e = Level().Server->ID_to_entity(id); e && e->ID_Parent != 0xffff && depth < 16; ++depth)
++		e = Level().Server->ID_to_entity(e->ID_Parent);
++	return depth;
++}
++
++void lifecycle_csv(LPCSTR kind, u16 id, const coop::proto::EntityRef& ref, u32 reason, LPCSTR section,
++	const Fvector& position)
++{
++	if (g_host->lifecycle_csv)
++		fprintf(g_host->lifecycle_csv, "%I64u,%s,%u,%I64u,%u,%u,%s,%.3f,%.3f,%.3f\n", g_host->commit, kind, u32(id),
++			ref.id, ref.generation, reason, section, VPUSH(position));
++}
++
++void queue_event(const coop::proto::Message& m)
++{
++	for (PlayerLink& link : g_host->links)
++		if (link.world == WorldStreaming || link.world == WorldLive)
++		{
++			link.outbox.push_back(m);
++			link.outbox_peak = _max(link.outbox_peak, u64(link.outbox.size()));
++		}
++}
++
++bool make_spawn(u16 id, CSE_Abstract* entity, const coop::proto::EntityRef& ref, coop::proto::Spawn& out)
++{
++	NET_Packet packet;
++	entity->Spawn_Write(packet, TRUE);
++	if (packet.B.count > coop::proto::kMaxSpawnState)
++	{
++		if (++g_host->spawn_oversize <= 16)
++			g_host->log.line("spawn-oversize id=%u section=%s bytes=%u", u32(id), *entity->s_name, packet.B.count);
++		return false;
++	}
++	const Fvector& p = entity->o_Position;
++	if (!_valid(p) || _abs(p.x) > coop::proto::kMaxCoord || _abs(p.y) > coop::proto::kMaxCoord ||
++		_abs(p.z) > coop::proto::kMaxCoord)
++	{
++		++g_host->spawn_unencodable;
++		return false;
++	}
++	out = coop::proto::Spawn{};
++	out.entity = ref;
++	out.archetype = archetype_of(*entity->s_name);
++	out.level = u16(ai().level_graph().level_id());
++	out.transform.x = p.x;
++	out.transform.y = p.y;
++	out.transform.z = p.z;
++	out.transform.yaw = angle_normalize_signed(entity->o_Angle.y);
++	if (entity->ID_Parent != 0xffff)
++		entity_ref_of(entity->ID_Parent, out.parent);
++	out.state.assign(packet.B.data, packet.B.data + packet.B.count);
++	return true;
++}
++
++void track_lifecycle()
++{
++	if (!g_pGameLevel || !ai().get_alife() || !Level().Server)
++		return;
++	xr_map<u16, coop::proto::EntityRef> now;
++	CObjectList& objects = Level().Objects;
++	for (u32 i = 0, n = objects.o_count(); i < n; ++i)
++	{
++		CObject* object = objects.o_get_by_iterator(i);
++		if (!object || object->getDestroy())
++			continue;
++		const u16 id = u16(object->ID());
++		if (!ai().alife().objects().object(id, true))
++			continue; // transient non-ALife objects (bolts, projectiles): Stage 6
++		coop::proto::EntityRef ref;
++		if (entity_ref_of(id, ref))
++			now[id] = ref;
++	}
++	// Despawns first, children before their parents.
++	xr_vector<std::pair<u32, u16>> gone;
++	for (const auto& p : g_host->published)
++	{
++		const auto it = now.find(p.first);
++		if (it == now.end() || !(it->second == p.second.ref))
++			gone.push_back({depth_of(p.first), p.first});
++	}
++	std::sort(gone.begin(), gone.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++	for (const auto& g : gone)
++	{
++		const Published& old = g_host->published[g.second];
++		coop::proto::EntityRef current;
++		const bool same_entity = entity_ref_of(g.second, current) && current.id == old.ref.id &&
++			ai().alife().objects().object(g.second, true);
++		coop::proto::Despawn d;
++		d.entity = old.ref;
++		d.reason = same_entity ? coop::proto::DespawnReason::OutOfRange : coop::proto::DespawnReason::Destroyed;
++		d.commit_id = ++g_host->commit;
++		queue_event(coop::proto::Message(d));
++		if (same_entity)
++			++g_host->despawns_range;
++		else
++			++g_host->despawns_destroyed;
++		lifecycle_csv("despawn", g.second, old.ref, u32(d.reason), *old.section, Fvector().set(0, 0, 0));
++		g_host->published.erase(g.second);
++	}
++	// Spawns, parents before their children.
++	xr_vector<std::pair<u32, u16>> fresh;
++	for (const auto& n : now)
++		if (!g_host->published.count(n.first))
++			fresh.push_back({depth_of(n.first), n.first});
++	std::sort(fresh.begin(), fresh.end());
++	for (const auto& f : fresh)
++	{
++		CSE_Abstract* entity = Level().Server->ID_to_entity(f.second);
++		if (!entity)
++			continue;
++		coop::proto::Spawn spawn;
++		Published published;
++		published.ref = now[f.second];
++		published.section = entity->s_name;
++		if (!make_spawn(f.second, entity, published.ref, spawn))
++		{
++			// not representable: published anyway so it is not retried every
++			// tick; the clients keep their checkpoint copy (if any) offline
++			g_host->published[f.second] = published;
++			continue;
++		}
++		spawn.commit_id = ++g_host->commit;
++		queue_event(coop::proto::Message(spawn));
++		++g_host->spawns;
++		lifecycle_csv("spawn", f.second, published.ref, 0, *entity->s_name, entity->o_Position);
++		g_host->published[f.second] = published;
++	}
++}
++
++void flush_outbox(PlayerLink& link)
++{
++	while (!link.outbox.empty())
++	{
++		coop::net::ChannelBacklog backlog;
++		if (!g_host->server->backlog(link.player, coop::proto::kLifecycle, backlog))
++			return;
++		if (backlog.queued_bytes + backlog.unacked_bytes > kLifecycleBacklogLimit)
++			return;
++		if (!g_host->server->send(link.player, link.outbox.front()))
++			return;
++		link.outbox.pop_front();
++		++link.events_sent;
++	}
++}
++
++bool read_file(LPCSTR path, xr_vector<u8>& out)
++{
++	FILE* file = fopen(path, "rb");
++	if (!file)
++		return false;
++	fseek(file, 0, SEEK_END);
++	const long size = ftell(file);
++	fseek(file, 0, SEEK_SET);
++	out.resize(size > 0 ? size_t(size) : 0);
++	const bool ok = size > 0 && fread(out.data(), 1, out.size(), file) == out.size();
++	fclose(file);
++	return ok;
++}
++
++template <typename T>
++void put(xr_vector<u8>& out, T value)
++{
++	const u8* p = reinterpret_cast<const u8*>(&value);
++	out.insert(out.end(), p, p + sizeof(T));
++}
++
++// The world a joining player starts from: a native checkpoint of the whole
++// campaign (scop + scoc, the S02-T06d save path) plus what the lifecycle
++// stream has said up to its watermark. Format (little-endian):
++//   u32 'CWLD', u32 1, u8 slot, u8 name_len, name, u8 actors, {u8 slot, u16 id},
++//   u32 online, {u16 id, u64 entity, u32 generation}, u32 scop, bytes, u32 scoc, bytes
++bool start_resync(PlayerLink& link)
++{
++	track_lifecycle(); // the watermark and the checkpoint describe the same world
++	const u64 watermark = g_host->commit;
++	string64 save;
++	xr_sprintf(save, "coop-join-%u", u32(++g_host->resyncs));
++	CTimer timer;
++	timer.Start();
++	NET_Packet packet;
++	packet.w_begin(M_SAVE_GAME);
++	packet.w_stringZ(save);
++	packet.w_u8(1);
++	Level().Send(packet, net_flags(TRUE));
++	const u32 save_ms = timer.GetElapsed_ms();
++	string_path scop_name, scoc_name, scop_path, scoc_path;
++	xr_sprintf(scop_name, "%s.scop", save);
++	xr_sprintf(scoc_name, "%s.scoc", save);
++	FS.update_path(scop_path, "$game_saves$", scop_name);
++	FS.update_path(scoc_path, "$game_saves$", scoc_name);
++	xr_vector<u8> scop, scoc;
++	if (!read_file(scop_path, scop) || !read_file(scoc_path, scoc))
++	{
++		g_host->log.line("resync-failed player=%s reason=checkpoint-missing save=%s", coop_uuid_hex(link.player).c_str(),
++			save);
++		return false;
++	}
++	xr_vector<u8>& blob = link.blob;
++	blob.clear();
++	put<u32>(blob, 0x444C5743); // "CWLD"
++	put<u32>(blob, 1);
++	put<u8>(blob, link.ref.slot);
++	put<u8>(blob, u8(xr_strlen(save)));
++	blob.insert(blob.end(), save, save + xr_strlen(save));
++	xr_vector<std::pair<u8, u16>> actors;
++	for (const PlayerLink& other : g_host->links)
++		if (other.bound)
++			if (CActor* actor = participant_actor(other.ref))
++				actors.push_back({other.ref.slot, u16(actor->ID())});
++	put<u8>(blob, u8(actors.size()));
++	for (const auto& a : actors)
++	{
++		put<u8>(blob, a.first);
++		put<u16>(blob, a.second);
++	}
++	put<u32>(blob, u32(g_host->published.size()));
++	for (const auto& p : g_host->published)
++	{
++		put<u16>(blob, p.first);
++		put<u64>(blob, p.second.ref.id);
++		put<u32>(blob, p.second.ref.generation);
++	}
++	put<u32>(blob, u32(scop.size()));
++	blob.insert(blob.end(), scop.begin(), scop.end());
++	put<u32>(blob, u32(scoc.size()));
++	blob.insert(blob.end(), scoc.begin(), scoc.end());
++
++	link.resync_id = g_host->resyncs;
++	link.watermark = watermark;
++	link.next_chunk = 0;
++	link.chunk_count = u32((blob.size() + kChunkBytes - 1) / kChunkBytes);
++	link.crc = 0;
++	link.outbox.clear(); // everything up to the watermark is in the checkpoint
++	coop::proto::ResyncBegin begin;
++	begin.resync_id = link.resync_id;
++	begin.checkpoint_id = link.resync_id;
++	begin.authority_epoch = 1; // a join does not change the epoch
++	begin.content_hash = coop::session::sha256(blob.data(), blob.size());
++	begin.event_watermark = watermark;
++	begin.total_bytes = blob.size();
++	begin.chunk_bytes = kChunkBytes;
++	begin.chunk_count = link.chunk_count;
++	if (!g_host->server->send(link.player, coop::proto::Message(begin)))
++	{
++		g_host->log.line("resync-failed player=%s reason=begin-not-sent", coop_uuid_hex(link.player).c_str());
++		return false;
++	}
++	link.world = WorldStreaming;
++	link.resync_started_ms = g_host->wall.GetElapsed_ms();
++	g_host->log.line("resync-begin player=%s resync=%I64u save=%s save_ms=%u scop=%u scoc=%u online=%u actors=%u "
++		"watermark=%I64u bytes=%u chunks=%u",
++		coop_uuid_hex(link.player).c_str(), link.resync_id, save, save_ms, u32(scop.size()), u32(scoc.size()),
++		u32(g_host->published.size()), u32(actors.size()), watermark, u32(blob.size()), link.chunk_count);
++	return true;
++}
++
++void stream_world(PlayerLink& link)
++{
++	while (link.next_chunk < link.chunk_count)
++	{
++		coop::net::ChannelBacklog backlog;
++		if (!g_host->server->backlog(link.player, coop::proto::kBulk, backlog))
++			return;
++		if (backlog.queued_bytes + backlog.unacked_bytes + kChunkBytes > kBulkBacklogLimit)
++			return;
++		coop::proto::ResyncChunk chunk;
++		chunk.resync_id = link.resync_id;
++		chunk.index = link.next_chunk;
++		const size_t from = size_t(link.next_chunk) * kChunkBytes;
++		const size_t to = std::min<size_t>(link.blob.size(), from + size_t(kChunkBytes));
++		chunk.data.assign(link.blob.begin() + from, link.blob.begin() + to);
++		if (!g_host->server->send(link.player, coop::proto::Message(chunk)))
++			return;
++		link.crc = coop::proto::crc32(chunk.data.data(), chunk.data.size(), link.crc);
++		++link.next_chunk;
++	}
++	coop::proto::ResyncEnd end;
++	end.resync_id = link.resync_id;
++	end.chunk_count = link.chunk_count;
++	end.total_crc32 = link.crc;
++	if (!g_host->server->send(link.player, coop::proto::Message(end)))
++		return;
++	link.world = WorldLive;
++	g_host->log.line("resync-end player=%s resync=%I64u chunks=%u ms=%u queued_events=%u",
++		coop_uuid_hex(link.player).c_str(), link.resync_id, link.chunk_count,
++		g_host->wall.GetElapsed_ms() - link.resync_started_ms, u32(link.outbox.size()));
++	link.blob.clear();
++	link.blob.shrink_to_fit();
++}
++
++// A server-controlled entity change every `churn` seconds (profile churn = N,
++// 0 off): a medkit appears beside participant 1's actor and is released half
++// a period later.
++void churn()
++{
++	if (!g_host->config.churn || !ai().get_alife())
++		return;
++	const u32 now = g_host->wall.GetElapsed_ms();
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (g_host->churn_id == 0xffff && now >= g_host->churn_next_ms)
++	{
++		const u32 period_ms = g_host->config.churn * 1000;
++		g_host->churn_next_ms = now + period_ms;
++		xr_vector<CActor*> actors;
++		participant_actors(actors);
++		const CSE_ALifeCreatureActor* se_actor = ai().alife().graph().actor();
++		u32 vertex = u32(-1);
++		Fvector position;
++		if (actors.empty() || !se_actor || !spawn_position(actors.front(), vertex, position))
++			return;
++		CSE_Abstract* item = alife->spawn_item("medkit", position, vertex, se_actor->m_tGraphID, u16(-1));
++		if (!item)
++			return;
++		g_host->churn_id = item->ID;
++		g_host->churn_release_ms = now + g_host->config.churn * 500;
++		++g_host->churn_spawned;
++		g_host->log.line("churn-spawn id=%u section=medkit pos=%.2f,%.2f,%.2f", u32(item->ID), VPUSH(position));
++	}
++	else if (g_host->churn_id != 0xffff && now >= g_host->churn_release_ms)
++	{
++		CSE_ALifeDynamicObject* object = ai().alife().objects().object(g_host->churn_id, true);
++		if (object)
++		{
++			if (object->m_bOnline)
++			{
++				// the way alife():release does it for an online object
++				NET_Packet packet;
++				packet.w_begin(M_EVENT);
++				packet.w_u32(Level().timeServer());
++				packet.w_u16(GE_DESTROY);
++				packet.w_u16(object->ID);
++				Level().Send(packet, net_flags(TRUE, TRUE));
++			}
++			else
++				alife->release(object, true);
++			++g_host->churn_released;
++		}
++		g_host->log.line("churn-release id=%u found=%d", u32(g_host->churn_id), object ? 1 : 0);
++		g_host->churn_id = 0xffff;
++	}
++}
++
+ void on_joined(const coop::session::SessionEvent& e)
+ {
+ 	PlayerLink* link = link_of(e.player);
+@@ -252,6 +677,10 @@ void on_joined(const coop::session::SessionEvent& e)
+ 		link->session = session;
+ 	link->join_serial = e.join_serial;
+ 	++link->joins;
++	// S05-T02: every join (new or resumed) gets the world from a fresh checkpoint.
++	link->world = WorldPending;
++	link->outbox.clear();
++	link->blob.clear();
+ 	g_host->log.line("joined player=%s name=%s session_slot=%u participant=%u/%u registry_session=%08x resumed=%d "
+ 		"attach=%s",
+ 		coop_uuid_hex(e.player).c_str(), link->name.c_str(), u32(e.slot), u32(link->ref.slot), link->ref.generation,
+@@ -265,6 +694,9 @@ void on_left(const coop::session::SessionEvent& e)
+ 	if (!link)
+ 		return;
+ 	++link->leaves;
++	link->world = WorldNone;
++	link->outbox.clear();
++	link->blob.clear();
+ 	Refusal detached = Refusal::NotAttached;
+ 	if (link->session)
+ 		detached = g_campaign_identity->detach_session(g_campaign_identity->authority(), link->session, Device.dwFrame);
+@@ -360,13 +792,22 @@ void log_status(LPCSTR tag)
+ 			xr_sprintf(one, " p%u=%s,actor=none", u32(link.ref.slot), state);
+ 		xr_strcat(participants, one);
+ 	}
++	string256 worlds = "";
++	for (const PlayerLink& link : g_host->links)
++	{
++		string64 one;
++		xr_sprintf(one, " w%u=%u/%I64u/%u", u32(link.ref.slot), u32(link.world), link.events_sent, u32(link.outbox.size()));
++		xr_strcat(worlds, one);
++	}
+ 	const coop::session::ServerCounters& c = g_host->server->counters();
+ 	g_host->log.line("%s tick=%I64u frame=%u game_ms=%I64u alife_objects=%u online_objects=%u%s joins=%I64u "
+ 		"violations=%I64u rejected_auth=%I64u rejected_build=%I64u rejected_content=%I64u intents_refused=%I64u "
+-		"inputs=%I64u acks=%I64u",
++		"inputs=%I64u acks=%I64u commit=%I64u published=%u spawns=%I64u despawns=%I64u/%I64u oversize=%I64u churn=%u/%u%s",
+ 		tag, g_host->tick, Device.dwFrame, game_ms, alife_objects, u32(Level().Objects.o_count()), participants,
+ 		c.joins, c.violations, c.rejected_auth, c.rejected_build, c.rejected_content, g_host->intents_refused,
+-		g_host->inputs_ignored, g_host->acks);
++		g_host->inputs_ignored, g_host->acks, g_host->commit, u32(g_host->published.size()), g_host->spawns,
++		g_host->despawns_range, g_host->despawns_destroyed, g_host->spawn_oversize, g_host->churn_spawned,
++		g_host->churn_released, worlds);
+ }
+ 
+ // S04-T01 finding 5: Windows power throttling stretches Sleep-paced loops
+@@ -497,6 +938,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		return false;
+ 	}
+ 	g_host->server = std::make_unique<coop::session::Server>(*g_host->transport, config, g_host->roster);
++	string_path csv;
++	FS.update_path(csv, "$logs$", "coop-lifecycle.csv");
++	g_host->lifecycle_csv = fopen(csv, "w");
++	if (g_host->lifecycle_csv)
++		fprintf(g_host->lifecycle_csv, "commit,kind,id,entity,generation,reason,section,x,y,z\n");
+ 	disable_power_throttling();
+ 	g_host->wall.Start();
+ 	g_host->started = true;
+@@ -538,6 +984,19 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	for (PlayerLink& link : g_host->links)
+ 		if (link.session && (link.pending_actor != kNoEngineId || !participant_actor(link.ref)))
+ 			give_actor(link);
++	// S05-T02: lifecycle, the server-controlled change fixture, world streams.
++	track_lifecycle();
++	churn();
++	for (PlayerLink& link : g_host->links)
++	{
++		if (link.world == WorldPending && link.session && link.pending_actor == kNoEngineId &&
++			participant_actor(link.ref))
++			start_resync(link);
++		if (link.world == WorldStreaming)
++			stream_world(link);
++		if (link.world == WorldStreaming || link.world == WorldLive)
++			flush_outbox(link);
++	}
+ 	const u32 now = g_host->wall.GetElapsed_ms();
+ 	if (now - g_host->last_status_ms >= 5000)
+ 	{
+@@ -577,6 +1036,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		drain_session_log();
+ 		g_host->server.reset();
+ 		g_host->transport.reset();
++		if (g_host->lifecycle_csv)
++			fclose(g_host->lifecycle_csv);
++		g_host->lifecycle_csv = nullptr;
+ 		timeEndPeriod(1);
+ 		g_host->log.line("server-stopped");
+ 	}
+diff --git a/src/xrGame/alife_simulator_base.cpp b/src/xrGame/alife_simulator_base.cpp
+index 910028e..f0499b8 100644
+--- a/src/xrGame/alife_simulator_base.cpp
++++ b/src/xrGame/alife_simulator_base.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopReplica.h"
+ #include "alife_simulator_base.h"
+ #include "alife_simulator_header.h"
+ #include "alife_time_manager.h"
+@@ -98,6 +99,9 @@ void CALifeSimulatorBase::reload(LPCSTR section)
+ CSE_Abstract* CALifeSimulatorBase::spawn_item(LPCSTR section, const Fvector& position, u32 level_vertex_id,
+                                               GameGraph::_GRAPH_ID game_vertex_id, u16 parent_id, bool registration)
+ {
++	// S05-T02: a co-op client creates nothing; only replication does.
++	if (campaign::replica_refuse_create(section))
++		return nullptr;
+ 	CSE_Abstract* abstract = F_entity_Create(section);
+ 	R_ASSERT3(abstract, "Cannot find item with section", section);
+ 
+@@ -268,6 +272,9 @@ void CALifeSimulatorBase::create(CSE_ALifeObject* object)
+ 
+ void CALifeSimulatorBase::release(CSE_Abstract* abstract, bool alife_query)
+ {
++	// S05-T02: nor does it release anything.
++	if (campaign::replica_refuse_release(abstract->ID))
++		return;
+ #ifdef DEBUG
+ 	if (psAI_Flags.test(aiALife)) {
+ 		Msg							("[LSS] Releasing object [%s][%s][%d][%x]",abstract->name_replace(),*abstract->s_name,abstract->ID,smart_cast<void*>(abstract));
+diff --git a/src/xrGame/alife_simulator_base2.cpp b/src/xrGame/alife_simulator_base2.cpp
+index 814b967..41b8e4b 100644
+--- a/src/xrGame/alife_simulator_base2.cpp
++++ b/src/xrGame/alife_simulator_base2.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "stdafx.h"
++#include "CoopReplica.h"
+ #include "alife_simulator_base.h"
+ #include "relation_registry.h"
+ #include "alife_registry_wrappers.h"
+@@ -22,6 +23,7 @@ using namespace ALife;
+ 
+ void CALifeSimulatorBase::register_object(CSE_ALifeDynamicObject* object, bool add_object)
+ {
++	campaign::replica_on_register(object); // S05-T02: the local participant's actor is the player
+ 	object->on_before_register();
+ 
+ 	if (add_object)
+diff --git a/src/xrGame/alife_switch_manager.cpp b/src/xrGame/alife_switch_manager.cpp
+index 27156f3..eb40730 100644
+--- a/src/xrGame/alife_switch_manager.cpp
++++ b/src/xrGame/alife_switch_manager.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "stdafx.h"
++#include "CoopReplica.h"
+ #include "alife_switch_manager.h"
+ #include "xrServer_Objects_ALife.h"
+ #include "alife_graph_registry.h"
+@@ -272,6 +273,9 @@ void CALifeSwitchManager::try_switch_offline(CSE_ALifeDynamicObject* I)
+ 
+ void CALifeSwitchManager::switch_object(CSE_ALifeDynamicObject* I)
+ {
++	// S05-T02: on a co-op client, online/offline follows the server.
++	if (campaign::replica_switch_object(*this, I))
++		return;
+ 	if (I->redundant())
+ 	{
+ 		release(I);
+diff --git a/src/xrGame/alife_update_manager.cpp b/src/xrGame/alife_update_manager.cpp
+index a6de3f1..3ad59e9 100644
+--- a/src/xrGame/alife_update_manager.cpp
++++ b/src/xrGame/alife_update_manager.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "stdafx.h"
++#include "CoopReplica.h"
+ #include "alife_update_manager.h"
+ #include "alife_simulator_header.h"
+ #include "alife_time_manager.h"
+@@ -101,6 +102,9 @@ void CALifeUpdateManager::update_switch()
+ 
+ void CALifeUpdateManager::update_scheduled(bool init_ef)
+ {
++	// S05-T02: a co-op client's replica runs no offline simulation.
++	if (!campaign::replica_alife_scheduled_allowed())
++		return;
+ 	if (init_ef)
+ 		init_ef_storage();
+ 
+@@ -112,6 +116,7 @@ void CALifeUpdateManager::update_scheduled(bool init_ef)
+ 
+ void CALifeUpdateManager::update()
+ {
++	campaign::replica_note_alife(1);
+ 	refresh_activation_anchors(); // S03-T04
+ 	update_switch();
+ 	update_scheduled(false);
+@@ -119,6 +124,7 @@ void CALifeUpdateManager::update()
+ 
+ void CALifeUpdateManager::shedule_Update(u32 dt)
+ {
++	campaign::replica_note_alife(0);
+ 	ISheduled::shedule_Update(dt);
+ 
+ 	if (!initialized())
+diff --git a/src/xrGame/script_binder.cpp b/src/xrGame/script_binder.cpp
+index 7381d2e..d28b5ee 100644
+--- a/src/xrGame/script_binder.cpp
++++ b/src/xrGame/script_binder.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopReplica.h"
+ #include "ai_space.h"
+ #include "script_engine.h"
+ #include "script_binder.h"
+@@ -273,6 +274,9 @@ void ScriptBinderUpdateStats(float& total_ms, float& actor_ms, u32& actor_calls)
+ 
+ void CScriptBinder::shedule_Update(u32 time_delta)
+ {
++	// S05-T02: a co-op client's remote objects are driven by the server.
++	if (m_object && !campaign::replica_binder_update_allowed(smart_cast<CGameObject*>(this)))
++		return;
+ 	if (m_object)
+ 	{
+ 		const u64 start = CPU::QPC();
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 11bc84f..02b58da 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2006,6 +2006,7 @@
+     <ClInclude Include="CoopIdentity.h" />
+     <ClInclude Include="CoopConfig.h" />
+     <ClInclude Include="CoopServerHost.h" />
++    <ClInclude Include="CoopReplica.h" />
+     <ClInclude Include="CoopClientLink.h" />
+     <ClInclude Include="CampaignCheckpoint.h" />
+     <ClInclude Include="CampaignQuestCapture.h" />
+@@ -4360,6 +4361,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CoopReplica.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="CoopClientLink.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+diff --git a/src/xrGame/xrServer.cpp b/src/xrGame/xrServer.cpp
+index e2c3a3e..634f510 100644
+--- a/src/xrGame/xrServer.cpp
++++ b/src/xrGame/xrServer.cpp
+@@ -3,6 +3,7 @@
+ //////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopReplica.h"
+ #include "xrServer.h"
+ #include "xrMessages.h"
+ #include "CampaignMessagePolicy.h"
+@@ -488,6 +489,9 @@ u32 xrServer::OnMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadc
+ 		campaign::note_message(type, bridge, CL != nullptr, verdict, sender.value());
+ 		if (verdict == campaign::MessageVerdict::Refuse)
+ 			return 0;
++		// S05-T02: a co-op client's own level spawns, controls and decides nothing.
++		if (campaign::replica_refuse_message(type, bridge))
++			return 0;
+ 	}
+ 
+ 	switch (type)
+diff --git a/src/xrGame/xrServer_CL_connect.cpp b/src/xrGame/xrServer_CL_connect.cpp
+index 28891de..477c2b8 100644
+--- a/src/xrGame/xrServer_CL_connect.cpp
++++ b/src/xrGame/xrServer_CL_connect.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "CoopReplica.h"
+ #include "xrserver.h"
+ #include "xrmessages.h"
+ #include "xrserver_objects.h"
+@@ -43,7 +44,8 @@ void xrServer::Perform_connect_spawn(CSE_Abstract* E, xrClientData* CL, NET_Pack
+ 
+ 		// Associate
+ 		E->owner = CL;
+-		E->Spawn_Write(P,TRUE);
++		// S05-T02: a co-op client presents what is not its own as remote.
++		E->Spawn_Write(P, campaign::replica_spawn_local(*this, E) ? TRUE : FALSE);
+ 		E->UPDATE_Write(P);
+ 
+ 		CSE_ALifeObject* object = smart_cast<CSE_ALifeObject*>(E);
+@@ -80,6 +82,12 @@ void xrServer::SendConnectionData(IClient* _CL)
+ 	// Replicate current entities on to this client
+ 	xrS_entities::iterator I = entities.begin(), E = entities.end();
+ 	for (; I != E; ++I) I->second->net_Processed = FALSE;
++	// S05-T02: a co-op client's own actor may not hold the lowest id (player 2's
++	// is spawned later); the installed scripts expect the player before any NPC
++	// binder runs (xr_meet reads db.actor), as in single player.
++	if (campaign::replica_active())
++		if (CSE_Abstract* actor = ID_to_entity(campaign::replica_local_actor()))
++			Perform_connect_spawn(actor, CL, P);
+ 	for (I = entities.begin(); I != E; ++I) Perform_connect_spawn(I->second, CL, P);
+ 
+ 	// Start to send server logo and rules
+diff --git a/src/xrGame/xrServer_process_event.cpp b/src/xrGame/xrServer_process_event.cpp
+index 0c3819b..b087813 100644
+--- a/src/xrGame/xrServer_process_event.cpp
++++ b/src/xrGame/xrServer_process_event.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "CoopReplica.h"
+ #include "xrServer.h"
+ #include "game_sv_single.h"
+ #include "alife_simulator.h"
+@@ -38,6 +39,9 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
+ 		campaign::note_event(type, bridge, verdict, sender.value());
+ 		if (verdict == campaign::MessageVerdict::Refuse)
+ 			return;
++		// S05-T02: outcomes on a co-op client come from the server only.
++		if (campaign::replica_refuse_event(type, bridge))
++			return;
+ 	}
+ 
+ 	CSE_Abstract* receiver = game->get_entity_from_eid(destination);
+diff --git a/src/xrGame/xrServer_process_spawn.cpp b/src/xrGame/xrServer_process_spawn.cpp
+index f56fe34..d691346 100644
+--- a/src/xrGame/xrServer_process_spawn.cpp
++++ b/src/xrGame/xrServer_process_spawn.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "CoopReplica.h"
+ #include "xrServer.h"
+ #include "xrserver_objects.h"
+ 
+@@ -146,7 +147,8 @@ CSE_Abstract* xrServer::Process_spawn(NET_Packet& P, ClientID sender, BOOL bSpaw
+ 	if (CL)
+ 	{
+ 		// For local ONLY
+-		E->Spawn_Write(Packet,TRUE);
++		// S05-T02: a co-op client presents what is not its own as remote.
++		E->Spawn_Write(Packet, campaign::replica_spawn_local(*this, E) ? TRUE : FALSE);
+ 		if (E->s_flags.is(M_SPAWN_UPDATE))
+ 			E->UPDATE_Write(Packet);
+ 		SendTo(CL->ID, Packet, net_flags(TRUE,TRUE));

@@ -94,3 +94,35 @@ The link starts in `CGamePersistent::OnAppStart` when the profile says
 (`CGamePersistent::OnFrame`). While it is active, `CApplication::OnEvent`
 refuses every local game start (main menu new game or load, console
 `start`/`load`); the refusal is counted and logged.
+
+## Client world replica (S05-T02)
+
+Validation: [S05-T02](validation/S05-T02.md). Code: `CoopServerHost.cpp`
+(lifecycle, join stream), `CoopClientLink.cpp` (receive, apply),
+`CoopReplica.{h,cpp}` (the client's guards and hooks).
+
+**Join.** Once a joining player's actor is online, the server saves a native
+checkpoint (`coop-join-N`) and streams it with the online set at the
+lifecycle watermark and each participant's actor id (ResyncBegin / 60 KiB
+chunks / ResyncEnd; a join keeps the epoch). The client writes it as its own
+saved game and starts it (the one start the role guard allows), pumping the
+link from the engine's loading loop. Lifecycle events that arrive meanwhile
+are buffered; at live, those after the watermark apply in commit order.
+
+**Lifecycle.** The server diffs its online ALife objects every tick:
+`Spawn` (native spawn packet ≤ 16 KiB; parents first) / `Despawn`
+OutOfRange (offline) or Destroyed (gone from ALife; children first), one
+commit id each, paced below the lifecycle backlog. Clients keep
+engine id ↔ entity id and generation maps and an `EntityTable`; an event at
+or below the applied commit, a recycled generation or a stale reference is
+dropped and counted.
+
+**Replica rules on the client** (all off without a co-op world):
+
+| Rule | Where |
+|---|---|
+| No ALife offline simulation; online/offline follows the server (object or squad switched when the event applies, 2-s reconcile) | `alife_update_manager.cpp`, `alife_switch_manager.cpp`, `CoopReplica.cpp` |
+| Only the local participant's actor (and what it carries) is local; everything else spawns remote (no AI think) | `xrServer_process_spawn.cpp`, `xrServer_CL_connect.cpp` |
+| The local participant's actor is the player entity and spawns first | `alife_simulator_base2.cpp` (`register_object`), `xrServer_CL_connect.cpp` |
+| The client's in-process server refuses M_SPAWN, world control and every game event from its own level; ALife create/release refused unless replication asks | `xrServer.cpp`, `xrServer_process_event.cpp`, `alife_simulator_base.cpp` |
+| The single-player actor binder only on the local actor; remote objects' binders do not update | `CampaignActorControl.cpp`, `script_binder.cpp` |

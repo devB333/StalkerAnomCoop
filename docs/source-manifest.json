@@ -117,6 +117,10 @@
     {
       "path": "patches/engine/0027-coop-roles.patch",
       "sha256": "70bc474184a4a92131ad5d5741e05483915d0dc946361ca58516a0fdcfc3e860"
+    },
+    {
+      "path": "patches/engine/0028-coop-world-replica.patch",
+      "sha256": "b6ce5376f1c1b00dafd057e18011c10476f946e71e6feb2f6753bb0068110d67"
     }
   ],
   "submodules": [

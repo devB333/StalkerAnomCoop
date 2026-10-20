@@ -53,6 +53,9 @@ def main():
                         help="saved game in the server runtime to serve; copied as coop-campaign "
                              "(no spaces: the engine's ini reader drops them)")
     parser.add_argument("--inject", default="", help="comma-separated client names (c1, c2) running the refusal test")
+    parser.add_argument("--churn", type=int, default=0,
+                        help="seconds between server-side medkit spawns, each released half a period later "
+                             "(S05-T02 lifecycle fixture; 0 off)")
     parser.add_argument("--protocol-build", default="proto-build-15")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
@@ -135,7 +138,8 @@ def main():
                  f"stop_file = {winpath(session_dir)}\\stop-{name}"]
         if name == "server":
             lines += ["role = server", f"listen = 0.0.0.0:{args.port}", f"roster = {winpath(roster)}",
-                      f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600"]
+                      f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600",
+                      f"churn = {args.churn}"]
         else:
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",

@@ -1,10 +1,10 @@
-# Session handoff — S03-T05 and S03-T06 complete; next: G03 review, then S04-T01
+# Session handoff — G03 accepted; next: S04-T01
 
 ## State at the end of the session (2026-10-19)
 
-Stage 3 / G03 in progress. **S03-T01..T06 Completed** — every Stage 3 task.
-The [G03 evidence record](../../validation/G03.md) is written and **awaits the
-user's review and acceptance**; S04-T01 needs G03.
+**Stage 3 Completed.** S03-T01..T06 Completed; the user **accepted
+[G03](../../validation/G03.md) for development on 2026-10-19** with its limits
+carried to their named owners. Stage 4 starts with S04-T01.
 
 **S03-T05** — native and Lua participant context contract
 ([report](../../validation/S03-T05.md), patch 0025, `23fa820f…3f0a`):
@@ -55,10 +55,7 @@ capture-23/24 (single-player quest `match: true`, client-32).
 
 ## Next
 
-1. **G03 review by the user** ([evidence](../../validation/G03.md)). On
-   acceptance: mark G03 Completed in plan.md (§I and the roadmap table's Stage
-   3) and record the decision in G03.md.
-2. Then **S04-T01 — Validate GameNetworkingSockets in isolation**. First
+1. **S04-T01 — Validate GameNetworkingSockets in isolation**. First
    action: pin a GNS release and its crypto/protobuf dependencies against the
    recorded VS2022 v143 toolchain and build an isolated listener and two peers
    outside engine-work.
@@ -85,4 +82,4 @@ capture-23/24 (single-player quest `match: true`, client-32).
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
 G02 carried limits are unchanged.
-Previous snapshot: [before G03 review, after S03-T06](../done/snapshot-before-G03-review-after-S03-T06.md).
+Previous snapshot: [before S04-T01](../done/snapshot-before-S04-T01.md).

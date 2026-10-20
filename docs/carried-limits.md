@@ -26,7 +26,7 @@ accepted; this file is the working list.
 |---|---|---|---|---|
 | L01 | Movement is the only player action that reaches the server: no fire, use, jump, lean, inventory, trade or dialogue from a client | G05 | S06-T04 (combat), S08-T01–T03 (items), S10-T04 (dialogue) | Open |
 | L02 | No client prediction or reconciliation: a player's own movement waits for the server (input → tick → snapshot → 100 ms render delay); the user found walking choppy | G05 (S05-T03) | S06-T03 | Open |
-| L03 | Server movement is native physics but inputs are not validated (rates, speeds, stance changes) | G05 | S06-T01 | Open |
+| L03 | Server movement is native physics but inputs are not validated (rates, speeds, stance changes) | G05 | S06-T01 | Closed 2026-10-20: [S06-T01](validation/S06-T01.md), runs move-8 and session-3. Inputs are sequenced by tick and validated, one is consumed per tick, and forged streams, teleports and positions are refused. The stamina-exhaustion and pitch-clamp limits are listed in the report |
 | L04 | NPCs and items do not move on clients after spawning; only the two participant actors have snapshots; snapshot rates/baselines provisional | G04, G05 | S06-T02 | Open |
 | L05 | No gameplay scripts on clients (HUD scripts, news, PDA updates); presentation outboxes are not delivered to clients | G03, G05 | No task yet: a presentation-split task before S08 | Open |
 | L06 | Player 2's client shows a local "Mission complete: Training Day: Boar Hunting" news item and logs `CRandomTask:task_fail/task_complete task_fanat_training_1 task is nil` after it goes live; source not found (not in `scripts.db0` or the engine). Presentation only | G05 (S05-T03, S05-T04) | With L05 | Open |

@@ -4,8 +4,9 @@
 #
 # coop_net      transport interface, shared policy and the in-memory fake.
 #               No transport library on its include or link path.
-# coop_protocol protocol v1 messages, codec and stateful guard (S04-T03);
-#               uses coop_net only for the channel layout types.
+# coop_protocol protocol v1 messages, codec and stateful guard (S04-T03) and
+#               the per-player input queue (S06-T01); uses coop_net only for
+#               the channel layout types.
 # coop_session sessions bound to authenticated players (S04-T04); Windows
 #               BCrypt and DPAPI for credentials.
 # coop-keytool  makes a player's key file and roster line.
@@ -32,7 +33,8 @@ target_link_libraries(coop_net_gns PUBLIC coop_net PRIVATE GameNetworkingSockets
 
 add_library(coop_protocol STATIC
     src/proto/messages.cpp
-    src/proto/guard.cpp)
+    src/proto/guard.cpp
+    src/proto/input_queue.cpp)
 target_include_directories(coop_protocol PUBLIC include)
 target_compile_options(coop_protocol PRIVATE ${COOP_WARNINGS})
 target_link_libraries(coop_protocol PUBLIC coop_net)

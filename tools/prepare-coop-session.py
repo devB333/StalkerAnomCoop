@@ -2,7 +2,8 @@
 
 Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2]
            [--port 27515] [--save "player - autosave"] [--inject c1,...]
-           [--protocol-build proto-build-14] [--keys-from <earlier run>]
+           [--script c1,c2] [--movement c1,c2] [--churn 10]
+           [--protocol-build proto-build-18] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -55,10 +56,13 @@ def main():
     parser.add_argument("--inject", default="", help="comma-separated client names (c1, c2) running the refusal test")
     parser.add_argument("--script", default="",
                         help="comma-separated client names running the S05-T03 look/walk/screenshot driver")
+    parser.add_argument("--movement", default="",
+                        help="comma-separated client names running the S06-T01 movement validation program "
+                             "(profile script = 2)")
     parser.add_argument("--churn", type=int, default=0,
                         help="seconds between server-side medkit spawns, each released half a period later "
                              "(S05-T02 lifecycle fixture; 0 off)")
-    parser.add_argument("--protocol-build", default="proto-build-15")
+    parser.add_argument("--protocol-build", default="proto-build-18")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -83,8 +87,11 @@ def main():
     names = ["server"] + [f"c{i + 1}" for i in range(args.clients)]
     inject = {n for n in args.inject.split(",") if n}
     script = {n for n in args.script.split(",") if n}
-    if (inject | script) - set(names[1:]):
-        raise SystemExit("--inject/--script name clients that do not exist")
+    movement = {n for n in args.movement.split(",") if n}
+    if (inject | script | movement) - set(names[1:]):
+        raise SystemExit("--inject/--script/--movement name clients that do not exist")
+    if script & movement:
+        raise SystemExit("a client runs one driver: --script or --movement")
 
     # One isolated runtime per process.
     runtimes = {}
@@ -147,7 +154,8 @@ def main():
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
                       f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",
-                      f"inject = {1 if name in inject else 0}", f"script = {1 if name in script else 0}"]
+                      f"inject = {1 if name in inject else 0}",
+                      f"script = {2 if name in movement else 1 if name in script else 0}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile

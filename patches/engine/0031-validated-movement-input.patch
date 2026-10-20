@@ -1,0 +1,846 @@
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index f5a9cc5..58a3957 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -32,6 +32,7 @@
+ #include "../xrEngine/xr_input.h"
+ //
+ #include "Actor.h"
++#include "../xrPhysics/PHCharacter.h"
+ #include "CampaignActorAccess.h" // S03-T03
+ #include "CampaignActorControl.h"
+ #include "CampaignScriptContext.h" // S03-T05
+@@ -1064,6 +1065,18 @@ void CActor::g_Physics(Fvector& _accel, float jump, float dt)
+ 		character_physics_support()->movement()->GetPosition(Position());
+ #endif //DEBUG
+ 		character_physics_support()->movement()->bSleep = false;
++		// S06-T01: the physics state that decides whether this body is stepped
++		CPHMovementControl* const trace_mc = character_physics_support()->movement();
++		++control_trace.physics_steps;
++		control_trace.slowmo = m_hit_slowmo;
++		control_trace.velocity = trace_mc->GetVelocityActual();
++		control_trace.ph_exist = trace_mc->CharacterExist() ? 1 : 0;
++		control_trace.ph_body_enabled = control_trace.ph_exist && trace_mc->IsCharacterEnabled() ? 1 : 0;
++		if (CPHCharacter* trace_ch = trace_mc->PHCharacter())
++		{
++			control_trace.ph_active = trace_ch->is_active() ? 1 : 0;
++			control_trace.ph_freezed = trace_ch->IsFreezed() ? 1 : 0;
++		}
+ 	}
+ 
+ 	if (Local() && g_Alive())
+@@ -1166,7 +1179,13 @@ void CActor::UpdateCL()
+ 		for (xr_vector<CObject*>::iterator it = feel_touch.begin(); it != feel_touch.end(); it++)
+ 		{
+ 			CPhysicsShellHolder* sh = smart_cast<CPhysicsShellHolder*>(*it);
+-			if (sh && sh->character_physics_support())
++			// S06-T01: UpdateObjectBox fits a nearby NPC's box to this actor's
++			// view and recalculates the NPC's movement with zero acceleration
++			// (its own movement manager sets it again). Another actor (a co-op
++			// participant) has no such manager: the zeroing replaced its control
++			// acceleration every frame, and two actors within touch range pinned
++			// each other (S06-T01 move-1..5). A single-player world has one actor.
++			if (sh && sh->character_physics_support() && !smart_cast<CActor*>(sh))
+ 			{
+ 				sh->character_physics_support()->movement()->UpdateObjectBox(
+ 					character_physics_support()->movement()->PHCharacter());
+@@ -1821,6 +1840,7 @@ void CActor::shedule_Update(u32 DT)
+ 
+ 	if (m_holder || !getEnabled() || !Ready())
+ 	{
++		++control_trace.skipped_updates; // S06-T01
+ 		m_sDefaultObjAction = NULL;
+ 		inherited::shedule_Update(DT);
+ 		return;
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 94aa5f6..78eb4e7 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -355,6 +355,21 @@ public:
+ 	// a participant's input into it; a co-op client samples its player's).
+ 	u32 replica_wishful() const { return mstate_wishful; }
+ 	void replica_set_wishful(u32 value) { mstate_wishful = value; }
++	// S06-T01: what the last native control step did with its input (the
++	// co-op host logs it after each tick that applied an input).
++	struct ControlTrace
++	{
++		u32 control_steps; // g_cl_CheckControls calls
++		u32 skipped_updates; // shedule_Update returned early (holder, disabled, not ready)
++		u32 wf_in, wf_used, real_out;
++		u8 can_move, environment;
++		float accel; // control acceleration before the world transform
++		// after the physics step (g_Physics)
++		u8 ph_exist, ph_body_enabled, ph_active, ph_freezed;
++		float slowmo, velocity;
++		u32 physics_steps;
++	};
++	ControlTrace control_trace = {};
+ 	void g_SetSprintAnimation(u32 mstate_rl, MotionID& head, MotionID& torso, MotionID& legs);
+ public:
+ 	virtual void OnHUDDraw(CCustomHUD* hud);
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index 654a097..ad9b7b7 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -169,6 +169,10 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
+ 	float cam_eff_factor = 0.0f;
+ 	mstate_old = mstate_real;
+ 	vControlAccel.set(0, 0, 0);
++	++control_trace.control_steps; // S06-T01
++	control_trace.wf_in = mstate_wf;
++	control_trace.can_move = CanMove() ? 1 : 0;
++	control_trace.environment = u8(character_physics_support()->movement()->Environment());
+ 
+ 	if (!(mstate_real & mcFall) && (character_physics_support()->movement()->Environment() == CPHMovementControl::
+ 		peInAir))
+@@ -367,6 +371,9 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
+ 			}
+ 		}
+ 	}
++	control_trace.wf_used = mstate_wf; // S06-T01
++	control_trace.real_out = mstate_real;
++	control_trace.accel = vControlAccel.magnitude();
+ 	//transform local dir to world dir
+ 	Fmatrix mOrient;
+ 	mOrient.rotateY(-r_model_yaw);
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 8a3e691..c11eeee 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -120,15 +120,48 @@ struct Link
+ 	u64 snapshots = 0, snapshot_unknown = 0, last_snapshot_tick = 0, last_input_acked = 0;
+ 	xr_deque<coop::proto::Input> inputs;
+ 	u64 input_tick = 0, inputs_sent = 0;
+-	u32 last_input_ms = 0;
++	// S06-T01: inputs are sampled at the server's tick rate (Welcome), one
++	// tick each, so the server consumes one per tick.
++	u32 input_period_ms = 20;
++	u32 next_input_ms = 0;
++	u64 inputs_skipped = 0; // sample times lost to a frame longer than the catch-up bound
+ 	// test driver (profile script = 1): face the other player, screenshot, walk
++	// (script = 2): the S06-T01 movement validation program
+ 	u32 script_phase = 0;
+ 	u32 script_t0 = 0; // when the loading screen went away
+-	u32 walk_until = 0;
+ 	u32 screenshots = 0;
+ 	bool script_saw_other = false; // the other actor was there at a facing
+ 	u32 other_since = 0; // script time the other actor first appeared (S05-T04)
+ 	u32 script_mark = 0;
++	// script-driven movement: these bits and stance are added to the sampled
++	// input until drive_until (script 1: mcBack for its walk)
++	u32 drive_bits = 0;
++	u32 drive_until = 0;
++	coop::proto::Stance drive_stance = coop::proto::Stance::Stand;
++	bool drive_force_stance = false;
++	// S06-T01 forgery modes for the sampled stream
++	enum SendMode : u8
++	{
++		SendNormal,
++		SendDuplicate4, // every batch four times
++		SendShift7, // the tick counter advances by 7 per sample
++	};
++	u8 send_mode = SendNormal;
++	bool send_ahead_once = false; // one extra input with tick + 100000
++	bool record_batches = false; // keep sent batches for a later replay
++	xr_vector<coop::proto::Message> recorded;
++	u32 replay_until = 0; // resend the recorded batches, a few per frame, until then
++	size_t replay_at = 0;
++	u32 replays = 0;
++	u32 program_t0 = 0; // script 2: when the program started (script time)
++	string32 leg_name = "";
++	u32 leg_start_ms = 0;
++	u64 leg_start_utc = 0;
++	u32 leg_log_mark = 0;
++	u64 teleport_operation = 0;
++	u32 teleport_outcome = 0xffff; // ActionResult outcome, 0xffff: none yet
++	bool forged_snapshot_sent = false;
++	int ended_code_after_forgery = 0;
+ 	FILE* actors_csv = nullptr;
+ 	u32 last_actor_log_ms = 0;
+ 	u64 clock_events = 0, clock_steps = 0, weather_changes = 0;
+@@ -764,6 +797,8 @@ void screenshot(LPCSTR tag)
+ 	::Render->Screenshot();
+ }
+ 
++void run_script2(u32 t);
++
+ void run_script()
+ {
+ 	if (!g_link->config.script || !g_actor)
+@@ -783,6 +818,8 @@ void run_script()
+ 		g_link->log.line("script-unpause");
+ 		Device.Pause(FALSE, TRUE, TRUE, "coop-script");
+ 	}
++	if (g_link->config.script == 2)
++		return run_script2(t);
+ 	const u32 walk_at = 7000 + u32(g_link->local_slot) * 6000;
+ 	switch (g_link->script_phase)
+ 	{
+@@ -792,7 +829,8 @@ void run_script()
+ 	case 3:
+ 		if (t >= walk_at)
+ 		{
+-			g_link->walk_until = g_link->wall.GetElapsed_ms() + 1500;
++			g_link->drive_bits = mcBack; // away from the other player it faces (forward would walk into it)
++			g_link->drive_until = g_link->wall.GetElapsed_ms() + 1500;
+ 			g_link->log.line("script-walk back 1500 ms");
+ 			++g_link->script_phase;
+ 		}
+@@ -822,22 +860,65 @@ void run_script()
+ 	}
+ }
+ 
+-// The player's input: what the native control path would read this frame
+-// (movement keys, stance, walk, the camera's angles), sent to the server; the
+-// keys are cleared as that path would clear them.
++// The player's input: what the native control path would read (movement
++// keys, stance, walk, the camera's angles), sampled once per server tick of
++// wall time (S06-T01: the server consumes one input per tick), numbered by
++// tick, sent with the previous inputs for loss; the keys are cleared as the
++// native path would clear them. The test driver adds its movement here and
++// can forge the stream (duplicates, a shifted counter, a jump, a replay).
++u64 utc_now_ms()
++{
++	FILETIME ft;
++	GetSystemTimeAsFileTime(&ft);
++	return ((u64(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000ull - 11644473600000ull;
++}
++
++// The end of a scripted leg, when its last input has gone (logged whether or
++// not the connection is still there: the forgery leg ends with it closed).
++void leg_end_check(u32 now)
++{
++	if (!g_actor || !g_link->leg_name[0] || !g_link->drive_until || now < g_link->drive_until)
++		return;
++	g_link->log.line("script-leg name=%s start_utc=%I64u end_utc=%I64u ms=%u mode=%u pos=%.2f,%.2f,%.2f",
++		g_link->leg_name, g_link->leg_start_utc, utc_now_ms(), now - g_link->leg_start_ms, u32(g_link->send_mode),
++		VPUSH(g_actor->Position()));
++	g_link->leg_name[0] = 0;
++	g_link->drive_until = 0;
++	g_link->send_mode = Link::SendNormal;
++	g_link->record_batches = false;
++	g_link->drive_force_stance = false;
++}
++
+ void sample_input()
+ {
++	const u32 now = g_link->wall.GetElapsed_ms();
++	leg_end_check(now);
+ 	if (!g_actor || !g_link->client || g_link->client->state() != coop::session::ClientState::Active)
+ 		return;
+-	const u32 now = g_link->wall.GetElapsed_ms();
+-	if (now - g_link->last_input_ms < 16)
++	// Replay (script 2, leg D): recorded batches from an earlier leg, as they
++	// were, a few per frame. Every tick in them was consumed long ago.
++	if (now < g_link->replay_until && g_link->replay_at < g_link->recorded.size())
++		for (int n = 0; n < 4 && g_link->replay_at < g_link->recorded.size(); ++n)
++			if (g_link->client->send(g_link->recorded[g_link->replay_at++]))
++				++g_link->replays;
++	if (now < g_link->next_input_ms)
+ 		return;
+-	g_link->last_input_ms = now;
++	// A frame longer than three ticks does not produce a burst: the server
++	// would drop it anyway (its queue holds five), and the actor cannot gain
++	// distance from it.
++	if (now - g_link->next_input_ms > 3 * g_link->input_period_ms)
++	{
++		g_link->inputs_skipped += (now - g_link->next_input_ms) / g_link->input_period_ms - 3;
++		g_link->next_input_ms = now - 3 * g_link->input_period_ms;
++	}
+ 	CActor* actor = g_actor;
+ 	u32 wishful = actor->replica_wishful();
+-	if (now < g_link->walk_until)
+-		wishful |= mcBack; // away from the other player it faces (forward would walk into it)
++	const bool driving = now < g_link->drive_until;
++	if (driving)
++		wishful |= g_link->drive_bits;
+ 	coop::proto::Input in;
++	if (g_link->send_mode == Link::SendShift7)
++		g_link->input_tick += 6;
+ 	in.tick = ++g_link->input_tick;
+ 	in.move_y = (wishful & mcFwd) ? 1.f : (wishful & mcBack) ? -1.f : 0.f;
+ 	in.move_x = (wishful & mcRStrafe) ? 1.f : (wishful & mcLStrafe) ? -1.f : 0.f;
+@@ -845,6 +926,8 @@ void sample_input()
+ 	in.pitch = clampr(actor->cam_Active()->pitch, -1.5f, 1.5f);
+ 	in.stance = (wishful & mcCrouch) ? coop::proto::Stance::Crouch :
+ 		(wishful & mcSprint) ? coop::proto::Stance::Sprint : coop::proto::Stance::Stand;
++	if (driving && g_link->drive_force_stance)
++		in.stance = g_link->drive_stance;
+ 	in.buttons = (wishful & mcAccel) ? 1u : 0u;
+ 	u32 cleared = mcFwd | mcBack | mcLStrafe | mcRStrafe;
+ 	if (!psActorFlags.test(AF_CROUCH_TOGGLE))
+@@ -859,8 +942,217 @@ void sample_input()
+ 		g_link->inputs.pop_back();
+ 	coop::proto::InputBatch batch;
+ 	batch.inputs.assign(g_link->inputs.begin(), g_link->inputs.end());
+-	if (g_link->client->send(coop::proto::Message(batch)))
+-		++g_link->inputs_sent;
++	const coop::proto::Message message(batch);
++	const int copies = g_link->send_mode == Link::SendDuplicate4 ? 4 : 1;
++	for (int n = 0; n < copies; ++n)
++		if (g_link->client->send(message))
++			++g_link->inputs_sent;
++	if (g_link->record_batches && g_link->recorded.size() < 400)
++		g_link->recorded.push_back(message);
++	if (g_link->send_ahead_once)
++	{
++		// One input whose tick jumped by 100000: the server must refuse it
++		// without losing the stream that follows.
++		g_link->send_ahead_once = false;
++		coop::proto::InputBatch jump;
++		coop::proto::Input ahead = in;
++		ahead.tick = in.tick + 100000;
++		jump.inputs.push_back(ahead);
++		g_link->client->send(coop::proto::Message(jump));
++		g_link->log.line("script-ahead-sent tick=%I64u", ahead.tick);
++	}
++	g_link->next_input_ms += g_link->input_period_ms;
++}
++
++// ------------------------------------------------------------ S06-T01
++// The movement validation program (profile script = 2). Legs are short runs
++// in the server's world, each logged with its wall-clock window so
++// tools/compare-coop-movement.py can measure what the server did with them:
++//   A  normal stream, away from and back towards the other player (baseline)
++//   B  every batch sent four times (duplicates; over the input rate limit)
++//   C  the tick counter advancing by seven per sample, plus one jump of 100000
++//   D  standing still while A's batches are sent again (a replay)
++//   F  the same legs crouched
++//   G  forward with a stance the actor has no mode for (Prone)
++//   E  forward normally (room for I)
++//   I  sprint into the other player's actor (the obstacle), then back off
++//   J  an action intent asking to be moved 50 m (a teleport)
++//   K  a Snapshot claiming a position (a server-only message)
++// Player 2 (slot 1) starts its program 60 s after player 1's so one actor
++// moves at a time, except where I is the point. Player 1's K leg waits until
++// player 2's program is over (K closes the connection).
++
++void face_away_from_other()
++{
++	CActor* other = other_actor();
++	if (!other || !g_actor)
++	{
++		g_link->log.line("script-face-away no-other-actor");
++		return;
++	}
++	Fvector to;
++	to.sub(other->Position(), g_actor->Position());
++	to.y = 0;
++	to.normalize_safe();
++	float h, p;
++	to.getHP(h, p);
++	CCameraBase* camera = g_actor->cam_Active();
++	camera->yaw = angle_normalize_signed(-h + PI);
++	camera->pitch = 0.f;
++	g_link->log.line("script-face-away other=%u yaw=%.3f", u32(other->ID()), camera->yaw);
++}
++
++void leg_begin(LPCSTR name, u32 bits, coop::proto::Stance stance, bool force_stance, u32 ms, u8 mode)
++{
++	xr_strcpy(g_link->leg_name, name);
++	g_link->drive_bits = bits;
++	g_link->drive_stance = stance;
++	g_link->drive_force_stance = force_stance;
++	g_link->send_mode = mode;
++	g_link->leg_start_ms = g_link->wall.GetElapsed_ms();
++	g_link->leg_start_utc = utc_now_ms();
++	g_link->drive_until = g_link->leg_start_ms + ms;
++	g_link->log.line("script-leg-start name=%s bits=%x stance=%u force=%d ms=%u mode=%u pos=%.2f,%.2f,%.2f", name, bits,
++		u32(stance), force_stance ? 1 : 0, ms, u32(mode), VPUSH(g_actor->Position()));
++}
++
++void send_teleport_intent()
++{
++	coop::proto::ActionIntent intent;
++	intent.operation_id = g_link->teleport_operation = 0x6001;
++	intent.kind = 9; // no kind is defined; a client asking to be moved
++	const auto ref = g_link->refs.find(g_actor->ID());
++	if (ref != g_link->refs.end())
++		intent.target = ref->second;
++	string128 params;
++	xr_sprintf(params, "teleport %.2f %.2f %.2f", g_actor->Position().x + 50.f, g_actor->Position().y,
++		g_actor->Position().z);
++	intent.params.assign(params, params + xr_strlen(params));
++	const bool sent = g_link->client->send(coop::proto::Message(intent));
++	g_link->log.line("script-teleport-intent sent=%d operation=%I64u target=%I64u/%u", sent ? 1 : 0,
++		intent.operation_id, intent.target.id, intent.target.generation);
++}
++
++void send_forged_snapshot()
++{
++	// A server-only message claiming the player's actor is 50 m away. The
++	// server's decoder refuses the direction and closes the connection.
++	coop::proto::Snapshot forged;
++	forged.server_tick = g_link->last_snapshot_tick + 1;
++	coop::proto::SnapshotEntity e;
++	const auto ref = g_link->refs.find(g_actor->ID());
++	if (ref != g_link->refs.end())
++		e.entity = ref->second;
++	e.components = coop::proto::kTransform;
++	e.transform.x = g_actor->Position().x + 50.f;
++	e.transform.y = g_actor->Position().y;
++	e.transform.z = g_actor->Position().z;
++	forged.entities.push_back(e);
++	g_link->forged_snapshot_sent = true;
++	const bool sent = g_link->client->send(coop::proto::Message(forged));
++	g_link->log.line("script-forged-snapshot sent=%d entity=%I64u/%u x=%.2f", sent ? 1 : 0, e.entity.id,
++		e.entity.generation, e.transform.x);
++}
++
++void run_script2(u32 t)
++{
++	// The program starts once the other actor has been there for 3 s, slot 1
++	// a minute later.
++	if (!g_link->program_t0)
++	{
++		if (!other_actor())
++		{
++			g_link->other_since = 0;
++			return;
++		}
++		if (!g_link->other_since)
++			g_link->other_since = t;
++		if (t < g_link->other_since + 3000 + u32(g_link->local_slot) * 60000)
++			return;
++		g_link->program_t0 = t;
++		g_link->log.line("script2-program-start slot=%u t=%u", u32(g_link->local_slot), t);
++	}
++	const u32 p = t - g_link->program_t0;
++	using coop::proto::Stance;
++	struct Step
++	{
++		u32 at;
++		LPCSTR name; // a leg name, or the action
++		u32 bits;
++		Stance stance;
++		bool force_stance;
++		u32 ms;
++		u8 mode;
++	};
++	static const Step steps[] = {
++		{0, "face-other", 0, Stance::Stand, false, 0, 0},
++		{1000, "screenshot", 0, Stance::Stand, false, 0, 0},
++		{2000, "face-away", 0, Stance::Stand, false, 0, 0},
++		{2500, "A-away", mcFwd, Stance::Stand, false, 1500, Link::SendNormal},
++		{5500, "face-other", 0, Stance::Stand, false, 0, 0},
++		{6000, "A-toward", mcFwd, Stance::Stand, false, 1200, Link::SendNormal},
++		{9000, "face-away", 0, Stance::Stand, false, 0, 0},
++		{9500, "B-away", mcFwd, Stance::Stand, false, 1500, Link::SendDuplicate4},
++		{12500, "face-other", 0, Stance::Stand, false, 0, 0},
++		{13000, "B-toward", mcFwd, Stance::Stand, false, 1200, Link::SendDuplicate4},
++		{16000, "face-away", 0, Stance::Stand, false, 0, 0},
++		{16500, "C-away", mcFwd, Stance::Stand, false, 1500, Link::SendShift7},
++		{19500, "face-other", 0, Stance::Stand, false, 0, 0},
++		{20000, "C-toward", mcFwd, Stance::Stand, false, 1200, Link::SendShift7},
++		{23000, "D-stale", 0, Stance::Stand, false, 1500, Link::SendNormal},
++		{26000, "face-away", 0, Stance::Stand, false, 0, 0},
++		{26500, "F-away", mcFwd | mcCrouch, Stance::Crouch, true, 1500, Link::SendNormal},
++		{29500, "face-other", 0, Stance::Stand, false, 0, 0},
++		{30000, "F-toward", mcFwd | mcCrouch, Stance::Crouch, true, 1200, Link::SendNormal},
++		{33000, "face-away", 0, Stance::Stand, false, 0, 0},
++		{33500, "G-invalid", mcFwd, Stance::Prone, true, 1500, Link::SendNormal},
++		{36500, "E-away", mcFwd, Stance::Stand, false, 1500, Link::SendNormal},
++		{39500, "face-other", 0, Stance::Stand, false, 0, 0},
++		{40000, "I-sprint-toward", mcFwd | mcSprint, Stance::Sprint, true, 3000, Link::SendNormal},
++		{44500, "I-backoff", mcBack, Stance::Stand, false, 1500, Link::SendNormal},
++		{47500, "J-teleport", 0, Stance::Stand, false, 1500, Link::SendNormal},
++		{50000, "K-forged-snapshot", 0, Stance::Stand, false, 1500, Link::SendNormal},
++		{53000, "program-end", 0, Stance::Stand, false, 0, 0},
++	};
++	const u32 count = u32(sizeof(steps) / sizeof(steps[0]));
++	if (g_link->script_phase >= count)
++		return;
++	// The forged snapshot ends the connection: player 1 (slot 0) sends it only
++	// after player 2's program is over (it starts 60 s later and takes 53 s),
++	// so neither program runs beside a detached player.
++	u32 at = steps[g_link->script_phase].at;
++	if (g_link->local_slot == 0 && at >= 50000)
++		at += 70000;
++	if (p < at)
++		return;
++	const Step& step = steps[g_link->script_phase++];
++	if (!xr_strcmp(step.name, "face-other"))
++		face_other_actor(false);
++	else if (!xr_strcmp(step.name, "face-away"))
++		face_away_from_other();
++	else if (!xr_strcmp(step.name, "screenshot"))
++		screenshot("program-start");
++	else if (!xr_strcmp(step.name, "program-end"))
++		g_link->log.line("script2-program-end replays=%u teleport_outcome=%u forged_closed=%d", g_link->replays,
++			g_link->teleport_outcome, g_link->ended_code_after_forgery);
++	else
++	{
++		leg_begin(step.name, step.bits, step.stance, step.force_stance, step.ms, step.mode);
++		if (!xr_strcmp(step.name, "A-away"))
++			g_link->record_batches = true;
++		else if (!xr_strcmp(step.name, "C-away"))
++			g_link->send_ahead_once = true;
++		else if (!xr_strcmp(step.name, "D-stale"))
++		{
++			g_link->replay_at = 0;
++			g_link->replay_until = g_link->wall.GetElapsed_ms() + step.ms;
++			g_link->log.line("script-replay batches=%u", u32(g_link->recorded.size()));
++		}
++		else if (!xr_strcmp(step.name, "J-teleport"))
++			send_teleport_intent();
++		else if (!xr_strcmp(step.name, "K-forged-snapshot"))
++			send_forged_snapshot();
++	}
+ }
+ 
+ // The server's world clock (CampaignEvent kind 1): the client's ALife clock
+@@ -995,6 +1287,13 @@ void on_message(const coop::session::ClientEvent& e)
+ 	{
+ 		g_link->log.line("action-result operation=%I64u outcome=%u reason=%u", result->operation_id,
+ 			u32(result->outcome), u32(result->reason));
++		if (g_link->teleport_operation && result->operation_id == g_link->teleport_operation)
++		{
++			g_link->teleport_outcome = u32(result->outcome);
++			g_link->log.line("script-teleport-result outcome=%u reason=%u %s", u32(result->outcome),
++				u32(result->reason),
++				result->outcome == coop::proto::ActionOutcome::Rejected ? "refused-as-expected" : "NOT-REFUSED");
++		}
+ 		if (g_link->inject == Inject::AwaitIntentResult && result->operation_id == g_link->inject_operation)
+ 		{
+ 			string128 detail;
+@@ -1031,6 +1330,11 @@ void on_event(const coop::session::ClientEvent& e)
+ 			u32(w.slot), w.slot_generation, w.authority_epoch, w.server_tick, u32(w.tick_rate_hz),
+ 			u32(w.snapshot_rate_hz), coop_uuid_hex(w.session_id).c_str(), coop_uuid_hex(w.player_id).c_str(),
+ 			e.resumed ? 1 : 0);
++		// S06-T01: input ticks count per connection, one per server tick.
++		g_link->input_tick = 0;
++		g_link->inputs.clear();
++		g_link->input_period_ms = _max(1u, 1000u / _max<u32>(1u, w.tick_rate_hz));
++		g_link->next_input_ms = g_link->wall.GetElapsed_ms();
+ 		if (g_link->inject == Inject::AwaitWelcome)
+ 		{
+ 			g_link->inject = Inject::LocalStart;
+@@ -1046,6 +1350,12 @@ void on_event(const coop::session::ClientEvent& e)
+ 	case coop::session::ClientEventType::Ended:
+ 		g_link->log.line("ended reason=%s code=%d detail=%s", coop::net::to_string(e.reason), e.code,
+ 			e.detail.c_str());
++		if (g_link->forged_snapshot_sent && !g_link->ended_code_after_forgery)
++		{
++			g_link->ended_code_after_forgery = e.code;
++			g_link->log.line("script-forged-snapshot-closed code=%d %s", e.code,
++				e.code == coop::net::close_code::kProtocolViolation ? "refused-as-expected" : "NOT-REFUSED");
++		}
+ 		if (g_link->inject == Inject::AwaitClose)
+ 		{
+ 			string128 detail;
+@@ -1066,11 +1376,11 @@ void log_status(LPCSTR tag)
+ 	const std::vector<double>& rtts = g_link->client ? g_link->client->rtts() : std::vector<double>();
+ 	g_link->log.line("%s state=%u welcomes=%u connects=%u level=%d local_starts_refused=%u rtt_samples=%u "
+ 		"last_rtt_ms=%.2f inject_ok=%u inject_failed=%u snapshots=%I64u snapshot_unknown=%I64u inputs_sent=%I64u "
+-		"input_acked=%I64u",
++		"input_acked=%I64u input_tick=%I64u input_period_ms=%u inputs_skipped=%I64u replays=%u",
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+-		g_link->last_input_acked);
++		g_link->last_input_acked, g_link->input_tick, g_link->input_period_ms, g_link->inputs_skipped, g_link->replays);
+ }
+ } // namespace
+ 
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 1bc7877..683f926 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -13,7 +13,8 @@
+ //                 churn (seconds between S05-T02 server-side entity changes; 0 off)
+ //   client only:  server (ip:port), key (absolute DPAPI key file), name,
+ //                 exit_after_seconds (0: never), inject (0/1: S05-T01 refusal test),
+-//                 script (0/1: S05-T03 look, walk and screenshot driver)
++//                 script (0/1: S05-T03 look, walk and screenshot driver;
++//                 2: S06-T01 movement validation program)
+ //
+ // Nothing in it is secret: the key file is DPAPI-protected and only its path
+ // is here; the roster holds public keys.
+@@ -42,7 +43,7 @@ struct CoopConfig
+ 	string64 display_name;
+ 	u32 exit_after_seconds;
+ 	u32 inject;
+-	u32 script; // S05-T03: the scripted look/walk/screenshot test driver
++	u32 script; // 1: S05-T03 look/walk/screenshot driver; 2: S06-T01 movement validation program
+ };
+ 
+ // Finds -coop-config in the command line. False when absent.
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 93f6fb2..83efbc4 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -26,6 +26,7 @@
+ #include "../xrEngine/xr_object_list.h"
+ 
+ #include "coop/net/transport.h"
++#include "coop/proto/input_queue.h"
+ #include "coop/session/server.h"
+ #include "coop/session/crypto.h"
+ #include "xrMessages.h"
+@@ -67,15 +68,12 @@ struct PlayerLink
+ 	xr_deque<coop::proto::Message> outbox; // lifecycle messages, commit order
+ 	u64 events_sent;
+ 	u64 outbox_peak;
+-	// S05-T03: the player's input, applied to its own actor each tick
+-	u64 input_last; // last input sequence taken
+-	coop::proto::Input held;
+-	bool has_held;
+-	u32 held_ms;
+-	u64 inputs_taken;
+-	u64 inputs_stale;
+-	u64 input_ticks; // ticks the held input moved the actor
++	// S05-T03/S06-T01: the player's inputs, one consumed per tick for its own actor
++	coop::proto::InputQueue inputs;
++	u64 input_batches;
++	u64 input_ticks; // ticks an input moved the actor
+ 	u64 input_refused; // the session's context did not resolve to this actor
++	u64 inputs_logged; // refusals logged so far
+ 	u64 snapshots_sent;
+ 	u32 last_input_log_ms;
+ };
+@@ -678,32 +676,67 @@ void churn()
+ 	}
+ }
+ 
+-// ------------------------------------------------------------ S05-T03
+-// Input: a player's latest input is held and applied to that player's actor
+-// every tick through the control path's own state (the movement bits and the
+-// camera the control path reads), only while the session is attached and the
+-// input is fresh (250 ms); otherwise the actor gets no input. The actor is the
+-// one the session's context resolves to (Scope::Self): a client cannot name
+-// another. Snapshots: both participant actors' transform, velocity, health and
+-// movement state at the snapshot rate.
++// ------------------------------------------------------------ S05-T03 / S06-T01
++// Input: a player's inputs go through its InputQueue (coop/proto/input_queue.h):
++// sequenced by tick, validated, bounded, and exactly one consumed per tick,
++// before the tick's simulation, into that participant's actor's control state
++// (the movement bits and the camera angles the native control path reads),
++// only while the session is attached and only through the actor the session's
++// context resolves (Scope::Self): a client cannot name another actor. The
++// native control path then moves the actor: CActor::shedule_Update ->
++// g_cl_CheckControls (CanMove, crouch box, CanSprint/CanAccelerate, stamina,
++// speed factors), g_cl_Orientate (the camera yaw becomes the body's) and
++// g_Physics (collision), with the server's own timestep. A client never sends
++// a position, speed or outcome; what it sends is intent, and intent is the
++// only thing applied. Snapshots: both participant actors' transform, velocity,
++// health and movement state at the snapshot rate.
+ 
+-const u32 kInputHoldMs = 250;
+ const u32 kManagedBits = mcFwd | mcBack | mcLStrafe | mcRStrafe | mcCrouch | mcAccel | mcSprint;
++const u64 kInputRefusalsLogged = 24; // per player; the counters keep counting
+ 
+ void take_input(PlayerLink& link, const coop::proto::Decoded& message)
+ {
+ 	const coop::proto::InputBatch& batch = std::get<coop::proto::InputBatch>(message.body);
+-	const auto fresh = coop::proto::FreshInputs(batch, message.header.sequence, link.input_last);
+-	if (fresh.empty())
++	++link.input_batches;
++	// oldest first: the batch is newest first
++	for (size_t i = batch.inputs.size(); i-- > 0;)
+ 	{
+-		++link.inputs_stale;
+-		return;
++		const coop::proto::Input& in = batch.inputs[i];
++		const char* why = "";
++		const coop::proto::InputVerdict verdict = link.inputs.offer(in, &why);
++		if (verdict == coop::proto::InputVerdict::Queued || verdict == coop::proto::InputVerdict::Stale)
++			continue; // stale repeats are the batch redundancy working as designed
++		if (link.inputs_logged < kInputRefusalsLogged)
++		{
++			++link.inputs_logged;
++			g_host->log.line("input-refused slot=%u verdict=%s why=\"%s\" tick=%I64u last_consumed=%I64u newest=%I64u "
++				"move=%.2f,%.2f yaw=%.3f pitch=%.3f stance=%u buttons=%x seq=%I64u",
++				u32(link.ref.slot), coop::proto::to_string(verdict), why, in.tick, link.inputs.last_consumed_tick(),
++				link.inputs.newest_tick(), in.move_x, in.move_y, in.yaw, in.pitch, u32(in.stance), in.buttons,
++				message.header.sequence);
++		}
++	}
++}
++
++// S06-T01: the living creatures within 3 m of an actor (id:section:distance),
++// for the input trace: what the actor's body is next to.
++void nearby_creatures(CActor* actor, string512& out)
++{
++	out[0] = 0;
++	CObjectList& objects = Level().Objects;
++	for (u32 i = 0, n = objects.o_count(); i < n; ++i)
++	{
++		CEntityAlive* other = smart_cast<CEntityAlive*>(objects.o_get_by_iterator(i));
++		if (!other || other == actor)
++			continue;
++		const float d = other->Position().distance_to(actor->Position());
++		if (d > 3.f)
++			continue;
++		string64 one;
++		xr_sprintf(one, " %u:%s:%.2f:%d", u32(other->ID()), other->cNameSect().c_str(), d, other->g_Alive() ? 1 : 0);
++		if (xr_strlen(out) + xr_strlen(one) < sizeof(out) - 1)
++			xr_strcat(out, one);
+ 	}
+-	link.held = fresh.back().second;
+-	link.input_last = fresh.back().first;
+-	link.has_held = true;
+-	link.held_ms = g_host->wall.GetElapsed_ms();
+-	link.inputs_taken += fresh.size();
+ }
+ 
+ void apply_inputs()
+@@ -711,10 +744,20 @@ void apply_inputs()
+ 	const u32 now = g_host->wall.GetElapsed_ms();
+ 	// What the previous tick did with the input it was given.
+ 	for (PlayerLink& link : g_host->links)
+-		if (link.bound && link.has_held && now - link.last_input_log_ms < 20)
++		if (link.bound && link.inputs.has_last() && now - link.last_input_log_ms < 20)
+ 			if (CActor* actor = participant_actor(link.ref))
+-				g_host->log.line("input-after-tick slot=%u wishful=%x real=%x pos=%.2f,%.2f,%.2f", u32(link.ref.slot),
+-					actor->replica_wishful(), actor->MovingState(), VPUSH(actor->Position()));
++			{
++				const CActor::ControlTrace& c = actor->control_trace;
++				string512 nearby;
++				nearby_creatures(actor, nearby);
++				g_host->log.line("input-after-tick slot=%u wishful=%x real=%x pos=%.2f,%.2f,%.2f steps=%u skipped=%u "
++					"wf_in=%x wf_used=%x real_out=%x can_move=%u environment=%u accel=%.3f physics_steps=%u ph=%u/%u/%u/%u "
++					"slowmo=%.3f velocity=%.3f near=[%s ]",
++					u32(link.ref.slot), actor->replica_wishful(), actor->MovingState(), VPUSH(actor->Position()),
++					c.control_steps, c.skipped_updates, c.wf_in, c.wf_used, c.real_out, u32(c.can_move),
++					u32(c.environment), c.accel, c.physics_steps, u32(c.ph_exist), u32(c.ph_body_enabled),
++					u32(c.ph_active), u32(c.ph_freezed), c.slowmo, c.velocity, nearby);
++			}
+ 	PartyId party;
+ 	party.hi = g_host->config.party_id.hi;
+ 	party.lo = g_host->config.party_id.lo;
+@@ -726,8 +769,12 @@ void apply_inputs()
+ 		if (!actor || !actor->g_Alive())
+ 			continue;
+ 		actor->replica_set_wishful(actor->replica_wishful() & ~kManagedBits);
+-		if (!link.session || !link.has_held || now - link.held_ms > kInputHoldMs)
+-			continue; // detached or silent: no input
++		if (!link.session)
++			continue; // detached: no input (the queue was reset at the leave)
++		coop::proto::Input in;
++		const coop::proto::InputSource source = link.inputs.consume(in);
++		if (source == coop::proto::InputSource::None)
++			continue; // silent: no input
+ 		ActionContext context;
+ 		context.origin = Origin::ClientIntent;
+ 		context.session = link.session;
+@@ -739,7 +786,6 @@ void apply_inputs()
+ 			++link.input_refused;
+ 			continue;
+ 		}
+-		const coop::proto::Input& in = link.held;
+ 		u32 bits = 0;
+ 		if (in.move_y > 0.5f)
+ 			bits |= mcFwd;
+@@ -756,25 +802,33 @@ void apply_inputs()
+ 		if (in.buttons & 1)
+ 			bits |= mcAccel;
+ 		actor->replica_set_wishful(actor->replica_wishful() | bits);
+-		actor->cam_Active()->yaw = in.yaw;
+-		actor->cam_Active()->pitch = in.pitch;
++		// The look direction is the player's intent too; the camera's own
++		// limits apply to it as they would to a local player's mouse.
++		CCameraBase* camera = actor->cam_Active();
++		camera->yaw = angle_normalize_signed(in.yaw);
++		float pitch = in.pitch;
++		if (camera->bClampPitch)
++			clamp(pitch, _min(camera->lim_pitch.x, camera->lim_pitch.y), _max(camera->lim_pitch.x, camera->lim_pitch.y));
++		camera->pitch = pitch;
+ 		if (bits & (mcFwd | mcBack | mcLStrafe | mcRStrafe))
+ 		{
+ 			++link.input_ticks;
+ 			if (now - link.last_input_log_ms >= 500)
+ 			{
+ 				link.last_input_log_ms = now;
+-				g_host->log.line("input-apply slot=%u actor=%u move=%.1f,%.1f stance=%u yaw=%.3f wishful=%x real=%x "
+-					"pos=%.2f,%.2f,%.2f enabled=%d processing=%d environment=%d character=%d can_move=%d "
+-					"cant_walk=%d cant_walk_weight=%d talking=%d",
+-					u32(link.ref.slot), u32(actor->ID()), in.move_x, in.move_y, u32(in.stance), in.yaw,
+-					actor->replica_wishful(), actor->MovingState(), VPUSH(actor->Position()),
+-					actor->getEnabled() ? 1 : 0, actor->processing_enabled() ? 1 : 0,
++				g_host->log.line("input-apply slot=%u actor=%u tick=%I64u source=%s depth=%u move=%.1f,%.1f stance=%u "
++					"yaw=%.3f wishful=%x real=%x pos=%.2f,%.2f,%.2f enabled=%d processing=%d environment=%d "
++					"character=%d can_move=%d cant_walk=%d cant_walk_weight=%d talking=%d power=%.3f",
++					u32(link.ref.slot), u32(actor->ID()), in.tick,
++					source == coop::proto::InputSource::Queued ? "queued" : "held", u32(link.inputs.depth()), in.move_x,
++					in.move_y, u32(in.stance), in.yaw, actor->replica_wishful(), actor->MovingState(),
++					VPUSH(actor->Position()), actor->getEnabled() ? 1 : 0, actor->processing_enabled() ? 1 : 0,
+ 					int(actor->character_physics_support()->movement()->Environment()),
+ 					actor->character_physics_support()->movement()->CharacterExist() ?
+ 						(actor->character_physics_support()->movement()->IsCharacterEnabled() ? 2 : 1) : 0,
+ 					actor->CanMove() ? 1 : 0, actor->conditions().IsCantWalk() ? 1 : 0,
+-					actor->conditions().IsCantWalkWeight() ? 1 : 0, actor->IsTalking() ? 1 : 0);
++					actor->conditions().IsCantWalkWeight() ? 1 : 0, actor->IsTalking() ? 1 : 0,
++					actor->conditions().GetPower());
+ 			}
+ 		}
+ 	}
+@@ -870,13 +924,13 @@ void send_snapshots()
+ 	for (PlayerLink& link : g_host->links)
+ 		if (link.world == WorldLive && link.session)
+ 		{
+-			snapshot.last_input = link.input_last;
++			snapshot.last_input = link.inputs.last_consumed_tick();
+ 			if (g_host->server->send(link.player, coop::proto::Message(snapshot)))
+ 				++link.snapshots_sent;
+ 		}
+ 	// the server's own record, for comparison with what the clients show
+ 	const u32 now = g_host->wall.GetElapsed_ms();
+-	if (g_host->actors_csv && now - g_host->last_actor_log_ms >= 250)
++	if (g_host->actors_csv && now - g_host->last_actor_log_ms >= 50) // S06-T01: every snapshot
+ 	{
+ 		g_host->last_actor_log_ms = now;
+ 		FILETIME ft;
+@@ -916,10 +970,9 @@ void on_joined(const coop::session::SessionEvent& e)
+ 	link->world = WorldPending;
+ 	link->outbox.clear();
+ 	link->blob.clear();
+-	// S05-T04: input sequences are per connection and every join is a new
++	// S05-T04: input ticks are per connection and every join is a new
+ 	// connection, so the previous connection's watermark would refuse them all.
+-	link->input_last = 0;
+-	link->has_held = false;
++	link->inputs.reset();
+ 	g_host->log.line("joined player=%s name=%s session_slot=%u participant=%u/%u registry_session=%08x resumed=%d "
+ 		"attach=%s",
+ 		coop_uuid_hex(e.player).c_str(), link->name.c_str(), u32(e.slot), u32(link->ref.slot), link->ref.generation,
+@@ -936,7 +989,7 @@ void on_left(const coop::session::SessionEvent& e)
+ 	link->world = WorldNone;
+ 	link->outbox.clear();
+ 	link->blob.clear();
+-	link->has_held = false; // no input while detached
++	link->inputs.reset(); // no input while detached, and nothing held into a rejoin
+ 	Refusal detached = Refusal::NotAttached;
+ 	if (link->session)
+ 		detached = g_campaign_identity->detach_session(g_campaign_identity->authority(), link->session, Device.dwFrame);
+@@ -1037,21 +1090,26 @@ void log_status(LPCSTR tag)
+ 	for (const PlayerLink& link : g_host->links)
+ 	{
+ 		string64 one;
+-		xr_sprintf(one, " w%u=%u/%I64u/%u in%u=%I64u/%I64u/%I64u/%I64u snap%u=%I64u", u32(link.ref.slot), u32(link.world),
+-			link.events_sent, u32(link.outbox.size()), u32(link.ref.slot), link.inputs_taken, link.input_ticks,
+-			link.inputs_stale, link.input_refused, u32(link.ref.slot), link.snapshots_sent);
++		const coop::proto::InputQueueCounters& q = link.inputs.counters();
++		xr_sprintf(one,
++			" w%u=%u/%I64u/%u in%u=%I64u/%I64u/%I64u/%I64u/%I64u/%I64u/%I64u/%I64u/%I64u/%u mv%u=%I64u/%I64u snap%u=%I64u",
++			u32(link.ref.slot), u32(link.world), link.events_sent, u32(link.outbox.size()), u32(link.ref.slot),
++			link.input_batches, q.offered, q.queued, q.consumed, q.held, q.stale, q.ahead, q.invalid, q.dropped_oldest,
++			u32(q.depth_peak), u32(link.ref.slot), link.input_ticks, link.input_refused, u32(link.ref.slot),
++			link.snapshots_sent);
+ 		xr_strcat(worlds, one);
+ 	}
+ 	const coop::session::ServerCounters& c = g_host->server->counters();
+ 	g_host->log.line("%s tick=%I64u frame=%u weather=%s game_ms=%I64u alife_objects=%u online_objects=%u%s joins=%I64u "
+ 		"violations=%I64u rejected_auth=%I64u rejected_build=%I64u rejected_content=%I64u intents_refused=%I64u "
+-		"inputs=%I64u acks=%I64u commit=%I64u published=%u spawns=%I64u despawns=%I64u/%I64u oversize=%I64u churn=%u/%u%s",
++		"inputs=%I64u rate_drops=%I64u acks=%I64u commit=%I64u published=%u spawns=%I64u despawns=%I64u/%I64u oversize=%I64u "
++		"churn=%u/%u%s",
+ 		tag, g_host->tick, Device.dwFrame,
+ 		g_pGamePersistent && g_pGamePersistent->Environment().CurrentWeatherName.size() ?
+ 			*g_pGamePersistent->Environment().CurrentWeatherName : "-",
+ 		game_ms, alife_objects, u32(Level().Objects.o_count()), participants,
+ 		c.joins, c.violations, c.rejected_auth, c.rejected_build, c.rejected_content, g_host->intents_refused,
+-		g_host->inputs_ignored, g_host->acks, g_host->commit, u32(g_host->published.size()), g_host->spawns,
++		g_host->inputs_ignored, c.rate_limited_drops, g_host->acks, g_host->commit, u32(g_host->published.size()), g_host->spawns,
+ 		g_host->despawns_range, g_host->despawns_destroyed, g_host->spawn_oversize, g_host->churn_spawned,
+ 		g_host->churn_released, worlds);
+ }

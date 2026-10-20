@@ -129,6 +129,10 @@
     {
       "path": "patches/engine/0030-coop-rejoin-input.patch",
       "sha256": "0868929701ad39f154bc70d424ae3556a113a9bf679791451583231e3e163c6c"
+    },
+    {
+      "path": "patches/engine/0031-validated-movement-input.patch",
+      "sha256": "968a818fb6b3b5475390556d46e6896903bc9dcf6f6b89401ce7ba0d3eec9958"
     }
   ],
   "submodules": [

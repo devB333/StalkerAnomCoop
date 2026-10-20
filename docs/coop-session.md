@@ -174,3 +174,65 @@ seeing both participant actors, walking one's own actor through the server,
 the server's world clock and weather, server-owned spawn/release, leaving
 and rejoining. Not supported yet: any action other than movement, moving
 NPCs and items on clients, gameplay scripts on clients (see S05-T04 limits).
+
+## Validated movement input (S06-T01)
+
+Validation: [S06-T01](validation/S06-T01.md). Patch 0031; protocol
+`input_queue.h` (proto-build-18).
+
+- **What a client sends is intent, never state:** movement axes, stance, the
+  walk button and the camera's yaw and pitch, numbered by input tick. No
+  message a client can send carries a position, speed or outcome; a Snapshot
+  from a client is a wrong-direction violation (the connection closes) and
+  every ActionIntent is refused (no action kind is defined).
+- **One input per server tick:** the client samples its control state once
+  per server tick of wall time (the Welcome's `tick_rate_hz`, 50 Hz), counts
+  ticks per connection and repeats the last 8 inputs in every batch. The
+  server keeps one `coop::proto::InputQueue` per player: every received input
+  is validated (finite, axes −1..1, |pitch| ≤ 1.6, a stance the actor has, a
+  known button), refused when stale (≤ the last consumed tick, or a repeat) or
+  ahead (> newest accepted + 250), else queued in tick order with a backlog of
+  at most 5 (oldest dropped). Each tick consumes exactly one input; an empty
+  queue reuses the last for at most 10 ticks, then the actor gets no input.
+  So duplicates, replays, floods and a shifted counter cannot move an actor
+  further than the server's ticks do, and a backlog adds at most 100 ms.
+  Refusals are counted per player (`in<slot>=` in the status line) and the
+  first 24 are logged with their reason.
+- **Native validation of the intent:** the consumed input only sets the
+  actor's control bits and camera angles (the pitch clamped to the camera's
+  own `lim_pitch`); the server's own control path then decides what the actor
+  can do with them and moves it with its own timestep and collision:
+  `CActor::shedule_Update` → `g_cl_CheckControls` (`CanMove`, the crouch box
+  check, `CanSprint`/`CanAccelerate`, stamina through `DisableSprint`, the
+  walk/run/sprint/crouch/strafe speed factors) → `g_cl_Orientate` (the camera
+  yaw becomes the body's) → `g_Physics` (the character controller against the
+  level and other characters). Nothing of the client's timestep or camera
+  reaches the server except the yaw and pitch it chose.
+- **Identity:** input is applied only to the actor the session's context
+  resolves (`Scope::Self`); a detached player's queue is reset and its actor
+  gets no input. Snapshots acknowledge the last consumed tick (`last_input`).
+- **Two actors near each other** (patch 0031, `CActor::UpdateCL`): an actor
+  no longer runs the NPC box fitting (`UpdateObjectBox`) on another actor.
+  That function recalculates the touched character's movement with zero
+  acceleration. Between two actors it pinned both for good within about
+  1.5 m (S06-T01 move-1..5). Single-player has one actor and is unchanged.
+- **Rate:** the session layer's input channel limit (120/s, burst 240) drops
+  the excess on the transient channel (`rate_drops=` in the status line).
+- **Trace:** after each tick that applied an input, the server logs what the
+  native step did (`input-after-tick`: control bits, `CanMove`, environment,
+  acceleration, the physics body's exist/enabled/active/frozen flags,
+  velocity and the living creatures within 3 m; `CActor::control_trace`).
+- **Test driver (profile `script = 2`):** the movement validation program
+  (legs A–K in `CoopClientLink.cpp`, measured by
+  `tools/compare-coop-movement.py`): baseline legs, duplicated batches, a
+  shifted counter with a jump, a replay while standing, crouched legs, an
+  unsupported stance, a sprint into the other player's actor, a teleport
+  intent and a forged snapshot. Player 2's program starts 60 s after player
+  1's, and player 1's connection-closing leg K waits until player 2's
+  program is over.
+
+```
+python3 tools/prepare-coop-session.py <run> --task S06-T01 --movement c1,c2
+powershell.exe ... Run-CoopSession.ps1 -Run <run> -Task S06-T01 -ServerAloneSeconds 10 -ClientStarts '0,10' -ClientSeconds '180,170' -AfterSeconds 10
+python3 tools/compare-coop-movement.py <logs> --out <logs>/compare-movement.json
+```

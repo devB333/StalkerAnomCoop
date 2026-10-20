@@ -165,4 +165,11 @@ refuse garbage.
 - Resync: chunks in order with the announced sizes, then the end with the
   matching count and CRC; data is streamed, never buffered whole.
 - Inputs: only inputs newer than the last processed one are applied, oldest
-  first.
+  first. Since S06-T01 the server keeps one `InputQueue` per player
+  (`input_queue.h`, [co-op session](coop-session.md#validated-movement-input-s06-t01)):
+  inputs are sequenced by their tick, validated (finite, axes −1..1, |pitch|
+  ≤ 1.6, a stance the actor has, known buttons), queued in tick order with a
+  bounded backlog (5, oldest dropped), refused when stale (≤ the last consumed
+  tick, or a repeat) or ahead (> newest + 250), and exactly one is consumed
+  per server tick; an empty queue reuses the last input for at most 10 ticks.
+  `Snapshot.last_input` is the last consumed tick.

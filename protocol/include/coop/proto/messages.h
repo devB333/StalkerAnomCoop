@@ -275,7 +275,7 @@ struct Snapshot // server -> client, snapshot
 {
     std::uint64_t server_tick = 0;
     std::uint64_t baseline_id = 0; // 0: full; otherwise an earlier snapshot's sequence
-    std::uint64_t last_input = 0;  // last input sequence the server processed for this player
+    std::uint64_t last_input = 0;  // last input tick the server consumed for this player (S06-T01)
     std::uint8_t part = 0;
     std::uint8_t part_count = 1;
     std::vector<SnapshotEntity> entities;

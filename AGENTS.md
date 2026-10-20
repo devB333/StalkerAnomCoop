@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is an investigation workspace for a two-player Anomaly mod. Start with `README.md` and `docs/engine-investigation.md`; design decisions are in `docs/architecture.md`, `docs/multiplayer-feasibility.md`, and `docs/implementation-roadmap.md`. `reverse-engineering/` holds evidence and a persistent Ghidra project. `tools/` contains Ghidra scripts. `engine/xray-monolith/` is an ignored, pinned reference checkout with its own Git repository. `builds/` is reserved for outputs. Create `client/`, `server/`, `protocol/`, and `tests/` when implementation begins; no project gameplay code or tests exist yet.
+This is an investigation workspace for a two-player Anomaly mod. Start with `README.md` and `docs/engine-investigation.md`; design decisions are in `docs/architecture.md`, `docs/multiplayer-feasibility.md`, and `docs/implementation-roadmap.md`. `reverse-engineering/` holds evidence and a persistent Ghidra project. `tools/` contains Ghidra scripts. `engine/xray-monolith/` is an ignored, pinned reference checkout with its own Git repository. `builds/` is reserved for outputs. `protocol/` holds project-owned networking code (S04-T02 transport adapter) and `tests/` its tests, built by `tools/Build-Protocol.ps1` and run by `tools/run-protocol-tests.py`; create `client/` and `server/` when needed.
 
 ## Build, Test & Development Commands
 

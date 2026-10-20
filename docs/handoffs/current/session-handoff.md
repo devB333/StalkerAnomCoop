@@ -1,85 +1,81 @@
-# Session handoff — G03 accepted; next: S04-T01
+# Session handoff — S04-T01 complete; next: S04-T02
 
-## State at the end of the session (2026-10-19)
+## State at the end of the session (2026-10-20)
 
-**Stage 3 Completed.** S03-T01..T06 Completed; the user **accepted
-[G03](../../validation/G03.md) for development on 2026-10-19** with its limits
-carried to their named owners. Stage 4 starts with S04-T01.
+**Stage 4 In Progress.** S04-T01 Completed
+([report](../../validation/S04-T01.md)); no engine change, no patch. G03's
+carried limits are unchanged.
 
-**S03-T05** — native and Lua participant context contract
-([report](../../validation/S03-T05.md), patch 0025, `23fa820f…3f0a`):
-participant script contexts entered only by native entry points (dialogue,
-phrases, use, owned tasks, captured deferred work), strict `campaign.*` Lua
-lookups, a server-only compatibility layer (`db.actor`/`AC_ID` per context,
-out-of-context reads audited), presentation outboxes. Both participants ran
-the installed mechanic quest concurrently with rewards on their own actors.
+**S04-T01** — GameNetworkingSockets validated in isolation. Pinned GNS v1.6.1
+(commit `d534c19a`), BCrypt crypto (no OpenSSL), static protobuf 3.21.12 (the
+last release without Abseil), ICE off, CMake 4.3.5 and Ninja 1.13.1, all in
+`tools/network-probe/pins.json`. Built with the Stage 1 pinned `cl.exe`, /MD,
+0 warnings (**net-build-7**, 55 s). The DLL (1.6 MB) imports only what the
+campaign server already loads plus Windows' `bcrypt.dll`. On one host over
+loopback (**net-8**, all pass): third peer refused with an app reason; 12,000
+reliable messages intact and in order under 10% loss, 10% reordering, 5%
+duplication and 20 ms lag; unreliable delivery 89–90% at 10% loss, no
+duplicates, stale ones discarded; lane priority plus a send-side discard rule
+keep critical pings within 9 ms of baseline on a 3× oversubscribed link;
+crash detection and reconnect traced; GNS `test_crypto` and
+`test_connection suite-quick` pass.
 
-**S03-T06** — server light model for AI vision, added this session by user
-decision ([report](../../validation/S03-T06.md), patch 0026, `0e7a46aa…776e`,
-20 files, `patch-check-29b`, 204 files byte-equal): every tick, per
-participant, the client's own light tracking (`CROS_impl::update`) runs on the
-actor and one object of its view, with the environment blended at its eye
-(`CEnvironment::UpdateCPU`) and the level's sun and static lights loaded as
-CPU objects (`Render->cpu_lighting_*`, R4). No other NPC is refreshed (user
-decision). At steady state server = client: 0.0213 / 0.0213 (capture-22 vs
-smoke-144). AI observers read the participants 14–42× brighter than the old
-darkness floor; 38.9 µs per tick.
+## Found this session (inputs to S04-T02/T05)
 
-Final runs: **smoke-144** (campaign-122, GameState, all 66 stages),
-**smoke-145** (Identity, 18 stages), capture-22 (lighting match),
-capture-23/24 (single-player quest `match: true`, client-32).
-
-## Found this session (open items)
-
-1. Lit vision changed behaviour (all handled or recorded): Clear Sky guards
-   now engage a monster spawned beside actor 1 in their base (the S03-T04
-   awareness phase moves actor 1 to a quiet vertex and back); the installed
-   campfire hint reached the server UI and faulted the actor binder
-   (`game.start_tutorial` is now a presentation); **smoke-143's commanded
-   stalker (S02-T04c) stopped mid-walk once** in nine light-model runs, never in
-   37 earlier runs — cause not established; watch it, rerun if it recurs and
-   log the stalker's weapon-handler and danger state.
-2. Installed scripts outside a context still decide for actor 0 (167 lines,
-   S03-T05 audit); `has_alife_info`, `alife():actor()`, story object not
-   remapped; party vs personal info portions are S08.
-3. k00_marsh has no static point lights (its `build.lights` holds 196
-   directional records), so the static-light term is 0 there on both products;
-   other levels will exercise it.
-4. capture-21's client hung at start-up (`Starting engine...`), killed at
-   600 s; unexplained, unrelated to the level.
-5. Carried: server-driven camera yaw (Stage 4); `EntityId`s, task owners and
-   participant script state across a checkpoint (Stage 7); fixture `PlayerId`s
-   (S04-T04); detached release (S04-T05); friendly fire and god mode per
-   participant (Stage 6); presentation delivery (Stage 4); hearing-stage
-   `npc_walk_events=0` (not seen in smoke-134..145).
+1. Dead-peer detection needs traffic that expects a reply: a silent server
+   took 15.5 s with a 5 s timeout, an unreliable heartbeat 12.5 s, a reliable
+   heartbeat 5.5 s. S04-T05 needs a reliable heartbeat or its own timer.
+2. A dead session holds its slot until it times out; a reconnect is a new
+   connection. S04-T04/T05 must bind reconnects to the player and replace the
+   stale session.
+3. The send buffer (512 KB) is shared per connection: when transient data
+   fills it, reliable critical sends are refused. The adapter must bound
+   unreliable data itself and budget it below the send rate (under 1% loss on
+   a saturated link the critical tails grew even with the discard rule).
+4. Reliable order is per lane; independent reliable streams go on separate
+   lanes.
+5. Windows 11 power throttling made `Sleep(1)` last 15.5 ms in a windowless
+   process (fixed in the probe with `SetProcessInformation(ProcessPowerThrottling)`).
+   The headless campaign server is such a process. Check its frame clock and
+   future network polling.
+6. Open: the encryption is unauthenticated (no certificates), so identity is
+   S04-T04's job. protobuf 3.21.12 is from 2022, so revisit before release.
+   Separate-machine, NAT and firewall tests weren't possible.
+7. Carried from G03 (unchanged): installed scripts outside a context still
+   decide for actor 0; the smoke-143 stalker stop (watch); k00_marsh has no
+   static point lights; capture-21 start-up hang; checkpoint identity
+   (Stage 7); presentation delivery and server-driven camera yaw (Stage 4,
+   later tasks).
 
 ## Next
 
-1. **S04-T01 — Validate GameNetworkingSockets in isolation**. First
-   action: pin a GNS release and its crypto/protobuf dependencies against the
-   recorded VS2022 v143 toolchain and build an isolated listener and two peers
-   outside engine-work.
+1. **S04-T02 — Implement a bounded transport adapter.** First action: decide
+   where the adapter lives (a project-owned library linked by the campaign
+   server and client, keeping GNS behind it), and write its interface first:
+   listen/connect/send/poll/close, separate critical-reliable and
+   transient-unreliable classes with bounded queues (finding 3), lanes per
+   independent stream (finding 4), received intents marshalled to the
+   simulation thread through `RunCallbacks`/poll on that thread. Then a fake
+   transport and the loopback, shutdown-race and queue-limit tests. Use the
+   GNS DLL from `builds/network-probe/install/net-build-7/gns`.
 
 ## Tools and runs
 
-- Last run names: `campaign-122`, `client-32`, `smoke-145`, `capture-24`,
-  `patch-check-29a/b`. Next: `campaign-123`, `client-33`, `smoke-146`,
+- Probe build: `powershell.exe ... -File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-NetworkProbe.ps1' -Run <name> [-ReuseLibrariesFrom <run>]`
+  (full build about 1 min). Probe run: `python3 tools/run-network-probe.py <run> --build <build-run> [--only a,b] [--skip-selftest]`
+  (full set about 6 min, 3.5 of it GNS's `test_connection`).
+- Last run names: `net-build-7`, `net-8`; unchanged: `campaign-122`,
+  `client-32`, `smoke-145`, `capture-24`, `patch-check-29a/b`. Next:
+  `net-build-8`, `net-9`, `campaign-123`, `client-33`, `smoke-146`,
   `capture-25`, patch check `30`.
+- Clone third-party repositories that Windows tools build with Windows git: a
+  WSL clone makes Linux symlinks that Windows can't read.
 - Run PowerShell scripts with the Windows path in single quotes from bash.
   Don't build while a GameState smoke runs (the server is real-time).
 - Smoke: `python3 tools/prepare-stage2-smoke.py <run>` then
-  `Run-Stage2Smoke.ps1 -Run <run> -Scope Identity|GameState` (GameState
-  ~4 min, 66 stages).
-- Lighting check: `prepare-stage2-smoke.py capture-N S03-T06`,
-  `Run-ClientCollisionCapture.ps1 -Run capture-N -Capture lighting -CheckpointRun <smoke>`,
-  `python3 tools/compare-lighting-capture.py builds/logs/S02-T02/run-<smoke>/server-lighting-snapshot.csv builds/logs/S03-T06/run-capture-N/client-lighting.csv`.
-- Quest check: `-Capture quest|quest-persisted` (task S02-T06e); copy
-  `builds/logs/S02-T06e/run-capture-N/client-quest*.csv` to
-  `builds/logs/S02-T06/` before `compare-quest-capture.py`.
-- Installed scripts for grepping: `python3 tools/xray-db-extract.py -q extract -o <dir>
-  builds/build_2/test-install/source-client/db/configs/scripts.db0` (cp1251/CRLF).
+  `Run-Stage2Smoke.ps1 -Run <run> -Scope Identity|GameState`.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
-G02 carried limits are unchanged.
-Previous snapshot: [before S04-T01](../done/snapshot-before-S04-T01.md).
+G02/G03 carried limits are unchanged.
+Previous snapshot: [before S04-T02](../done/snapshot-before-S04-T02.md).

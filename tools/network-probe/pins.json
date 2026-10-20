@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "task": "S04-T01",
+  "recorded": "2026-10-19",
+  "root": "builds/network-probe",
+  "toolchain_manifest": "docs/toolchain-manifest.json",
+  "gamenetworkingsockets": {
+    "repository": "https://github.com/ValveSoftware/GameNetworkingSockets.git",
+    "tag": "v1.6.1",
+    "tag_object": "61d5da24fc933ab104cc8e5ab2beb133550f9570",
+    "commit": "d534c19aa760df3fb75fd20db13ba1932b8a5463",
+    "published": "2026-10-03",
+    "license": "BSD-3-Clause (LICENSE, Copyright (c) 2018 Valve Corporation)",
+    "directory": "src/GameNetworkingSockets",
+    "submodules": "none initialised (abseil/webrtc/vjson are only for WebRTC ICE and the cert tool, both off)",
+    "options": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
+      "USE_CRYPTO": "BCrypt",
+      "Protobuf_USE_STATIC_LIBS": "ON",
+      "ENABLE_ICE": "OFF",
+      "USE_STEAMWEBRTC": "OFF",
+      "BUILD_SHARED_LIB": "ON",
+      "BUILD_STATIC_LIB": "ON",
+      "BUILD_TESTS": "ON",
+      "BUILD_EXAMPLES": "OFF",
+      "BUILD_TOOLS": "OFF"
+    }
+  },
+  "protobuf": {
+    "version": "3.21.12",
+    "tag": "v21.12",
+    "url": "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-cpp-3.21.12.zip",
+    "file": "downloads/protobuf-cpp-3.21.12.zip",
+    "sha256": "c7db1d1fead682be24aa29477f5e224fdfc2bb1adeeaee1214f854a2076de71e",
+    "sha256_source": "computed at download 2026-10-19; the 2022 release asset carries no published digest",
+    "license": "BSD-3-Clause (LICENSE, Copyright 2008 Google Inc.)",
+    "directory": "src/protobuf-3.21.12",
+    "reason": "last protobuf release without the Abseil dependency; GNS accepts protobuf 2.6.1+",
+    "options": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "protobuf_BUILD_TESTS": "OFF",
+      "protobuf_BUILD_SHARED_LIBS": "OFF",
+      "protobuf_MSVC_STATIC_RUNTIME": "OFF",
+      "protobuf_WITH_ZLIB": "OFF"
+    }
+  },
+  "crypto": {
+    "backend": "BCrypt (Windows CNG, bcrypt.dll, part of the OS) for AES-GCM, SHA-256 and random numbers",
+    "curve25519_ed25519": "curve25519-donna and ed25519-donna bundled in GNS src/external (src/CMakeLists.txt:136-149)",
+    "third_party_crypto_library": "none"
+  },
+  "build_tools": {
+    "cmake": {
+      "version": "4.3.5",
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.5-windows-x86_64.zip",
+      "file": "downloads/cmake-4.3.5-windows-x86_64.zip",
+      "sha256": "c05a60d22d5df22d75a72ae9b6628ef5f20daee4f4ba380920e1fbbeaf244fc1",
+      "sha256_source": "matches cmake-4.3.5-SHA-256.txt and the GitHub asset digest",
+      "executable": "tools/cmake-4.3.5-windows-x86_64/bin/cmake.exe"
+    },
+    "ninja": {
+      "version": "1.13.1",
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-win.zip",
+      "file": "downloads/ninja-win.zip",
+      "sha256": "26a40fa8595694dec2fad4911e62d29e10525d2133c9a4230b66397774ae25bf",
+      "sha256_source": "matches the GitHub asset digest",
+      "executable": "tools/ninja-1.13.1/ninja.exe"
+    }
+  }
+}

@@ -28,7 +28,7 @@ constexpr std::size_t kHeaderBytes = 24;
 // ------------------------------------------------------------- channels
 enum Channel : net::ChannelId
 {
-    kControl = 0,   // Critical: hello, welcome, reject, heartbeat, resync begin/end
+    kControl = 0,   // Critical: handshake (hello, challenge, proof, welcome, reject), heartbeat, resync begin/end
     kActions = 1,   // Critical: action intents and results
     kLifecycle = 2, // Critical: spawn, despawn, campaign events
     kBulk = 3,      // Bulk: resync chunks
@@ -43,7 +43,7 @@ net::TransportConfig transport_config();
 // ------------------------------------------------------------- limits
 constexpr std::size_t kMaxMessageBytes[kChannelCount] = {1024, 512, 4096, 64 * 1024, 1200, 512};
 constexpr std::size_t kMaxDisplayName = 32;
-constexpr std::size_t kMaxAuthProof = 256;
+constexpr std::size_t kSignatureBytes = 64; // ECDSA P-256 r||s
 constexpr std::size_t kMinResumeToken = 16;
 constexpr std::size_t kMaxResumeToken = 64;
 constexpr std::size_t kMaxRejectDetail = 128;
@@ -87,6 +87,8 @@ enum class MessageType : std::uint16_t
     Snapshot = 0x0040,
     SnapshotAck = 0x0041,
     InputBatch = 0x0050,
+    AuthChallenge = 0x0007,
+    AuthProof = 0x0008,
 };
 // A type with this bit that the receiver does not know is skipped, not an
 // error: a later minor version may add optional messages.
@@ -129,11 +131,22 @@ struct Hello // client -> server, control
     std::uint16_t minor = kProtocolMinor;
     Digest build_id{};
     Digest content_digest{};
-    Uuid128 player_id; // a claim; S04-T04 authenticates it
+    Uuid128 player_id; // a claim until AuthProof proves it (S04-T04)
     std::string display_name;
-    std::vector<std::uint8_t> auth_proof;
+    Digest client_nonce{}; // fresh per connection; part of the signed transcript
     bool resume = false;
     ResumeRequest resume_request; // only when resume
+};
+
+struct AuthChallenge // server -> client, control, after Hello
+{
+    Digest server_nonce{}; // fresh per connection
+    Uuid128 campaign_id;   // the campaign the client is proving itself to
+};
+
+struct AuthProof // client -> server, control, answers AuthChallenge
+{
+    std::array<std::uint8_t, kSignatureBytes> signature{}; // over the transcript (session/auth.h)
 };
 
 struct Welcome // server -> client, control
@@ -325,7 +338,10 @@ struct ResyncEnd // server -> client, control
 };
 
 using Message = std::variant<Hello, Welcome, Reject, Heartbeat, ResyncBegin, ResyncEnd, ActionIntent, ActionResult,
-    Spawn, Despawn, CampaignEvent, ResyncChunk, Snapshot, SnapshotAck, InputBatch>;
+    Spawn, Despawn, CampaignEvent, ResyncChunk, Snapshot, SnapshotAck, InputBatch, AuthChallenge, AuthProof>;
+
+// Handshake types travel with epoch 0, before the session exists.
+bool handshake_type(std::uint16_t type);
 
 struct Decoded
 {

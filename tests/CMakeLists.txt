@@ -33,11 +33,13 @@ add_executable(protocol-tests
     protocol/test_codec.cpp
     protocol/test_guard.cpp
     protocol/test_fuzz.cpp
-    protocol/test_wire.cpp)
+    protocol/test_wire.cpp
+    session/test_crypto.cpp
+    session/test_session.cpp)
 target_include_directories(protocol-tests PRIVATE harness transport protocol)
 target_compile_options(protocol-tests PRIVATE /W4 /WX /permissive- /EHsc)
 target_compile_definitions(protocol-tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(protocol-tests PRIVATE coop_protocol coop_net_gns winmm)
+target_link_libraries(protocol-tests PRIVATE coop_session coop_protocol coop_net_gns winmm)
 
 # Run next to the library they were built against.
 add_custom_command(TARGET transport-tests POST_BUILD

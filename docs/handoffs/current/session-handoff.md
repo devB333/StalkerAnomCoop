@@ -1,59 +1,64 @@
-# Session handoff — S04-T03 complete; next: S04-T04
+# Session handoff — S04-T04 complete; next: S04-T05
 
 ## State at the end of the session (2026-10-20)
 
-**Stage 4 In Progress.** S04-T01, S04-T02 and S04-T03 Completed. No engine
-change, no patch since 0026. G03's carried limits are unchanged.
+**Stage 4 In Progress.** S04-T01..T04 Completed; S04-T05 (then G04) remains.
+No engine change, no patch since 0026. G03's carried limits are unchanged.
 
-- **S04-T02** — bounded transport adapter
-  ([report](../../validation/S04-T02.md)): `coop::net::Transport` in
-  `protocol/`, GNS confined to `src/net/gns_transport.cpp`, owner-thread-only
-  delivery through `poll()`, per-channel overload policy. tr-4..7: 51/51.
-- **S04-T03** — protocol codec v1.0 ([report](../../validation/S04-T03.md),
-  [wire format](../../network-protocol.md#wire-format-v1)): `coop_protocol`
-  (`protocol/include/coop/proto/`) has 15 types on 6 channels
-  (`transport_config()`) and a 24-byte header. The decoder bounds every
-  field; the encoder refuses what the decoder refuses. The per-connection
-  guard (`guard.h`) checks epochs, sequences, entity generations, resync
-  and fresh inputs. pt-3: 20/20 with 2.0 M guarded fuzz mutations.
+- **S04-T02** transport adapter ([report](../../validation/S04-T02.md)):
+  `coop::net::Transport` with GNS and fake backends; owner-thread delivery;
+  per-channel overload policy.
+- **S04-T03** codec v1.0 ([report](../../validation/S04-T03.md),
+  [wire format](../../network-protocol.md#wire-format-v1)): bounded decoder,
+  canonical encoder, per-connection guard; 2.0 M guarded fuzz mutations.
+- **S04-T04** sessions ([report](../../validation/S04-T04.md),
+  [design](../../session-authentication.md)): `coop_session` (`Server`,
+  `Client`) with ECDSA P-256 challenge-response (BCrypt), DPAPI key files
+  from `coop-keytool`, a public-key roster, player-owned slots (kept across
+  reconnects; a reconnect replaces the stale session; `release` advances
+  the generation), rate limits and handshake timeouts. pt-6 43/43, tr-8 51/51.
 
 ## Found (inputs to later tasks)
 
-1. Critical producers must pace below the send rate (S04-T02 finding 3).
-2. GNS impairments survive Kill/Init; closing a listen socket drops its
-   connections silently (handled by the adapter).
-3. The session's ids bind once in Hello/Welcome. Hello's layout is frozen
-   across majors, so a mismatch can be answered.
-4. Unverified or passed on: what build id/content digest cover, the auth
-   proof and rate limits (S04-T04); heartbeat timing (S04-T05); wire entity
-   generation mapping (S05-T02); one host, loopback, no sanitizer; the
-   notice inbox is unbounded under a connection flood (S04-T04); engine
-   linkage and power throttling (S05-T01).
+1. Stated limit: an active man in the middle relaying a live handshake keeps
+   the session (GNS encryption is unauthenticated; open-source GNS takes its
+   CA key at compile time). Recorded for G11/R06.
+2. The transport's `max_connections` (default 4) refuses peers with 1001
+   before the session layer sees them; it is the first bound.
+3. Critical producers must pace below the send rate (S04-T02).
+4. Passed on: build/content digest computation and session-to-participant
+   attachment (S05-T01); wire entity generation mapping (S05-T02); the
+   notice inbox under a connection flood (bounded by the transport cap and
+   the address limit in practice; S04-T05 to recheck); power throttling
+   (S05-T01); one host, loopback, no sanitizer.
 
 ## Next
 
-1. **S04-T04 — Bind authenticated sessions to canonical players.** First
-   action: decide the initial deployment/authentication scheme (plan.md R06;
-   GNS encryption is unauthenticated, S04-T01) and write it down. Then build
-   a session manager in `protocol/` on top of `Transport` + codec + guard:
-   join state machine (Hello → check → auth → Welcome/Reject), two active
-   slots bound to stable player ids, build/content match, per-connection and
-   per-address rate limits, a bounded pending-handshake count, no privileged
-   role for remote peers, and no logged tokens. Tests: two legitimate joins,
-   impersonation, replay, a third client, mismatched builds, floods.
+1. **S04-T05 — Handle liveness and in-memory reconnect.** First action:
+   write the policy in `docs/session-authentication.md`. It covers:
+   - a reliable heartbeat (S04-T01 finding 1: GNS needs traffic that expects
+     a reply), suspect and disconnect timeouts and the grace period;
+   - what a detached player's actor does (participant model: it stays in
+     its slot);
+   - resume with the Welcome's token (stored hashed) and token rotation.
+
+   Then implement in `session::Server/Client`: heartbeats, timeouts, resume,
+   rotation, and refusing a stale session's late messages. Tests: dropped
+   connection, delayed old messages, repeated reconnect, server shutdown. Then
+   the G04 report.
 
 ## Tools and runs
 
 - Build: `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:\Users\djb20\StalkerAnomCoop\tools\Build-Protocol.ps1' -Run <name> -Task <task>`
 - Tests: `python3 tools/run-protocol-tests.py <run> --build <build-run> --task <task> [--exe protocol-tests] [--filter a,b]`
-  (transport suite about 45 s, protocol suite about 3 s).
-- Last run names: `proto-build-7`, `pt-3`, `tr-7`, `tr-race-8`; unchanged:
+  (transport suite about 45 s; protocol+session suite about 10 s).
+- Last run names: `proto-build-11`, `pt-6`, `tr-8`, `keytool-1`; unchanged:
   `net-build-7`, `net-8`, `campaign-122`, `client-32`, `smoke-145`,
-  `capture-24`, `patch-check-29a/b`. Next: `proto-build-8`, `pt-4`, `tr-8`,
+  `capture-24`, `patch-check-29a/b`. Next: `proto-build-12`, `pt-7`, `tr-9`,
   `campaign-123`, `client-33`, `smoke-146`, `capture-25`, patch check `30`.
 - Run PowerShell scripts with the Windows path in single quotes from bash.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture. The two G01 waivers and the
 G02/G03 carried limits are unchanged.
-Previous snapshot: [before S04-T04](../done/snapshot-before-S04-T04.md).
+Previous snapshot: [before S04-T05](../done/snapshot-before-S04-T05.md).

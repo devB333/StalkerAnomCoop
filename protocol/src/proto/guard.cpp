@@ -6,11 +6,7 @@ namespace
 {
 bool Reliable(net::ChannelId channel) { return channel != kSnapshot && channel != kInput; }
 
-bool Handshake(std::uint16_t type)
-{
-    return type == std::uint16_t(MessageType::Hello) || type == std::uint16_t(MessageType::Welcome) ||
-           type == std::uint16_t(MessageType::Reject);
-}
+bool Handshake(std::uint16_t type) { return handshake_type(type); }
 } // namespace
 
 void StreamGuard::begin_session(std::uint64_t epoch)
@@ -57,8 +53,7 @@ GuardResult StreamGuard::check(net::ChannelId channel, const Header& h)
     {
         if (epoch_ != 0)
             return violation("handshake message inside a session");
-        // A server only receives Hello; a client only Welcome or Reject
-        // (decode() checked direction). One Hello per connection.
+        // decode() checked direction; the session layer checks their order.
         return {};
     }
     if (epoch_ == 0)

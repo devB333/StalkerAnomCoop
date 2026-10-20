@@ -1,6 +1,6 @@
 # Network protocol
 
-Status: the transport adapter (S04-T02) and the v1 wire format and codec (S04-T03, [below](#wire-format-v1)) are implemented and tested; sessions, liveness and replication are not. The sections before the wire format are the original design proposal; it is not wire-compatible with X-Ray. Engine evidence is in [network findings](network-findings.md). Exactly two authenticated active players initially; slot count is policy, not embedded in entity identifiers.
+Status: the transport adapter (S04-T02), the v1 wire format and codec (S04-T03, [below](#wire-format-v1)) and authenticated sessions (S04-T04, [sessions](session-authentication.md)) are implemented and tested; liveness, reconnect and replication are not. The sections before the wire format are the original design proposal; it is not wire-compatible with X-Ray. Engine evidence is in [network findings](network-findings.md). Exactly two authenticated active players initially; slot count is policy, not embedded in entity identifiers.
 
 ## Transport decision
 
@@ -85,7 +85,7 @@ section is its summary.
 | type | u16 | known type, or bit `0x8000` set (optional: skipped if unknown) |
 | flags | u16 | 0 in v1 |
 | payload_bytes | u32 | exactly the bytes after the header |
-| epoch | u64 | 0 for Hello/Welcome/Reject; the session's authority epoch otherwise |
+| epoch | u64 | 0 for the handshake (Hello, AuthChallenge, AuthProof, Welcome, Reject); the session's authority epoch otherwise |
 | sequence | u64 | per channel and direction, from 1 |
 
 The session (campaign, session, player ids) is bound to the transport
@@ -98,7 +98,7 @@ violation (the receiver closes with transport code 1003).
 
 | # | Channel | Class | Max message | Backlog | Carries |
 |---|---|---|---|---|---|
-| 0 | control | Critical, p0 | 1,024 | 64 KB | Hello (C), Welcome, Reject, ResyncBegin, ResyncEnd (S), Heartbeat (both) |
+| 0 | control | Critical, p0 | 1,024 | 64 KB | Hello, AuthProof (C), AuthChallenge, Welcome, Reject, ResyncBegin, ResyncEnd (S), Heartbeat (both) |
 | 1 | actions | Critical, p0 | 512 | 64 KB | ActionIntent (C), ActionResult (S) |
 | 2 | lifecycle | Critical, p0 | 4,096 | 128 KB | Spawn, Despawn, CampaignEvent (S) |
 | 3 | bulk | Bulk, p2 | 65,536 | 192 KB | ResyncChunk (S) |
@@ -111,7 +111,9 @@ violation (the receiver closes with transport code 1003).
 
 | Message | Body | Bounds |
 |---|---|---|
-| Hello | magic `COOP`, major, minor, build id (32 B), content digest (32 B), player id, display name, auth proof, resume flag [+ session id, token, last event, last snapshot] | name 1–32; proof ≤ 256; token 16–64; layout frozen across majors so a mismatch can be answered |
+| Hello | magic `COOP`, major, minor, build id (32 B), content digest (32 B), player id, display name, client nonce (32 B), resume flag [+ session id, token, last event, last snapshot] | name 1–32; token 16–64; layout frozen across majors so a mismatch can be answered |
+| AuthChallenge | server nonce (32 B), campaign id | campaign id non-zero ([sessions](session-authentication.md)) |
+| AuthProof | ECDSA P-256 signature (64 B) over the transcript | fixed size; verified against the roster key |
 | Welcome | major (must match), negotiated minor, campaign/session/player/party ids, slot, slot generation, authority epoch, server tick, tick and snapshot rates, resume token | ids non-zero; slot < 8; epoch ≥ 1; 1 ≤ snapshot rate ≤ tick rate ≤ 240; token 16–64 |
 | Reject | reason, server major/minor, detail | reason ≠ 0 (unknown values kept); detail ≤ 128 |
 | Heartbeat | nonce, echo, sent tick | nonce ≠ 0 |
@@ -139,14 +141,15 @@ refuse garbage.
   optional message types (bit `0x8000`), which older peers skip.
 - **Build and content**: the Hello's build id and content digest must equal
   the server's (`check_hello`), else Reject `BuildMismatch` (2) or
-  `ContentMismatch` (3). What the digests cover is fixed by S04-T04.
+  `ContentMismatch` (3). What the digests cover:
+  [sessions](session-authentication.md#build-and-content-identity).
 
 ### Stateful rules (`guard.h`, one set per connection)
 
 - Sequences: reliable channels count 1, 2, 3, ... with no gap or repeat (a
   violation); transient channels only move forward, and older or repeated
   ones are dropped.
-- Epoch: only Hello/Welcome/Reject before the session, and never inside it.
+- Epoch: only handshake messages before the session, and never inside it.
   After the Welcome every message carries the session's epoch; an older one
   (in flight across a resync or recovery) is dropped; a newer one is a
   violation. A resync announces the next epoch in ResyncBegin's body, sent

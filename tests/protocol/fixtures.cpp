@@ -24,10 +24,9 @@ std::vector<Fixture> AllFixtures()
     h.content_digest = MakeDigest(2);
     h.player_id = MakeUuid(1);
     h.display_name = "Player One";
-    h.auth_proof = std::vector<std::uint8_t>(kMaxAuthProof, 0xA5);
+    h.client_nonce = MakeDigest(5);
     f.push_back({"hello", h, 0, 1});
     Hello hr = h;
-    hr.auth_proof.clear();
     hr.display_name = std::string(kMaxDisplayName, 'x');
     hr.resume = true;
     hr.resume_request.session_id = MakeUuid(9);
@@ -47,6 +46,15 @@ std::vector<Fixture> AllFixtures()
     w.server_tick = 123456;
     w.resume_token = std::vector<std::uint8_t>(32, 0x3C);
     f.push_back({"welcome", w, 0, 1});
+
+    AuthChallenge ch;
+    ch.server_nonce = MakeDigest(6);
+    ch.campaign_id = MakeUuid(2);
+    f.push_back({"auth-challenge", ch, 0, 2});
+    AuthProof pr;
+    for (std::size_t i = 0; i < pr.signature.size(); ++i)
+        pr.signature[i] = std::uint8_t(0xF0 ^ i);
+    f.push_back({"auth-proof", pr, 0, 2});
 
     Reject rj;
     rj.reason = std::uint16_t(RejectReason::ContentMismatch);

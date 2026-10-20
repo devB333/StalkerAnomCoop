@@ -83,7 +83,7 @@ TEST("codec/round-trip")
         sizes[f.name] = bytes.size();
         ++n;
     }
-    CHECK(n == 19);
+    CHECK(n == 21);
     for (auto& kv : sizes)
         metric("bytes_" + kv.first, double(kv.second));
     // Spot checks of decoded fields.
@@ -156,7 +156,7 @@ TEST("codec/field-limits")
     // Lengths and counts one past their limit, written raw (encode() would
     // refuse them), are refused by decode before anything is allocated.
     const Hello h = std::get<Hello>(Find("hello").message);
-    auto hello = [&](const std::string& name, std::size_t proofLen) {
+    auto hello = [&](const std::string& name) {
         return Frame(std::uint16_t(MessageType::Hello), 0, 1, Body([&](Writer& w) {
             w.u32(kMagic);
             w.u16(1);
@@ -165,17 +165,16 @@ TEST("codec/field-limits")
             w.digest(h.content_digest);
             w.uuid(h.player_id);
             w.str8(name);
-            w.bytes16(std::vector<std::uint8_t>(proofLen, 1));
+            w.digest(h.client_nonce);
             w.u8(0);
         }));
     };
-    CHECK(DecodeAs(MessageType::Hello, hello("ok", 0)).ok());
-    CHECK(DecodeAs(MessageType::Hello, hello(std::string(kMaxDisplayName + 1, 'a'), 0)).error == DecodeError::TooLong);
-    CHECK(DecodeAs(MessageType::Hello, hello("", 0)).error == DecodeError::BadValue);
-    CHECK(DecodeAs(MessageType::Hello, hello("tab\there", 0)).error == DecodeError::BadString);
-    CHECK(DecodeAs(MessageType::Hello, hello("ok", kMaxAuthProof + 1)).error == DecodeError::TooLong);
+    CHECK(DecodeAs(MessageType::Hello, hello("ok")).ok());
+    CHECK(DecodeAs(MessageType::Hello, hello(std::string(kMaxDisplayName + 1, 'a'))).error == DecodeError::TooLong);
+    CHECK(DecodeAs(MessageType::Hello, hello("")).error == DecodeError::BadValue);
+    CHECK(DecodeAs(MessageType::Hello, hello("tab\there")).error == DecodeError::BadString);
     // A length prefix claiming more than the message holds.
-    auto lying = hello("ok", 0);
+    auto lying = hello("ok");
     lying[kHeaderBytes + 88] = 200; // display-name length
     CHECK(DecodeAs(MessageType::Hello, lying).error == DecodeError::TooLong);
     lying[kHeaderBytes + 88] = 30;

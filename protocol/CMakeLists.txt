@@ -6,6 +6,9 @@
 #               No transport library on its include or link path.
 # coop_protocol protocol v1 messages, codec and stateful guard (S04-T03);
 #               uses coop_net only for the channel layout types.
+# coop_session sessions bound to authenticated players (S04-T04); Windows
+#               BCrypt and DPAPI for credentials.
+# coop-keytool  makes a player's key file and roster line.
 # coop_net_gns  the GameNetworkingSockets backend (src/net/gns_transport.cpp
 #               is the only file that includes the library).
 
@@ -33,3 +36,17 @@ add_library(coop_protocol STATIC
 target_include_directories(coop_protocol PUBLIC include)
 target_compile_options(coop_protocol PRIVATE ${COOP_WARNINGS})
 target_link_libraries(coop_protocol PUBLIC coop_net)
+
+add_library(coop_session STATIC
+    src/session/crypto_win.cpp
+    src/session/auth.cpp
+    src/session/server.cpp
+    src/session/client.cpp)
+target_include_directories(coop_session PUBLIC include)
+target_compile_options(coop_session PRIVATE ${COOP_WARNINGS})
+target_compile_definitions(coop_session PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(coop_session PUBLIC coop_protocol PRIVATE bcrypt crypt32)
+
+add_executable(coop-keytool tools/coop_keytool.cpp)
+target_compile_options(coop-keytool PRIVATE ${COOP_WARNINGS})
+target_link_libraries(coop-keytool PRIVATE coop_session)

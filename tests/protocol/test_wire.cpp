@@ -24,8 +24,7 @@ struct Peer
         std::vector<std::uint8_t> b;
         std::string error;
         const MessageType t = type_of(m);
-        const std::uint64_t epoch =
-            t == MessageType::Hello || t == MessageType::Welcome || t == MessageType::Reject ? 0 : guard.epoch();
+        const std::uint64_t epoch = handshake_type(std::uint16_t(t)) ? 0 : guard.epoch();
         if (!encode(m, epoch, seq.next(channel_of(t)), b, &error))
         {
             problems.push_back("encode: " + error);

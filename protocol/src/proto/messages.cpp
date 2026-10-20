@@ -75,6 +75,8 @@ struct TypeInfo
 constexpr TypeInfo kTypes[] = {
     {MessageType::Hello, "hello", kControl, 0},
     {MessageType::Welcome, "welcome", kControl, 1},
+    {MessageType::AuthChallenge, "auth_challenge", kControl, 1},
+    {MessageType::AuthProof, "auth_proof", kControl, 0},
     {MessageType::Reject, "reject", kControl, 1},
     {MessageType::Heartbeat, "heartbeat", kControl, 2},
     {MessageType::ResyncBegin, "resync_begin", kControl, 1},
@@ -161,7 +163,7 @@ void Write(Writer& w, const Hello& m)
     w.digest(m.content_digest);
     w.uuid(m.player_id);
     w.str8(m.display_name);
-    w.bytes16(m.auth_proof);
+    w.digest(m.client_nonce);
     w.u8(m.resume ? 1 : 0);
     if (m.resume)
     {
@@ -188,8 +190,8 @@ void Read(Reader& r, Hello& m)
     m.player_id = r.uuid(true);
     r.field("hello.display_name");
     m.display_name = r.str8(1, kMaxDisplayName, NameChar);
-    r.field("hello.auth_proof");
-    m.auth_proof = r.bytes16(0, kMaxAuthProof);
+    r.field("hello.client_nonce");
+    m.client_nonce = r.digest();
     r.field("hello.resume");
     const std::uint8_t resume = r.u8();
     if (r.ok() && resume > 1)
@@ -214,6 +216,26 @@ void Read(Reader& r, Hello& m)
         m.resume_request.last_event = r.u64();
         m.resume_request.last_snapshot = r.u64();
     }
+}
+
+void Write(Writer& w, const AuthChallenge& m)
+{
+    w.digest(m.server_nonce);
+    w.uuid(m.campaign_id);
+}
+void Read(Reader& r, AuthChallenge& m)
+{
+    r.field("auth_challenge");
+    m.server_nonce = r.digest();
+    m.campaign_id = r.uuid(true);
+}
+
+void Write(Writer& w, const AuthProof& m) { w.raw(m.signature.data(), m.signature.size()); }
+void Read(Reader& r, AuthProof& m)
+{
+    r.field("auth_proof.signature");
+    for (auto& b : m.signature)
+        b = r.u8();
 }
 
 void Write(Writer& w, const Welcome& m)
@@ -661,6 +683,13 @@ bool ReadBody(Reader& r, std::uint16_t type, std::uint64_t sequence, Message& ou
 
 bool known_type(std::uint16_t type) { return info(type) != nullptr; }
 
+bool handshake_type(std::uint16_t type)
+{
+    return type == std::uint16_t(MessageType::Hello) || type == std::uint16_t(MessageType::Welcome) ||
+           type == std::uint16_t(MessageType::Reject) || type == std::uint16_t(MessageType::AuthChallenge) ||
+           type == std::uint16_t(MessageType::AuthProof);
+}
+
 net::ChannelId channel_of(MessageType type)
 {
     const TypeInfo* t = info(std::uint16_t(type));
@@ -686,7 +715,8 @@ MessageType type_of(const Message& m)
     static constexpr MessageType order[] = {MessageType::Hello, MessageType::Welcome, MessageType::Reject,
         MessageType::Heartbeat, MessageType::ResyncBegin, MessageType::ResyncEnd, MessageType::ActionIntent,
         MessageType::ActionResult, MessageType::Spawn, MessageType::Despawn, MessageType::CampaignEvent,
-        MessageType::ResyncChunk, MessageType::Snapshot, MessageType::SnapshotAck, MessageType::InputBatch};
+        MessageType::ResyncChunk, MessageType::Snapshot, MessageType::SnapshotAck, MessageType::InputBatch,
+        MessageType::AuthChallenge, MessageType::AuthProof};
     static_assert(std::variant_size_v<Message> == sizeof(order) / sizeof(order[0]));
     return order[m.index()];
 }
@@ -739,8 +769,7 @@ DecodeResult decode(net::ChannelId channel, Role receiver, const void* data, std
         return done(DecodeError::WrongDirection);
     // Before the session exists (Hello, Welcome, Reject) the epoch is 0;
     // every other message carries the session's epoch.
-    const bool handshake = t->type == MessageType::Hello || t->type == MessageType::Welcome || t->type == MessageType::Reject;
-    if (handshake != (h.epoch == 0))
+    if (handshake_type(h.type) != (h.epoch == 0))
         return done(DecodeError::BadValue);
 
     switch (t->type)
@@ -760,6 +789,8 @@ DecodeResult decode(net::ChannelId channel, Role receiver, const void* data, std
     case MessageType::Snapshot: ReadBody<Snapshot>(r, h.type, h.sequence, out.body); break;
     case MessageType::SnapshotAck: ReadBody<SnapshotAck>(r, h.type, h.sequence, out.body); break;
     case MessageType::InputBatch: ReadBody<InputBatch>(r, h.type, h.sequence, out.body); break;
+    case MessageType::AuthChallenge: ReadBody<AuthChallenge>(r, h.type, h.sequence, out.body); break;
+    case MessageType::AuthProof: ReadBody<AuthProof>(r, h.type, h.sequence, out.body); break;
     }
     r.expect_end();
     return done();
@@ -777,8 +808,7 @@ bool encode(const Message& m, std::uint64_t epoch, std::uint64_t sequence, std::
         [&](const auto& v) {
             using T = std::decay_t<decltype(v)>;
             if constexpr (std::is_same_v<T, Hello>)
-                fits = v.display_name.size() <= 255 && v.auth_proof.size() <= 0xFFFF &&
-                       v.resume_request.token.size() <= 255;
+                fits = v.display_name.size() <= 255 && v.resume_request.token.size() <= 255;
             else if constexpr (std::is_same_v<T, Welcome>)
                 fits = v.resume_token.size() <= 255;
             else if constexpr (std::is_same_v<T, Reject>)

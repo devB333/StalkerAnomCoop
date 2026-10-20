@@ -159,6 +159,7 @@ foreach ($name in $session.processes.PSObject.Properties.Name) {
     $dest = Join-Path $logDir $name
     New-Item -ItemType Directory $dest -Force | Out-Null
     Get-ChildItem (Join-Path $runtime 'appdata\logs') -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $dest }
+    Get-ChildItem (Join-Path $runtime 'appdata\screenshots') -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $dest }
 }
 $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $logDir 'result.json')
 $result | ConvertTo-Json -Depth 6

@@ -126,3 +126,22 @@ dropped and counted.
 | The local participant's actor is the player entity and spawns first | `alife_simulator_base2.cpp` (`register_object`), `xrServer_CL_connect.cpp` |
 | The client's in-process server refuses M_SPAWN, world control and every game event from its own level; ALife create/release refused unless replication asks | `xrServer.cpp`, `xrServer_process_event.cpp`, `alife_simulator_base.cpp` |
 | The single-player actor binder only on the local actor; remote objects' binders do not update | `CampaignActorControl.cpp`, `script_binder.cpp` |
+
+## Participant views (S05-T03)
+
+Validation: [S05-T03](validation/S05-T03.md).
+
+- Each client's player entity is its own participant's actor; the other
+  participant's actor is drawn whole (third person) on it.
+- A replica client moves no actor: it sends its player's control state
+  (movement keys, stance, walk, camera angles) as `InputBatch` each frame
+  (≤ 60 Hz); the server holds the newest input for 250 ms and writes it into
+  that participant's actor's control state before every tick, only through
+  the actor the session's context resolves (`Scope::Self`).
+- Snapshots at 20 Hz carry both participant actors; clients interpolate
+  100 ms behind the server's clock (`CActor::replica_present`). No prediction
+  yet (S06-T03).
+- World clock (`CampaignEvent` kind 1, payload `u64 game_ms, f32 factor, u8
+  length, weather`): clients follow the server's game time and weather.
+- No script binder updates on a replica; unattended test clients use
+  `keypress_on_start off` and `g_always_active on`.

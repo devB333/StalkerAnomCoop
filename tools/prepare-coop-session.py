@@ -53,6 +53,8 @@ def main():
                         help="saved game in the server runtime to serve; copied as coop-campaign "
                              "(no spaces: the engine's ini reader drops them)")
     parser.add_argument("--inject", default="", help="comma-separated client names (c1, c2) running the refusal test")
+    parser.add_argument("--script", default="",
+                        help="comma-separated client names running the S05-T03 look/walk/screenshot driver")
     parser.add_argument("--churn", type=int, default=0,
                         help="seconds between server-side medkit spawns, each released half a period later "
                              "(S05-T02 lifecycle fixture; 0 off)")
@@ -80,8 +82,9 @@ def main():
 
     names = ["server"] + [f"c{i + 1}" for i in range(args.clients)]
     inject = {n for n in args.inject.split(",") if n}
-    if inject - set(names[1:]):
-        raise SystemExit("--inject names clients that do not exist")
+    script = {n for n in args.script.split(",") if n}
+    if (inject | script) - set(names[1:]):
+        raise SystemExit("--inject/--script name clients that do not exist")
 
     # One isolated runtime per process.
     runtimes = {}
@@ -144,7 +147,7 @@ def main():
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
                       f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",
-                      f"inject = {1 if name in inject else 0}"]
+                      f"inject = {1 if name in inject else 0}", f"script = {1 if name in script else 0}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile
@@ -168,6 +171,10 @@ def main():
                 line = "rs_screenmode windowed"
             elif line.startswith("vid_mode "):
                 line = "vid_mode 800x600"
+            elif line.startswith("keypress_on_start "):
+                line = "keypress_on_start off"  # unattended clients: no "press any key" after loading
+            elif line.startswith("g_always_active "):
+                line = "g_always_active on"  # both windows keep rendering when the other has the focus
             settings.append(line)
         (runtime / "appdata/user.ltx").write_text("\n".join(settings) + "\n")
         shutil.copytree(accepted / "appdata/shaders_cache", runtime / "appdata/shaders_cache")

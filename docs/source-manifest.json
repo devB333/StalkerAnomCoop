@@ -121,6 +121,10 @@
     {
       "path": "patches/engine/0028-coop-world-replica.patch",
       "sha256": "b6ce5376f1c1b00dafd057e18011c10476f946e71e6feb2f6753bb0068110d67"
+    },
+    {
+      "path": "patches/engine/0029-coop-participant-views.patch",
+      "sha256": "30cf95cabbc742471e2ef0e88ece4f79c5bfeaf4b5be008d132158891453c035"
     }
   ],
   "submodules": [

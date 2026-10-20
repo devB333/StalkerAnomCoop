@@ -1,57 +1,60 @@
-# Session handoff — S05-T02 done; next: S05-T03
+# Session handoff — S05-T03 done; next: S05-T04 (then G05)
 
-## State (2026-10-20)
+## State (2026-10-20, end of session)
 
-Stage 5 In Progress. **S05-T01 Completed** ([report](../../validation/S05-T01.md)),
-**S05-T02 Completed** ([report](../../validation/S05-T02.md),
-[design](../../coop-session.md#client-world-replica-s05-t02)): engine
-`c57fe5b9` + patches 0001–0028; protocol v1.1 (`proto-build-15`). Clients
-join a serving campaign server, receive its world as a native checkpoint plus
-the lifecycle stream, and hold a passive replica; world-7: three replicas
-(late join, rejoin, constant churn) equal the server's online set.
-Regressions: smoke-149 (66 stages; smoke-148 hit the known intermittent walk
-stop), capture-27 (single-player checkpoint match).
+Stage 5 In Progress; S05-T01, T02, T03 **Completed**. Engine `c57fe5b9` +
+patches 0001–0029 (exported, reconstruction check 32); protocol v1.1
+(`proto-build-15`). Design: [co-op session](../../coop-session.md).
 
-## Next: S05-T03 — display both participants with separate local views
+| Task | Result | Report |
+|---|---|---|
+| S05-T01 roles | serve mode, client link, local-start guard, build/content identity; injection 3/3 refused (coop-9) | [S05-T01](../../validation/S05-T01.md) |
+| S05-T02 world | join = native checkpoint + Spawn/Despawn stream; client replica (no simulation, local outcomes refused); world-7: three replicas (late join, rejoin, churn) equal the server's online set | [S05-T02](../../validation/S05-T02.md) |
+| S05-T03 views | own view per client; input → server → actor (session context only); 20 Hz actor snapshots, server-time interpolation; world clock + weather; view-11: each walk moved only its own actor, both clients within 0.15 m of the server, same sky | [S05-T03](../../validation/S05-T03.md) |
 
-- Each client's view is its own participant's actor (already the player
-  entity on its client). Input → server: the client stops moving its actor
-  locally (`controls_actor` false in the replica) and sends InputBatch
-  (movement keys, look angles, stance) every frame; the server applies it to
-  that participant's actor through the S03-T03 input context
-  (`actor_input_*`), only for an attached session (detached: no input).
-- Snapshots (protocol Snapshot, 20 Hz, transient): actor transforms, velocity,
-  state bits; clients feed remote actors through the engine's MP path
-  (`CActor::net_Import` / NET queue interpolation) and set their own actor's
-  position (no prediction: S06-T03). Consider basic NPC transforms too, or
-  leave NPCs to S06-T02 and say so.
-- Evidence: both clients see both actors (screenshots via the `screenshot`
-  console command, read with the image viewer), each moves only its own
-  (scripted input in a test mode), positions compared server vs clients.
+Regressions on the final builds: smoke-150 (66 stages), capture-28
+(single-player checkpoint match).
 
-Then S05-T04 (bounded session, G05 report). Stop for G05 acceptance before
-Stage 6.
+User feedback during the session: walking felt "incredibly choppy" (eased
+by the buffered interpolation; prediction is S06-T03); different weather
+on the two clients (fixed: world clock). The user was asked not to play in
+the test windows; their clicks earlier are visible in coop-9/view-2 logs.
+
+## Not verified / carried
+
+- No prediction, no actions (fire/use/jump), NPC/item movement not
+  replicated (S06); no gameplay scripts on clients (presentation split S08/S10).
+- Client ALife scheduler stalls after load (not needed; cause open).
+- Rare client access violation at exit (2 of ~40 runs).
+- smoke-148's intermittent activity-fixture walk stop (third time in ~90 runs).
+- One host, loopback only; G01 waivers and G02–G04 limits unchanged.
+
+## Next: S05-T04 — verify a bounded shared-world session (then G05)
+
+One session that shows the G05 evidence together: two joins, both actors
+visible, a server-controlled entity change seen by both (churn medkit),
+late join and disconnect/rejoin, state comparison and screenshots.
+
+```
+python3 tools/prepare-coop-session.py session-1 --task S05-T04 --churn 10 --script c1,c2
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:\Users\djb20\StalkerAnomCoop\tools\Run-CoopSession.ps1' -Run session-1 -Task S05-T04 -ServerAloneSeconds 10 -ClientStarts '0,45' -ClientSeconds '220,80' -Restart 'c2:20:90' -AfterSeconds 10
+python3 tools/compare-coop-world.py builds/logs/S05-T04/run-session-1/server/coop-lifecycle.csv builds/logs/S05-T04/run-session-1/<c1|c2-first-run|c2>/coop-world-final.csv
+python3 tools/compare-coop-actors.py builds/logs/S05-T04/run-session-1 --lag-ms 120
+```
+
+Then write `docs/validation/S05-T04.md` and `docs/validation/G05.md` (the
+G05 requirement table, carried limits), update plan.md, and **stop for the
+user's G05 acceptance** before Stage 6.
 
 ## Tools and runs
 
-- `python3 tools/prepare-coop-session.py <run> [--task S05-T0N] [--inject c1]`
-  then `Run-CoopSession.ps1 -Run <run> -Task <task> -ClientStarts '0,15'
-  -ClientSeconds '90,75' [-Restart 'c2:40:30']`; logs in
-  `builds/logs/<task>/run-<run>/{server,c1,c2}`.
-- Builds: `Build-Stage2.ps1 -Run <name> -Product Client|Campaign`
-  (`-ProtocolBuild proto-build-15` default). Rebuild **both** products after
-  any engine change (build ids must match).
-- `python3 tools/compare-coop-world.py <server coop-lifecycle.csv> <client coop-world-final.csv>`
-  compares a replica with the server; `--churn N` adds a server-side
-  spawn/release every N s.
-- Last runs: `proto-build-15`, `pt-13`, `tr-10`, `campaign-138`, `client-45`,
-  `world-7`, `smoke-149`, `capture-27`, patch check 31. Next:
-  `proto-build-16`, `pt-14`, `tr-11`, `campaign-139`, `client-46`,
-  `view-1` (task S05-T03), `smoke-150`, `capture-28`, patch check 32.
-- Don't build while a session or smoke runs. The user may click in client
-  windows; refused starts are logged (`role-guard`).
+- Builds: `Build-Stage2.ps1 -Run <name> -Product Client|Campaign` (rebuild
+  both after any engine change: build ids must match).
+- Last runs: `campaign-152`, `client-59`, `view-11`, `smoke-150`,
+  `capture-28`, patch check 32. Next: `campaign-153`, `client-60`,
+  `session-1`, `smoke-151`, `capture-29`, patch check 33.
+- Don't build while a session or smoke runs.
 
 Preserve the original installation, the reference checkout, the accepted
-source-client runtime and the saved-game fixture. G01 waivers and G02–G04
-carried limits unchanged.
-Previous snapshot: [before S05-T03](../done/snapshot-before-S05-T03.md).
+source-client runtime and the saved-game fixture.
+Previous snapshot: [before S05-T04](../done/snapshot-before-S05-T04.md).

@@ -53,6 +53,7 @@ void InputQueue::reset()
     queue_.clear();
     last_consumed_ = 0;
     newest_ = 0;
+    refused_newest_ = 0;
     has_last_ = false;
     held_run_ = 0;
 }
@@ -64,6 +65,8 @@ InputVerdict InputQueue::offer(const Input& in, const char** why)
     if (*reason)
     {
         ++counters_.invalid;
+        if (in.tick > last_consumed_ && in.tick <= newest_ + config_.max_gap && in.tick > refused_newest_)
+            refused_newest_ = in.tick;
         if (why)
             *why = reason;
         return InputVerdict::Invalid;
@@ -105,6 +108,13 @@ InputVerdict InputQueue::offer(const Input& in, const char** why)
     if (why)
         *why = "";
     return InputVerdict::Queued;
+}
+
+std::uint64_t InputQueue::processed_tick() const
+{
+    if (!queue_.empty() || refused_newest_ <= last_consumed_)
+        return last_consumed_;
+    return refused_newest_;
 }
 
 std::size_t InputQueue::offer_batch(const InputBatch& batch)

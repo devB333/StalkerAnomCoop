@@ -1,0 +1,550 @@
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 78eb4e7..0c3d3b8 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -351,6 +351,10 @@ public:
+ 	void replica_present(const Fvector& position, float model_yaw, u32 mstate, const Fvector& velocity,
+ 		bool local_view);
+ 	float replica_model_yaw() const { return r_model_yaw; }
++	// S06-T03: where the actor looks (its torso: the camera's world yaw and
++	// pitch, which the arms and weapon follow; the body yaw lags it).
++	const SRotation& replica_torso() const { return r_torso; }
++	void replica_set_aim(float torso_yaw, float torso_pitch);
+ 	// S05-T03: the movement state the control path reads (the co-op host sets
+ 	// a participant's input into it; a co-op client samples its player's).
+ 	u32 replica_wishful() const { return mstate_wishful; }
+diff --git a/src/xrGame/ActorCameras.cpp b/src/xrGame/ActorCameras.cpp
+index e538c43..6d5c250 100644
+--- a/src/xrGame/ActorCameras.cpp
++++ b/src/xrGame/ActorCameras.cpp
+@@ -676,16 +676,25 @@ void CActor::cam_Update(float dt, float fFOV)
+ 	float& cam_yaw_cur = cameras[eacFirstEye]->yaw;
+ 	float& cam_pitch_cur = cameras[eacFirstEye]->pitch;
+ 
+-	static bool freelook_last_frame;
+-	static float cam_yaw_prev = cam_yaw_cur;
+-	static float cam_pitch_prev = cam_pitch_cur;
++	// S06-T03: the previous angles are function statics, so they belong to
++	// the view actor. A co-op client also updates the other participant's
++	// actor here every frame; its angles made the view actor's turn rate
++	// jump between the two cameras, and the HUD weapon's turn tilt
++	// (CHudItem m_fLR_CameraFactor) snapped to its limit and drifted back.
++	// Single-player has one actor and is unchanged.
++	if (Level().CurrentViewEntity() == this)
++	{
++		static bool freelook_last_frame;
++		static float cam_yaw_prev = cam_yaw_cur;
++		static float cam_pitch_prev = cam_pitch_cur;
+ 
+-	fFPCamYawMagnitude = freelook_last_frame ? 0.f : (1.f - freelook_cam_control) * (angle_difference_signed(cam_yaw_prev, cam_yaw_cur) / Device.fTimeDelta); // L+ / R-
+-	fFPCamPitchMagnitude = freelook_last_frame ? 0.f : (1.f - freelook_cam_control) * (angle_difference_signed(cam_pitch_prev, cam_pitch_cur) / Device.fTimeDelta); //U+ / D-
++		fFPCamYawMagnitude = freelook_last_frame ? 0.f : (1.f - freelook_cam_control) * (angle_difference_signed(cam_yaw_prev, cam_yaw_cur) / Device.fTimeDelta); // L+ / R-
++		fFPCamPitchMagnitude = freelook_last_frame ? 0.f : (1.f - freelook_cam_control) * (angle_difference_signed(cam_pitch_prev, cam_pitch_cur) / Device.fTimeDelta); //U+ / D-
+ 
+-	freelook_last_frame = cam_freelook == eflDisabling;
+-	cam_yaw_prev = cam_yaw_cur;
+-	cam_pitch_prev = cam_pitch_cur;
++		freelook_last_frame = cam_freelook == eflDisabling;
++		cam_yaw_prev = cam_yaw_cur;
++		cam_pitch_prev = cam_pitch_cur;
++	}
+ 	//--#SM+ End#--
+ 
+ #ifdef DEBUG
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index ad9b7b7..d070302 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -499,6 +499,18 @@ void CActor::replica_present(const Fvector& position, float model_yaw, u32 mstat
+ 	g_SetAnimation(mstate_real);
+ }
+ 
++void CActor::replica_set_aim(float torso_yaw, float torso_pitch)
++{
++	// S06-T03: a remote actor's torso where its player looks (replica_present
++	// sets it to the body yaw, level, which kept the arms centred until the
++	// body turned).
++	if (!_valid(torso_yaw) || !_valid(torso_pitch))
++		return;
++	r_torso.yaw = torso_yaw;
++	r_torso.pitch = torso_pitch;
++	unaffected_r_torso = r_torso;
++}
++
+ bool CActor::g_LadderOrient()
+ {
+ 	Fvector leader_norm;
+diff --git a/src/xrGame/CampaignActorControl.cpp b/src/xrGame/CampaignActorControl.cpp
+index daba58a..d0ea398 100644
+--- a/src/xrGame/CampaignActorControl.cpp
++++ b/src/xrGame/CampaignActorControl.cpp
+@@ -48,8 +48,10 @@ bool controls_actor(const CActor* actor)
+ 		return false;
+ 	// S05-T03: a co-op client moves no actor itself; its input goes to the
+ 	// server, whose snapshots place every actor (replica_present).
++	// S06-T03: except its own, which it predicts through the same native
++	// control path; the server's snapshots correct it (CoopClientLink).
+ 	if (!server_role())
+-		return !replica_active() && Level().CurrentControlEntity() == actor;
++		return (!replica_active() || replica_predicting()) && Level().CurrentControlEntity() == actor;
+ 	const bool held = is_participant_actor(actor);
+ 	if (held)
+ 		++s_stats.control_server_true;
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 2ff1b41..b0bf5fa 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -28,6 +28,11 @@
+ #include "coop/net/gns_testing.h"
+ #include "coop/proto/snapshot.h"
+ #include "coop/proto/interpolation.h"
++#include "coop/proto/prediction.h"
++#include "ActorEffector.h"
++#include "CharacterPhysicsSupport.h"
++#include "PHMovementControl.h"
++#include "../xrEngine/Effector.h"
+ #include "coop/session/client.h"
+ #include "CustomMonster.h"
+ #include "ai/crow/ai_crow.h"
+@@ -131,6 +136,21 @@ struct Link
+ 	FILE* entities_csv = nullptr;
+ 	u32 last_entities_log_ms = 0;
+ 	u32 local_creatures_logged = 0;
++	// S06-T03: the own actor is predicted and reconciled
++	bool predicting = false;
++	coop::proto::Reconciler reconciler;
++	coop::proto::Smoother smoother;
++	FILE* prediction_csv = nullptr;
++	u64 correction_frames = 0;
++	u64 reconciled_snapshot = 0; // the last snapshot id reconciled
++	Fvector leg_start_pos = {0, 0, 0};
++	// S06-T03: the HUD's camera turn rate while the camera is still (should be
++	// 0; the other actor's angles leaked into it before ActorCameras.cpp's fix)
++	float last_cam_yaw = 0.f;
++	u32 cam_still_frames = 0;
++	float hud_still_turn_max = 0.f;
++	u64 hud_still_frames = 0;
++	bool leg_moved = false; // the own actor has moved 5 cm since the leg began
+ 	xr_deque<coop::proto::Input> inputs;
+ 	u64 input_tick = 0, inputs_sent = 0;
+ 	// S06-T01: inputs are sampled at the server's tick rate (Welcome), one
+@@ -160,6 +180,7 @@ struct Link
+ 		SendNormal,
+ 		SendDuplicate4, // every batch four times
+ 		SendShift7, // the tick counter advances by 7 per sample
++		SendStill, // S06-T03: the server is told to stand still while the local actor walks (a wrong prediction)
+ 	};
+ 	u8 send_mode = SendNormal;
+ 	bool send_ahead_once = false; // one extra input with tick + 100000
+@@ -442,6 +463,9 @@ bool spawn_header(const coop::proto::Spawn& s, NET_Packet& packet, shared_str& s
+ }
+ 
+ void seed_track(u16 id);
++u64 utc_now_ms();
++void prediction_begin();
++void reconcile_own_actor(u64 snapshot_id, u64 last_input);
+ 
+ void apply_spawn(const coop::proto::Spawn& s)
+ {
+@@ -633,6 +657,7 @@ void world_frame()
+ 	if (g_link->world == WorldLive && (g_link->quitting || !g_pGameLevel || !ai().get_alife()))
+ 	{
+ 		g_link->world = WorldMenu;
++		g_link->predicting = false;
+ 		campaign::replica_end();
+ 		g_link->log.line("world-ended quitting=%d level=%d", g_link->quitting ? 1 : 0, g_pGameLevel ? 1 : 0);
+ 		return;
+@@ -651,6 +676,7 @@ void world_frame()
+ 		// (the loading loop pumps the link only now and then): start the
+ 		// server clock again from live snapshots.
+ 		g_link->clock.reset();
++		prediction_begin(); // S06-T03
+ 		g_link->log.line("world-live load_ms=%u applied_buffered=%u applied=%I64u actor=%u paused=%d snapshots=%I64u "
+ 			"seeded=%I64u",
+ 			g_link->live_ms - g_link->load_started_ms, buffered, g_link->applied, u32(g_actor->ID()),
+@@ -661,6 +687,17 @@ void world_frame()
+ 			Device.Pause(FALSE, TRUE, TRUE, "coop-world-live");
+ 		campaign::report_replica("live");
+ 	}
++	if (g_link->world == WorldLive && g_actor)
++	{
++		const float yaw = g_actor->cam_Active()->yaw;
++		g_link->cam_still_frames = yaw == g_link->last_cam_yaw ? g_link->cam_still_frames + 1 : 0;
++		g_link->last_cam_yaw = yaw;
++		if (g_link->cam_still_frames >= 2)
++		{
++			++g_link->hud_still_frames;
++			g_link->hud_still_turn_max = _max(g_link->hud_still_turn_max, _abs(g_actor->fFPCamYawMagnitude));
++		}
++	}
+ 	if (g_link->world == WorldLive)
+ 	{
+ 		present_actors();
+@@ -787,6 +824,8 @@ void on_snapshot(const coop::proto::Snapshot& snapshot)
+ 	// An entity in the snapshot that has no track (its Spawn was applied
+ 	// after its last state went by, and it has not changed since: an actor
+ 	// standing still) gets one from this snapshot.
++	if (verdict == coop::proto::SnapshotVerdict::Completed)
++		reconcile_own_actor(snapshot.snapshot_id, snapshot.last_input);
+ 	if (verdict == coop::proto::SnapshotVerdict::Completed)
+ 		if (const coop::proto::SnapshotFrame* frame = g_link->receiver.newest_frame())
+ 			for (const auto& e : *frame)
+@@ -798,6 +837,88 @@ void on_snapshot(const coop::proto::Snapshot& snapshot)
+ 	send_snapshot_ack();
+ }
+ 
++// ------------------------------------------------------------ S06-T03
++// The view's side of a correction: the actor's collision state takes the
++// correction at once; the camera keeps minus it and glides over (Smoother).
++const ECamEffectorType kCoopViewEffector = ECamEffectorType(cefNext + 40);
++
++class CoopViewEffector : public CEffectorCam
++{
++public:
++	CoopViewEffector() : CEffectorCam(kCoopViewEffector, 1000000.f) {}
++	BOOL ProcessCam(SCamEffectorInfo& info) override
++	{
++		if (!g_link || !g_link->predicting)
++			return TRUE;
++		const coop::proto::Vec3 o = g_link->smoother.step(Device.fTimeDelta * 1000.f);
++		if (o.x != 0.f || o.y != 0.f || o.z != 0.f)
++		{
++			info.p.x += o.x;
++			info.p.y += o.y;
++			info.p.z += o.z;
++			++g_link->correction_frames;
++		}
++		return TRUE;
++	}
++};
++
++void prediction_begin()
++{
++	g_link->reconciler.reset();
++	g_link->smoother.clear();
++	g_link->reconciled_snapshot = 0;
++	g_link->predicting = g_link->config.predict != 0 && g_actor;
++	campaign::replica_set_predicting(g_link->predicting);
++	if (g_link->predicting && !g_actor->Cameras().GetCamEffector(kCoopViewEffector))
++		g_actor->Cameras().AddCamEffector(xr_new<CoopViewEffector>());
++	if (g_link->predicting && !g_link->prediction_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-prediction.csv");
++		g_link->prediction_csv = fopen(path, "w");
++		if (g_link->prediction_csv)
++			fprintf(g_link->prediction_csv, "utc_ms,snapshot,last_input,kind,error,ox,oy,oz,x,y,z,sx,sy,sz\n");
++	}
++	g_link->log.line("prediction %s", g_link->predicting ? "on" : "off");
++}
++
++// After a complete snapshot: the server's position for the own actor (in the
++// snapshot's frame, changed or not) against where the actor was when it
++// sampled the last input the server consumed.
++void reconcile_own_actor(u64 snapshot_id, u64 last_input)
++{
++	if (!g_link->predicting || !g_actor || !last_input || snapshot_id <= g_link->reconciled_snapshot)
++		return;
++	g_link->reconciled_snapshot = snapshot_id;
++	const coop::proto::SnapshotFrame* frame = g_link->receiver.frame(snapshot_id);
++	const auto ref = g_link->refs.find(u16(g_actor->ID()));
++	if (!frame || ref == g_link->refs.end())
++		return;
++	const auto it = frame->find(ref->second.id);
++	if (it == frame->end() || !(it->second.entity == ref->second))
++		return;
++	const coop::proto::Vec3 server{it->second.transform.x, it->second.transform.y, it->second.transform.z};
++	const coop::proto::Correction c = g_link->reconciler.reconcile(last_input, server);
++	if (c.kind == coop::proto::CorrectionKind::Smooth || c.kind == coop::proto::CorrectionKind::Snap)
++	{
++		Fvector p = g_actor->Position();
++		p.x += c.offset.x;
++		p.y += c.offset.y;
++		p.z += c.offset.z;
++		if (g_actor->character_physics_support()->movement()->CharacterExist())
++			g_actor->character_physics_support()->movement()->SetPosition(p);
++		g_actor->Position().set(p);
++		if (c.kind == coop::proto::CorrectionKind::Smooth)
++			g_link->smoother.add(c.offset);
++		else
++			g_link->smoother.clear();
++	}
++	if (g_link->prediction_csv && c.kind != coop::proto::CorrectionKind::Unknown)
++		fprintf(g_link->prediction_csv, "%I64u,%I64u,%I64u,%u,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
++			utc_now_ms(), snapshot_id, last_input, u32(c.kind), c.error, c.offset.x, c.offset.y, c.offset.z,
++			VPUSH(g_actor->Position()), server.x, server.y, server.z);
++}
++
+ // A physics object where the server has it: its shell (when it has one) and
+ // its transform, the shell put to sleep so this client's physics does not move
+ // it on its own between states.
+@@ -853,7 +974,14 @@ void present_actors()
+ 		if (CActor* actor = smart_cast<CActor*>(object))
+ 		{
+ 			entry.second.kind = 0;
++			if (actor == g_actor && g_link->predicting)
++			{
++				entry.second.presented = true; // S06-T03: it moves itself; snapshots correct it
++				continue;
++			}
+ 			actor->replica_present(position, s.transform.yaw, s.state_bits, velocity, actor == g_actor);
++			if (actor != g_actor && (s.components & coop::proto::kAim))
++				actor->replica_set_aim(s.aim_yaw, s.aim_pitch);
+ 		}
+ 		else if (object->H_Parent())
+ 			continue; // carried here: its owner places it
+@@ -1114,6 +1242,26 @@ void sample_input()
+ 		for (int n = 0; n < 4 && g_link->replay_at < g_link->recorded.size(); ++n)
+ 			if (g_link->client->send(g_link->recorded[g_link->replay_at++]))
+ 				++g_link->replays;
++	// S06-T03: responsiveness: how long after a leg began the player's own
++	// actor (as this client shows it) had moved 5 cm.
++	if (g_actor && g_link->leg_name[0] && !g_link->leg_moved && g_link->drive_bits &&
++		g_actor->Position().distance_to(g_link->leg_start_pos) > 0.05f)
++	{
++		g_link->leg_moved = true;
++		g_link->log.line("script-leg-first-move name=%s ms=%u predicting=%d", g_link->leg_name, now - g_link->leg_start_ms,
++			g_link->predicting ? 1 : 0);
++	}
++	// S06-T03: predicting, the script's driving goes into the keys every
++	// frame, as held keys would, so the local actor moves with what is sent.
++	if (g_link->predicting && now < g_link->drive_until && g_actor)
++	{
++		u32 bits = g_link->drive_bits;
++		if (g_link->drive_force_stance && g_link->drive_stance == coop::proto::Stance::Crouch)
++			bits |= mcCrouch;
++		else if (g_link->drive_force_stance && g_link->drive_stance == coop::proto::Stance::Sprint)
++			bits |= mcSprint;
++		g_actor->replica_set_wishful(g_actor->replica_wishful() | bits);
++	}
+ 	if (now < g_link->next_input_ms)
+ 		return;
+ 	// A frame longer than three ticks does not produce a burst: the server
+@@ -1133,6 +1281,11 @@ void sample_input()
+ 	if (g_link->send_mode == Link::SendShift7)
+ 		g_link->input_tick += 6;
+ 	in.tick = ++g_link->input_tick;
++	// S06-T03: the actor's position as this input is sampled: the server's
++	// snapshot naming this tick as its last consumed input has the actor
++	// after the inputs before it (coop/proto/prediction.h).
++	if (g_link->predicting)
++		g_link->reconciler.record(in.tick, coop::proto::Vec3{actor->Position().x, actor->Position().y, actor->Position().z});
+ 	in.move_y = (wishful & mcFwd) ? 1.f : (wishful & mcBack) ? -1.f : 0.f;
+ 	in.move_x = (wishful & mcRStrafe) ? 1.f : (wishful & mcLStrafe) ? -1.f : 0.f;
+ 	in.yaw = angle_normalize_signed(actor->cam_Active()->yaw);
+@@ -1142,6 +1295,13 @@ void sample_input()
+ 	if (driving && g_link->drive_force_stance)
+ 		in.stance = g_link->drive_stance;
+ 	in.buttons = (wishful & mcAccel) ? 1u : 0u;
++	if (driving && g_link->send_mode == Link::SendStill)
++	{
++		// S06-T03 leg P: the local actor walks, the server is told to stand.
++		in.move_x = in.move_y = 0.f;
++		in.stance = coop::proto::Stance::Stand;
++		in.buttons = 0;
++	}
+ 	u32 cleared = mcFwd | mcBack | mcLStrafe | mcRStrafe;
+ 	if (!psActorFlags.test(AF_CROUCH_TOGGLE))
+ 		cleared |= mcCrouch;
+@@ -1149,7 +1309,10 @@ void sample_input()
+ 		cleared |= mcAccel;
+ 	if (!psActorFlags.test(AF_SPRINT_TOGGLE))
+ 		cleared |= mcSprint;
+-	actor->replica_set_wishful(actor->replica_wishful() & ~cleared);
++	// Predicting, the native control path reads and clears the keys itself
++	// (CActor::shedule_Update, after this frame's link update).
++	if (!g_link->predicting)
++		actor->replica_set_wishful(actor->replica_wishful() & ~cleared);
+ 	g_link->inputs.push_front(in);
+ 	while (g_link->inputs.size() > coop::proto::kMaxInputsPerBatch)
+ 		g_link->inputs.pop_back();
+@@ -1190,6 +1353,7 @@ void sample_input()
+ //   E  forward normally (room for I)
+ //   I  sprint into the other player's actor (the obstacle), then back off
+ //   J  an action intent asking to be moved 50 m (a teleport)
++//   P  S06-T03: walk locally while telling the server to stand (a wrong prediction)
+ //   K  a Snapshot claiming a position (a server-only message)
+ // Player 2 (slot 1) starts its program 60 s after player 1's so one actor
+ // moves at a time, except where I is the point. Player 1's K leg waits until
+@@ -1225,6 +1389,8 @@ void leg_begin(LPCSTR name, u32 bits, coop::proto::Stance stance, bool force_sta
+ 	g_link->leg_start_ms = g_link->wall.GetElapsed_ms();
+ 	g_link->leg_start_utc = utc_now_ms();
+ 	g_link->drive_until = g_link->leg_start_ms + ms;
++	g_link->leg_start_pos = g_actor->Position();
++	g_link->leg_moved = false;
+ 	g_link->log.line("script-leg-start name=%s bits=%x stance=%u force=%d ms=%u mode=%u pos=%.2f,%.2f,%.2f", name, bits,
+ 		u32(stance), force_stance ? 1 : 0, ms, u32(mode), VPUSH(g_actor->Position()));
+ }
+@@ -1325,17 +1491,19 @@ void run_script2(u32 t)
+ 		{40000, "I-sprint-toward", mcFwd | mcSprint, Stance::Sprint, true, 3000, Link::SendNormal},
+ 		{44500, "I-backoff", mcBack, Stance::Stand, false, 1500, Link::SendNormal},
+ 		{47500, "J-teleport", 0, Stance::Stand, false, 1500, Link::SendNormal},
+-		{50000, "K-forged-snapshot", 0, Stance::Stand, false, 1500, Link::SendNormal},
+-		{53000, "program-end", 0, Stance::Stand, false, 0, 0},
++		{49200, "face-away", 0, Stance::Stand, false, 0, 0},
++		{49500, "P-wrong-prediction", mcFwd, Stance::Stand, false, 1500, Link::SendStill},
++		{51500, "K-forged-snapshot", 0, Stance::Stand, false, 1500, Link::SendNormal},
++		{54500, "program-end", 0, Stance::Stand, false, 0, 0},
+ 	};
+ 	const u32 count = u32(sizeof(steps) / sizeof(steps[0]));
+ 	if (g_link->script_phase >= count)
+ 		return;
+ 	// The forged snapshot ends the connection: player 1 (slot 0) sends it only
+-	// after player 2's program is over (it starts 60 s later and takes 53 s),
++	// after player 2's program is over (it starts 60 s later and takes 54.5 s),
+ 	// so neither program runs beside a detached player.
+ 	u32 at = steps[g_link->script_phase].at;
+-	if (g_link->local_slot == 0 && at >= 50000)
++	if (g_link->local_slot == 0 && at >= 51500)
+ 		at += 70000;
+ 	if (p < at)
+ 		return;
+@@ -1578,6 +1746,11 @@ void on_event(const coop::session::ClientEvent& e)
+ 		g_link->receiver.reset();
+ 		g_link->tracks.clear();
+ 		g_link->clock.reset();
++		// S06-T03: input ticks restart with the connection; nothing recorded
++		// before it may correct the actor.
++		g_link->reconciler.reset();
++		g_link->smoother.clear();
++		g_link->reconciled_snapshot = 0;
+ 		// S06-T01: input ticks count per connection, one per server tick.
+ 		g_link->input_tick = 0;
+ 		g_link->inputs.clear();
+@@ -1651,7 +1824,9 @@ void log_status(LPCSTR tag)
+ 		"snap_parts=%I64u snap_completed=%I64u snap_full=%I64u snap_delta=%I64u snap_duplicate=%I64u "
+ 		"snap_missing_baseline=%I64u snap_inconsistent=%I64u snap_incomplete=%I64u snap_older=%I64u "
+ 		"snap_states=%I64u snap_removed=%I64u acks_sent=%I64u tracks=%u presented=%I64u holding=%I64u extrapolated=%I64u "
+-		"seeded=%I64u clock_offset_ms=%.1f local_creatures=%u",
++		"seeded=%I64u clock_offset_ms=%.1f local_creatures=%u predicting=%d pred_recorded=%I64u pred_reconciled=%I64u "
++		"pred_within=%I64u pred_smoothed=%I64u pred_snapped=%I64u pred_unknown=%I64u pred_max_error=%.3f "
++		"view_max_offset=%.3f correction_frames=%I64u hud_still_turn_max=%.3f hud_still_frames=%I64u",
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+@@ -1661,7 +1836,12 @@ void log_status(LPCSTR tag)
+ 		g_link->receiver.counters().missing_baseline, g_link->receiver.counters().inconsistent,
+ 		g_link->receiver.counters().incomplete_dropped, g_link->receiver.counters().older, g_link->snapshot_states,
+ 		g_link->snapshot_removed, g_link->acks_sent, u32(g_link->tracks.size()), g_link->presented, g_link->holding,
+-		g_link->extrapolated, g_link->seeded, g_link->clock.offset(), local_creatures());
++		g_link->extrapolated, g_link->seeded, g_link->clock.offset(), local_creatures(), g_link->predicting ? 1 : 0,
++		g_link->reconciler.counters().recorded, g_link->reconciler.counters().reconciled,
++		g_link->reconciler.counters().within, g_link->reconciler.counters().smoothed,
++		g_link->reconciler.counters().snapped, g_link->reconciler.counters().unknown,
++		g_link->reconciler.counters().max_error, g_link->smoother.max_offset(), g_link->correction_frames,
++		g_link->hud_still_turn_max, g_link->hud_still_frames);
+ }
+ } // namespace
+ 
+@@ -1764,6 +1944,8 @@ void coop_client_app_end()
+ 		fclose(g_link->actors_csv);
+ 	if (g_link->entities_csv)
+ 		fclose(g_link->entities_csv);
++	if (g_link->prediction_csv)
++		fclose(g_link->prediction_csv);
+ 	if (g_link->client)
+ 		g_link->client->close(coop::net::close_code::kNormal, "client exit");
+ 	if (g_link->transport)
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 3d00d5c..01156ae 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -140,6 +140,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 			ini.line_exist("coop", "exit_after_seconds") ? ini.r_u32("coop", "exit_after_seconds") : 0;
+ 		out.inject = ini.line_exist("coop", "inject") ? ini.r_u32("coop", "inject") : 0;
+ 		out.script = ini.line_exist("coop", "script") ? ini.r_u32("coop", "script") : 0;
++		out.predict = ini.line_exist("coop", "predict") ? ini.r_u32("coop", "predict") : 1;
+ 		if (ok && !absolute(out.key_path))
+ 		{
+ 			Msg("! S05-T01 coop config: key must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 8eb12ba..90a9f3c 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -16,7 +16,8 @@
+ //   client only:  server (ip:port), key (absolute DPAPI key file), name,
+ //                 exit_after_seconds (0: never), inject (0/1: S05-T01 refusal test),
+ //                 script (0/1: S05-T03 look, walk and screenshot driver;
+-//                 2: S06-T01 movement validation program)
++//                 2: S06-T01 movement validation program),
++//                 predict (S06-T03: 1, the default, predicts the own actor; 0 waits for the server)
+ //   both, S06-T02: net_loss (percent of this process's packets dropped),
+ //                 net_lag (ms added to them): declared test network
+ //                 conditions through the library's simulated impairment
+@@ -53,6 +54,7 @@ struct CoopConfig
+ 	u32 exit_after_seconds;
+ 	u32 inject;
+ 	u32 script; // 1: S05-T03 look/walk/screenshot driver; 2: S06-T01 movement validation program
++	u32 predict; // S06-T03: 1 predicts the own actor (default), 0 waits for the server
+ };
+ 
+ // Finds -coop-config in the command line. False when absent.
+diff --git a/src/xrGame/CoopReplica.cpp b/src/xrGame/CoopReplica.cpp
+index c924c11..a8ae918 100644
+--- a/src/xrGame/CoopReplica.cpp
++++ b/src/xrGame/CoopReplica.cpp
+@@ -20,6 +20,7 @@ namespace campaign
+ namespace
+ {
+ bool g_active = false;
++bool g_predicting = false; // S06-T03
+ u16 g_local_actor = u16(-1);
+ int g_permits = 0;
+ // Created by replica_begin, deleted by replica_end: a static container would
+@@ -59,12 +60,16 @@ void replica_end()
+ 		return;
+ 	report_replica("end");
+ 	g_active = false;
++	g_predicting = false;
+ 	g_local_actor = u16(-1);
+ 	xr_delete(g_online);
+ }
+ 
+ u16 replica_local_actor() { return g_local_actor; }
+ 
++bool replica_predicting() { return g_active && g_predicting; }
++void replica_set_predicting(bool on) { g_predicting = on; }
++
+ bool replica_permitted() { return g_permits > 0; }
+ ReplicaPermit::ReplicaPermit() { ++g_permits; }
+ ReplicaPermit::~ReplicaPermit() { --g_permits; }
+diff --git a/src/xrGame/CoopReplica.h b/src/xrGame/CoopReplica.h
+index 475a7f6..8cc2b0b 100644
+--- a/src/xrGame/CoopReplica.h
++++ b/src/xrGame/CoopReplica.h
+@@ -38,6 +38,10 @@ bool replica_active();
+ void replica_begin(u16 local_actor, const xr_vector<u16>& online);
+ void replica_end();
+ u16 replica_local_actor();
++// S06-T03: the client predicts its own actor (it runs the native control
++// path for it, campaign::controls_actor); off without a co-op world.
++bool replica_predicting();
++void replica_set_predicting(bool on);
+ 
+ // Replication applies a change: the hooks let it through.
+ bool replica_permitted();
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 44298c8..59266fa 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -926,6 +926,10 @@ bool actor_state(CActor* actor, coop::proto::EntityState& out)
+ 	out.vz = v.z;
+ 	out.health = health_of(actor->GetfHealth());
+ 	out.state_bits = u16(actor->MovingState() & 0xffff);
++	// S06-T03 (protocol 1.3): where it looks, for its arms and weapon
++	out.components |= coop::proto::kAim;
++	out.aim_yaw = angle_normalize_signed(actor->replica_torso().yaw);
++	out.aim_pitch = clampr(actor->replica_torso().pitch, -coop::proto::kMaxAngle, coop::proto::kMaxAngle);
+ 	return true;
+ }
+ 
+@@ -1237,7 +1241,8 @@ void send_snapshots()
+ 		link.snapshot_set_peak = _max(link.snapshot_set_peak, u32(wanted.size()));
+ 		link.snapshot_entities_wanted += wanted.size();
+ 		std::vector<coop::proto::Snapshot> parts;
+-		link.snapshots.build(g_host->tick, link.inputs.last_consumed_tick(), wanted, parts, participants.size());
++		// S06-T03: the newest input tick dealt with (consumed, or refused as invalid)
++		link.snapshots.build(g_host->tick, link.inputs.processed_tick(), wanted, parts, participants.size());
+ 		bool congested = false;
+ 		for (const coop::proto::Snapshot& part : parts)
+ 		{

@@ -85,6 +85,13 @@ public:
     InputSource consume(Input& out);
 
     std::uint64_t last_consumed_tick() const { return last_consumed_; }
+    // S06-T03: the newest input tick the server has dealt with: the last
+    // consumed one, or, when nothing is queued, a newer one it refused as
+    // Invalid (an input it cannot apply is applied as nothing). Snapshots
+    // report it so a client also reconciles the inputs the server refused
+    // (a predicted walk with a stance the server has no mode for). Ahead and
+    // stale inputs never move it.
+    std::uint64_t processed_tick() const;
     std::uint64_t newest_tick() const { return newest_; }
     std::size_t depth() const { return queue_.size(); }
     bool has_last() const { return has_last_; }
@@ -97,6 +104,7 @@ private:
     std::deque<Input> queue_; // tick order
     std::uint64_t last_consumed_ = 0;
     std::uint64_t newest_ = 0;
+    std::uint64_t refused_newest_ = 0; // newest Invalid tick within (last consumed, newest + max_gap]
     Input last_;
     bool has_last_ = false;
     std::uint32_t held_run_ = 0;

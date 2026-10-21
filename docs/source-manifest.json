@@ -137,6 +137,10 @@
     {
       "path": "patches/engine/0032-coop-snapshots-and-baselines.patch",
       "sha256": "8f48c44133e4e985150f7ecf22e460ef8690bbb75c3b93401f92ef603ee87ffc"
+    },
+    {
+      "path": "patches/engine/0033-coop-own-actor-prediction.patch",
+      "sha256": "2e07622c5bc076a86addc8df15cf87828e0ad0976704e8c892f088026f741261"
     }
   ],
   "submodules": [

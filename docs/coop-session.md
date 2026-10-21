@@ -287,3 +287,44 @@ python3 tools/prepare-coop-session.py <run> --task S06-T02 --script c1,c2 --drop
 powershell.exe ... Run-CoopSession.ps1 -Run <run> -Task S06-T02 -ServerAloneSeconds 10 -ClientStarts '0,10' -ClientSeconds '150,140' -AfterSeconds 10
 python3 tools/compare-coop-snapshots.py <logs> [--lag-ms 140] --out <logs>/compare-snapshots.json
 ```
+
+## Own-actor prediction and reconciliation (S06-T03)
+
+Validation: [S06-T03](validation/S06-T03.md). Protocol `prediction.h`
+(`Reconciler`, `Smoother`) and `InputQueue::processed_tick`; engine:
+`CoopClientLink.cpp`, `CampaignActorControl.cpp` (`controls_actor`),
+`CoopReplica` (`replica_predicting`).
+
+- **Prediction is native.** A client (profile `predict = 1`, the default)
+  lets its own actor through `campaign::controls_actor`, so
+  `CActor::shedule_Update` runs the same control path the server runs for it
+  (`g_cl_CheckControls`, `g_cl_Orientate`, `g_Physics`) against the same
+  level and the snapshot-placed NPCs and other actor. Every other actor and
+  NPC is still only presented. The native path reads and clears the keys;
+  the input sampler (50 Hz, one input per server tick) sends what they were.
+- **Recording.** At each input tick the client records where its actor was
+  (`Reconciler::record`).
+- **Reconciliation.** Each complete snapshot carries the newest input tick
+  the server dealt with (`processed_tick`: the last consumed one, or a newer
+  one it refused as invalid once nothing older waits) and, in its frame, the
+  actor's position after the inputs before it. The error against the record
+  for that tick moves the actor (and every newer record) by the error: the
+  displacement since then, the unacknowledged inputs' movement, is kept.
+  Errors under 3 cm are left alone; over 1.5 m they jump.
+- **Smoothing is visual only.** The physics controller (collision state)
+  takes the correction at once; a camera effector (`CoopViewEffector`) keeps
+  minus the correction and halves it every 60 ms.
+- **Aim (protocol 1.3).** Each actor's snapshot also carries its torso yaw
+  and pitch (the camera's world angles, `CActor::r_torso`); a client sets
+  them on the other player's actor (`CActor::replica_set_aim`). Before, the
+  torso was set to the body yaw, so the arms and weapon stayed centred until
+  the body turned past its threshold and then swung over (user report).
+- **Resets.** A new connection (Welcome) and every world start forget all
+  records and the view offset; input ticks restart with the connection, so
+  no input from before can correct the actor.
+- **Test driver:** leg P of the movement program walks locally while telling
+  the server to stand (a deliberately wrong prediction); leg G (a stance the
+  server refuses) is another. `script-leg-first-move` logs how long after a
+  leg began the own actor had moved 5 cm. Comparison:
+  `tools/compare-coop-prediction.py`; `prepare-coop-session.py --no-predict`
+  runs the baseline.

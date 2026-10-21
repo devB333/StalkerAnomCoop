@@ -42,6 +42,8 @@ EntityState interpolate(const EntityState& a, const EntityState& b, float k)
     r.vy = Lerp(a.vy, b.vy, k);
     r.vz = Lerp(a.vz, b.vz, k);
     r.health = std::uint16_t(std::lround(Lerp(float(a.health), float(b.health), k)));
+    r.aim_yaw = AngleLerp(a.aim_yaw, b.aim_yaw, k);
+    r.aim_pitch = AngleLerp(a.aim_pitch, b.aim_pitch, k);
     // Quaternions: the shorter arc (q and -q are one rotation), normalised.
     const float dot = a.qx * b.qx + a.qy * b.qy + a.qz * b.qz + a.qw * b.qw;
     const float s = dot < 0.f ? -1.f : 1.f;

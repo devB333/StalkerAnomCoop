@@ -34,6 +34,7 @@ add_executable(protocol-tests
     protocol/test_guard.cpp
     protocol/test_input_queue.cpp
     protocol/test_snapshot.cpp
+    protocol/test_prediction.cpp
     protocol/test_fuzz.cpp
     protocol/test_wire.cpp
     session/test_crypto.cpp

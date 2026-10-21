@@ -32,6 +32,8 @@ SnapshotEntity Entry(const EntityState& s, std::uint16_t components)
     e.qy = s.qy;
     e.qz = s.qz;
     e.qw = s.qw;
+    e.aim_yaw = s.aim_yaw;
+    e.aim_pitch = s.aim_pitch;
     return e;
 }
 
@@ -70,6 +72,11 @@ void Merge(SnapshotFrame& frame, const SnapshotEntity& e)
         s.qz = e.qz;
         s.qw = e.qw;
     }
+    if (e.components & kAim)
+    {
+        s.aim_yaw = e.aim_yaw;
+        s.aim_pitch = e.aim_pitch;
+    }
 }
 } // namespace
 
@@ -96,6 +103,9 @@ std::uint16_t changed_components(const EntityState* base, const EntityState& now
         (Differs(now.qx, base->qx, t.rotation) || Differs(now.qy, base->qy, t.rotation) ||
             Differs(now.qz, base->qz, t.rotation) || Differs(now.qw, base->qw, t.rotation)))
         c |= kRotation;
+    if ((have & kAim) && (base->components & kAim) &&
+        (AngleDistance(now.aim_yaw, base->aim_yaw) > t.yaw || AngleDistance(now.aim_pitch, base->aim_pitch) > t.yaw))
+        c |= kAim;
     return c;
 }
 
@@ -114,6 +124,8 @@ std::size_t entry_bytes(std::uint16_t c)
         n += 2;
     if (c & kRotation)
         n += 16;
+    if (c & kAim)
+        n += 8;
     return n;
 }
 

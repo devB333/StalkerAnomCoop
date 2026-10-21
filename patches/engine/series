@@ -30,3 +30,4 @@
 0030-coop-rejoin-input.patch
 0031-validated-movement-input.patch
 0032-coop-snapshots-and-baselines.patch
+0033-coop-own-actor-prediction.patch

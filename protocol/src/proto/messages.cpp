@@ -548,6 +548,11 @@ void Write(Writer& w, const Snapshot& m)
             w.f32(e.qz);
             w.f32(e.qw);
         }
+        if (e.components & kAim)
+        {
+            w.f32(e.aim_yaw);
+            w.f32(e.aim_pitch);
+        }
     }
 }
 void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
@@ -617,6 +622,12 @@ void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
             const float n = e.qx * e.qx + e.qy * e.qy + e.qz * e.qz + e.qw * e.qw;
             if (r.ok() && (n < 0.98f || n > 1.02f))
                 r.fail(DecodeError::BadValue); // not a rotation
+        }
+        if (e.components & kAim)
+        {
+            r.field("snapshot.aim");
+            e.aim_yaw = r.f32(-kMaxAngle, kMaxAngle);
+            e.aim_pitch = r.f32(-kMaxAngle, kMaxAngle);
         }
         m.entities.push_back(e);
     }

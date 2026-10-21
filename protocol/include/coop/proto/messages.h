@@ -28,7 +28,9 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // an acknowledged baseline (coop/proto/snapshot.h); rotation and removal
 // components; SnapshotAck reports a missing baseline. Both peers are built
 // from one tree (build id), so the layout change needs no negotiation.
-constexpr std::uint16_t kProtocolMinor = 2;
+// 1.3 (S06-T03): an aim component (an actor's torso yaw and pitch: where its
+// camera looks, which its arms and weapon follow; the body yaw lags it).
+constexpr std::uint16_t kProtocolMinor = 3;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -264,7 +266,8 @@ enum SnapshotComponent : std::uint16_t
     kStateBits = 1 << 3, // u16, opaque state flags
     kRotation = 1 << 4,  // qx, qy, qz, qw: a unit quaternion (v1.2; physics objects)
     kRemoved = 1 << 5,   // v1.2: the entity leaves the client's snapshot set; no fields, never with another bit
-    kStateComponents = kTransform | kVelocity | kHealth | kStateBits | kRotation,
+    kAim = 1 << 6,       // v1.3: aim yaw, aim pitch (an actor's torso; radians)
+    kStateComponents = kTransform | kVelocity | kHealth | kStateBits | kRotation | kAim,
     kKnownComponents = kStateComponents | kRemoved,
 };
 
@@ -279,6 +282,7 @@ struct SnapshotEntity
     std::uint16_t health = 0;
     std::uint16_t state_bits = 0;
     float qx = 0, qy = 0, qz = 0, qw = 1;
+    float aim_yaw = 0, aim_pitch = 0;
 };
 
 // One part of a snapshot. A snapshot is the server's state of the client's

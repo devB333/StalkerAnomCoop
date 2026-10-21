@@ -219,4 +219,31 @@ TEST("input-queue/reset-restarts-the-sequence")
     CHECK(q.consume(out) == InputSource::Queued && out.tick == 1);
     CHECK(q.counters().consumed == 3); // counters span the link
 }
+TEST("input-queue/processed-tick-covers-refused-inputs")
+{
+    // S06-T03: inputs the server refuses as invalid are dealt with too, once
+    // nothing older is still queued; ahead and stale ones are not.
+    InputQueue q;
+    Input out;
+    CHECK(q.offer(In(1)) == InputVerdict::Queued);
+    CHECK(q.processed_tick() == 0);
+    CHECK(q.consume(out) == InputSource::Queued);
+    CHECK(q.processed_tick() == 1);
+    Input bad = In(2);
+    bad.stance = Stance::Prone;
+    CHECK(q.offer(bad) == InputVerdict::Invalid);
+    CHECK(q.processed_tick() == 2); // nothing queued: tick 2 is dealt with
+    CHECK(q.offer(In(4)) == InputVerdict::Queued);
+    bad.tick = 5;
+    CHECK(q.offer(bad) == InputVerdict::Invalid);
+    CHECK(q.processed_tick() == 1); // tick 4 is still waiting
+    CHECK(q.consume(out) == InputSource::Queued && out.tick == 4);
+    CHECK(q.processed_tick() == 5);
+    bad.tick = 5 + 100000; // a jump: not dealt with
+    CHECK(q.offer(bad) == InputVerdict::Invalid);
+    CHECK(q.processed_tick() == 5);
+    q.reset();
+    CHECK(q.processed_tick() == 0);
+}
+
 } // namespace coop::test

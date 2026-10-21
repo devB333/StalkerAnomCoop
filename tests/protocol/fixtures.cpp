@@ -142,6 +142,8 @@ std::vector<Fixture> AllFixtures()
         e.qy = 0.5f;
         e.qz = -0.5f;
         e.qw = 0.5f;
+        e.aim_yaw = -3.f;
+        e.aim_pitch = 1.2f;
         sn.entities.push_back(e);
     }
     SnapshotEntity removed;

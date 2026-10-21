@@ -717,4 +717,33 @@ TEST("interpolation/moving-entities-extrapolate-capped")
     CHECK(p.state.transform.x == 0.f);
 }
 
+TEST("snapshot/aim-delta-and-interpolation")
+{
+    // v1.3: an actor's aim (torso yaw and pitch) travels apart from its body
+    // yaw: turning the camera sends only the aim.
+    SnapshotSender s;
+    SnapshotReceiver r;
+    EntityState a = Creature(1, 0.f);
+    a.components = std::uint16_t(a.components | kAim);
+    a.aim_yaw = 0.2f;
+    std::vector<Snapshot> parts;
+    s.build(1, 0, {a}, parts);
+    OfferAll(r, OverWire(parts));
+    Ack(r, s);
+    a.aim_yaw = 0.6f; // the camera turned; the body did not
+    a.aim_pitch = -0.3f;
+    s.build(2, 0, {a}, parts);
+    REQUIRE(parts.size() == 1 && parts[0].entities.size() == 1);
+    CHECK(parts[0].entities[0].components == kAim);
+    SnapshotUpdate u;
+    OfferAll(r, OverWire(parts), &u);
+    REQUIRE(u.states.size() == 1);
+    CHECK(u.states[0].aim_yaw == 0.6f && u.states[0].transform.yaw == 0.25f);
+    EntityState b = a;
+    a.aim_yaw = 3.0f;
+    b.aim_yaw = -3.0f;
+    const EntityState m = interpolate(a, b, 0.5f);
+    CHECK(std::fabs(std::fabs(m.aim_yaw) - 3.14159f) < 0.01f); // the short way round
+}
+
 } // namespace coop::test

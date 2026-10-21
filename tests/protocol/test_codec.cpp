@@ -101,6 +101,7 @@ TEST("codec/round-trip")
     CHECK(sn.entities[0].components == kTransform && sn.entities[0].health == 0);
     CHECK(sn.snapshot_id == 4 && sn.baseline_id == 3 && sn.entities[1].qx == -0.5f && sn.entities[1].qw == 0.5f);
     CHECK(sn.entities[22].components == kRemoved && sn.entities[22].entity == (EntityRef{999, 7}));
+    CHECK(sn.entities[1].aim_yaw == -3.f && sn.entities[1].aim_pitch == 1.2f); // v1.3
 }
 
 TEST("codec/truncation")
@@ -363,7 +364,7 @@ TEST("codec/values")
           DecodeError::BadValue); // second input's tick 500 >= first's
     // Snapshot: unknown component bit, health over 10000, the same entity twice.
     Snapshot sn = std::get<Snapshot>(Find("snapshot").message);
-    sn.entities[0].components = 0x40;
+    sn.entities[0].components = 0x80;
     std::vector<std::uint8_t> out;
     CHECK(!encode(sn, 5, 10, out));
     sn = std::get<Snapshot>(Find("snapshot").message);

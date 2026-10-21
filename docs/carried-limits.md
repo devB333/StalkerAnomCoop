@@ -2,7 +2,7 @@
 
 The open limits each accepted gate carried forward, in one place, so they can
 be tracked to closure. Created 2026-10-20 at the user's request when G05 was
-accepted; it collects the limits recorded in [G01](validation/G01.md),
+accepted (L28–L31 added at G06, 2026-10-21); it collects the limits recorded in [G01](validation/G01.md),
 [G02](validation/G02.md), [G03](validation/G03.md), [G04](validation/G04.md)
 and [G05](validation/G05.md). The gate records stay the source of what was
 accepted; this file is the working list.
@@ -24,7 +24,7 @@ accepted; this file is the working list.
 
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|
-| L01 | Movement is the only player action that reaches the server: no fire, use, jump, lean, inventory, trade or dialogue from a client | G05 | S06-T04 (combat), S08-T01–T03 (items), S10-T04 (dialogue) | Open. 2026-10-21: fire, reload and activate-slot now reach the server ([S06-T04](validation/S06-T04.md), combat-12/13); use, jump, lean, inventory moves, trade and dialogue remain |
+| L01 | Movement is the only player action that reaches the server: no fire, use, jump, lean, inventory, trade or dialogue from a client | G05 | S06-T04 (combat), S06-T07 (jump, lean), S08-T01–T03 (items), S10-T04 (dialogue, trade) | Open. 2026-10-21: fire, reload and activate-slot now reach the server ([S06-T04](validation/S06-T04.md), combat-12/13); use, jump, lean, inventory moves, trade and dialogue remain |
 | L02 | No client prediction or reconciliation: a player's own movement waits for the server (input → tick → snapshot → 100 ms render delay); the user found walking choppy | G05 (S05-T03) | S06-T03 | Closed 2026-10-21: [S06-T03](validation/S06-T03.md), runs pred-8, pred-9 and session-8. The own actor is predicted natively and reconciled; it responds in 83–100 ms (250 ms without); wrong predictions converge |
 | L03 | Server movement is native physics but inputs are not validated (rates, speeds, stance changes) | G05 | S06-T01 | Closed 2026-10-20: [S06-T01](validation/S06-T01.md), runs move-8 and session-3. Inputs are sequenced by tick and validated, one is consumed per tick, and forged streams, teleports and positions are refused. The stamina-exhaustion and pitch-clamp limits are listed in the report |
 | L04 | NPCs and items do not move on clients after spawning; only the two participant actors have snapshots; snapshot rates/baselines provisional | G04, G05 | S06-T02 | Closed 2026-10-21: [S06-T02](validation/S06-T02.md), runs snap-11 and snap-12 (5 % loss, 40 ms lag). Creatures and moving physics objects are sent as deltas against acknowledged baselines and presented within p95 0.11–0.14 m; objects rest where the server has them; 11–14 KB/s per client. NPC animation state, ownership changes and deaths are not replicated (report limits) |
@@ -32,7 +32,12 @@ accepted; this file is the working list.
 | L06 | Player 2's client shows a local "Mission complete: Training Day: Boar Hunting" news item and logs `CRandomTask:task_fail/task_complete task_fanat_training_1 task is nil` after it goes live; source not found (not in `scripts.db0` or the engine). Presentation only | G05 (S05-T03, S05-T04) | With L05 | Open |
 | L07 | Player 2's actor has the engine's default name ("Zhora Squire"), faction and look, not the player's own | G05 | No task yet: player profile/appearance before S08 | Open |
 | L08 | Friendly fire and god mode are not per participant | G03 | S06-T04 | Open. 2026-10-21: hits between participant actors follow one co-op rule both ways (profile `friendly_fire`, [S06-T04](validation/S06-T04.md)); god mode (`AF_GODMODE_RT`) is still process-wide, and other hits on a second participant still pass the installed callback's `db.actor` checks (L11) |
-| L09 | Weather effects (storms, emission visuals) not replicated, only the weather section and game time | G05 (S05-T03) | S10-T05 | Open |
+| L09 | Weather effects (storms, emission visuals) not replicated, only the weather section and game time | G05 (S05-T03) | S06-T08 (visuals, user decision at G06); S10-T05 (emission gameplay) | Open |
+
+| L28 | Deaths are in memory only; a dead player stays dead (no respawn); the killer is not replicated to clients (a body names itself) | G06 | S07-T07 (respawn, durable death); killer presentation: with L05 | Open |
+| L29 | Hits are resolved at the server's present time; no lag compensation | G06 | No task yet (decide from play tests; S11-T01 latency work) | Open |
+| L30 | Fixture NPCs decide the tests' course: Fanat (companion) follows actor 0, fights, and his melee (`xrs_facer`) drops a punched player's weapon; the boar's AI chooses whether to attack (8 of 10 runs) | G06 | S06-T06 (Cordon, no Fanat) | Open |
+| L31 | Installed death game modes (Azazel, Ironman) do not run for participants | G06 | None: accepted scope (user decision 2026-10-21) | Open |
 
 ## Campaign and scripts
 

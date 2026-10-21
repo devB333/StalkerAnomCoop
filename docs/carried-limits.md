@@ -42,7 +42,7 @@ accepted; this file is the working list.
 | L11 | Installed scripts outside a participant context still decide for actor 0 (NPC condlists, meet/talk, disguise, warfare; 167 lines in the S03-T05 audit); `has_alife_info`, `alife():actor()` and the story object are not participant-aware; party vs personal info portions undecided (R04, R09) | G03 | S08, S10-T04/T05 | Open |
 | L12 | Player-bound monster abilities (phantom, psy dog aura, controller, snork, pseudogigant, scanning) are explicit no-ops or guarded (B21) | G02, G03 | S10-T02 | Open |
 | L13 | AI lighting: NPCs outside every participant's view keep their last lighting; dynamic lights do not count (as on the DX11 client) | G03 (S03-T06) | S10-T02 | Open |
-| L14 | One level (`k00_marsh`) and one save; no level change or new game | G02–G05 | S09, S10-T01 | Open |
+| L14 | One level (`k00_marsh`) and one save; no level change or new game | G02–G05 | S09, S10-T01 | Open. 2026-10-21: now enforced: a level-changer touch crashed the headless server (enc-9); the campaign server and co-op clients refuse level-changer touches and `M_CHANGE_LEVEL` and log them ([S06-T05](validation/S06-T05.md), enc-12) |
 
 ## Persistence
 
@@ -65,7 +65,7 @@ accepted; this file is the working list.
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|
 | L21 | Short runs: server runs about 2 min, co-op sessions under 5 min; no long-run stability, memory or drift evidence | G02, G05 | S11-T03 | Open |
-| L22 | Behavioural comparisons are rule- and milestone-based; timing and totals differ from the client | G02 | S06 (measured convergence) | Open. Measured: own-actor convergence (S06-T03); combat health/slot/rounds agreement ≥ 95 % with equal end state ([S06-T04](validation/S06-T04.md)); NPC combat remains (S06-T05) |
+| L22 | Behavioural comparisons are rule- and milestone-based; timing and totals differ from the client | G02 | S06 (measured convergence) | Open. Measured: own-actor convergence (S06-T03); combat health/slot/rounds agreement ≥ 95 % with equal end state ([S06-T04](validation/S06-T04.md)); NPC combat measured: health/alive agreement ≥ 99.9 % with equal end state, deaths shown within 120 ms, nominal to 10 % loss / 100 ms ([S06-T05](validation/S06-T05.md), enc-15…19). Remaining: long runs (S11-T03) and the single-player rule-based captures |
 | L23 | GameState smoke's activity fixture: the walked stalker sometimes stops short (smoke-143, smoke-148, smoke-151; about 4 in 95 runs). Rerun under a new name; two failures in a row is a defect | G03, G05 | S11-T01/T02 | Open |
 | L24 | Rare client access violation at exit (capture-10 `0xC0000005` after teardown; 2 of ~40 S05-T03 client runs; none in S05-T04) | G02, G05 | S11-T04 | Open |
 | L25 | Client ALife scheduler stalls after load on a replica (S05-T02); not needed by a replica, cause open | G05 | S06-T02 (check while client presentation changes) | Closed 2026-10-21: [S06-T02](validation/S06-T02.md), not reproduced: seen only in S05-T02 world-2; in every later client run (S05-T03 to S06-T02, including snap-1…12) the replica's ALife shedule count rises steadily. The replica runs no offline simulation; the world-2 cause is unknown |

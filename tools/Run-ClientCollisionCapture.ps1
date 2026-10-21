@@ -67,6 +67,9 @@ $settings = Get-Content (Join-Path $accepted 'appdata\user.ltx')
 $settings = $settings | ForEach-Object {
     if ($_ -match '^rs_screenmode ') { 'rs_screenmode windowed' }
     elseif ($_ -match '^vid_mode ') { 'vid_mode 800x600' }
+    # S06-T05: with keypress_on_start on the loaded level waits at "Press any key to
+    # continue"; unattended captures timed out there (capture-32/33, capture-38...41)
+    elseif ($_ -match '^keypress_on_start ') { 'keypress_on_start off' }
     else { $_ }
 }
 $settings | Set-Content -Encoding ASCII (Join-Path $appdata 'user.ltx')

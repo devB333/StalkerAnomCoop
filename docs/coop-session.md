@@ -380,3 +380,65 @@ Validation: [S06-T04](validation/S06-T04.md). Protocol 1.4 (`messages.h`:
   `combat_heal` restores an actor below 40 % health to 100 % and logs it.
   The combat program is profile `script = 3`; `tools/compare-coop-combat.py`
   measures it against the server's `coop-combat.csv`.
+
+## NPC encounter and deaths (S06-T05)
+
+Validation: [S06-T05](validation/S06-T05.md). Engine: `Entity.cpp`
+(`CEntity::KillEntity`), `entity_alive.cpp` (`CEntityAlive::Die`),
+`Actor.cpp` (`CActor::Die`), `CoopServerHost.cpp`, `CoopClientLink.cpp`,
+`CoopConfig`, `level_changer.cpp`, `xrServer.cpp`.
+
+- **A participant's death is native on the server.** The installed
+  before-death callback (`bind_stalker_ext.actor_on_before_death`) only
+  reaches the actor with the script binder (`db.actor`) and ends in
+  `db.actor:kill(db.actor, true)`. The second participant's actor has no
+  binder, so before this its death never happened: health 0, no `Die`. On the
+  campaign server every participant now takes the path that call takes. The
+  installed game modes that hook the callback (Azazel, Ironman) do not run
+  for participants.
+- **Health 0 means dead.** A living actor or creature is sent at least 1 (of
+  10,000); a creature's state bit 0 is also its alive flag.
+- **Clients show deaths with the native `Die`.** It plays the body's fall and
+  the death sound, and the death camera for the player's own actor. The
+  server ran the consequences, so on a replica `CEntityAlive::Die` skips the
+  scripts' death callbacks, the relation change and the killer record, and
+  `CActor::Die` skips the single-player game over (which would end the
+  level). The killer is not replicated: the body is named as its own killer.
+  A dead body falls by itself on the client (its ragdoll); the server's
+  corpse position is not followed. A creature's health is applied to the
+  client's object while it lives.
+- **The dead take no input.** The server consumes a dead actor's input and
+  applies none of it (`dead_in`); its trigger is let go. A dead client's own
+  actor is no longer reconciled. Native control does nothing for a dead
+  actor, so a dead player cannot move or fire there either.
+- **No level change** (L14; coordinated transitions are Stage 9). In enc-9
+  actor 0 sprinted into a `k00_marsh` level changer; the server ran the
+  native change (`CALifeUpdateManager::change_level`: autosave, disconnect,
+  start) and crashed in `eStart`'s `main_menu off`, since a headless server
+  has no main menu. A non-silent changer would instead open the change-level
+  dialog, which pauses the device. Now `CLevelChanger` touches and
+  invitations on the campaign server or a co-op client only log
+  `coop level-change-refused`, and the server refuses `M_CHANGE_LEVEL`
+  (scripts, console `jump_to_level`). Plain single player is unchanged
+  (`level_changer.cpp`, `xrServer.cpp`).
+- **Fixtures** (profile; `prepare-coop-session.py --encounter`): `encounter`
+  spawns a `boar_normal` (the S02-T06c monster) 8–12 m from participant 2, at
+  the reachable node (of 8 directions) farthest from Fanat and participant 1,
+  20 s after both players' clients send input.
+  Fanat is participant 1's companion: he follows actor 0 and shot every boar
+  spawned near it. `lethal`
+  gives participant 2's actor a lethal wound hit from the boar 8 s after the
+  boar died (or 60 s after the spawn while the boar lives), unless it is dead
+  already. `combat_heal` is off. The server writes
+  `coop-encounter.csv` (participants and the boar every 100 ms).
+- **Encounter program** (profile `script = 4`): each player sprints 4 s away
+  from Fanat, takes out the pistol, aims at the boar every frame and holds fire until the boar has hurt
+  one of them (or 12 s), then presses every 300 ms and reloads when empty.
+  After its own death a player tries to walk and fire for 2 s and sends a
+  forged "revive" intent. A player whose pistol is knocked out of their hand
+  (seen in enc-10, a native drop on the server) has no way to pick it up yet
+  (L01). `tools/compare-coop-encounter.py` measures it: damage both ways,
+  every NPC death in the record (the boar or Fanat) and every participant
+  death shown on each client within 1 s, the dead player's attempts,
+  health agreement, no level change, and
+  the server's tick, snapshot and byte rates from the status lines.

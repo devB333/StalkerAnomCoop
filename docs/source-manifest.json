@@ -145,6 +145,10 @@
     {
       "path": "patches/engine/0034-coop-weapon-combat-slice.patch",
       "sha256": "9196d7542abfb3fbfb06f2e3a270fe6267ea20a15b559067550ae2e6b9949089"
+    },
+    {
+      "path": "patches/engine/0035-coop-npc-encounter-and-deaths.patch",
+      "sha256": "6834ecaec547a144f8548d2bced669de3640de05bccc5fccc09a780f3f923c2d"
     }
   ],
   "submodules": [

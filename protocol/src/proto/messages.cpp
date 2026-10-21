@@ -519,6 +519,7 @@ void Read(Reader& r, ResyncChunk& m)
 void Write(Writer& w, const Snapshot& m)
 {
     w.u64(m.server_tick);
+    w.u64(m.snapshot_id);
     w.u64(m.baseline_id);
     w.u64(m.last_input);
     w.u8(m.part);
@@ -540,14 +541,23 @@ void Write(Writer& w, const Snapshot& m)
             w.u16(e.health);
         if (e.components & kStateBits)
             w.u16(e.state_bits);
+        if (e.components & kRotation)
+        {
+            w.f32(e.qx);
+            w.f32(e.qy);
+            w.f32(e.qz);
+            w.f32(e.qw);
+        }
     }
 }
 void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
 {
+    (void)sequence; // v1.2: a snapshot has its own id (its parts have different sequences)
     r.field("snapshot.header");
     m.server_tick = r.u64();
+    m.snapshot_id = NonZero64(r);
     m.baseline_id = r.u64();
-    if (r.ok() && m.baseline_id >= sequence)
+    if (r.ok() && m.baseline_id >= m.snapshot_id)
         r.fail(DecodeError::BadValue); // a baseline is an earlier snapshot
     m.last_input = r.u64();
     m.part = r.u8();
@@ -577,6 +587,8 @@ void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
         e.components = r.u16();
         if (r.ok() && (e.components & ~std::uint16_t(kKnownComponents)))
             r.fail(DecodeError::ReservedNonZero);
+        if (r.ok() && (e.components & kRemoved) && e.components != kRemoved)
+            r.fail(DecodeError::BadValue); // a removal carries no state
         if (e.components & kTransform)
             e.transform = ReadTransform(r);
         if (e.components & kVelocity)
@@ -595,6 +607,17 @@ void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
         }
         if (e.components & kStateBits)
             e.state_bits = r.u16();
+        if (e.components & kRotation)
+        {
+            r.field("snapshot.rotation");
+            e.qx = r.f32(-1.f, 1.f);
+            e.qy = r.f32(-1.f, 1.f);
+            e.qz = r.f32(-1.f, 1.f);
+            e.qw = r.f32(-1.f, 1.f);
+            const float n = e.qx * e.qx + e.qy * e.qy + e.qz * e.qz + e.qw * e.qw;
+            if (r.ok() && (n < 0.98f || n > 1.02f))
+                r.fail(DecodeError::BadValue); // not a rotation
+        }
         m.entities.push_back(e);
     }
 }
@@ -602,16 +625,16 @@ void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
 void Write(Writer& w, const SnapshotAck& m)
 {
     w.u64(m.snapshot_id);
-    w.u64(m.baseline_id);
+    w.u64(m.missing_baseline);
     w.u64(m.event_cursor);
 }
 void Read(Reader& r, SnapshotAck& m)
 {
     r.field("snapshot_ack");
-    m.snapshot_id = NonZero64(r);
-    m.baseline_id = r.u64();
-    if (r.ok() && m.baseline_id > m.snapshot_id)
-        r.fail(DecodeError::BadValue);
+    m.snapshot_id = r.u64();
+    m.missing_baseline = r.u64();
+    if (r.ok() && m.snapshot_id == 0 && m.missing_baseline == 0)
+        r.fail(DecodeError::BadValue); // acknowledges nothing and asks for nothing
     m.event_cursor = r.u64();
 }
 

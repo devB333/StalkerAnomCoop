@@ -122,6 +122,7 @@ std::vector<Fixture> AllFixtures()
 
     Snapshot sn;
     sn.server_tick = 2000;
+    sn.snapshot_id = 4;
     sn.baseline_id = 3;
     sn.last_input = 50;
     sn.part = 1;
@@ -130,19 +131,29 @@ std::vector<Fixture> AllFixtures()
     {
         SnapshotEntity e;
         e.entity = {1000 + i, 1 + i};
-        e.components = std::uint16_t(i % 2 ? kKnownComponents : kTransform);
+        e.components = std::uint16_t(i % 2 ? kStateComponents : kTransform);
         e.transform = {float(i), 2.f, 3.f, 0.5f};
         e.vx = -kMaxSpeed;
         e.vy = 1.f;
         e.vz = kMaxSpeed;
         e.health = 10000;
         e.state_bits = 0xFFFF;
+        e.qx = -0.5f;
+        e.qy = 0.5f;
+        e.qz = -0.5f;
+        e.qw = 0.5f;
         sn.entities.push_back(e);
     }
+    SnapshotEntity removed;
+    removed.entity = {999, 7};
+    removed.components = kRemoved;
+    sn.entities.push_back(removed);
     f.push_back({"snapshot", sn, 5, 10});
     Snapshot sn0;
+    sn0.snapshot_id = 1;
     f.push_back({"snapshot-empty-full", sn0, 5, 1});
     f.push_back({"snapshot-ack", SnapshotAck{10, 3, 400}, 5, 7});
+    f.push_back({"snapshot-ack-missing", SnapshotAck{0, 3, 0}, 5, 8});
 
     InputBatch ib;
     for (int i = 0; i < int(kMaxInputsPerBatch); ++i)

@@ -236,3 +236,54 @@ python3 tools/prepare-coop-session.py <run> --task S06-T01 --movement c1,c2
 powershell.exe ... Run-CoopSession.ps1 -Run <run> -Task S06-T01 -ServerAloneSeconds 10 -ClientStarts '0,10' -ClientSeconds '180,170' -AfterSeconds 10
 python3 tools/compare-coop-movement.py <logs> --out <logs>/compare-movement.json
 ```
+
+## Snapshots, interpolation and baselines (S06-T02)
+
+Validation: [S06-T02](validation/S06-T02.md). Protocol v1.2
+(`snapshot.h`, `interpolation.h`, [wire format](network-protocol.md#wire-format-v1));
+engine: `CoopServerHost.cpp` (`send_snapshots`), `CoopClientLink.cpp`
+(`on_snapshot`, `present_actors`), `CustomMonster` (`replica_present`),
+`CoopReplica` (`replica_keeps_remote`), `Level_network_spawn.cpp`.
+
+- **What is sent, per player** (20 Hz on the 50 Hz tick, at most 256
+  entities): both participant actors (pinned), every other online creature
+  nearest first, and unparented physics objects while they move or until
+  the player has acknowledged where they came to rest; then they leave the
+  set and the client keeps that pose. Static objects (anomalies,
+  restrictors, smart covers, boxes) are never in it. An entity whose Spawn
+  has not been sent to the player is left out (lifecycle causality).
+- **Deltas against acknowledged baselines** (`SnapshotSender` per
+  connection): only changed components; removals; a full snapshot only at
+  the start, when the acknowledged baseline left the 32-snapshot history, or
+  when the client reports a missing one; always within the part budget (8
+  parts, halved on congestion). Until a player acknowledges its first
+  snapshot it gets one every 500 ms (it is still downloading its checkpoint).
+- **States:** actors as before (S05-T03); creatures: position, body yaw,
+  health, alive bit and the observed velocity (displacement between the
+  server's own position changes, zero once it stopped: distant NPCs are
+  moved only when scheduled, about every 0.6 s, and their controller
+  velocity is not that motion); physics objects: position and rotation.
+- **Client** (`SnapshotReceiver`): decodes from the moment its checkpoint is
+  in, acknowledges every complete snapshot, hands on only states newer than
+  the last shown per entity. Presentation 100 ms behind a server clock
+  estimated as a 2-s windowed minimum of arrival offsets (restarted at live),
+  interpolated; creatures carried on along their velocity for at most
+  500 ms, then back. Actors: `CActor::replica_present`; NPCs:
+  `CCustomMonster::replica_present` (transform, controller and the engine's
+  remote update queue, so they animate); crows: their own flight taken for
+  the frame; physics objects: shell transform, put to sleep.
+- **NPCs are remote on a replica.** The client level forced every spawn
+  local when it hosts the in-process server (`cl_Process_Spawn`), so NPCs
+  had been thinking on clients since S05-T02 (idle, as their script
+  binders do not run). Creatures the server writes as remote now stay
+  remote: no AI, no local damage or death on a client.
+- **Test fixtures:** profile `drop = N` (server: a medkit spawned beside
+  player 1 and tossed every N s, released 0.8 N s later) and `net_loss` /
+  `net_lag` (any process: the library's simulated impairment of what it
+  sends). Comparison: `tools/compare-coop-snapshots.py`.
+
+```
+python3 tools/prepare-coop-session.py <run> --task S06-T02 --script c1,c2 --drop 6 [--net-loss 5 --net-lag 40]
+powershell.exe ... Run-CoopSession.ps1 -Run <run> -Task S06-T02 -ServerAloneSeconds 10 -ClientStarts '0,10' -ClientSeconds '150,140' -AfterSeconds 10
+python3 tools/compare-coop-snapshots.py <logs> [--lag-ms 140] --out <logs>/compare-snapshots.json
+```

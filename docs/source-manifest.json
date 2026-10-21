@@ -133,6 +133,10 @@
     {
       "path": "patches/engine/0031-validated-movement-input.patch",
       "sha256": "968a818fb6b3b5475390556d46e6896903bc9dcf6f6b89401ce7ba0d3eec9958"
+    },
+    {
+      "path": "patches/engine/0032-coop-snapshots-and-baselines.patch",
+      "sha256": "8f48c44133e4e985150f7ecf22e460ef8690bbb75c3b93401f92ef603ee87ffc"
     }
   ],
   "submodules": [

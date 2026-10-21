@@ -62,9 +62,12 @@ Cap message sizes, command rates, outstanding operations, entity counts and resy
 
 Implemented 2026-10-20 (S04-T03, [validation](validation/S04-T03.md)) in
 `protocol/include/coop/proto/` (`wire.h`, `messages.h`, `guard.h`) and
-`protocol/src/proto/`. Version **1.1** (1.0 in S04-T03; 1.1 in S05-T01 raised the
+`protocol/src/proto/`. Version **1.2** (1.0 in S04-T03; 1.1 in S05-T01 raised the
 Spawn state to 16 KiB for native spawn packets, lifecycle messages to 20 KiB
-with a 1 MiB backlog, and the send buffer to 2 MiB). The code is the reference; this
+with a 1 MiB backlog, and the send buffer to 2 MiB; **1.2** in S06-T02 gave
+Snapshot its own id, rotation and removal components and delta semantics
+against acknowledged baselines, and SnapshotAck a missing-baseline field: both
+peers come from one build, so the layout change is not negotiated). The code is the reference; this
 section is its summary.
 
 ### Encoding
@@ -124,8 +127,8 @@ violation (the receiver closes with transport code 1003).
 | Spawn | entity ref, archetype, level, transform, parent ref, commit id, state | archetype 1–64; parent ≠ self; state ≤ 16,384 (opaque, decoded later with bounds) |
 | Despawn | entity ref, reason, commit id | reason 1–3 |
 | CampaignEvent | event id, kind, revision, payload | ids non-zero; payload ≤ 1,024 |
-| Snapshot | server tick, baseline, last input, part, part count, entities | baseline < this sequence; part < count ≤ 16; ≤ 64 entities, each once; component bits known; health ≤ 10,000 |
-| SnapshotAck | snapshot id, baseline, event cursor | baseline ≤ snapshot |
+| Snapshot | server tick, snapshot id (v1.2), baseline, last input, part, part count, entities; each entity: ref, components, then transform / velocity / health / state bits / rotation (v1.2) as the bits say; a removal (v1.2) has no fields | snapshot id ≠ 0; baseline < snapshot id; part < count ≤ 16; ≤ 64 entities, each once; component bits known; removal alone; health ≤ 10,000; rotation a unit quaternion (norm² 0.98–1.02) |
+| SnapshotAck | snapshot id (newest complete, 0: none), missing baseline (v1.2, 0: none), event cursor | not both zero |
 | InputBatch | 1–8 inputs, newest first (input *i* has sequence `header.sequence − i`) | ticks strictly decreasing; axes −1..1; angles bounded; buttons ≤ 16 bits; stance 0–3 |
 | ResyncBegin | resync id, checkpoint id, next epoch, content hash, event watermark, total bytes, chunk size, chunk count | total ≤ 256 MiB; chunk ≤ 60 KiB; count = ⌈total/chunk⌉ ≤ 65,536 |
 | ResyncChunk | resync id, index, CRC-32, data | 1–60 KiB; CRC checked on decode |
@@ -173,3 +176,23 @@ refuse garbage.
   tick, or a repeat) or ahead (> newest + 250), and exactly one is consumed
   per server tick; an empty queue reuses the last input for at most 10 ticks.
   `Snapshot.last_input` is the last consumed tick.
+- Snapshots (v1.2, S06-T02, `snapshot.h`): one `SnapshotSender` and one
+  `SnapshotReceiver` per connection. A snapshot (its parts share id, baseline,
+  tick and last input; an entity appears in one part only) is a delta against
+  the newest snapshot the client acknowledged with every part decoded, or full
+  (baseline 0). Entries carry only the components that changed beyond a
+  tolerance; a new entity or generation carries all of its components; an
+  entity the baseline holds that is no longer wanted gets a removal. The
+  sender keeps, per snapshot, the frame the client will hold (a change that
+  did not fit the part budget keeps the baseline's state there and is sent
+  later), so a decoded snapshot reproduces the sender's frame exactly. The
+  sender keeps 32 snapshots, the receiver 64; an acknowledged baseline that
+  left the sender's history, or a missing baseline the client reports, gives
+  a full snapshot within the same part budget. The budget (8 parts at most)
+  halves when the transport drops a part or the snapshot queue is older than
+  50 ms and grows back by one part after 10 clean snapshots; a deferred entity
+  moves ahead of the others, the pinned ones (the participant actors) always
+  go first. The receiver hands a state on for presentation only when its tick
+  is newer than the last one handed on for that entity. Presentation:
+  `interpolation.h` (server clock as a 2-s windowed minimum of arrival
+  offsets, 100 ms render delay, capped extrapolation of moving creatures).

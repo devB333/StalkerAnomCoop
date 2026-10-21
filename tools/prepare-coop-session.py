@@ -2,8 +2,9 @@
 
 Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2]
            [--port 27515] [--save "player - autosave"] [--inject c1,...]
-           [--script c1,c2] [--movement c1,c2] [--churn 10]
-           [--protocol-build proto-build-18] [--keys-from <earlier run>]
+           [--script c1,c2] [--movement c1,c2] [--churn 10] [--drop 6]
+           [--net-loss 5] [--net-lag 40]
+           [--protocol-build proto-build-26] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -62,7 +63,14 @@ def main():
     parser.add_argument("--churn", type=int, default=0,
                         help="seconds between server-side medkit spawns, each released half a period later "
                              "(S05-T02 lifecycle fixture; 0 off)")
-    parser.add_argument("--protocol-build", default="proto-build-18")
+    parser.add_argument("--drop", type=int, default=0,
+                        help="seconds between physics objects the server drops from 1.5 m beside player 1 "
+                             "(S06-T02 moving-object fixture; 0 off)")
+    parser.add_argument("--net-loss", type=float, default=0.0,
+                        help="percent of packets every process drops on send (S06-T02 declared conditions)")
+    parser.add_argument("--net-lag", type=int, default=0,
+                        help="ms every process adds to what it sends (S06-T02 declared conditions)")
+    parser.add_argument("--protocol-build", default="proto-build-26")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -146,10 +154,12 @@ def main():
         logs = runtime / "appdata/logs"
         lines = ["[coop]", f"campaign_id = {campaign_id}", f"log = {winpath(logs)}\\coop-{name}.log",
                  f"stop_file = {winpath(session_dir)}\\stop-{name}"]
+        if args.net_loss or args.net_lag:
+            lines += [f"net_loss = {args.net_loss}", f"net_lag = {args.net_lag}"]
         if name == "server":
             lines += ["role = server", f"listen = 0.0.0.0:{args.port}", f"roster = {winpath(roster)}",
                       f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600",
-                      f"churn = {args.churn}"]
+                      f"churn = {args.churn}", f"drop = {args.drop}"]
         else:
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
@@ -198,6 +208,9 @@ def main():
         "port": args.port,
         "save": args.save,
         "protocol_build": args.protocol_build,
+        "drop": args.drop,
+        "net_loss_pct": args.net_loss,
+        "net_lag_ms": args.net_lag,
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

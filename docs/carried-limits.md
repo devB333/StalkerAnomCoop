@@ -27,7 +27,7 @@ accepted; this file is the working list.
 | L01 | Movement is the only player action that reaches the server: no fire, use, jump, lean, inventory, trade or dialogue from a client | G05 | S06-T04 (combat), S08-T01–T03 (items), S10-T04 (dialogue) | Open |
 | L02 | No client prediction or reconciliation: a player's own movement waits for the server (input → tick → snapshot → 100 ms render delay); the user found walking choppy | G05 (S05-T03) | S06-T03 | Open |
 | L03 | Server movement is native physics but inputs are not validated (rates, speeds, stance changes) | G05 | S06-T01 | Closed 2026-10-20: [S06-T01](validation/S06-T01.md), runs move-8 and session-3. Inputs are sequenced by tick and validated, one is consumed per tick, and forged streams, teleports and positions are refused. The stamina-exhaustion and pitch-clamp limits are listed in the report |
-| L04 | NPCs and items do not move on clients after spawning; only the two participant actors have snapshots; snapshot rates/baselines provisional | G04, G05 | S06-T02 | Open |
+| L04 | NPCs and items do not move on clients after spawning; only the two participant actors have snapshots; snapshot rates/baselines provisional | G04, G05 | S06-T02 | Closed 2026-10-21: [S06-T02](validation/S06-T02.md), runs snap-11 and snap-12 (5 % loss, 40 ms lag). Creatures and moving physics objects are sent as deltas against acknowledged baselines and presented within p95 0.11–0.14 m; objects rest where the server has them; 11–14 KB/s per client. NPC animation state, ownership changes and deaths are not replicated (report limits) |
 | L05 | No gameplay scripts on clients (HUD scripts, news, PDA updates); presentation outboxes are not delivered to clients | G03, G05 | No task yet: a presentation-split task before S08 | Open |
 | L06 | Player 2's client shows a local "Mission complete: Training Day: Boar Hunting" news item and logs `CRandomTask:task_fail/task_complete task_fanat_training_1 task is nil` after it goes live; source not found (not in `scripts.db0` or the engine). Presentation only | G05 (S05-T03, S05-T04) | With L05 | Open |
 | L07 | Player 2's actor has the engine's default name ("Zhora Squire"), faction and look, not the player's own | G05 | No task yet: player profile/appearance before S08 | Open |
@@ -68,7 +68,7 @@ accepted; this file is the working list.
 | L22 | Behavioural comparisons are rule- and milestone-based; timing and totals differ from the client | G02 | S06 (measured convergence) | Open |
 | L23 | GameState smoke's activity fixture: the walked stalker sometimes stops short (smoke-143, smoke-148, smoke-151; about 4 in 95 runs). Rerun under a new name; two failures in a row is a defect | G03, G05 | S11-T01/T02 | Open |
 | L24 | Rare client access violation at exit (capture-10 `0xC0000005` after teardown; 2 of ~40 S05-T03 client runs; none in S05-T04) | G02, G05 | S11-T04 | Open |
-| L25 | Client ALife scheduler stalls after load on a replica (S05-T02); not needed by a replica, cause open | G05 | S06-T02 (check while client presentation changes) | Open |
+| L25 | Client ALife scheduler stalls after load on a replica (S05-T02); not needed by a replica, cause open | G05 | S06-T02 (check while client presentation changes) | Closed 2026-10-21: [S06-T02](validation/S06-T02.md), not reproduced: seen only in S05-T02 world-2; in every later client run (S05-T03 to S06-T02, including snap-1…12) the replica's ALife shedule count rises steadily. The replica runs no offline simulation; the world-2 cause is unknown |
 
 ## Baseline waivers (G01)
 

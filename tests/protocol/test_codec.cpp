@@ -83,7 +83,7 @@ TEST("codec/round-trip")
         sizes[f.name] = bytes.size();
         ++n;
     }
-    CHECK(n == 21);
+    CHECK(n == 22);
     for (auto& kv : sizes)
         metric("bytes_" + kv.first, double(kv.second));
     // Spot checks of decoded fields.
@@ -97,8 +97,10 @@ TEST("codec/round-trip")
     CHECK(h.resume && h.resume_request.token.size() == kMaxResumeToken && h.resume_request.last_snapshot == 88);
     REQUIRE(DecodeAs(MessageType::Snapshot, Encode(Find("snapshot")), &d).ok());
     const Snapshot& sn = std::get<Snapshot>(d.body);
-    CHECK(sn.entities.size() == 22 && sn.entities[1].health == 10000 && sn.entities[1].vx == -kMaxSpeed);
+    CHECK(sn.entities.size() == 23 && sn.entities[1].health == 10000 && sn.entities[1].vx == -kMaxSpeed);
     CHECK(sn.entities[0].components == kTransform && sn.entities[0].health == 0);
+    CHECK(sn.snapshot_id == 4 && sn.baseline_id == 3 && sn.entities[1].qx == -0.5f && sn.entities[1].qw == 0.5f);
+    CHECK(sn.entities[22].components == kRemoved && sn.entities[22].entity == (EntityRef{999, 7}));
 }
 
 TEST("codec/truncation")
@@ -215,6 +217,7 @@ TEST("codec/field-limits")
     CHECK(DecodeAs(MessageType::InputBatch, batch(8, 2)).error == DecodeError::Truncated);
     auto snap = [&](std::uint8_t count) {
         return Frame(std::uint16_t(MessageType::Snapshot), 5, 2, Body([&](Writer& w) {
+            w.u64(1);
             w.u64(1);
             w.u64(0);
             w.u64(0);
@@ -360,7 +363,7 @@ TEST("codec/values")
           DecodeError::BadValue); // second input's tick 500 >= first's
     // Snapshot: unknown component bit, health over 10000, the same entity twice.
     Snapshot sn = std::get<Snapshot>(Find("snapshot").message);
-    sn.entities[0].components = 0x10;
+    sn.entities[0].components = 0x40;
     std::vector<std::uint8_t> out;
     CHECK(!encode(sn, 5, 10, out));
     sn = std::get<Snapshot>(Find("snapshot").message);
@@ -370,9 +373,26 @@ TEST("codec/values")
     sn.entities[1].entity = sn.entities[0].entity;
     CHECK(!encode(sn, 5, 10, out));
     sn = std::get<Snapshot>(Find("snapshot").message);
-    CHECK(!encode(sn, 5, 3, out)); // baseline 3 is not before snapshot 3
+    sn.snapshot_id = 3;
+    CHECK(!encode(sn, 5, 10, out)); // baseline 3 is not before snapshot 3
+    sn.snapshot_id = 0;
+    sn.baseline_id = 0;
+    CHECK(!encode(sn, 5, 10, out)); // v1.2: a snapshot has an id
+    sn = std::get<Snapshot>(Find("snapshot").message);
+    CHECK(encode(sn, 5, 2, out)); // v1.2: the baseline is a snapshot id, not a sequence
     sn.part = 2;
     CHECK(!encode(sn, 5, 10, out)); // part 2 of 2
+    // v1.2: a removal carries nothing else; a rotation is a unit quaternion.
+    sn = std::get<Snapshot>(Find("snapshot").message);
+    sn.entities[22].components = kRemoved | kHealth;
+    CHECK(!encode(sn, 5, 10, out));
+    sn = std::get<Snapshot>(Find("snapshot").message);
+    sn.entities[1].qw = 0.f;
+    CHECK(!encode(sn, 5, 10, out));
+    sn.entities[1].qw = 1.5f;
+    CHECK(!encode(sn, 5, 10, out));
+    CHECK(!encode(SnapshotAck{0, 0, 9}, 5, 1, out)); // acknowledges nothing, asks for nothing
+    CHECK(encode(SnapshotAck{0, 4, 0}, 5, 1, out));
     // Identities: zero player, zero entity, half-set reference, entity its own parent.
     Hello h = std::get<Hello>(Find("hello").message);
     h.player_id = {};

@@ -24,7 +24,11 @@ constexpr std::uint32_t kMagic = 0x504F4F43; // "COOP" little-endian
 constexpr std::uint16_t kProtocolMajor = 1;
 // 1.1 (S05-T02): Spawn state up to 16 KiB (a native spawn packet), lifecycle
 // messages up to 20 KiB with a 1 MiB backlog.
-constexpr std::uint16_t kProtocolMinor = 1;
+// 1.2 (S06-T02): Snapshot carries its own snapshot id and is a delta against
+// an acknowledged baseline (coop/proto/snapshot.h); rotation and removal
+// components; SnapshotAck reports a missing baseline. Both peers are built
+// from one tree (build id), so the layout change needs no negotiation.
+constexpr std::uint16_t kProtocolMinor = 2;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -258,9 +262,14 @@ enum SnapshotComponent : std::uint16_t
     kVelocity = 1 << 1,  // vx, vy, vz
     kHealth = 1 << 2,    // u16, 0..10000 (hundredths of a percent)
     kStateBits = 1 << 3, // u16, opaque state flags
-    kKnownComponents = kTransform | kVelocity | kHealth | kStateBits,
+    kRotation = 1 << 4,  // qx, qy, qz, qw: a unit quaternion (v1.2; physics objects)
+    kRemoved = 1 << 5,   // v1.2: the entity leaves the client's snapshot set; no fields, never with another bit
+    kStateComponents = kTransform | kVelocity | kHealth | kStateBits | kRotation,
+    kKnownComponents = kStateComponents | kRemoved,
 };
 
+// One entity in a snapshot. In a delta, `components` names only the fields
+// that changed since the baseline; the others are the baseline's.
 struct SnapshotEntity
 {
     EntityRef entity;
@@ -269,12 +278,18 @@ struct SnapshotEntity
     float vx = 0, vy = 0, vz = 0;
     std::uint16_t health = 0;
     std::uint16_t state_bits = 0;
+    float qx = 0, qy = 0, qz = 0, qw = 1;
 };
 
+// One part of a snapshot. A snapshot is the server's state of the client's
+// snapshot set at server_tick, split into part_count messages that each
+// carry different entities; all parts share snapshot_id, baseline_id, tick
+// and last_input (coop/proto/snapshot.h).
 struct Snapshot // server -> client, snapshot
 {
     std::uint64_t server_tick = 0;
-    std::uint64_t baseline_id = 0; // 0: full; otherwise an earlier snapshot's sequence
+    std::uint64_t snapshot_id = 0; // v1.2: per connection, from 1
+    std::uint64_t baseline_id = 0; // 0: full; otherwise an earlier snapshot id the client acknowledged
     std::uint64_t last_input = 0;  // last input tick the server consumed for this player (S06-T01)
     std::uint8_t part = 0;
     std::uint8_t part_count = 1;
@@ -283,8 +298,8 @@ struct Snapshot // server -> client, snapshot
 
 struct SnapshotAck // client -> server, snapshot
 {
-    std::uint64_t snapshot_id = 0; // latest fully decoded snapshot's sequence
-    std::uint64_t baseline_id = 0;
+    std::uint64_t snapshot_id = 0;      // newest snapshot with every part decoded; 0: none yet
+    std::uint64_t missing_baseline = 0; // v1.2: a baseline the client does not hold (0: none); asks for a full snapshot
     std::uint64_t event_cursor = 0;
 };
 

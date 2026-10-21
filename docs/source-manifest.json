@@ -141,6 +141,10 @@
     {
       "path": "patches/engine/0033-coop-own-actor-prediction.patch",
       "sha256": "2e07622c5bc076a86addc8df15cf87828e0ad0976704e8c892f088026f741261"
+    },
+    {
+      "path": "patches/engine/0034-coop-weapon-combat-slice.patch",
+      "sha256": "9196d7542abfb3fbfb06f2e3a270fe6267ea20a15b559067550ae2e6b9949089"
     }
   ],
   "submodules": [

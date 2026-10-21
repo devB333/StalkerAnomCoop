@@ -1,0 +1,1139 @@
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index 58a3957..7e397ee 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -35,6 +35,7 @@
+ #include "../xrPhysics/PHCharacter.h"
+ #include "CampaignActorAccess.h" // S03-T03
+ #include "CampaignActorControl.h"
++#include "CoopServerHost.h" // S06-T04
+ #include "CampaignScriptContext.h" // S03-T05
+ #include "ActorAnimation.h"
+ #include "actor_anim_defs.h"
+@@ -688,12 +689,32 @@ void CActor::Hit(SHit* pHDS)
+ 			{
+ 				CScriptHit tLuaHit(&HDS);
+ 
+-				::luabind::functor<bool> funct;
+-				if (ai().script_engine().functor("_G.CActor__BeforeHitCallback", funct))
++				// S06-T04: a hit between two participant actors. The installed
++				// pre-hit callback drops hits from any stalker or actor friendly
++				// to db.actor (the first participant's actor) except the one
++				// with id 0, so the second participant could never damage
++				// anyone, itself included, while the first could. Between
++				// participants the co-op rule decides instead, the same for
++				// both: a participant's own hits always apply, another
++				// participant's apply when the server allows friendly fire.
++				// Single-player has one actor and never gets here.
++				const CObject* source = HDS.who;
++				const bool between_participants = source && campaign::process_role() == campaign::Role::Server &&
++					campaign::is_participant_actor(this) && campaign::is_participant_actor(source);
++				if (between_participants)
+ 				{
+-					if (!funct(this->lua_game_object(), &tLuaHit, HDS.boneID))
++					if (source != this && !campaign::coop_server_friendly_fire())
+ 						return;
+ 				}
++				else
++				{
++					::luabind::functor<bool> funct;
++					if (ai().script_engine().functor("_G.CActor__BeforeHitCallback", funct))
++					{
++						if (!funct(this->lua_game_object(), &tLuaHit, HDS.boneID))
++							return;
++					}
++				}
+ 
+ 				HDS.ApplyScriptHit(&tLuaHit);
+ 				HDS.power = HitArtefactsOnBelt(HDS.damage(), HDS.hit_type);
+diff --git a/src/xrGame/Actor_Weapon.cpp b/src/xrGame/Actor_Weapon.cpp
+index ab44662..7381fc1 100644
+--- a/src/xrGame/Actor_Weapon.cpp
++++ b/src/xrGame/Actor_Weapon.cpp
+@@ -114,6 +114,22 @@ SPickParam& CActor::GetPick()
+ 
+ void CActor::g_fireParams(const CHudItem* pHudItem, Fvector& fire_pos, Fvector& fire_dir)
+ {
++	// S06-T04: the HUD's pick is the view player's camera ray. Any other actor
++	// (every participant actor on the campaign server, which has no view; the
++	// other player's actor on a co-op client) fires along its own camera.
++	// Single-player has one actor, the view one, and is unchanged.
++	if (Level().CurrentViewEntity() != this)
++	{
++		fire_pos = Cameras().Position();
++		fire_dir = Cameras().Direction();
++		if (fire_dir.square_magnitude() < EPS)
++		{
++			fire_dir.setHP(-cam_Active()->yaw, -cam_Active()->pitch);
++			fire_pos.set(Position()).add(Fvector().set(0.f, 1.6f, 0.f));
++		}
++		fire_dir.normalize_safe();
++		return;
++	}
+ 	SPickParam& pp = GetPick();
+ 
+ 	attachable_hud_item* item_0 = g_player_hud->attached_item(0);
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index b0bf5fa..a9f7770 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -37,6 +37,10 @@
+ #include "CustomMonster.h"
+ #include "ai/crow/ai_crow.h"
+ #include "ai/stalker/ai_stalker.h"
++#include "Inventory.h"
++#include "Weapon.h"
++#include "xr_level_controller.h"
++#include "../xrEngine/xr_input.h"
+ #include "../Include/xrRender/KinematicsAnimated.h"
+ #include "PhysicsShellHolder.h"
+ #include "../xrPhysics/PhysicsShell.h"
+@@ -150,6 +154,25 @@ struct Link
+ 	u32 cam_still_frames = 0;
+ 	float hud_still_turn_max = 0.f;
+ 	u64 hud_still_frames = 0;
++	// S06-T04: combat. What the server last said of each actor's weapon (so a
++	// local prediction is overridden only when the server's value changes).
++	struct Outcome
++	{
++		u8 slot = 0xff;
++		u16 ammo = 0xffff;
++		u16 shots = 0xffff;
++	};
++	xr_map<u16, Outcome> outcomes;
++	u64 shots_presented = 0, slots_applied = 0, ammo_applied = 0, health_applied = 0;
++	bool fire_sent = false; // the fire button as last sampled
++	bool drive_fire = false; // the test driver holds or pulses the fire key
++	u32 drive_fire_period = 0; // inputs per press-release cycle (0: hold)
++	u32 drive_fire_count = 0;
++	bool script_fire_down = false; // the driver pressed the local key
++	bool aim_track = false; // the driver keeps aiming at the other actor's chest
++	u64 combat_operation = 0x7000;
++	FILE* combat_csv = nullptr;
++	u32 last_combat_log_ms = 0;
+ 	bool leg_moved = false; // the own actor has moved 5 cm since the leg began
+ 	xr_deque<coop::proto::Input> inputs;
+ 	u64 input_tick = 0, inputs_sent = 0;
+@@ -650,6 +673,7 @@ void run_script();
+ void sample_input();
+ void log_actors();
+ void log_entities();
++void log_combat();
+ 
+ void world_frame()
+ {
+@@ -705,6 +729,7 @@ void world_frame()
+ 		sample_input();
+ 		log_actors();
+ 		log_entities();
++		log_combat();
+ 	}
+ 	// Anything whose switch did not take (a squad's member order, an object
+ 	// still loading) is switched again; counted.
+@@ -919,6 +944,68 @@ void reconcile_own_actor(u64 snapshot_id, u64 last_input)
+ 			VPUSH(g_actor->Position()), server.x, server.y, server.z);
+ }
+ 
++// ------------------------------------------------------------ S06-T04
++// The server's outcomes for an actor: health, the active slot and the rounds
++// in its magazine (applied when the server's value changes, so the shooter's
++// own local firing is corrected, not fought), and the other player's shots
++// shown from its counter (presentation only: no bullet, no ammo change).
++void apply_actor_outcomes(CActor* actor, const coop::proto::EntityState& s)
++{
++	if (s.components & coop::proto::kHealth)
++	{
++		// a death is S06-T05's: the client keeps the actor alive
++		const float health = _max(float(s.health) / 10000.f, 0.001f);
++		if (!fsimilar(actor->GetfHealth(), health, 0.0001f))
++		{
++			actor->SetfHealth(health);
++			++g_link->health_applied;
++		}
++	}
++	if (!(s.components & coop::proto::kWeapon))
++		return;
++	Link::Outcome& o = g_link->outcomes[u16(actor->ID())];
++	if (s.weapon_slot != o.slot)
++	{
++		o.slot = s.weapon_slot;
++		// the server put an item in that slot (CInventory::Slot sends no
++		// event): the same kind of item moves from the backpack here too
++		if (s.weapon_slot != NO_ACTIVE_SLOT && !actor->inventory().ItemFromSlot(s.weapon_slot))
++			for (PIItem item : actor->inventory().m_ruck)
++				if (item->BaseSlot() == s.weapon_slot && actor->inventory().CanPutInSlot(item, s.weapon_slot))
++				{
++					actor->inventory().Slot(s.weapon_slot, item, true);
++					break;
++				}
++		if (actor->inventory().GetActiveSlot() != s.weapon_slot &&
++			(s.weapon_slot == NO_ACTIVE_SLOT || actor->inventory().ItemFromSlot(s.weapon_slot)))
++		{
++			actor->inventory().Activate(s.weapon_slot);
++			++g_link->slots_applied;
++		}
++	}
++	CWeapon* weapon = smart_cast<CWeapon*>(actor->inventory().ActiveItem());
++	if (s.ammo != o.ammo)
++	{
++		o.ammo = s.ammo;
++		if (weapon && weapon->GetAmmoElapsed() != int(s.ammo))
++		{
++			weapon->SetAmmoElapsed(int(s.ammo));
++			++g_link->ammo_applied;
++		}
++	}
++	if (s.shots != o.shots)
++	{
++		const u16 fresh = o.shots == 0xffff ? 0 : u16(s.shots - o.shots);
++		o.shots = s.shots;
++		if (actor != g_actor && weapon)
++			for (u16 i = 0; i < _min<u16>(fresh, 3); ++i)
++			{
++				weapon->replica_present_shot();
++				++g_link->shots_presented;
++			}
++	}
++}
++
+ // A physics object where the server has it: its shell (when it has one) and
+ // its transform, the shell put to sleep so this client's physics does not move
+ // it on its own between states.
+@@ -974,6 +1061,8 @@ void present_actors()
+ 		if (CActor* actor = smart_cast<CActor*>(object))
+ 		{
+ 			entry.second.kind = 0;
++			if (const coop::proto::EntityState* newest = entry.second.buffer.newest())
++				apply_actor_outcomes(actor, *newest); // S06-T04
+ 			if (actor == g_actor && g_link->predicting)
+ 			{
+ 				entry.second.presented = true; // S06-T03: it moves itself; snapshots correct it
+@@ -1107,6 +1196,7 @@ void screenshot(LPCSTR tag)
+ }
+ 
+ void run_script2(u32 t);
++void run_script3(u32 t);
+ 
+ void run_script()
+ {
+@@ -1129,6 +1219,8 @@ void run_script()
+ 	}
+ 	if (g_link->config.script == 2)
+ 		return run_script2(t);
++	if (g_link->config.script == 3)
++		return run_script3(t);
+ 	// S06-T02: the nearest NPC stalker, 26 s in: face it, log its animation
+ 	// blends and remote flag, screenshot it.
+ 	if (g_link->npc_phase == 0 && t >= 26000)
+@@ -1225,6 +1317,9 @@ void leg_end_check(u32 now)
+ 		VPUSH(g_actor->Position()));
+ 	g_link->leg_name[0] = 0;
+ 	g_link->drive_until = 0;
++	g_link->drive_fire = false;
++	g_link->drive_fire_period = 0;
++	g_link->aim_track = false;
+ 	g_link->send_mode = Link::SendNormal;
+ 	g_link->record_batches = false;
+ 	g_link->drive_force_stance = false;
+@@ -1294,13 +1389,43 @@ void sample_input()
+ 		(wishful & mcSprint) ? coop::proto::Stance::Sprint : coop::proto::Stance::Stand;
+ 	if (driving && g_link->drive_force_stance)
+ 		in.stance = g_link->drive_stance;
+-	in.buttons = (wishful & mcAccel) ? 1u : 0u;
++	in.buttons = (wishful & mcAccel) ? coop::proto::kButtonWalk : 0u;
++	// S06-T04: the fire key, held by the player or the test driver
++	bool fire = false;
++	for (int idx = 0; idx < 2 && !fire; ++idx)
++	{
++		const int dik = get_action_dik(kWPN_FIRE, idx);
++		fire = dik && pInput && pInput->iGetAsyncKeyState(dik);
++	}
++	if (driving && g_link->drive_fire)
++	{
++		const bool pressed = !g_link->drive_fire_period ||
++			(g_link->drive_fire_count++ % g_link->drive_fire_period) < _max<u32>(1, g_link->drive_fire_period / 2);
++		fire = fire || pressed;
++		// the shooter's own weapon shows the shot at once (presentation)
++		if (pressed != g_link->script_fire_down)
++		{
++			g_link->script_fire_down = pressed;
++			if (pressed)
++				actor->IR_OnKeyboardPress(kWPN_FIRE);
++			else
++				actor->IR_OnKeyboardRelease(kWPN_FIRE);
++		}
++	}
++	else if (g_link->script_fire_down)
++	{
++		g_link->script_fire_down = false;
++		actor->IR_OnKeyboardRelease(kWPN_FIRE);
++	}
++	if (fire)
++		in.buttons |= coop::proto::kButtonFire;
++	g_link->fire_sent = fire;
+ 	if (driving && g_link->send_mode == Link::SendStill)
+ 	{
+ 		// S06-T03 leg P: the local actor walks, the server is told to stand.
+ 		in.move_x = in.move_y = 0.f;
+ 		in.stance = coop::proto::Stance::Stand;
+-		in.buttons = 0;
++		in.buttons &= coop::proto::kButtonFire;
+ 	}
+ 	u32 cleared = mcFwd | mcBack | mcLStrafe | mcRStrafe;
+ 	if (!psActorFlags.test(AF_CROUCH_TOGGLE))
+@@ -1537,6 +1662,233 @@ void run_script2(u32 t)
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S06-T04
++// The combat program (profile script = 3; prepare-coop-session.py --combat).
++// Each player, its program starting 45 s after the other's for slot 1:
++//   holster       ActionIntent: activate slot 0 (nothing in the hands)
++//   equip         ActionIntent: activate slot 2 (the PM from the arm fixture)
++//   W-aim-fire    three presses at the other player's actor (hits, health)
++//   reloads       ActionIntent: reload (server ammo restored)
++//   W-hold        the key held 1 s at the sky (a semi-automatic: one shot)
++//   W-rapid       a press every 80 ms for 1 s at the sky (the weapon's cadence)
++//   W-dup         the same with every input batch sent four times
++//   W-empty       a press every 100 ms for 3 s: the magazine runs dry, then nothing
++//   W-move-fire   strafing while pressing every 300 ms at the other actor
++//   W-forged      an ActionIntent claiming a hit on the other actor (refused)
++// Then both players, at the same server time (215 s), fire at each other
++// for 1.2 s (W-simultaneous).
++void send_action(u16 kind, const xr_vector<u8>& params, LPCSTR what)
++{
++	coop::proto::ActionIntent intent;
++	intent.operation_id = ++g_link->combat_operation;
++	intent.kind = kind;
++	intent.params.assign(params.begin(), params.end());
++	if (kind == 7)
++	{
++		const auto other = other_actor();
++		const auto ref = other ? g_link->refs.find(u16(other->ID())) : g_link->refs.end();
++		if (ref != g_link->refs.end())
++			intent.target = ref->second;
++	}
++	const bool sent = g_link->client && g_link->client->send(coop::proto::Message(intent));
++	g_link->log.line("script-action %s operation=%I64u kind=%u sent=%d", what, intent.operation_id, u32(kind),
++		sent ? 1 : 0);
++}
++
++void combat_leg(LPCSTR name, u32 bits, u32 ms, u8 mode, u32 period)
++{
++	leg_begin(name, bits, coop::proto::Stance::Stand, false, ms, mode);
++	g_link->drive_fire = true;
++	g_link->drive_fire_period = period;
++	g_link->drive_fire_count = 0;
++}
++
++// The camera at the other actor's chest (1.2 m above its feet) from this
++// actor's eye, every frame of an aimed leg: the weapon's recoil lifts the
++// camera after each shot, and a player brings it back down.
++void aim_at_other_chest()
++{
++	CActor* other = other_actor();
++	if (!other || !g_actor)
++		return;
++	const Fvector eye = g_actor->Cameras().Position();
++	Fvector to = Fvector().set(other->Position()).add(Fvector().set(0.f, 1.2f, 0.f)).sub(eye);
++	if (to.magnitude() < EPS_L)
++		return;
++	to.normalize();
++	float h, p;
++	to.getHP(h, p);
++	g_actor->cam_Active()->yaw = -h;
++	g_actor->cam_Active()->pitch = -p;
++}
++
++void face_sky()
++{
++	face_away_from_other();
++	if (g_actor)
++		g_actor->cam_Active()->pitch = -0.7f;
++}
++
++void run_script3(u32 t)
++{
++	if (!g_link->program_t0)
++	{
++		if (!other_actor())
++		{
++			g_link->other_since = 0;
++			return;
++		}
++		if (!g_link->other_since)
++			g_link->other_since = t;
++		if (t < g_link->other_since + 3000 + u32(g_link->local_slot) * 45000)
++			return;
++		g_link->program_t0 = t;
++		g_link->log.line("script3-program-start slot=%u t=%u", u32(g_link->local_slot), t);
++	}
++	if (g_link->aim_track)
++		aim_at_other_chest();
++	const u32 p = t - g_link->program_t0;
++	struct Step
++	{
++		u32 at;
++		LPCSTR name;
++	};
++	static const Step steps[] = {
++		{0, "holster"},
++		{1500, "equip"},
++		{3000, "face-other"},
++		{3200, "W-aim-fire"},
++		{5000, "reload"},
++		{8000, "face-sky"},
++		{8500, "W-hold"},
++		{10000, "W-rapid"},
++		{11500, "reload"},
++		{14500, "W-dup"},
++		{16000, "reload"},
++		{19000, "W-empty"},
++		{22500, "reload"},
++		{25500, "face-other"},
++		{26000, "W-move-fire"},
++		{28500, "W-forged"},
++		{30500, "program-end"},
++	};
++	const u32 count = u32(sizeof(steps) / sizeof(steps[0]));
++	if (g_link->script_phase < count)
++	{
++		if (p < steps[g_link->script_phase].at)
++			return;
++		const Step& step = steps[g_link->script_phase++];
++		const LPCSTR n = step.name;
++		if (!xr_strcmp(n, "holster"))
++		{
++			xr_vector<u8> slot;
++			slot.push_back(u8(NO_ACTIVE_SLOT));
++			send_action(coop::proto::kActionActivateSlot, slot, "holster");
++		}
++		else if (!xr_strcmp(n, "equip"))
++		{
++			xr_vector<u8> slot;
++			slot.push_back(u8(INV_SLOT_2));
++			send_action(coop::proto::kActionActivateSlot, slot, "equip-slot-2");
++		}
++		else if (!xr_strcmp(n, "reload"))
++			send_action(coop::proto::kActionReload, xr_vector<u8>(), "reload");
++		else if (!xr_strcmp(n, "face-other"))
++			face_other_actor(false);
++		else if (!xr_strcmp(n, "face-sky"))
++			face_sky();
++		else if (!xr_strcmp(n, "W-aim-fire"))
++		{
++			combat_leg(n, 0, 1500, Link::SendNormal, 15);
++			g_link->aim_track = true;
++		}
++		else if (!xr_strcmp(n, "W-hold"))
++			combat_leg(n, 0, 1000, Link::SendNormal, 0);
++		else if (!xr_strcmp(n, "W-rapid"))
++			combat_leg(n, 0, 1000, Link::SendNormal, 4);
++		else if (!xr_strcmp(n, "W-dup"))
++			combat_leg(n, 0, 1000, Link::SendDuplicate4, 4);
++		else if (!xr_strcmp(n, "W-empty"))
++			combat_leg(n, 0, 3000, Link::SendNormal, 5);
++		else if (!xr_strcmp(n, "W-move-fire"))
++		{
++			combat_leg(n, mcLStrafe, 1500, Link::SendNormal, 15);
++			g_link->aim_track = true;
++		}
++		else if (!xr_strcmp(n, "W-forged"))
++		{
++			const char forged[] = "hit 1.0 health=0";
++			xr_vector<u8> params;
++			params.assign(forged, forged + sizeof(forged) - 1);
++			send_action(7, params, "forged-hit");
++			leg_begin(n, 0, coop::proto::Stance::Stand, false, 1500, Link::SendNormal);
++		}
++		else if (!xr_strcmp(n, "program-end"))
++			g_link->log.line("script3-program-end");
++		return;
++	}
++	// Both players at the same server time. First each takes its pistol
++	// out again and reloads: the world may have changed its hands since its
++	// program ended (combat-10: Fanat struck actor 0 and its slot went to 0).
++	const double server_ms = double(g_link->last_snapshot_tick) * double(kServerTickMs);
++	if (g_link->script_phase == count && server_ms >= 205000.0)
++	{
++		++g_link->script_phase;
++		xr_vector<u8> slot;
++		slot.push_back(u8(INV_SLOT_2));
++		send_action(coop::proto::kActionActivateSlot, slot, "equip-slot-2-again");
++		return;
++	}
++	if (g_link->script_phase == count + 1 && server_ms >= 207000.0)
++	{
++		++g_link->script_phase;
++		send_action(coop::proto::kActionReload, xr_vector<u8>(), "reload-again");
++		return;
++	}
++	if (g_link->script_phase == count + 2 && server_ms >= 215000.0)
++	{
++		++g_link->script_phase;
++		face_other_actor(false);
++		combat_leg("W-simultaneous", 0, 1200, Link::SendNormal, 15);
++		g_link->aim_track = true;
++		g_link->log.line("script-simultaneous server_ms=%.0f", server_ms);
++	}
++}
++
++// What this client shows of each actor's combat state, 10 times a second.
++void log_combat()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (now - g_link->last_combat_log_ms < 100)
++		return;
++	g_link->last_combat_log_ms = now;
++	if (!g_link->combat_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-combat-client.csv");
++		g_link->combat_csv = fopen(path, "w");
++		if (!g_link->combat_csv)
++			return;
++		fprintf(g_link->combat_csv, "utc_ms,id,entity,local,health,slot,ammo,server_slot,server_ammo,server_shots,fire\n");
++	}
++	const u64 utc_ms = utc_now_ms();
++	for (const auto& entry : g_link->tracks)
++	{
++		CActor* actor = smart_cast<CActor*>(Level().Objects.net_Find(entry.first));
++		const auto ref = g_link->refs.find(entry.first);
++		if (!actor || ref == g_link->refs.end())
++			continue;
++		const CWeapon* weapon = smart_cast<CWeapon*>(actor->inventory().ActiveItem());
++		const auto o = g_link->outcomes.find(entry.first);
++		fprintf(g_link->combat_csv, "%I64u,%u,%I64u,%d,%u,%u,%d,%u,%u,%u,%d\n", utc_ms, u32(entry.first), ref->second.id,
++			actor == g_actor ? 1 : 0, u32(iFloor(actor->GetfHealth() * 10000.f + 0.5f)),
++			u32(actor->inventory().GetActiveSlot()), weapon ? weapon->GetAmmoElapsed() : -1,
++			o != g_link->outcomes.end() ? u32(o->second.slot) : 255u,
++			o != g_link->outcomes.end() ? u32(o->second.ammo) : 65535u,
++			o != g_link->outcomes.end() ? u32(o->second.shots) : 65535u, actor == g_actor && g_link->fire_sent ? 1 : 0);
++	}
++}
++
+ // The server's world clock (CampaignEvent kind 1): the client's ALife clock
+ // follows the server's (a step only when more than 3 s of game time apart;
+ // the time of day cannot visibly change in that) and its sky is the server's
+@@ -1826,7 +2178,8 @@ void log_status(LPCSTR tag)
+ 		"snap_states=%I64u snap_removed=%I64u acks_sent=%I64u tracks=%u presented=%I64u holding=%I64u extrapolated=%I64u "
+ 		"seeded=%I64u clock_offset_ms=%.1f local_creatures=%u predicting=%d pred_recorded=%I64u pred_reconciled=%I64u "
+ 		"pred_within=%I64u pred_smoothed=%I64u pred_snapped=%I64u pred_unknown=%I64u pred_max_error=%.3f "
+-		"view_max_offset=%.3f correction_frames=%I64u hud_still_turn_max=%.3f hud_still_frames=%I64u",
++		"view_max_offset=%.3f correction_frames=%I64u hud_still_turn_max=%.3f hud_still_frames=%I64u "
++		"shots_presented=%I64u slots_applied=%I64u ammo_applied=%I64u health_applied=%I64u",
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+@@ -1841,7 +2194,8 @@ void log_status(LPCSTR tag)
+ 		g_link->reconciler.counters().within, g_link->reconciler.counters().smoothed,
+ 		g_link->reconciler.counters().snapped, g_link->reconciler.counters().unknown,
+ 		g_link->reconciler.counters().max_error, g_link->smoother.max_offset(), g_link->correction_frames,
+-		g_link->hud_still_turn_max, g_link->hud_still_frames);
++		g_link->hud_still_turn_max, g_link->hud_still_frames, g_link->shots_presented, g_link->slots_applied,
++		g_link->ammo_applied, g_link->health_applied);
+ }
+ } // namespace
+ 
+@@ -1946,6 +2300,8 @@ void coop_client_app_end()
+ 		fclose(g_link->entities_csv);
+ 	if (g_link->prediction_csv)
+ 		fclose(g_link->prediction_csv);
++	if (g_link->combat_csv)
++		fclose(g_link->combat_csv);
+ 	if (g_link->client)
+ 		g_link->client->close(coop::net::close_code::kNormal, "client exit");
+ 	if (g_link->transport)
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 01156ae..efd4763 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -125,6 +125,9 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.serve_seconds = ini.line_exist("coop", "serve_seconds") ? ini.r_u32("coop", "serve_seconds") : 0;
+ 		out.churn = ini.line_exist("coop", "churn") ? ini.r_u32("coop", "churn") : 0;
+ 		out.drop = ini.line_exist("coop", "drop") ? ini.r_u32("coop", "drop") : 0;
++		out.arm = ini.line_exist("coop", "arm") ? ini.r_u32("coop", "arm") : 0;
++		out.combat_heal = ini.line_exist("coop", "combat_heal") ? ini.r_u32("coop", "combat_heal") : 0;
++		out.friendly_fire = ini.line_exist("coop", "friendly_fire") ? ini.r_u32("coop", "friendly_fire") : 1;
+ 		if (ok && !absolute(out.roster_path))
+ 		{
+ 			Msg("! S05-T01 coop config: roster must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 90a9f3c..da60e07 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -12,7 +12,13 @@
+ //                 save (saved game to serve), serve_seconds (0: until stop_file),
+ //                 churn (seconds between S05-T02 server-side entity changes; 0 off),
+ //                 drop (S06-T02: seconds between physics objects dropped from
+-//                 1.5 m beside participant 1; 0 off)
++//                 1.5 m beside participant 1; 0 off),
++//                 arm (S06-T04 fixture: 1 gives every participant actor a
++//                 PM pistol and two boxes of its ammo if it has no pistol),
++//                 combat_heal (S06-T04 fixture: 1 restores a participant actor
++//                 to full health below 40 %; deaths are S06-T05's),
++//                 friendly_fire (S06-T04: 1, the default, lets participants'
++//                 hits damage each other's actors; 0 drops them)
+ //   client only:  server (ip:port), key (absolute DPAPI key file), name,
+ //                 exit_after_seconds (0: never), inject (0/1: S05-T01 refusal test),
+ //                 script (0/1: S05-T03 look, walk and screenshot driver;
+@@ -44,6 +50,9 @@ struct CoopConfig
+ 	u32 serve_seconds;
+ 	u32 churn; // S05-T02: seconds between server-controlled entity changes (fixture; 0 off)
+ 	u32 drop; // S06-T02: seconds between physics objects dropped beside participant 1 (fixture; 0 off)
++	u32 arm; // S06-T04 fixture: give participant actors a pistol and ammo
++	u32 combat_heal; // S06-T04 fixture: heal participant actors below 40 %
++	u32 friendly_fire; // S06-T04: participants' hits damage each other (default 1)
+ 	// both, S06-T02: simulated impairment of what this process sends (test conditions)
+ 	float net_loss_pct;
+ 	u32 net_lag_ms;
+diff --git a/src/xrGame/CoopReplica.cpp b/src/xrGame/CoopReplica.cpp
+index a8ae918..b6dcb70 100644
+--- a/src/xrGame/CoopReplica.cpp
++++ b/src/xrGame/CoopReplica.cpp
+@@ -249,6 +249,16 @@ bool replica_refuse_event(u16 type, bool bridge)
+ {
+ 	if (!g_active || replica_permitted() || !bridge)
+ 		return false;
++	// S06-T04: a weapon's state change is presentation on a client (its HUD
++	// item switches state only when its own level echoes the event, so with
++	// the event refused a client's weapon could not show, hide or fire). The
++	// outcomes of firing (hits, ammo, health) still come from the server only:
++	// hit events stay refused.
++	if (type == GE_WPN_STATE_CHANGE)
++	{
++		++g_stats.weapon_states_allowed;
++		return false;
++	}
+ 	++g_stats.events_refused;
+ 	if (type < 64)
+ 		++g_stats.event_types_refused[type];
+@@ -285,11 +295,12 @@ void report_replica(LPCSTR tag)
+ 		}
+ 	Msg("S05-T02 replica %s active=%d local_actor=%u online_set=%u scheduled_skipped=%I64u switched_online=%I64u "
+ 		"switched_offline=%I64u player_flag_set=%I64u player_flag_cleared=%I64u creates_refused=%I64u "
+-		"releases_refused=%I64u spawns_local=%I64u spawns_remote=%I64u creatures_kept_remote=%I64u messages_refused=%I64u events_refused=%I64u "
++		"releases_refused=%I64u spawns_local=%I64u spawns_remote=%I64u creatures_kept_remote=%I64u weapon_states_allowed=%I64u "
++		"messages_refused=%I64u events_refused=%I64u "
+ 		"binder_updates_skipped=%I64u alife_shedule=%I64u alife_updates=%I64u switch_calls=%I64u events:%s",
+ 		tag, g_active ? 1 : 0, u32(g_local_actor), replica_online_count(), s.scheduled_skipped, s.switched_online,
+ 		s.switched_offline, s.player_flag_set, s.player_flag_cleared, s.creates_refused, s.releases_refused,
+-		s.spawns_local, s.spawns_remote, s.creatures_kept_remote, s.messages_refused, s.events_refused, s.binder_updates_skipped,
++		s.spawns_local, s.spawns_remote, s.creatures_kept_remote, s.weapon_states_allowed, s.messages_refused, s.events_refused, s.binder_updates_skipped,
+ 		s.alife_shedule_calls, s.alife_updates, s.switch_calls, events);
+ }
+ } // namespace campaign
+diff --git a/src/xrGame/CoopReplica.h b/src/xrGame/CoopReplica.h
+index 8cc2b0b..d2d186e 100644
+--- a/src/xrGame/CoopReplica.h
++++ b/src/xrGame/CoopReplica.h
+@@ -88,6 +88,7 @@ struct ReplicaStats
+ 	u64 spawns_remote;
+ 	u64 spawns_local;
+ 	u64 creatures_kept_remote;
++	u64 weapon_states_allowed; // S06-T04
+ 	u64 messages_refused;
+ 	u64 events_refused;
+ 	u64 binder_updates_skipped;
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 59266fa..f6b6007 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -37,6 +37,10 @@
+ #include "xrMessages.h"
+ #include "xrServer.h"
+ #include "../xrEngine/Environment.h"
++#include "CampaignActorControl.h"
++#include "Inventory.h"
++#include "Weapon.h"
++#include "xr_level_controller.h"
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -89,6 +93,12 @@ struct PlayerLink
+ 	u64 snapshot_parts_dropped;
+ 	u64 snapshot_congested;
+ 	u32 snapshot_set_peak;
++	// S06-T04: the fire key as this player's inputs hold it
++	bool fire_down;
++	u64 fire_presses;
++	u64 fire_logged_tick;
++	u64 actions_accepted, actions_refused;
++	bool armed;
+ 	u64 snapshot_entities_wanted; // summed over snapshots
+ 	u64 snapshot_skipped_unsent; // entities left out: their Spawn had not gone to this player yet
+ 	u32 last_snapshot_ms; // when the last snapshot went to this player
+@@ -181,6 +191,16 @@ struct Host
+ 	xr_map<u16, Motion> motion;
+ 	xr_map<u16, Gait> gait;
+ 	FILE* snapshots_csv = nullptr;
++	// S06-T04: each participant actor's shots (the magazine's decreases)
++	struct Gun
++	{
++		u16 weapon = 0xffff;
++		int ammo = -1;
++		u16 shots = 0;
++	};
++	xr_map<u16, Gun> guns;
++	FILE* combat_csv = nullptr;
++	u32 heals = 0;
+ 	u64 snapshot_rounds = 0;
+ 	u32 drop_next_ms = 0;
+ 	u32 drops = 0;
+@@ -828,23 +848,78 @@ void apply_inputs()
+ 		if (!actor || !actor->g_Alive())
+ 			continue;
+ 		actor->replica_set_wishful(actor->replica_wishful() & ~kManagedBits);
+-		if (!link.session)
+-			continue; // detached: no input (the queue was reset at the leave)
+-		coop::proto::Input in;
+-		const coop::proto::InputSource source = link.inputs.consume(in);
+-		if (source == coop::proto::InputSource::None)
+-			continue; // silent: no input
+ 		ActionContext context;
+ 		context.origin = Origin::ClientIntent;
+ 		context.session = link.session;
+ 		context.actor = link.ref;
+ 		context.party = party;
++		if (!link.session)
++		{
++			// detached: no input (the queue was reset at the leave); a held
++			// trigger is let go
++			if (link.fire_down)
++			{
++				actor->IR_OnKeyboardRelease(kWPN_FIRE);
++				link.fire_down = false;
++			}
++			continue;
++		}
++		coop::proto::Input in;
++		const coop::proto::InputSource source = link.inputs.consume(in);
++		if (source == coop::proto::InputSource::None)
++		{
++			if (link.fire_down)
++			{
++				actor_input_release(context, kWPN_FIRE);
++				link.fire_down = false;
++			}
++			continue; // silent: no input
++		}
+ 		Refusal why = Refusal::None;
+ 		if (context_actor(context, Scope::Self, &why) != actor)
+ 		{
+ 			++link.input_refused;
+ 			continue;
+ 		}
++		// S06-T04: the fire key. The player's input holds it or not; the
++		// server presses and releases the native key on the player's own
++		// actor, so the weapon decides whether, when and how it fires (state,
++		// cadence, ammo, ballistics) and the hits are the server's.
++		const bool fire = (in.buttons & coop::proto::kButtonFire) != 0;
++		if (fire != link.fire_down)
++		{
++			if (fire)
++			{
++				actor_input_press(context, kWPN_FIRE);
++				++link.fire_presses;
++				// the fire ray against the other participant (the first press
++				// of each second, for the record)
++				if (link.fire_presses == 1 || g_host->tick - link.fire_logged_tick >= 50)
++				{
++					link.fire_logged_tick = g_host->tick;
++					Fvector pos, dir;
++					actor->g_fireParams(nullptr, pos, dir);
++					float off = -1.f;
++					u32 other_id = 0xffff;
++					for (PlayerLink& o : g_host->links)
++						if (&o != &link && o.bound)
++							if (CActor* other = participant_actor(o.ref))
++							{
++								Fvector to = Fvector().set(other->Position()).add(Fvector().set(0.f, 1.2f, 0.f)).sub(pos);
++								to.normalize_safe();
++								off = rad2deg(acosf(clampr(to.dotproduct(dir), -1.f, 1.f)));
++								other_id = other->ID();
++							}
++					g_host->log.line("fire-press slot=%u actor=%u view=%d cam=%d pos=%.2f/%.2f/%.2f dir=%.3f/%.3f/%.3f "
++						"other=%u off_deg=%.1f", u32(link.ref.slot), u32(actor->ID()),
++						Level().CurrentViewEntity() == actor ? 1 : 0, int(actor->active_cam()), VPUSH(pos), VPUSH(dir),
++						other_id, off);
++				}
++			}
++			else
++				actor_input_release(context, kWPN_FIRE);
++			link.fire_down = fire;
++		}
+ 		u32 bits = 0;
+ 		if (in.move_y > 0.5f)
+ 			bits |= mcFwd;
+@@ -858,7 +933,7 @@ void apply_inputs()
+ 			bits |= mcCrouch;
+ 		else if (in.stance == coop::proto::Stance::Sprint)
+ 			bits |= mcSprint;
+-		if (in.buttons & 1)
++		if (in.buttons & coop::proto::kButtonWalk)
+ 			bits |= mcAccel;
+ 		actor->replica_set_wishful(actor->replica_wishful() | bits);
+ 		// The look direction is the player's intent too; the camera's own
+@@ -930,6 +1005,26 @@ bool actor_state(CActor* actor, coop::proto::EntityState& out)
+ 	out.components |= coop::proto::kAim;
+ 	out.aim_yaw = angle_normalize_signed(actor->replica_torso().yaw);
+ 	out.aim_pitch = clampr(actor->replica_torso().pitch, -coop::proto::kMaxAngle, coop::proto::kMaxAngle);
++	// S06-T04 (protocol 1.4): what it holds, the rounds in the magazine and its
++	// shot counter (the magazine's decreases, counted by the host)
++	out.components |= coop::proto::kWeapon;
++	const u16 slot = actor->inventory().GetActiveSlot();
++	out.weapon_slot = u8(slot <= 15 ? slot : 0);
++	PIItem active = actor->inventory().ActiveItem();
++	CHudItem* hud = active ? active->cast_hud_item() : nullptr;
++	out.weapon_state = hud ? u8(_min<u32>(hud->GetState(), 255u)) : 0;
++	CWeapon* weapon = active ? smart_cast<CWeapon*>(active) : nullptr;
++	Host::Gun& gun = g_host->guns[u16(actor->ID())];
++	if (weapon)
++	{
++		const int ammo = weapon->GetAmmoElapsed();
++		if (gun.weapon == u16(weapon->ID()) && gun.ammo > ammo)
++			gun.shots = u16(gun.shots + (gun.ammo - ammo));
++		gun.weapon = u16(weapon->ID());
++		gun.ammo = ammo;
++		out.ammo = u16(clampr(ammo, 0, 65535));
++	}
++	out.shots = gun.shots;
+ 	return true;
+ }
+ 
+@@ -1069,6 +1164,8 @@ bool object_state(CPhysicsShellHolder* object, coop::proto::EntityState& out, Fq
+ 	return true;
+ }
+ 
++void combat_record(const coop::proto::EntityState& s, u16 id, CActor* actor); // S06-T04
++
+ // Every online, unparented, replicated entity that moves, with its state now.
+ void collect_candidates(xr_vector<Candidate>& out)
+ {
+@@ -1092,6 +1189,7 @@ void collect_candidates(xr_vector<Candidate>& out)
+ 			if (!actor_state(actor, c.state) || !(c.state.entity == ref))
+ 				continue;
+ 			c.kind = KindParticipant;
++			combat_record(c.state, p.first, actor);
+ 		}
+ 		else if (CEntity* creature = smart_cast<CEntity*>(object))
+ 		{
+@@ -1365,6 +1463,135 @@ void drop_objects()
+ 	g_host->log.line("drop-spawn id=%u section=medkit pos=%.2f,%.2f,%.2f", u32(item->ID), VPUSH(position));
+ }
+ 
++// S06-T04: the action kinds (coop::proto::ActionKind). The player names no
++// actor: the action acts on the actor its session's context resolves
++// (Scope::Self). Returns 0 when accepted, else the refusal reason:
++//   1 unsupported kind, 2 malformed params, 3 no actor, 4 nothing to act on
++u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
++{
++	if (intent.kind != coop::proto::kActionActivateSlot && intent.kind != coop::proto::kActionReload)
++		return 1;
++	if (!link.session)
++		return 3;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor || !actor->g_Alive())
++		return 3;
++	if (intent.kind == coop::proto::kActionActivateSlot)
++	{
++		if (intent.params.size() != 1)
++			return 2;
++		const u16 slot = intent.params[0];
++		if (slot == NO_ACTIVE_SLOT)
++		{
++			actor->inventory().Activate(NO_ACTIVE_SLOT); // holster
++			return 0;
++		}
++		if (slot < KNIFE_SLOT || slot > BOLT_SLOT)
++			return 2;
++		if (!actor->inventory().ItemFromSlot(slot))
++			return 4;
++		actor->inventory().Activate(slot);
++		return 0;
++	}
++	// reload: the native reload key on the active weapon (its own ammo rules)
++	if (!intent.params.empty())
++		return 2;
++	if (!smart_cast<CWeapon*>(actor->inventory().ActiveItem()))
++		return 4;
++	actor_input_press(context, kWPN_RELOAD);
++	actor_input_release(context, kWPN_RELOAD);
++	return 0;
++}
++
++// S06-T04 fixtures (profile arm, combat_heal) and the combat record.
++// An item for an online parent: the path of the script's alife():create with
++// a parent (alife_simulator_script.cpp, CALifeSimulator__spawn_item2). The
++// item goes through the server's spawn, which registers it with ALife and
++// with its parent once; spawn_item with registration on an online parent
++// would list it twice among the parent's children.
++void give_item(CALifeSimulator* alife, LPCSTR section, CActor* actor, const CSE_ALifeDynamicObject* se)
++{
++	NET_Packet packet;
++	packet.w_begin(M_SPAWN);
++	packet.w_stringZ(section);
++	CSE_Abstract* item = alife->spawn_item(section, se->o_Position, se->m_tNodeID, se->m_tGraphID, u16(actor->ID()), false);
++	if (!item)
++		return;
++	item->Spawn_Write(packet, FALSE);
++	alife->server().FreeID(item->ID, 0);
++	F_entity_Destroy(item);
++	ClientID client;
++	client.set(0xffff);
++	u16 dummy;
++	packet.r_begin(dummy);
++	alife->server().Process_spawn(packet, client);
++}
++
++void combat_fixtures()
++{
++	if (!ai().get_alife())
++		return;
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	for (PlayerLink& link : g_host->links)
++	{
++		CActor* actor = link.bound ? participant_actor(link.ref) : nullptr;
++		if (!actor || !actor->g_Alive())
++			continue;
++		if (g_host->config.arm && !link.armed)
++		{
++			const CSE_ALifeDynamicObject* se = ai().alife().objects().object(u16(actor->ID()), true);
++			if (!se || !se->m_bOnline)
++				continue;
++			link.armed = true;
++			const bool has = actor->inventory().ItemFromSlot(INV_SLOT_2) != nullptr;
++			if (!has)
++				give_item(alife, "wpn_pm", actor, se);
++			give_item(alife, "ammo_9x18_fmj", actor, se);
++			give_item(alife, "ammo_9x18_fmj", actor, se);
++			g_host->log.line("arm slot=%u actor=%u %s +2x ammo_9x18_fmj", u32(link.ref.slot), u32(actor->ID()),
++				has ? actor->inventory().ItemFromSlot(INV_SLOT_2)->object().cNameSect().c_str() : "wpn_pm");
++		}
++		// a pistol that arrived in the backpack goes to its slot
++		if (g_host->config.arm && !actor->inventory().ItemFromSlot(INV_SLOT_2))
++			for (PIItem item : actor->inventory().m_ruck)
++				if (item->BaseSlot() == INV_SLOT_2 && actor->inventory().CanPutInSlot(item, INV_SLOT_2))
++				{
++					actor->inventory().Slot(INV_SLOT_2, item, true); // not drawn
++					g_host->log.line("arm slot=%u actor=%u %s to slot 2", u32(link.ref.slot), u32(actor->ID()),
++						item->object().cNameSect().c_str());
++					break;
++				}
++		if (g_host->config.combat_heal && actor->GetfHealth() < 0.4f)
++		{
++			++g_host->heals;
++			g_host->log.line("heal slot=%u actor=%u health=%.3f -> 1.000 (fixture)", u32(link.ref.slot),
++				u32(actor->ID()), actor->GetfHealth());
++			actor->SetfHealth(1.f);
++		}
++	}
++}
++
++void combat_record(const coop::proto::EntityState& s, u16 id, CActor* actor)
++{
++	if (!g_host->combat_csv)
++		return;
++	FILETIME ft;
++	GetSystemTimeAsFileTime(&ft);
++	const u64 utc_ms = ((u64(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000ull - 11644473600000ull;
++	fprintf(g_host->combat_csv, "%I64u,%I64u,%u,%I64u,%u,%u,%u,%u,%u,%u,%.3f,%.3f,%.3f\n", utc_ms, g_host->tick, u32(id),
++		s.entity.id, u32(s.health), u32(s.weapon_slot), u32(s.weapon_state), u32(s.ammo), u32(s.shots),
++		u32(actor->conditions().GetWhoHitLastTimeID()), VPUSH(actor->Position()));
++}
++
+ void on_joined(const coop::session::SessionEvent& e)
+ {
+ 	PlayerLink* link = link_of(e.player);
+@@ -1399,6 +1626,7 @@ void on_joined(const coop::session::SessionEvent& e)
+ 	link->snapshots.reset();
+ 	link->settled.clear();
+ 	link->sent_commit = 0;
++	link->fire_down = false;
+ 	g_host->log.line("joined player=%s name=%s session_slot=%u participant=%u/%u registry_session=%08x resumed=%d "
+ 		"attach=%s",
+ 		coop_uuid_hex(e.player).c_str(), link->name.c_str(), u32(e.slot), u32(link->ref.slot), link->ref.generation,
+@@ -1419,6 +1647,7 @@ void on_left(const coop::session::SessionEvent& e)
+ 	link->snapshots.reset();
+ 	link->settled.clear();
+ 	link->sent_commit = 0;
++	link->fire_down = false;
+ 	Refusal detached = Refusal::NotAttached;
+ 	if (link->session)
+ 		detached = g_campaign_identity->detach_session(g_campaign_identity->authority(), link->session, Device.dwFrame);
+@@ -1453,18 +1682,25 @@ void on_message(const coop::session::SessionEvent& e)
+ 	}
+ 	if (const auto* intent = std::get_if<coop::proto::ActionIntent>(&e.message.body))
+ 	{
+-		// No action kind is defined yet (S06/S08 add them); every intent is
+-		// refused, and nothing in the world changes.
++		// S06-T04: activate a slot and reload are the defined kinds; every
++		// other kind is refused, and nothing in the world changes.
+ 		coop::proto::ActionResult result;
+ 		result.operation_id = intent->operation_id;
+-		result.outcome = coop::proto::ActionOutcome::Rejected;
+-		result.reason = 1; // unsupported kind
+ 		result.server_tick = g_host->tick;
++		const u16 reason = take_action(*link, *intent);
++		result.outcome = reason ? coop::proto::ActionOutcome::Rejected : coop::proto::ActionOutcome::Accepted;
++		result.reason = reason;
+ 		g_host->server->send(e.player, coop::proto::Message(result));
+-		++g_host->intents_refused;
+-		g_host->log.line("intent-refused player=%s operation=%I64u kind=%u target=%I64u/%u reason=unsupported",
+-			coop_uuid_hex(e.player).c_str(), intent->operation_id, u32(intent->kind), intent->target.id,
+-			intent->target.generation);
++		if (reason)
++		{
++			++g_host->intents_refused;
++			++link->actions_refused;
++		}
++		else
++			++link->actions_accepted;
++		g_host->log.line("intent-%s player=%s operation=%I64u kind=%u target=%I64u/%u reason=%u params=%u",
++			reason ? "refused" : "accepted", coop_uuid_hex(e.player).c_str(), intent->operation_id, u32(intent->kind),
++			intent->target.id, intent->target.generation, u32(reason), u32(intent->params.size()));
+ 		return;
+ 	}
+ 	if (std::get_if<coop::proto::InputBatch>(&e.message.body))
+@@ -1538,14 +1774,15 @@ void log_status(LPCSTR tag)
+ 			link.snapshot_parts_dropped, link.snapshot_congested, link.snapshot_set_peak, link.snapshots.acked(),
+ 			link.snapshot_skipped_unsent, u32(link.settled.size()));
+ 		xr_strcat(worlds, one);
+-		xr_sprintf(one, " paced%u=%I64u", u32(link.ref.slot), link.snapshot_paced);
++		xr_sprintf(one, " paced%u=%I64u fire%u=%I64u act%u=%I64u/%I64u", u32(link.ref.slot), link.snapshot_paced,
++			u32(link.ref.slot), link.fire_presses, u32(link.ref.slot), link.actions_accepted, link.actions_refused);
+ 		xr_strcat(worlds, one);
+ 	}
+ 	const coop::session::ServerCounters& c = g_host->server->counters();
+ 	g_host->log.line("%s tick=%I64u frame=%u weather=%s game_ms=%I64u alife_objects=%u online_objects=%u%s joins=%I64u "
+ 		"violations=%I64u rejected_auth=%I64u rejected_build=%I64u rejected_content=%I64u intents_refused=%I64u "
+ 		"inputs=%I64u rate_drops=%I64u acks=%I64u commit=%I64u published=%u spawns=%I64u despawns=%I64u/%I64u oversize=%I64u "
+-		"churn=%u/%u drops=%u/%u%s",
++		"churn=%u/%u drops=%u/%u heals=%u%s",
+ 		tag, g_host->tick, Device.dwFrame,
+ 		g_pGamePersistent && g_pGamePersistent->Environment().CurrentWeatherName.size() ?
+ 			*g_pGamePersistent->Environment().CurrentWeatherName : "-",
+@@ -1553,7 +1790,7 @@ void log_status(LPCSTR tag)
+ 		c.joins, c.violations, c.rejected_auth, c.rejected_build, c.rejected_content, g_host->intents_refused,
+ 		g_host->inputs_ignored, c.rate_limited_drops, g_host->acks, g_host->commit, u32(g_host->published.size()), g_host->spawns,
+ 		g_host->despawns_range, g_host->despawns_destroyed, g_host->spawn_oversize, g_host->churn_spawned,
+-		g_host->churn_released, g_host->drops, g_host->tosses, worlds);
++		g_host->churn_released, g_host->drops, g_host->tosses, g_host->heals, worlds);
+ }
+ 
+ // S04-T01 finding 5: Windows power throttling stretches Sleep-paced loops
+@@ -1625,6 +1862,11 @@ bool coop_server_prepare(LPCSTR command_line)
+ 	return true;
+ }
+ 
++bool coop_server_friendly_fire()
++{
++	return !g_host || g_host->config.friendly_fire != 0;
++}
++
+ bool coop_server_prepared() { return g_host && g_host->prepared; }
+ 
+ bool coop_server_bind_roster(CampaignIdentityRegistry& registry)
+@@ -1704,6 +1946,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		fprintf(g_host->actors_csv, "utc_ms,tick,entity,generation,x,y,z,yaw,state,health\n");
+ 	if (g_host->lifecycle_csv)
+ 		fprintf(g_host->lifecycle_csv, "commit,kind,id,entity,generation,reason,section,x,y,z\n");
++	string_path combat;
++	FS.update_path(combat, "$logs$", "coop-combat.csv");
++	g_host->combat_csv = fopen(combat, "w");
++	if (g_host->combat_csv)
++		fprintf(g_host->combat_csv, "utc_ms,tick,id,entity,health,slot,state,ammo,shots,hitter,x,y,z\n");
+ 	string_path snapshots;
+ 	FS.update_path(snapshots, "$logs$", "coop-snapshots.csv");
+ 	g_host->snapshots_csv = fopen(snapshots, "w");
+@@ -1756,6 +2003,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	track_lifecycle();
+ 	churn();
+ 	drop_objects();
++	combat_fixtures();
+ 	for (PlayerLink& link : g_host->links)
+ 	{
+ 		if (link.world == WorldPending && link.session && link.pending_actor == kNoEngineId &&
+@@ -1816,6 +2064,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		if (g_host->snapshots_csv)
+ 			fclose(g_host->snapshots_csv);
+ 		g_host->snapshots_csv = nullptr;
++		if (g_host->combat_csv)
++			fclose(g_host->combat_csv);
++		g_host->combat_csv = nullptr;
+ 		timeEndPeriod(1);
+ 		g_host->log.line("server-stopped");
+ 	}
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index e62d2ff..e231fef 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -30,4 +30,8 @@ bool coop_server_prepared();
+ // roster's players to participant slots in roster order, so the saved actor
+ // is adopted by the first roster player at its spawn.
+ bool coop_server_bind_roster(CampaignIdentityRegistry& registry);
++// S06-T04: whether a participant's hits damage another participant's actor
++// (profile friendly_fire, default 1). Not asked on a client or in
++// single-player.
++bool coop_server_friendly_fire();
+ } // namespace campaign
+diff --git a/src/xrGame/Weapon.h b/src/xrGame/Weapon.h
+index 1894bb9..7dea8a1 100644
+--- a/src/xrGame/Weapon.h
++++ b/src/xrGame/Weapon.h
+@@ -803,6 +803,9 @@ public:
+ 	int GetSuitableAmmoTotal(bool use_item_to_spawn = false) const;
+ 
+ 	void SetAmmoElapsed(int ammo_count);
++	// S06-T04: a co-op client shows a shot the server's weapon fired (sound,
++	// flame, smoke): presentation only, no bullet, no ammo change.
++	virtual void replica_present_shot() {}
+ 
+ 	virtual void OnMagazineEmpty();
+ 	void SpawnAmmo(u32 boxCurr = 0xffffffff,
+diff --git a/src/xrGame/WeaponMagazined.cpp b/src/xrGame/WeaponMagazined.cpp
+index 0061706..498bc53 100644
+--- a/src/xrGame/WeaponMagazined.cpp
++++ b/src/xrGame/WeaponMagazined.cpp
+@@ -928,6 +928,18 @@ void CWeaponMagazined::OnShot()
+ 	AddHUDShootingEffect();
+ }
+ 
++void CWeaponMagazined::replica_present_shot()
++{
++	// S06-T04: what OnShot shows of a shot, without the HUD, the camera, the
++	// script callback or the recoil: the other player's weapon on a co-op client.
++	PlaySoundShot();
++	StartFlameParticles();
++	ForceUpdateFireParticles();
++	Fvector vel;
++	PHGetLinearVell(vel);
++	StartSmokeParticles(get_LastFP(), vel);
++}
++
+ void CWeaponMagazined::OnEmptyClick()
+ {
+ 	if (ParentIsActor())
+diff --git a/src/xrGame/WeaponMagazined.h b/src/xrGame/WeaponMagazined.h
+index f4e37fb..382dcca 100644
+--- a/src/xrGame/WeaponMagazined.h
++++ b/src/xrGame/WeaponMagazined.h
+@@ -56,6 +56,9 @@ protected:
+ 
+ 	virtual void OnShot();
+ 	virtual void PlaySoundShot();
++public:
++	void replica_present_shot() override; // S06-T04
++protected:
+ 
+ 	virtual void OnEmptyClick();
+ 

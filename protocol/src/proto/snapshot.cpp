@@ -34,6 +34,10 @@ SnapshotEntity Entry(const EntityState& s, std::uint16_t components)
     e.qw = s.qw;
     e.aim_yaw = s.aim_yaw;
     e.aim_pitch = s.aim_pitch;
+    e.weapon_slot = s.weapon_slot;
+    e.weapon_state = s.weapon_state;
+    e.ammo = s.ammo;
+    e.shots = s.shots;
     return e;
 }
 
@@ -77,6 +81,13 @@ void Merge(SnapshotFrame& frame, const SnapshotEntity& e)
         s.aim_yaw = e.aim_yaw;
         s.aim_pitch = e.aim_pitch;
     }
+    if (e.components & kWeapon)
+    {
+        s.weapon_slot = e.weapon_slot;
+        s.weapon_state = e.weapon_state;
+        s.ammo = e.ammo;
+        s.shots = e.shots;
+    }
 }
 } // namespace
 
@@ -106,6 +117,10 @@ std::uint16_t changed_components(const EntityState* base, const EntityState& now
     if ((have & kAim) && (base->components & kAim) &&
         (AngleDistance(now.aim_yaw, base->aim_yaw) > t.yaw || AngleDistance(now.aim_pitch, base->aim_pitch) > t.yaw))
         c |= kAim;
+    if ((have & kWeapon) && (base->components & kWeapon) &&
+        (now.weapon_slot != base->weapon_slot || now.weapon_state != base->weapon_state || now.ammo != base->ammo ||
+            now.shots != base->shots))
+        c |= kWeapon;
     return c;
 }
 
@@ -126,6 +141,8 @@ std::size_t entry_bytes(std::uint16_t c)
         n += 16;
     if (c & kAim)
         n += 8;
+    if (c & kWeapon)
+        n += 6;
     return n;
 }
 

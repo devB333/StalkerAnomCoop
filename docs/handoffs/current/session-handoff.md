@@ -1,66 +1,68 @@
-# Session handoff — S06-T03 done; next: S06-T04
+# Session handoff — S06-T04 done; next: S06-T05
 
 ## State (2026-10-21)
 
-Stage 6 **In Progress**: S06-T01–T03 **Completed**; S06-T04 and T05 Not
-Started. Engine `c57fe5b9` + patches 0001–0033 (reconstruction check 36).
-Protocol v1.3 (`proto-build-29`, the default in `Build-Stage2.ps1` and
-`prepare-coop-session.py`). Design:
-[co-op session](../../coop-session.md#own-actor-prediction-and-reconciliation-s06-t03).
+Stage 6 **In Progress**: S06-T01–T04 **Completed**; S06-T05 Not Started (it
+produces the G06 report). Engine `c57fe5b9` + patches 0001–0034
+(reconstruction check 37). Protocol v1.4 (`proto-build-30`, the default in
+`Build-Stage2.ps1` and `prepare-coop-session.py`). Design:
+[co-op session](../../coop-session.md#authoritative-weapon-slice-s06-t04).
 
-S06-T03 ([report](../../validation/S06-T03.md)):
-- **Prediction:** each client predicts its own actor through the native
-  control path (`controls_actor` on a predicting replica) and reconciles it
-  after every complete snapshot against the server's position for the last
-  processed input (`processed_tick`, which includes refused inputs).
-  Corrections go to the physics controller at once; a camera effector smooths
-  the view.
-  - pred-8 (nominal) and pred-9 (5 % loss, 40 ms lag) pass all checks.
-  - Deliberately wrong predictions (legs G and P) stay under 0.28 m and
-    converge.
-  - The own actor moves in 83–100 ms, against 250 ms without prediction.
-- **Fixed on the way (user reports):**
-  - The other actor's arms now follow its aim (`kAim`, protocol 1.3).
-  - The own HUD arms no longer snap when turning: two actors shared
-    `cam_Update` statics. Measured: 6.6 M → 0.000 rad/s with a still camera,
-    and the user confirmed.
-- **Regressions:** session-8, snap-14, smoke-156 and capture-35 all pass.
-  pred-10 (no prediction) gave 22/24 on the movement program: Fanat pushes.
-- **Carried limits:** L02 closed.
+S06-T04 ([report](../../validation/S06-T04.md)):
+- **Fire is an input.** The fire bit makes the server press or release
+  `kWPN_FIRE` on the player's own actor, so the native weapon decides cadence,
+  ammo and ballistics. Actions: activate slot (0 holsters) and reload.
+  Outcomes: health, slot, rounds and a shot counter (`kWeapon`).
+- **Fire ray per actor:** a non-view actor fires along its own camera
+  (`CActor::g_fireParams`).
+- **Hits between participants:** the installed pre-hit callback let only
+  actor 0 hurt the other player. Hits between participants now skip it and
+  follow one rule both ways, profile `friendly_fire` (default 1). **The final
+  friendly-fire policy is a user decision for G06.**
+- **Results:** combat-13 (nominal) and combat-12 (5 % loss, 40 ms lag) pass
+  all 21 checks; display agreement 99.4–99.7 %. Regressions session-10,
+  snap-16, pred-11, smoke-160/161 and capture-37 pass.
+- **Smoke flakiness:** smoke-157 and smoke-159 failed the activity walk (L23)
+  and smoke-158 the two-actors walk check (seen before in smoke-154). Watch
+  the rate.
+- **Carried limits:** L01, L08 and L22 updated (still open).
 
-## Next: S06-T04 — one authoritative weapon/combat slice
+## Next: S06-T05 — NPC combat encounter and the G06 report
 
-Read plan.md S06-T04. Design notes from this session:
-- Fire as an input button. The server presses and releases `kWPN_FIRE` on
-  the participant's actor through `actor_input_press` / `actor_input_release`
-  (`Scope::Self`).
-- `CActor::g_fireParams` takes the fire ray from the global HUD pick
-  (`g_player_hud`, `HUD().GetPick()`). A non-view actor on the server needs
-  its own camera instead.
-- The replica refuses every game event from its own level, including
-  `GE_WPN_STATE_CHANGE` for the local weapon (`CHudItem::SwitchState` waits
-  for the echo), so a client's own weapon cannot change state. Allow it for
-  items the local actor carries, for presentation.
-- Equip: a validated action (activate slot). Outcomes: ammo, active slot and
-  actor health replicated to the clients. Presentation of the other player's
-  shots: a separate event.
-- Target: the other participant's actor.
+Read plan.md S06-T05. Notes:
+- **Fixture:** extend the combat program with one hostile NPC that targets
+  either participant. The server's AI already fights headless (S02-T06c,
+  stalker against boar) and targets either player (S03-T04).
+- **Deaths:** clients now keep actors alive whatever the snapshot health
+  says (`apply_actor_outcomes`), and `combat_heal` keeps the fixture going.
+  Death of a participant and of the NPC must replicate: decide the client
+  presentation and what the server does with a dead participant (S03-T03
+  killed and released actors on the server).
+- **Measure:** the simulation and snapshot rates and bandwidth (snapshot CSVs
+  as in S06-T02), plus controlled latency and loss and forged outcomes.
+  Rerun the single-player combat regression (S02-T06c).
+- **Fanat** (the companion at the base) pushes and strikes actors, and once
+  put away actor 0's weapon (combat-10). Expect it in an NPC fixture near the
+  base, or pick an NPC away from it.
+- **G06:** write `docs/validation/G06.md` from S06-T01–T05, then stop for user
+  acceptance.
 
 ## Tools and runs
 
-- Prediction:
-  - `prepare-coop-session.py <run> --task S06-T03 --movement c1,c2 [--net-loss 5 --net-lag 40] [--no-predict c1,c2]`
-  - `compare-coop-movement.py` and `compare-coop-prediction.py`
-- Last runs: `campaign-182`, `client-87`, `proto-build-29`, `pt-27`,
-  `pred-10`, `session-8`, `snap-14`, `hud-2`, `smoke-156`, `capture-35`,
-  patch check 36.
-- Next: `campaign-183`, `client-88`, `proto-build-30`, `pt-28`, `tr-14`,
-  `smoke-157`, `capture-36`, patch check 37; co-op runs under
-  `builds/logs/S06-T04/`.
-- The host was slow at times while the user ran the game alongside (pred-2's
-  42-s loads, capture-32/33 timeouts). Rerun under a new name when timings
-  look off.
+- Combat:
+  - `prepare-coop-session.py <run> --task S06-T04 --combat c1,c2 [--net-loss 5 --net-lag 40]`
+  - `Run-CoopSession.ps1 ... -ClientStarts '0,10' -ClientSeconds '250,240'`
+  - `compare-coop-combat.py <logs>`
+- Last runs: `campaign-193`, `client-97`, `proto-build-30`, `pt-28`,
+  `combat-13`, `session-10`, `snap-16`, `pred-11`, `smoke-161`,
+  `capture-37`, patch check 37.
+- Next: `campaign-194`, `client-98`, `proto-build-31`, `pt-29`, `smoke-162`,
+  `capture-38`, patch check 38; co-op runs under `builds/logs/S06-T05/`.
+- Run names used by stopped chains are taken (`session-9`, `combat-6`); pick
+  new ones.
+- Right after a build, client loads can run past the server's 15 s silence
+  timeout (combat-11). Rerun under a new name.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and the saved-game fixture.
-Previous snapshot: [before S06-T04](../done/snapshot-before-S06-T04.md).
+Previous snapshot: [before S06-T05](../done/snapshot-before-S06-T05.md).

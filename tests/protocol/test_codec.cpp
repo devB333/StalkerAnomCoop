@@ -97,10 +97,11 @@ TEST("codec/round-trip")
     CHECK(h.resume && h.resume_request.token.size() == kMaxResumeToken && h.resume_request.last_snapshot == 88);
     REQUIRE(DecodeAs(MessageType::Snapshot, Encode(Find("snapshot")), &d).ok());
     const Snapshot& sn = std::get<Snapshot>(d.body);
-    CHECK(sn.entities.size() == 23 && sn.entities[1].health == 10000 && sn.entities[1].vx == -kMaxSpeed);
+    CHECK(sn.entities.size() == 21 && sn.entities[1].health == 10000 && sn.entities[1].vx == -kMaxSpeed);
     CHECK(sn.entities[0].components == kTransform && sn.entities[0].health == 0);
     CHECK(sn.snapshot_id == 4 && sn.baseline_id == 3 && sn.entities[1].qx == -0.5f && sn.entities[1].qw == 0.5f);
-    CHECK(sn.entities[22].components == kRemoved && sn.entities[22].entity == (EntityRef{999, 7}));
+    CHECK(sn.entities[20].components == kRemoved && sn.entities[20].entity == (EntityRef{999, 7}));
+    CHECK(sn.entities[1].weapon_slot == 2 && sn.entities[1].ammo == 8 && sn.entities[1].shots == 65535); // v1.4
     CHECK(sn.entities[1].aim_yaw == -3.f && sn.entities[1].aim_pitch == 1.2f); // v1.3
 }
 
@@ -364,7 +365,7 @@ TEST("codec/values")
           DecodeError::BadValue); // second input's tick 500 >= first's
     // Snapshot: unknown component bit, health over 10000, the same entity twice.
     Snapshot sn = std::get<Snapshot>(Find("snapshot").message);
-    sn.entities[0].components = 0x80;
+    sn.entities[0].components = 0x100;
     std::vector<std::uint8_t> out;
     CHECK(!encode(sn, 5, 10, out));
     sn = std::get<Snapshot>(Find("snapshot").message);
@@ -385,7 +386,7 @@ TEST("codec/values")
     CHECK(!encode(sn, 5, 10, out)); // part 2 of 2
     // v1.2: a removal carries nothing else; a rotation is a unit quaternion.
     sn = std::get<Snapshot>(Find("snapshot").message);
-    sn.entities[22].components = kRemoved | kHealth;
+    sn.entities[20].components = kRemoved | kHealth;
     CHECK(!encode(sn, 5, 10, out));
     sn = std::get<Snapshot>(Find("snapshot").message);
     sn.entities[1].qw = 0.f;

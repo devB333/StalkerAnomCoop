@@ -746,4 +746,34 @@ TEST("snapshot/aim-delta-and-interpolation")
     CHECK(std::fabs(std::fabs(m.aim_yaw) - 3.14159f) < 0.01f); // the short way round
 }
 
+TEST("snapshot/weapon-component")
+{
+    // v1.4: an actor's weapon state travels as one component; a shot (the
+    // counter and the ammo change) sends only it.
+    SnapshotSender s;
+    SnapshotReceiver r;
+    EntityState a = Creature(1, 0.f);
+    a.components = std::uint16_t(a.components | kWeapon);
+    a.weapon_slot = 2;
+    a.ammo = 8;
+    std::vector<Snapshot> parts;
+    s.build(1, 0, {a}, parts);
+    OfferAll(r, OverWire(parts));
+    Ack(r, s);
+    a.ammo = 7;
+    a.shots = 1;
+    s.build(2, 0, {a}, parts);
+    REQUIRE(parts.size() == 1 && parts[0].entities.size() == 1);
+    CHECK(parts[0].entities[0].components == kWeapon);
+    SnapshotUpdate u;
+    OfferAll(r, OverWire(parts), &u);
+    REQUIRE(u.states.size() == 1);
+    CHECK(u.states[0].ammo == 7 && u.states[0].shots == 1 && u.states[0].weapon_slot == 2);
+    // A slot beyond the inventory's is refused on the wire.
+    Snapshot bad = parts[0];
+    bad.entities[0].weapon_slot = 16;
+    std::vector<std::uint8_t> out;
+    CHECK(!encode(Message(bad), 5, 99, out));
+}
+
 } // namespace coop::test

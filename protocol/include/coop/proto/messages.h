@@ -30,7 +30,10 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // from one tree (build id), so the layout change needs no negotiation.
 // 1.3 (S06-T03): an aim component (an actor's torso yaw and pitch: where its
 // camera looks, which its arms and weapon follow; the body yaw lags it).
-constexpr std::uint16_t kProtocolMinor = 3;
+// 1.4 (S06-T04): a weapon component (an actor's active slot, weapon state,
+// rounds in the magazine and a shot counter), the fire button, and the first
+// action kinds (activate a slot, reload).
+constexpr std::uint16_t kProtocolMinor = 4;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -267,7 +270,8 @@ enum SnapshotComponent : std::uint16_t
     kRotation = 1 << 4,  // qx, qy, qz, qw: a unit quaternion (v1.2; physics objects)
     kRemoved = 1 << 5,   // v1.2: the entity leaves the client's snapshot set; no fields, never with another bit
     kAim = 1 << 6,       // v1.3: aim yaw, aim pitch (an actor's torso; radians)
-    kStateComponents = kTransform | kVelocity | kHealth | kStateBits | kRotation | kAim,
+    kWeapon = 1 << 7,    // v1.4: u8 active slot, u8 weapon state, u16 rounds in the magazine, u16 shot counter
+    kStateComponents = kTransform | kVelocity | kHealth | kStateBits | kRotation | kAim | kWeapon,
     kKnownComponents = kStateComponents | kRemoved,
 };
 
@@ -283,6 +287,8 @@ struct SnapshotEntity
     std::uint16_t state_bits = 0;
     float qx = 0, qy = 0, qz = 0, qw = 1;
     float aim_yaw = 0, aim_pitch = 0;
+    std::uint8_t weapon_slot = 0, weapon_state = 0;
+    std::uint16_t ammo = 0, shots = 0;
 };
 
 // One part of a snapshot. A snapshot is the server's state of the client's
@@ -315,6 +321,17 @@ enum class Stance : std::uint8_t
     Sprint = 3,
 };
 constexpr std::uint32_t kKnownButtons = 0x0000FFFF;
+constexpr std::uint32_t kButtonWalk = 1u << 0; // S06-T01
+constexpr std::uint32_t kButtonFire = 1u << 1; // S06-T04: the fire key is held
+
+// S06-T04: the action kinds the server defines (ActionIntent.kind); every
+// other kind is refused. Their params are decoded by the server with their
+// own bounds.
+enum ActionKind : std::uint16_t
+{
+    kActionActivateSlot = 1, // params: u8 inventory slot; the item in it becomes the active one
+    kActionReload = 2,       // params: none; reload the active weapon from the actor's own ammo
+};
 
 struct Input
 {

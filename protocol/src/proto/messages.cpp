@@ -553,6 +553,13 @@ void Write(Writer& w, const Snapshot& m)
             w.f32(e.aim_yaw);
             w.f32(e.aim_pitch);
         }
+        if (e.components & kWeapon)
+        {
+            w.u8(e.weapon_slot);
+            w.u8(e.weapon_state);
+            w.u16(e.ammo);
+            w.u16(e.shots);
+        }
     }
 }
 void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
@@ -628,6 +635,16 @@ void Read(Reader& r, Snapshot& m, std::uint64_t sequence)
             r.field("snapshot.aim");
             e.aim_yaw = r.f32(-kMaxAngle, kMaxAngle);
             e.aim_pitch = r.f32(-kMaxAngle, kMaxAngle);
+        }
+        if (e.components & kWeapon)
+        {
+            r.field("snapshot.weapon");
+            e.weapon_slot = r.u8();
+            e.weapon_state = r.u8();
+            e.ammo = r.u16();
+            e.shots = r.u16();
+            if (r.ok() && e.weapon_slot > 15)
+                r.fail(DecodeError::BadValue);
         }
         m.entities.push_back(e);
     }

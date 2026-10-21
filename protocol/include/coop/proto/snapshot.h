@@ -60,6 +60,8 @@ struct EntityState
     std::uint16_t state_bits = 0;
     float qx = 0, qy = 0, qz = 0, qw = 1;
     float aim_yaw = 0, aim_pitch = 0; // kAim
+    std::uint8_t weapon_slot = 0, weapon_state = 0; // kWeapon
+    std::uint16_t ammo = 0, shots = 0;
 };
 
 using SnapshotFrame = std::map<std::uint64_t, EntityState>;

@@ -62,12 +62,13 @@ Cap message sizes, command rates, outstanding operations, entity counts and resy
 
 Implemented 2026-10-20 (S04-T03, [validation](validation/S04-T03.md)) in
 `protocol/include/coop/proto/` (`wire.h`, `messages.h`, `guard.h`) and
-`protocol/src/proto/`. Version **1.3** (1.0 in S04-T03; 1.1 in S05-T01 raised the
+`protocol/src/proto/`. Version **1.4** (1.0 in S04-T03; 1.1 in S05-T01 raised the
 Spawn state to 16 KiB for native spawn packets, lifecycle messages to 20 KiB
 with a 1 MiB backlog, and the send buffer to 2 MiB; **1.2** in S06-T02 gave
 Snapshot its own id, rotation and removal components and delta semantics
 against acknowledged baselines, and SnapshotAck a missing-baseline field; **1.3** in S06-T03 added the aim
-component: both
+component; **1.4** in S06-T04 added the weapon component, the fire button and
+the first two action kinds: both
 peers come from one build, so the layout change is not negotiated). The code is the reference; this
 section is its summary.
 
@@ -123,14 +124,14 @@ violation (the receiver closes with transport code 1003).
 | Welcome | major (must match), negotiated minor, campaign/session/player/party ids, slot, slot generation, authority epoch, server tick, tick and snapshot rates, resume token | ids non-zero; slot < 8; epoch ≥ 1; 1 ≤ snapshot rate ≤ tick rate ≤ 240; token 16–64 |
 | Reject | reason, server major/minor, detail | reason ≠ 0 (unknown values kept); detail ≤ 128 |
 | Heartbeat | nonce, echo, sent tick | nonce ≠ 0 |
-| ActionIntent | operation id, kind, target ref, expected revision, params | operation id ≠ 0; kind 1–1023; params ≤ 256 (decoded per kind later, with its own bounds) |
+| ActionIntent | operation id, kind, target ref, expected revision, params | operation id ≠ 0; kind 1–1023; params ≤ 256 (decoded per kind, with its own bounds). Kinds (v1.4): 1 activate slot (params: one byte, the slot: 0 holsters, 1–6 must hold an item), 2 reload (no params); any other kind is refused with reason 1 |
 | ActionResult | operation id, outcome, reason, commit id, tick, revision | outcome 1–3; accepted ⇔ reason 0 (duplicate: either) |
 | Spawn | entity ref, archetype, level, transform, parent ref, commit id, state | archetype 1–64; parent ≠ self; state ≤ 16,384 (opaque, decoded later with bounds) |
 | Despawn | entity ref, reason, commit id | reason 1–3 |
 | CampaignEvent | event id, kind, revision, payload | ids non-zero; payload ≤ 1,024 |
-| Snapshot | server tick, snapshot id (v1.2), baseline, last input, part, part count, entities; each entity: ref, components, then transform / velocity / health / state bits / rotation (v1.2) / aim (v1.3: an actor's torso yaw and pitch) as the bits say; a removal (v1.2) has no fields | snapshot id ≠ 0; baseline < snapshot id; part < count ≤ 16; ≤ 64 entities, each once; component bits known; removal alone; health ≤ 10,000; rotation a unit quaternion (norm² 0.98–1.02) |
+| Snapshot | server tick, snapshot id (v1.2), baseline, last input, part, part count, entities; each entity: ref, components, then transform / velocity / health / state bits / rotation (v1.2) / aim (v1.3: an actor's torso yaw and pitch) / weapon (v1.4: active slot, weapon state, rounds in the magazine, shot counter) as the bits say; a removal (v1.2) has no fields | snapshot id ≠ 0; baseline < snapshot id; part < count ≤ 16; ≤ 64 entities, each once; component bits known; removal alone; health ≤ 10,000; rotation a unit quaternion (norm² 0.98–1.02); weapon slot ≤ 15 |
 | SnapshotAck | snapshot id (newest complete, 0: none), missing baseline (v1.2, 0: none), event cursor | not both zero |
-| InputBatch | 1–8 inputs, newest first (input *i* has sequence `header.sequence − i`) | ticks strictly decreasing; axes −1..1; angles bounded; buttons ≤ 16 bits; stance 0–3 |
+| InputBatch | 1–8 inputs, newest first (input *i* has sequence `header.sequence − i`) | ticks strictly decreasing; axes −1..1; angles bounded; buttons ≤ 16 bits (bit 0 walk, bit 1 fire in v1.4); stance 0–3 |
 | ResyncBegin | resync id, checkpoint id, next epoch, content hash, event watermark, total bytes, chunk size, chunk count | total ≤ 256 MiB; chunk ≤ 60 KiB; count = ⌈total/chunk⌉ ≤ 65,536 |
 | ResyncChunk | resync id, index, CRC-32, data | 1–60 KiB; CRC checked on decode |
 | ResyncEnd | resync id, chunk count, CRC-32 of all data | count ≥ 1 |

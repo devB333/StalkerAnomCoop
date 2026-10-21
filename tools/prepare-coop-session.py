@@ -3,8 +3,8 @@
 Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2]
            [--port 27515] [--save "player - autosave"] [--inject c1,...]
            [--script c1,c2] [--movement c1,c2] [--churn 10] [--drop 6]
-           [--net-loss 5] [--net-lag 40] [--no-predict c1,c2]
-           [--protocol-build proto-build-29] [--keys-from <earlier run>]
+           [--net-loss 5] [--net-lag 40] [--no-predict c1,c2] [--combat c1,c2]
+           [--protocol-build proto-build-30] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -70,10 +70,13 @@ def main():
                         help="percent of packets every process drops on send (S06-T02 declared conditions)")
     parser.add_argument("--net-lag", type=int, default=0,
                         help="ms every process adds to what it sends (S06-T02 declared conditions)")
+    parser.add_argument("--combat", default="",
+                        help="comma-separated client names running the S06-T04 combat program (profile script = 3); "
+                             "the server arms the participant actors and heals them below 40 %% (fixtures)")
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-29")
+    parser.add_argument("--protocol-build", default="proto-build-30")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -100,6 +103,7 @@ def main():
     script = {n for n in args.script.split(",") if n}
     movement = {n for n in args.movement.split(",") if n}
     no_predict = {n for n in args.no_predict.split(",") if n}
+    combat = {n for n in args.combat.split(",") if n}
     if (inject | script | movement) - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -163,13 +167,14 @@ def main():
         if name == "server":
             lines += ["role = server", f"listen = 0.0.0.0:{args.port}", f"roster = {winpath(roster)}",
                       f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600",
-                      f"churn = {args.churn}", f"drop = {args.drop}"]
+                      f"churn = {args.churn}", f"drop = {args.drop}",
+                      f"arm = {1 if combat else 0}", f"combat_heal = {1 if combat else 0}"]
         else:
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
                       f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",
                       f"inject = {1 if name in inject else 0}",
-                      f"script = {2 if name in movement else 1 if name in script else 0}",
+                      f"script = {3 if name in combat else 2 if name in movement else 1 if name in script else 0}",
                       f"predict = {0 if name in no_predict else 1}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")

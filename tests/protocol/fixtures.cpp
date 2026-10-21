@@ -127,7 +127,7 @@ std::vector<Fixture> AllFixtures()
     sn.last_input = 50;
     sn.part = 1;
     sn.part_count = 2;
-    for (std::uint32_t i = 0; i < 22; ++i)
+    for (std::uint32_t i = 0; i < 20; ++i)
     {
         SnapshotEntity e;
         e.entity = {1000 + i, 1 + i};
@@ -144,6 +144,10 @@ std::vector<Fixture> AllFixtures()
         e.qw = 0.5f;
         e.aim_yaw = -3.f;
         e.aim_pitch = 1.2f;
+        e.weapon_slot = 2;
+        e.weapon_state = 5;
+        e.ammo = 8;
+        e.shots = 65535;
         sn.entities.push_back(e);
     }
     SnapshotEntity removed;

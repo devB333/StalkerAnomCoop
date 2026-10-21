@@ -328,3 +328,55 @@ Validation: [S06-T03](validation/S06-T03.md). Protocol `prediction.h`
   leg began the own actor had moved 5 cm. Comparison:
   `tools/compare-coop-prediction.py`; `prepare-coop-session.py --no-predict`
   runs the baseline.
+
+## Authoritative weapon slice (S06-T04)
+
+Validation: [S06-T04](validation/S06-T04.md). Protocol 1.4 (`messages.h`:
+`kWeapon`, `kButtonFire`, `ActionKind`); engine: `CoopServerHost.cpp`,
+`CoopClientLink.cpp`, `Actor.cpp` (`CActor::Hit`), `Actor_Weapon.cpp`
+(`CActor::g_fireParams`), `Weapon.h` / `WeaponMagazined` (`replica_present_shot`),
+`CoopReplica.cpp`, `CoopConfig`.
+
+- **Fire is an input.** The input batch carries the fire key's state (bit 1).
+  On a change the server presses or releases the native `kWPN_FIRE` on that
+  player's own actor (`actor_input_press/release`, `Scope::Self`). The weapon
+  then decides as in single-player whether, when and how it fires: its state,
+  cadence, fire mode, magazine and ballistics. Bullets fly in the server's
+  bullet manager and hit at the server's present time; there is no rewind.
+  A silent or detached player's trigger is released.
+- **Fire ray per actor.** `CActor::g_fireParams` took every actor's ray from
+  the HUD pick, which is the view player's camera. Any actor other than the
+  view one now fires along its own camera (`Cameras()`), which `cam_Update`
+  keeps for every actor. Single-player has one actor and is unchanged.
+- **Actions.** `ActionIntent` kind 1 activates a slot (0 holsters, 1–6 must
+  hold an item) and kind 2 presses the native reload key; the server answers
+  with an `ActionResult` (reasons: 1 unsupported kind, 2 malformed params,
+  3 no live actor, 4 nothing to act on). The intent names no actor: it acts
+  on the actor the player's session resolves. Every other kind, a forged
+  "hit" included, is refused and changes nothing.
+- **Outcomes (protocol 1.4).** Each actor's snapshot carries its health, its
+  active slot, its weapon's state, the rounds in its magazine and a shot
+  counter (the magazine's decreases, counted by the host). A client applies
+  health, slot and rounds to both actors when the server's value changes, so
+  its own weapon's local firing is corrected, not fought. A client keeps an
+  actor alive whatever its health says (deaths are S06-T05's). When the
+  server put an item in a slot (`CInventory::Slot` sends no event), the
+  client moves the same kind of item from the backpack into it.
+- **Presentation.** The shooter's own weapon fires locally at once for sound,
+  flash and recoil. The other player's shots are shown from the counter
+  (`CWeaponMagazined::replica_present_shot`: sound, flame and smoke, no
+  bullet). The replica refuses every game event from its own level, so local
+  bullets damage nothing; `GE_WPN_STATE_CHANGE` is now let through so a
+  client's own weapon can change state.
+- **Hits between participants.** The installed pre-hit script callback drops
+  hits from any stalker or actor friendly to `db.actor` except the one with
+  id 0. The first player's actor could hurt the second, but the second could
+  hurt nobody, itself included. Hits between participant actors now skip the
+  callback and follow one co-op rule, the same both ways: a player's own hits
+  apply, and another player's apply when the server profile allows friendly
+  fire (`friendly_fire`, default 1).
+- **Fixtures** (profile, `prepare-coop-session.py --combat`): `arm` gives each
+  participant actor a PM (into slot 2, not drawn) and two boxes of 9x18;
+  `combat_heal` restores an actor below 40 % health to 100 % and logs it.
+  The combat program is profile `script = 3`; `tools/compare-coop-combat.py`
+  measures it against the server's `coop-combat.csv`.

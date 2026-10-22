@@ -13,7 +13,7 @@ Planning baseline: 2026-10-15. **The original planning execution authorized no i
 | 4 | Validated transport, protocol and sessions | G04 | Completed |
 | 5 | Two clients observe the same actors and world | G05 | Completed |
 | 6 | Server movement, reconciliation and combat | G06 | Completed |
-| 7 | Recoverable checkpoints, durable critical outcomes and resynchronization | G07 | Not Started |
+| 7 | Recoverable checkpoints, durable critical outcomes and resynchronization | G07 | In Progress |
 | 8 | Durable inventory and one complete shared quest | G08 | Not Started |
 | 9 | Confirmed party travel with failure recovery | G09 | Not Started |
 | 10 | Broader campaign and simulation coverage | G10 | Not Started |
@@ -572,7 +572,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S07-T01 — Specify recoverable state and critical transaction boundaries
 
-- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- [x] **Status: Completed** · **Reasoning effort: Extra High** · **Complexity: High**
 - **Purpose:** Make durable guarantees precise before implementing storage.
 - **Prerequisites:** G06.
 - **Relevant files/subsystems:** E12; state-ownership.md; native saves; proposed journal interfaces.
@@ -584,7 +584,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S07-T02 — Create consistent authoritative checkpoint generations
 
-- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- [ ] **Status: In Progress** · **Reasoning effort: Extra High** · **Complexity: High**
 - **Purpose:** Replace client-dependent saves with recoverable server checkpoints.
 - **Prerequisites:** S07-T01.
 - **Relevant files/subsystems:** alife_storage_manager; Process_save E04; actor/identity registries.
@@ -596,7 +596,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S07-T03 — Implement durable critical outcome journal
 
-- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High**
+- [ ] **Status: In Progress** · **Reasoning effort: Extra High** · **Complexity: High**
 - **Purpose:** Ensure permanent success is acknowledged only after durability.
 - **Prerequisites:** S07-T01.
 - **Relevant files/subsystems:** Planned server journal/transaction module; simulation command queue.
@@ -1044,6 +1044,8 @@ Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Comple
 | S06-T06 | Completed | [Cordon fixture](docs/validation/S06-T06.md) (patch 0036, proto-build-31): user-made Cordon save ([record](docs/cordon-fixture.json)); no fixture names Fanat; Cordon's weak boar; fixed: server crash on blood marks (no wallmark engine), join race at 10 % loss (other channels wait for the client's first in-session message), a reused id with the same section kept a stale replica object; cenc-19/20 (nominal), cenc-21 (5 % / 40 ms), cenc-22 (10 % / 100 ms) pass all checks; ccombat-5, cpred-5, csession-5, csnap-5 pass in Cordon; smoke-168, capture-52/53 pass; 98/98 protocol tests. Next: S06-T07. |
 | S06-T07 | Completed | Jump and lean as server input (added at G06). Part 1 done ([report](docs/validation/S06-T07.md), patch 0037): windowed co-op clients take the mouse only on a click inside, so a window can be dragged by its title bar; checked with `tools/Test-WindowCapture.ps1` (window-capture-3). Part 2 done (patch 0038, after a user demo): a player's own weapon switch and reload reach the server, the other player's drawn weapon shows, both players start holstered. Part 3 (0039): remote items presentation only; the knife glitch is logged as [K1](docs/known-issues.md). Part 4 (0040, protocol v1.5): jump and lean reach the server (act-5). Final co-op regression on campaign-217 passes (tenc-1/2, tcombat-1, tpred-1, tsession-1, tsnap-1); smoke-169, capture-56 (checkpoint) and capture-59 (combat) pass. Next: S06-T08. |
 | S06-T08 | Completed | [Storm and emission visuals](docs/validation/S06-T08.md) (patch 0041, campaign-222/client-124): the server sends its environment (cycle, the two blended descriptors, the weather effect and its time left), its thunderbolts and the scripts' camera/post-process effectors, sounds and particles (participant and broadcast outboxes); clients blend the same descriptors from the shared clock, play the server's bolts and the emission's phases. cweather-2 (nominal), cweather-3 (5 % loss, 40 ms) and cweather-4 (final build) pass every check on both clients: descriptors equal, weight within 0.001, effect start within 92 ms, bolts within 291 ms, records within 443 ms, effectors in step. L09 closed; L28/L29 added (actor-relative presentation and the emission's gameplay use participant 1's actor: S10-T05). Fixed on the way: a backward clock step ended the effect on clients; events were queued before a client was in the world. Next: S07-T01. |
+| S07-T01 | Completed | [Persistence contract](docs/persistence-contract.md) and [report](docs/validation/S07-T01.md) (2026-10-22): guarantee matrix, ids, transaction phases, publication, journal, recovery, resync, respawn, synthetic ledger fixture, 17 crash boundaries on paper. Specification only. |
+| S07-T02 / S07-T03 | In Progress | Store library `protocol/{include,src}/coop/store` and `tests/store/test_store.cpp` written (journal, generations, failpoints, termination matrix); proto-build-33 failed on one compile error, fixed, not rebuilt; no engine integration yet. See the handoff. |
 | S07-T07 | Not Started | Respawn with a lootable corpse (added at G06; after S07-T02/T03). |
 
 As work progresses, replace the aggregate engineering/gate rows with compact current-stage status plus completed-gate links; detailed results remain in task reports. Keep the stage summary at the top synchronized. S02-T03–T06 are complete, S02-T06 including the native checkpoint round-trip (T06d), the quest round-trip (T06e) and the G02 evidence record. G02 was accepted for development on 2026-10-18 with named limits carried into Stage 3. The Services smoke pass does not satisfy any gameplay requirement. G02 requires S02-T02–T06 and their behavioral evidence.

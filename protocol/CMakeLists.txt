@@ -13,6 +13,10 @@
 # coop-keytool  makes a player's key file and roster line.
 # coop_net_gns  the GameNetworkingSockets backend (src/net/gns_transport.cpp
 #               is the only file that includes the library).
+# coop_store    the durable store (S07-T02/T03): file primitives with
+#               failpoints, the journal, checkpoint generations. Windows
+#               file API and BCrypt (SHA-256); uses coop_protocol for the
+#               wire types and CRC only.
 
 find_package(GameNetworkingSockets CONFIG REQUIRED)
 
@@ -56,3 +60,12 @@ target_link_libraries(coop_session PUBLIC coop_protocol PRIVATE bcrypt crypt32)
 add_executable(coop-keytool tools/coop_keytool.cpp)
 target_compile_options(coop-keytool PRIVATE ${COOP_WARNINGS})
 target_link_libraries(coop-keytool PRIVATE coop_session)
+
+add_library(coop_store STATIC
+    src/store/file.cpp
+    src/store/journal.cpp
+    src/store/checkpoint.cpp)
+target_include_directories(coop_store PUBLIC include)
+target_compile_options(coop_store PRIVATE ${COOP_WARNINGS})
+target_compile_definitions(coop_store PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(coop_store PUBLIC coop_protocol PRIVATE bcrypt)

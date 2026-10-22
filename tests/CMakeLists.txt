@@ -39,11 +39,12 @@ add_executable(protocol-tests
     protocol/test_wire.cpp
     session/test_crypto.cpp
     session/test_session.cpp
-    session/test_liveness.cpp)
+    session/test_liveness.cpp
+    store/test_store.cpp)
 target_include_directories(protocol-tests PRIVATE harness transport protocol session)
 target_compile_options(protocol-tests PRIVATE /W4 /WX /permissive- /EHsc)
 target_compile_definitions(protocol-tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(protocol-tests PRIVATE coop_session coop_protocol coop_net_gns winmm)
+target_link_libraries(protocol-tests PRIVATE coop_session coop_store coop_protocol coop_net_gns winmm)
 
 # Run next to the library they were built against.
 add_custom_command(TARGET transport-tests POST_BUILD

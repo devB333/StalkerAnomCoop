@@ -1,62 +1,70 @@
-# Session handoff — Stage 6 done (S06-T08 completed); next S07-T01
+# Session handoff — Stage 7 started: S07-T01 completed, S07-T02/T03 in progress
 
 ## State (2026-10-22)
 
-- **G06 accepted** 2026-10-21 ([G06](../../validation/G06.md#user-decision)); the
-  three tasks added at the gate are done, so **every Stage 6 task is
-  Completed**. New bugs go to [known issues](../../known-issues.md), not into
-  the current task.
-  - S06-T06 Cordon fixture, S06-T07 jump and lean: Completed.
-  - S06-T08 storm and emission visuals: **Completed** 2026-10-22
-    ([S06-T08](../../validation/S06-T08.md), patch 0041, no protocol change).
-    Three new `CampaignEvent` kinds: environment (cycle, the two blended
-    descriptors, the weather effect and its time left), thunderbolt (the
-    server draws each bolt), presentation (the scripts' camera/post-process
-    effectors, sounds and particles from the participant and broadcast
-    outboxes). cweather-2 (nominal), cweather-3 (5 % loss, 40 ms) and
-    cweather-4 (final build) pass every check on both clients. Regression:
-    smoke-170, capture-60/61, wenc-1 pass. L09 closed; L28/L29 added (the
-    emission's actor-relative presentation and gameplay use participant 1's
-    actor: S10-T05).
-  - S07-T07 respawn with a lootable corpse (after S07-T02/T03; starting kit).
-- Engine: patches 0001–0041 (check `builds/stage2/patch-check-44b`); protocol
-  **v1.5** `proto-build-32` (98/98, pt-30). Final build `campaign-222` /
-  `client-124`. Tool defaults: `proto-build-32`, `--fixture cordon`.
+- **G06 accepted** 2026-10-21; every Stage 6 task Completed. The user said
+  they are "ready to accept gate 6" (already accepted) and to **work through
+  to the next gate (G07)**, stopping only for a major blocker.
+- **S07-T01 Completed** 2026-10-22 ([report](../../validation/S07-T01.md)):
+  the persistence contract is [docs/persistence-contract.md](../../persistence-contract.md)
+  (guarantee matrix, revision/generation/epoch/operation ids, the six
+  transaction phases, checkpoint publication in 8 steps, journal format,
+  recovery sequence, client resync, respawn, the synthetic ledger fixture,
+  17 crash boundaries on paper). It is the spec for S07-T02…T07.
+- **S07-T02 + S07-T03 In Progress** (no engine change yet, nothing built):
+  - Project-owned store library written: `protocol/include/coop/store/{file,journal,checkpoint}.h`,
+    `protocol/src/store/*.cpp` (durable file primitives with failpoints,
+    `JournalWriter`/`read_journal`, `CheckpointStore::publish/recover`,
+    supplemental record and manifest codecs), `coop_store` in
+    `protocol/CMakeLists.txt`; tests `tests/store/test_store.cpp` (journal
+    round trip, torn tail, corruption, fail-closed append, publish/recover/
+    retention/fallback, publication failpoints, a **termination matrix** that
+    runs this exe as a child with `--filter store/child` and
+    `TerminateProcess` at 8 failpoints) added to `protocol-tests`.
+  - `proto-build-33` **failed to compile** (one error: assigning a
+    `JournalWriter`, `checkpoint.cpp:747`). Fixed in source
+    (`JournalWriter::reset()`, movable `AppendFile`) but **not rebuilt**.
+- Engine: patches 0001–0041 unchanged; engine-work has no uncommitted
+  changes of this session. Final Stage 6 build `campaign-222` / `client-124`,
+  protocol `proto-build-32` (v1.5).
 
 ## First thing next session
 
-1. Start **S07-T01** (specify recoverable state and critical transaction
-   boundaries): see plan.md §C Stage 7. It is a specification task; read
-   `docs/validation/S02-T06.md` part 5 (the native checkpoint round-trip) and the
-   checkpoint code (`CampaignCheckpoint.cpp`, `CoopServerHost.cpp`
-   `start_resync`) first.
-2. Weather demo for the user, if asked: `prepare-coop-session.py <run> --task
-   S06-T08 --weather c1,c2` then `Run-CoopSession.ps1 ... -ClientSeconds
-   '480,470'` (storm 10 s after both are in the world, emission 70 s after;
-   `--psi-storm` for a psi-storm instead; untested on a psi-storm).
+1. Rebuild the protocol: `Build-Protocol.ps1 -Run proto-build-34 -Task S07-T02`,
+   then `python3 tools/run-protocol-tests.py st-1 --build proto-build-34 --task S07-T02 --exe protocol-tests`
+   (expect 98 old tests + 8 store tests; the termination matrix spawns
+   children). Fix what fails; record in `docs/validation/S07-T02.md` and
+   `S07-T03.md` (not yet written).
+2. Engine integration (design in the contract §5–§7, §10; plan sketched this
+   session): new `xrGame/CoopPersistence.{h,cpp}`; `xrCoopServer_Prepare`
+   runs `CheckpointStore::recover` and chooses the save name
+   (`coop-gen-<G>` or the profile's base save), allocates the epoch
+   (journal `epoch` record, flushed) before listening; `start_resync` and a
+   periodic `checkpoint_seconds` profile key publish generations (native
+   save under `coop-tmp-gen-<G>`, then `publish`); the supplemental record
+   needs `CampaignIdentityRegistry` additions (export u16→EntityId, restore
+   map consulted in `on_engine_id_assigned`, `next_entity`), participants
+   assigned by saved u16 after the ALife load and before the client stages
+   (new hook in `x_ray.cpp` between `campaign-server-ready` and the client
+   stages); `ActionIntent` kind 3 `ledger` (`s32 delta` → `set_money`)
+   committed through the journal before apply/ack; reason 5 `StoreFailed`
+   fail-closed; `Welcome`/`ResyncBegin` epoch from the store; client program
+   6 (ledger) and `tools/compare-coop-recovery.py`; `Run-CoopSession.ps1`
+   needs a server kill/restart option and clients need reconnect (S07-T05).
+3. Then S07-T04 (replay adapters), T05 (client fence/reconnect), T06
+   (failpoint matrix, G07 report), T07 (respawn). Add L32 (actor 2 script
+   state) to carried limits at G07.
 
 ## Known issues (not to chase now)
 
-[known issues](../../known-issues.md): K1 the other player's knife bends your
-own first-person pistol; K2 NPC shuffle (S10-T02); K3 slight choppiness
-(S11); K4 items an NPC held after the server released it (S08).
-
-## Hands-on demo for the user
-
-`bash tools/start-coop-demo.sh` (Cordon, armed, boar after 30 s, 28 min;
-`S06-T07 0 15` for no boar, 15 min); end by closing both windows, or
-`bash tools/stop-coop-demo.sh`. Windows: alt-tab out, drag by the title bar.
-Test drivers: `tools/Send-ClientActions.ps1` (keys, holds, clicks),
-`tools/Test-WindowCapture.ps1` (both drive the real mouse; tell the user first).
-Never screen-capture the desktop; use `PrintWindow` on the game window.
+[known issues](../../known-issues.md): K1–K4 unchanged.
 
 ## Run names
 
-- Used (S06-T08): builds `campaign-218…222`, `client-120…124`; `cweather-1…4`,
-  `wenc-1`; `smoke-170`; `capture-60`, `capture-61`; patch check 44a/44b.
-- Next: `campaign-223`, `client-125`, `proto-build-33`, `pt-31`,
-  `smoke-171`, `capture-62`, patch check 45.
+- Used this session: `proto-build-33` (failed compile, S07-T02 log folder).
+- Next: `proto-build-34`, `st-1` (store tests), `campaign-223`, `client-125`,
+  `pt-31`, `smoke-171`, `capture-62`, patch check 45.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S07-T01](../done/snapshot-before-S07-T01.md).
+Previous snapshot: [before S07-T02](../done/snapshot-before-S07-T02.md).

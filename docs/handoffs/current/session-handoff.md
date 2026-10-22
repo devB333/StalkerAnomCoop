@@ -11,13 +11,16 @@
     `campaign-212` / `client-114`). Part 2 done (user demo report): a
     player's weapon switch and reload now reach the server, and the other
     player's drawn weapon shows (patch 0038, `campaign-214` / `client-116`).
-    Jump and lean not started.
+    Part 3 (patch 0039): remote participants' items are presentation only;
+    it did not fix the knife glitch, which is logged with the other demo bugs
+    in [known issues](../../known-issues.md) (K1-K4). Next: jump and lean.
+    The user wants to move through the gates first; bugs go to the list.
   - S06-T08 storm and emission visuals.
   - S07-T07 respawn with a lootable corpse (after S07-T02/T03; the respawned
     player gets the faction's starting kit).
-- Engine: patches 0001–0038 (check `builds/stage2/patch-check-41b`);
+- Engine: patches 0001–0039 (check `builds/stage2/patch-check-42b`);
   protocol `proto-build-31` (wire v1.4 unchanged; session join fix). Final
-  build `campaign-214` / `client-116`. Tool defaults: `proto-build-31`, and
+  build `campaign-215` / `client-117`. Tool defaults: `proto-build-31`, and
   `prepare-coop-session.py --fixture cordon`.
 - **Cordon fixture:** user-made save `cordon fixture`
   ([record](../../cordon-fixture.json)), Loner, outdoors about 140 m east of

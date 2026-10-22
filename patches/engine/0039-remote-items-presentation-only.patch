@@ -1,0 +1,27 @@
+diff --git a/src/xrGame/HudItem.cpp b/src/xrGame/HudItem.cpp
+index 814d528..e15df12 100644
+--- a/src/xrGame/HudItem.cpp
++++ b/src/xrGame/HudItem.cpp
+@@ -160,11 +160,19 @@ void CHudItem::SwitchState(u32 S)
+ 	}
+ 	// S06-T07: on a co-op client the other player's item is remote and no
+ 	// state event reaches it, so it never left eHidden and its weapon was
+-	// never drawn (demo-4: player 1 never saw player 2's pistol). Its state
+-	// changes here, as presentation; the server decides the weapon's outcomes.
++	// never drawn (demo-4: player 1 never saw player 2's pistol). It is now
++	// shown or hidden here, as presentation only; the server decides the
++	// weapon's outcomes. Not OnStateSwitch: its first-person (HUD) motions use
++	// the shared hands of the local player, whose own pistol then took the
++	// other player's knife pose (demo-6).
+ 	else if (campaign::replica_active() && !object().getDestroy() &&
+ 		smart_cast<CActor*>(object().H_Parent()))
+-		OnStateSwitch(S, GetState());
++	{
++		const u32 shown = (S == eHiding || S == eHidden) ? u32(eHidden) : (S == eShowing ? u32(eIdle) : S);
++		SetState(shown);
++		SetNextState(shown);
++		object().setVisible(shown != eHidden);
++	}
+ }
+ 
+ void CHudItem::OnEvent(NET_Packet& P, u16 type)

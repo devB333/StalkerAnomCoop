@@ -161,6 +161,10 @@
     {
       "path": "patches/engine/0038-player-weapon-actions-and-remote-weapons.patch",
       "sha256": "9b0115328ec26d701af16a179920ae524fc8da504f48bd745f44f42bbb3ddfac"
+    },
+    {
+      "path": "patches/engine/0039-remote-items-presentation-only.patch",
+      "sha256": "e587f5b9ca1be6558106319bdeba8f43cc005f1d71c872f81b76a9a41e3e9db5"
     }
   ],
   "submodules": [

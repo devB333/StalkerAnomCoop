@@ -50,7 +50,11 @@ INT_FIELDS = {"level_id", "game_time", "alife_objects", "alife_savable", "level_
               "se_actor_node", "npc_id", "npc_se", "npc_live", "npc_alive", "monster_id", "monster_se",
               "monster_se_online", "monster_live", "binder", "after_first_update"}
 NO_ID = 65535
-GAME_TWO_MINUTES_MS = 120000
+# The loaded game time may be this far past the saved one. Two minutes until
+# S06-T08: since S06-T07 the capture harness keeps the game active while its
+# window has no focus (g_always_active on), so game time advances through the
+# ~30 s level load at the save's time factor (capture-60: 172 s).
+GAME_RESUME_WINDOW_MS = 600000
 
 
 def load(path):
@@ -97,7 +101,7 @@ def compare(saved, loaded, live_expected):
     # checks it is still in ALife on this level).
     checks["level_objects_near_saved"] = near(loaded["level_objects"], saved["level_savable"])
     game_time_delta = loaded["game_time"] - saved["game_time"]
-    checks["game_time_resumed"] = 0 <= game_time_delta < GAME_TWO_MINUTES_MS
+    checks["game_time_resumed"] = 0 <= game_time_delta < GAME_RESUME_WINDOW_MS
     checks["se_actor_position"] = loaded["se_actor"] == 1 and distance(saved, loaded, "se_actor_") < 0.25
     checks["se_actor_state"] = (loaded["se_actor"] == 1 and abs(loaded["se_actor_health"] - saved["se_actor_health"])
                                 < 1e-3 and loaded["se_actor_graph"] == saved["se_actor_graph"]

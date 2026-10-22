@@ -169,6 +169,10 @@
     {
       "path": "patches/engine/0040-jump-and-lean-input.patch",
       "sha256": "5c859a78c7af2e025dce5fee61315dd4fa64adc030d5c0c1db54daac2d4ed0c0"
+    },
+    {
+      "path": "patches/engine/0041-storm-and-emission-visuals.patch",
+      "sha256": "2a00639462160a9df19c8ec3813f72b490e4330c5fd56524e1021ccdef6de797"
     }
   ],
   "submodules": [

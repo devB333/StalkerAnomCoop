@@ -1,0 +1,1752 @@
+diff --git a/src/xrEngine/thunderbolt.cpp b/src/xrEngine/thunderbolt.cpp
+index e55fdd0..b37fb5c 100644
+--- a/src/xrEngine/thunderbolt.cpp
++++ b/src/xrEngine/thunderbolt.cpp
+@@ -129,6 +129,7 @@ CEffect_Thunderbolt::CEffect_Thunderbolt()
+ 	state = stIdle;
+ 	next_lightning_time = 0.f;
+ 	bEnabled = FALSE;
++	remote_driven = false;
+ 
+ 	base_sky_color.set(0.f, 0.f, 0.f);
+ 	base_sun_color.set(0.f, 0.f, 0.f);
+@@ -216,27 +217,56 @@ static inline void undo_flash_value(Fvector3& value, const Fvector3& written, co
+ void CEffect_Thunderbolt::Bolt(shared_str id, float period, float lt)
+ {
+ 	VERIFY(id.size());
++	CEnvironment& environment = g_pGamePersistent->Environment();
++	SThunderboltCollection* c = environment.thunderbolt_collection(collection, id);
++	VERIFY(c && c->palette.size() > 0);
++	const float life = lt + Random.randF(-lt * 0.5f, lt * 0.5f);
++	const u32 index = u32(Random.randI(int(c->palette.size())));
++	float sun_h, sun_p;
++	environment.CurrentEnv->sun_dir.getHP(sun_h, sun_p);
++	const float lng = Random.randF(sun_h - environment.p_var_long + PI, sun_h + environment.p_var_long + PI);
++	const float dist = Random.randF(FAR_DIST * environment.p_min_dist, FAR_DIST * .95f);
++	Fvector dev;
++	dev.x = Random.randF(-environment.p_tilt, environment.p_tilt);
++	dev.y = Random.randF(0, PI_MUL_2);
++	dev.z = Random.randF(-environment.p_tilt, environment.p_tilt);
++	const bool second = Random.randF() < environment.p_second_prop;
++	BoltWith(c->palette[index], life, lng, dist, dev, second, period, lt);
++}
++
++void CEffect_Thunderbolt::BoltRemote(shared_str id, u32 index, float life, float longitude, float distance,
++                                     const Fvector& tilt, bool second)
++{
++	if (!id.size() || !g_pGamePersistent || !g_pGamePersistent->Environment().CurrentEnv)
++		return;
++	CEnvironment& environment = g_pGamePersistent->Environment();
++	SThunderboltCollection* c = environment.thunderbolt_collection(collection, id);
++	if (!c || c->palette.empty())
++		return;
++	if (index >= c->palette.size())
++		index = 0;
++	BoltWith(c->palette[index], life, longitude, distance, tilt, second, 0.f, 0.f);
++}
++
++void CEffect_Thunderbolt::BoltWith(SThunderboltDesc* desc, float life, float longitude, float distance,
++                                   const Fvector& tilt, bool second, float period, float lt)
++{
+ 	state = stWorking;
+-	life_time = lt + Random.randF(-lt * 0.5f, lt * 0.5f);
++	life_time = life;
+ 	current_time = 0.f;
+ 
+-	current = g_pGamePersistent->Environment().thunderbolt_collection(collection, id)->GetRandomDesc();
++	current = desc;
+ 	VERIFY(current);
+ 
+ 	Fmatrix XF, S;
+-	Fvector pos, dev;
+-	float sun_h, sun_p;
++	Fvector pos;
+ 	CEnvironment& environment = g_pGamePersistent->Environment();
+-	environment.CurrentEnv->sun_dir.getHP(sun_h, sun_p);
+ 	float alt = environment.p_var_alt; //Random.randF(environment.p_var_alt.x,environment.p_var_alt.y);
+-	float lng = Random.randF(sun_h - environment.p_var_long + PI, sun_h + environment.p_var_long + PI);
+-	float dist = Random.randF(FAR_DIST * environment.p_min_dist, FAR_DIST * .95f);
++	float lng = longitude;
++	float dist = distance;
+ 	current_direction.setHP(lng, alt);
+ 	pos.mad(Device.vCameraPosition, current_direction, dist);
+-	dev.x = Random.randF(-environment.p_tilt, environment.p_tilt);
+-	dev.y = Random.randF(0, PI_MUL_2);
+-	dev.z = Random.randF(-environment.p_tilt, environment.p_tilt);
+-	XF.setXYZi(dev);
++	XF.setXYZi(tilt);
+ 
+ 	Fvector light_dir = {0.f, -1.f, 0.f};
+ 	XF.transform_dir(light_dir);
+@@ -249,9 +279,7 @@ void CEffect_Thunderbolt::Bolt(shared_str id, float period, float lt)
+ 	XF.translate_over(pos);
+ 	current_xform.mul_43(XF, S);
+ 
+-	float next_v = Random.randF();
+-
+-	if (next_v < environment.p_second_prop)
++	if (second)
+ 	{
+ 		next_lightning_time = Device.fTimeGlobal + lt + EPS_L;
+ 	}
+@@ -293,7 +321,7 @@ void CEffect_Thunderbolt::OnFrame(shared_str id, float period, float duration)
+ 		bEnabled = enabled;
+ 		next_lightning_time = Device.fTimeGlobal + period + Random.randF(-period * 0.5f, period * 0.5f);
+ 	}
+-	else if (bEnabled && (Device.fTimeGlobal > next_lightning_time))
++	else if (bEnabled && !remote_driven && (Device.fTimeGlobal > next_lightning_time))
+ 	{
+ 		if (state == stIdle && !!(id.size())) Bolt(id, period, duration);
+ 	}
+diff --git a/src/xrEngine/thunderbolt.h b/src/xrEngine/thunderbolt.h
+index 019bfb3..b62089f 100644
+--- a/src/xrEngine/thunderbolt.h
++++ b/src/xrEngine/thunderbolt.h
+@@ -128,11 +128,22 @@ private:
+ private:
+ 	BOOL RayPick(const Fvector& s, const Fvector& d, float& range);
+ 	void Bolt(shared_str id, float period, float life_time);
++	// The bolt itself, after the random choices: Bolt draws them, BoltRemote
++	// takes them from the campaign server (S06-T08).
++	void BoltWith(SThunderboltDesc* desc, float life, float longitude, float distance, const Fvector& tilt,
++	              bool second, float period, float duration);
+ public:
+ 	CEffect_Thunderbolt();
+ 	~CEffect_Thunderbolt();
+ 
+ 	void OnFrame(shared_str id, float period, float duration);
++	// S06-T08: a co-op client's bolts are the server's: while remote_driven
++	// the effect schedules none of its own, and BoltRemote plays the server's
++	// choice (collection entry, life, direction, distance, tilt; a "second"
++	// bolt has no clap) relative to this camera.
++	bool remote_driven;
++	void BoltRemote(shared_str id, u32 index, float life, float longitude, float distance, const Fvector& tilt,
++	                bool second);
+ 	void Render();
+ 
+ 	shared_str AppendDef(CEnvironment& environment, CInifile* pIni, CInifile* thunderbolts, LPCSTR sect);
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 7157529..0b64ab8 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -488,22 +488,25 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::PostProcessRemove: return "post-process-remove";
+ 	case Presentation::GameOver: return "game-over";
+ 	case Presentation::Tutorial: return "tutorial";
++	case Presentation::PostProcessFactor: return "post-process-factor";
++	case Presentation::Sound: return "sound";
++	case Presentation::SoundAtPos: return "sound-at-pos";
++	case Presentation::SoundStop: return "sound-stop";
++	case Presentation::SoundStopDeferred: return "sound-stop-deferred";
++	case Presentation::SoundVolume: return "sound-volume";
++	case Presentation::SoundPosition: return "sound-position";
++	case Presentation::Particles: return "particles";
++	case Presentation::ParticlesMove: return "particles-move";
++	case Presentation::ParticlesStop: return "particles-stop";
++	case Presentation::ParticlesStopDeferred: return "particles-stop-deferred";
+ 	default: return "?";
+ 	}
+ }
+ 
+-Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail)
++static void record_presentation(u8 slot, const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail,
++                                const PresentationArgs& args)
+ {
+-	if (!server_role())
+-		return Refusal::WrongRole;
+-	const Participant* participant = nullptr;
+-	const Refusal refusal = g_campaign_identity->participant(to, participant);
+-	if (refusal != Refusal::None || to.slot >= kOutboxSlots)
+-	{
+-		++s_present_dropped;
+-		return refusal != Refusal::None ? refusal : Refusal::UnknownParticipant;
+-	}
+-	xr_vector<PresentationRecord>& outbox = s_outbox[to.slot];
++	xr_vector<PresentationRecord>& outbox = s_outbox[slot];
+ 	if (outbox.size() >= kOutboxCapacity)
+ 	{
+ 		outbox.erase(outbox.begin());
+@@ -516,11 +519,34 @@ Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR
+ 	record.object = object;
+ 	record.frame = Device.dwFrame;
+ 	xr_strcpy(record.detail, detail ? detail : "");
++	record.handle = args.handle;
++	record.position = args.position;
++	record.value = args.value;
++	record.flags = args.flags;
+ 	outbox.push_back(record);
+ 	++s_stats.presented;
++}
++
++Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	const Participant* participant = nullptr;
++	const Refusal refusal = g_campaign_identity->participant(to, participant);
++	if (refusal != Refusal::None || to.slot >= kBroadcastSlot)
++	{
++		++s_present_dropped;
++		return refusal != Refusal::None ? refusal : Refusal::UnknownParticipant;
++	}
++	record_presentation(to.slot, to, kind, object, detail, args);
+ 	return Refusal::None;
+ }
+ 
++Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail)
++{
++	return present(to, kind, object, detail, PresentationArgs());
++}
++
+ Refusal present_to_context(Presentation kind, u16 object, LPCSTR detail)
+ {
+ 	if (!server_role())
+@@ -535,6 +561,22 @@ Refusal present_to_context(Presentation kind, u16 object, LPCSTR detail)
+ 	return present(context.action.actor, kind, object, detail);
+ }
+ 
++Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	ScriptContext context;
++	if (current_script_context(context) == Refusal::None)
++		return present(context.action.actor, kind, object, detail, args);
++	// S06-T08: no context, so every player's
++	++s_stats.present_broadcast;
++	ParticipantRef nobody;
++	nobody.slot = kBroadcastSlot;
++	nobody.generation = 0;
++	record_presentation(kBroadcastSlot, nobody, kind, object, detail, args);
++	return Refusal::None;
++}
++
+ Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LPCSTR detail)
+ {
+ 	if (!server_role())
+@@ -549,6 +591,19 @@ Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LP
+ 	return present(ref, kind, object, detail);
+ }
+ 
++u32 presentation_serial() { return s_present_serial; }
++
++void presentation_trim(u8 slot, u32 serial)
++{
++	if (slot >= kOutboxSlots)
++		return;
++	xr_vector<PresentationRecord>& outbox = s_outbox[slot];
++	auto it = outbox.begin();
++	while (it != outbox.end() && it->serial <= serial)
++		++it;
++	outbox.erase(outbox.begin(), it);
++}
++
+ u32 presentation_outbox(u8 slot, xr_vector<PresentationRecord>& out)
+ {
+ 	out.clear();
+@@ -984,11 +1039,12 @@ void report_script_context(LPCSTR tag)
+ 		tag, st.entered, st.refused, st.left, st.leave_mismatch, s_stack ? s_stack->depth() : 0u, st.max_depth_seen,
+ 		st.captured, st.captured_entered, st.captured_refused, st.captured_evicted);
+ 	Msg("S03-T05 script-context %s lua_calls=%I64u lua_no_context=%I64u task_scopes=%I64u task_unowned=%I64u "
+-		"task_callbacks_hosted=%I64u presented=%I64u present_no_context=%I64u dropped=%u gameplay_context=%I64u "
+-		"gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u",
++		"task_callbacks_hosted=%I64u presented=%I64u present_no_context=%I64u present_broadcast=%I64u dropped=%u "
++		"gameplay_context=%I64u gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u",
+ 		tag, s_stats.lua_actor_calls, s_stats.lua_no_context, s_stats.task_scopes, s_stats.task_unowned,
+-		s_stats.task_callbacks_hosted, s_stats.presented, s_stats.present_no_context, s_present_dropped,
+-		s_stats.gameplay_context, s_stats.gameplay_compat, s_stats.compat_installs, s_stats.compat_failures);
++		s_stats.task_callbacks_hosted, s_stats.presented, s_stats.present_no_context, s_stats.present_broadcast,
++		s_present_dropped, s_stats.gameplay_context, s_stats.gameplay_compat, s_stats.compat_installs,
++		s_stats.compat_failures);
+ 	for (u32 slot = 0; slot < kOutboxSlots; ++slot)
+ 		if (!s_outbox[slot].empty())
+ 			Msg("S03-T05 script-context %s outbox slot=%u records=%u", tag, slot, u32(s_outbox[slot].size()));
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index d5e9118..fb027ae 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -207,6 +207,20 @@ enum class Presentation : u8
+ 	PostProcessRemove,
+ 	GameOver,
+ 	Tutorial, // S03-T06: game.start_tutorial
++	// S06-T08: the storm and emission presentation the installed scripts
++	// drive through level.*, sound_object and particles_object; see the
++	// PresentationRecord fields each one fills.
++	PostProcessFactor, // object: effector id; value: factor; position.x: speed
++	Sound, // handle: the sound_object; detail: sound name; flags: play flags; value: delay; on the viewer's own actor
++	SoundAtPos, // as Sound, at position
++	SoundStop, // handle
++	SoundStopDeferred, // handle
++	SoundVolume, // handle; value
++	SoundPosition, // handle; position
++	Particles, // handle: the particles_object; detail: name; position
++	ParticlesMove, // handle; position; flags 1: a bare transform move (xform_move_to)
++	ParticlesStop, // handle
++	ParticlesStopDeferred, // handle
+ 	Count,
+ };
+ 
+@@ -220,18 +234,45 @@ struct PresentationRecord
+ 	u16 object; // the partner, effector id or 0
+ 	u32 frame;
+ 	string128 detail;
++	// S06-T08
++	u32 handle; // the script object the record is about (sound_object, particles_object), else 0
++	Fvector position;
++	float value;
++	u32 flags; // CameraEffector/PostProcess: bit 0 cyclic, bit 1 hud; Sound: play flags; ParticlesMove: 1 xform
++};
++
++// S06-T08: the extra fields of a record, zero by default.
++struct PresentationArgs
++{
++	u32 handle = 0;
++	Fvector position = {0.f, 0.f, 0.f};
++	float value = 0.f;
++	u32 flags = 0;
+ };
+ 
+ // To a participant: recorded in its outbox (bounded; the oldest is dropped
+ // and counted). StaleReference/UnknownParticipant for a reference that is not
+ // current, WrongRole on a client.
+ Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail);
++Refusal present(const ParticipantRef& to, Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args);
+ // To the innermost context's participant; NoContext (dropped, counted) when none.
+ Refusal present_to_context(Presentation kind, u16 object, LPCSTR detail);
+ // To the participant holding this actor.
+ Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LPCSTR detail);
++// S06-T08: from a script call. Inside a context: that participant. Outside
++// any (the surge and psi-storm managers run from level.add_call, the weather
++// manager from the binder of actor 0): every player, through the broadcast
++// outbox (slot kBroadcastSlot), which the co-op server delivers to each
++// live client. Counted as broadcast, not dropped.
++Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args);
++const u8 kBroadcastSlot = 7;
+ // A copy of the slot's outbox, oldest first.
+ u32 presentation_outbox(u8 slot, xr_vector<PresentationRecord>& out);
++// The serial of the newest record (0: none yet).
++u32 presentation_serial();
++// S06-T08: drop the slot's records up to and including this serial once the
++// co-op server has sent them, so the bounded outbox evicts only unsent ones.
++void presentation_trim(u8 slot, u32 serial);
+ u32 presentation_dropped();
+ 
+ // --- Lua ------------------------------------------------------------------------
+@@ -257,6 +298,7 @@ struct ScriptContextStats
+ 	u64 task_callbacks_hosted; // owned tasks' state callbacks delivered to the script host
+ 	u64 presented;
+ 	u64 present_no_context;
++	u64 present_broadcast; // S06-T08: script presentation outside any context, to every player
+ 	u64 compat_installs;
+ 	u64 compat_failures;
+ 	u64 gameplay_context; // gameplay_script_actor answered from a context
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index e332d3f..90c7169 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -18,6 +18,11 @@
+ #include "alife_object_registry.h"
+ #include "alife_time_manager.h"
+ #include "../xrEngine/Environment.h"
++#include "../xrEngine/thunderbolt.h" // S06-T08
++#include "CampaignScriptContext.h" // S06-T08: presentation kinds
++#include "script_particles.h"
++#include "PostprocessAnimator.h"
++#include "../xrEngine/CameraManager.h"
+ #include "../xrServerEntities/xrServer_Objects_ALife.h"
+ #include "coop/proto/guard.h"
+ #include "actor_defs.h"
+@@ -239,6 +244,19 @@ struct Link
+ 	FILE* actors_csv = nullptr;
+ 	u32 last_actor_log_ms = 0;
+ 	u64 clock_events = 0, clock_steps = 0, weather_changes = 0;
++	// S06-T08: the server's environment, thunderbolts and script presentation
++	FILE* weather_csv = nullptr;
++	u32 last_weather_log_ms = 0;
++	u64 env_events = 0, env_applied = 0, wfx_starts = 0, wfx_shifts = 0, bolts = 0, presentations = 0,
++		presentations_unknown = 0, sounds_missing = 0;
++	xr_map<u32, ref_sound> sounds; // the server's sound_objects by handle
++	struct Particles
++	{
++		CScriptParticles* object = nullptr;
++		bool stopped = false;
++	};
++	xr_map<u32, Particles> particles; // the server's particles_objects by handle
++	u32 last_particles_sweep_ms = 0;
+ };
+ 
+ enum World : u8
+@@ -703,6 +721,8 @@ void log_actors();
+ void log_entities();
+ void log_combat();
+ void log_encounter();
++void release_presentation(); // S06-T08
++void log_weather_client();
+ 
+ void world_frame()
+ {
+@@ -711,6 +731,7 @@ void world_frame()
+ 	{
+ 		g_link->world = WorldMenu;
+ 		g_link->predicting = false;
++		release_presentation(); // S06-T08
+ 		campaign::replica_end();
+ 		g_link->log.line("world-ended quitting=%d level=%d", g_link->quitting ? 1 : 0, g_pGameLevel ? 1 : 0);
+ 		return;
+@@ -739,6 +760,9 @@ void world_frame()
+ 		if (Device.Paused())
+ 			Device.Pause(FALSE, TRUE, TRUE, "coop-world-live");
+ 		campaign::report_replica("live");
++		// S06-T08: lightning is the server's from now on
++		if (g_pGamePersistent && g_pGamePersistent->Environment().eff_Thunderbolt)
++			g_pGamePersistent->Environment().eff_Thunderbolt->remote_driven = true;
+ 	}
+ 	if (g_link->world == WorldLive && g_actor)
+ 	{
+@@ -1278,6 +1302,7 @@ void screenshot(LPCSTR tag)
+ void run_script2(u32 t);
+ void run_script3(u32 t);
+ void run_script4(u32 t);
++void run_script5(u32 t); // S06-T08
+ 
+ void run_script()
+ {
+@@ -1304,6 +1329,8 @@ void run_script()
+ 		return run_script3(t);
+ 	if (g_link->config.script == 4)
+ 		return run_script4(t);
++	if (g_link->config.script == 5)
++		return run_script5(t);
+ 	// S06-T02: the nearest NPC stalker, 26 s in: face it, log its animation
+ 	// blends and remote flag, screenshot it.
+ 	if (g_link->npc_phase == 0 && t >= 26000)
+@@ -2233,15 +2260,470 @@ void on_world_clock(const coop::proto::CampaignEvent& event)
+ 		clock.set_game_time(game_ms);
+ 		if (++g_link->clock_steps <= 8)
+ 			g_link->log.line("clock-step apart_ms=%I64d factor=%.2f", apart, factor);
++		// S06-T08: a step backwards reads as a day forward to the weather
++		// effect (CEnvironment::SetGameTime subtracts TimeDiff, which wraps),
++		// which ended the effect and restarted it from the wrong descriptors
++		// (cweather-1, 347 s); add the day the next SetGameTime will take off.
++		CEnvironment& env = g_pGamePersistent->Environment();
++		if (apart < 0 && env.bWFX)
++		{
++			env.wfx_time += DAY_LENGTH;
++			g_link->log.line("clock-step backwards wfx-kept apart_ms=%I64d", apart);
++		}
++	}
++	// S06-T08: the weather itself comes with the environment event (kind 2):
++	// the cycle and the two blended descriptors, or the weather effect and
++	// its time left. The name here is logged only.
++	(void)weather;
++}
++
++// ------------------------------------------------------------ S06-T08
++// The server's environment (kind 2), thunderbolts (kind 3) and the installed
++// scripts' presentation (kind 4); see CoopServerHost.cpp and
++// docs/validation/S06-T08.md.
++struct PayloadReader
++{
++	const std::vector<u8>& p;
++	size_t at = 0;
++	bool ok = true;
++	explicit PayloadReader(const std::vector<u8>& payload) : p(payload) {}
++	template <typename T> T get()
++	{
++		T v;
++		memset(&v, 0, sizeof(v));
++		if (at + sizeof(v) > p.size())
++		{
++			ok = false;
++			at = p.size();
++			return v;
++		}
++		memcpy(&v, p.data() + at, sizeof(v));
++		at += sizeof(v);
++		return v;
++	}
++	void str(char* out, size_t capacity)
++	{
++		out[0] = 0;
++		const u8 n = get<u8>();
++		if (!ok || at + n > p.size() || n + 1 > capacity)
++		{
++			ok = false;
++			return;
++		}
++		memcpy(out, p.data() + at, n);
++		out[n] = 0;
++		at += n;
++	}
++};
++
++static shared_str descriptor_cycle(CEnvironment& env, const CEnvDescriptor* d)
++{
++	if (!d)
++		return shared_str();
++	for (auto it = env.WeatherCycles.begin(); it != env.WeatherCycles.end(); ++it)
++		for (auto e = it->second.begin(); e != it->second.end(); ++e)
++			if (*e == d)
++				return it->first;
++	return shared_str();
++}
++
++static CEnvDescriptor* find_descriptor(CEnvironment& env, LPCSTR cycle, float exec)
++{
++	if (!cycle || !cycle[0] || exec < 0.f)
++		return nullptr;
++	auto it = env.WeatherCycles.find(shared_str(cycle));
++	if (it == env.WeatherCycles.end())
++		return nullptr;
++	for (CEnvDescriptor* d : it->second)
++		if (fsimilar(d->exec_time, exec, 0.01f))
++			return d;
++	return nullptr;
++}
++
++void on_environment(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	const u8 flags = r.get<u8>();
++	const float wfx_time = r.get<float>();
++	string256 cycle, weather, c0, c1;
++	r.str(cycle, sizeof(cycle));
++	r.str(weather, sizeof(weather));
++	r.str(c0, sizeof(c0));
++	const float exec0 = r.get<float>();
++	r.str(c1, sizeof(c1));
++	const float exec1 = r.get<float>();
++	if (!r.ok || !_valid(wfx_time) || !_valid(exec0) || !_valid(exec1) || !g_pGamePersistent)
++		return;
++	++g_link->env_events;
++	CEnvironment& env = g_pGamePersistent->Environment();
++	const bool wfx = (flags & 1) != 0;
++	if (wfx)
++	{
++		if (!env.bWFX || xr_strcmp(env.CurrentWeatherName.size() ? *env.CurrentWeatherName : "", weather))
++		{
++			if (env.bWFX && env.CurrentCycleName.size())
++				env.StopWFX();
++			if (cycle[0] && xr_strcmp(env.CurrentCycleName.size() ? *env.CurrentCycleName : "", cycle))
++				env.SetWeather(cycle, false);
++			if ((!env.Current[0] || !env.Current[1]) && cycle[0])
++				env.SetWeather(cycle, true);
++			if (env.WeatherFXs.find(shared_str(weather)) == env.WeatherFXs.end() || !env.Current[0] || !env.Current[1])
++			{
++				g_link->log.line("environment wfx-unknown name=%s", weather);
++				return;
++			}
++			env.StartWeatherFXFromTime(weather, wfx_time);
++			++g_link->wfx_starts;
++			g_link->log.line("environment wfx-start name=%s wfx_time=%.2f cycle=%s", weather, wfx_time, cycle);
++		}
++		else if (_abs(env.wfx_time - wfx_time) > 4.0f && env.CurrentWeather) // above the 3 s clock-step tolerance
++		{
++			// re-aligned: every descriptor of the effect moves by the difference
++			const float delta = wfx_time - env.wfx_time;
++			for (CEnvDescriptor* d : *env.CurrentWeather)
++			{
++				float moved = d->exec_time + delta; // as CEnvironment::NormalizeTime (private)
++				while (moved >= DAY_LENGTH)
++					moved -= DAY_LENGTH;
++				while (moved < 0.f)
++					moved += DAY_LENGTH;
++				d->exec_time = moved;
++			}
++			env.wfx_time = wfx_time;
++			if (++g_link->wfx_shifts <= 20)
++				g_link->log.line("environment wfx-shift delta=%.2f", delta);
++		}
++		return;
++	}
++	if (env.bWFX && env.CurrentCycleName.size())
++	{
++		env.StopWFX();
++		g_link->log.line("environment wfx-stop weather=%s", env.CurrentWeatherName.size() ? *env.CurrentWeatherName : "-");
+ 	}
+-	CEnvironment& environment = g_pGamePersistent->Environment();
+-	if (length && xr_strcmp(*environment.CurrentWeatherName, weather))
++	if (cycle[0] && xr_strcmp(env.CurrentCycleName.size() ? *env.CurrentCycleName : "", cycle))
+ 	{
+-		g_link->log.line("weather %s -> %s", environment.CurrentWeatherName.size() ? *environment.CurrentWeatherName : "-",
+-			weather);
+-		environment.SetWeather(weather, true);
++		g_link->log.line("environment cycle %s -> %s", env.CurrentCycleName.size() ? *env.CurrentCycleName : "-", cycle);
++		env.SetWeather(cycle, false);
+ 		++g_link->weather_changes;
+ 	}
++	CEnvDescriptor* d0 = find_descriptor(env, c0, exec0);
++	CEnvDescriptor* d1 = find_descriptor(env, c1, exec1);
++	if (d0 && d1)
++	{
++		if (env.Current[0] != d0 || env.Current[1] != d1)
++		{
++			env.Current[0] = d0;
++			env.Current[1] = d1;
++			if (++g_link->env_applied <= 40)
++				g_link->log.line("environment descriptors c0=%s@%.2f c1=%s@%.2f", c0, exec0, c1, exec1);
++		}
++	}
++	else if ((!env.Current[0] || !env.Current[1]) && cycle[0])
++		env.SetWeather(cycle, true);
++}
++
++void on_thunderbolt(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	string256 id;
++	r.str(id, sizeof(id));
++	const u32 index = r.get<u32>();
++	const float life = r.get<float>();
++	const float lng = r.get<float>();
++	const float dist = r.get<float>();
++	Fvector dev;
++	dev.x = r.get<float>();
++	dev.y = r.get<float>();
++	dev.z = r.get<float>();
++	const bool second = r.get<u8>() != 0;
++	if (!r.ok || !id[0] || !_valid(life) || !_valid(lng) || !_valid(dist) || !_valid(dev) || life <= 0.f || life > 10.f ||
++		dist < 0.f || !g_pGamePersistent)
++		return;
++	CEffect_Thunderbolt* bolt = g_pGamePersistent->Environment().eff_Thunderbolt;
++	if (!bolt)
++		return;
++	bolt->remote_driven = true;
++	bolt->BoltRemote(id, index, life, lng, dist, dev, second);
++	++g_link->bolts;
++	g_link->log.line("bolt n=%I64u id=%s index=%u life=%.2f lng=%.2f dist=%.0f second=%d", g_link->bolts, id, index, life,
++		lng, dist, second ? 1 : 0);
++}
++
++static bool chatty_presentation(campaign::Presentation kind)
++{
++	return kind == campaign::Presentation::PostProcessFactor || kind == campaign::Presentation::SoundVolume ||
++		kind == campaign::Presentation::SoundPosition || kind == campaign::Presentation::ParticlesMove;
++}
++
++void on_presentation(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	const u8 kind_byte = r.get<u8>();
++	const u16 object = r.get<u16>();
++	const u32 handle = r.get<u32>();
++	Fvector position;
++	position.x = r.get<float>();
++	position.y = r.get<float>();
++	position.z = r.get<float>();
++	const float value = r.get<float>();
++	const u32 flags = r.get<u32>();
++	const u32 serial = r.get<u32>();
++	string256 detail;
++	r.str(detail, sizeof(detail));
++	if (!r.ok || !_valid(position) || !_valid(value) || kind_byte >= u8(campaign::Presentation::Count))
++		return;
++	const campaign::Presentation kind = campaign::Presentation(kind_byte);
++	CActor* viewer = g_actor;
++	if (!viewer)
++		return;
++	++g_link->presentations;
++	const char* applied = "applied";
++	switch (kind)
++	{
++	case campaign::Presentation::CameraEffector:
++	{
++		CAnimatorCamEffectorScriptCB* e = xr_new<CAnimatorCamEffectorScriptCB>("");
++		if (position.x > 0.f)
++		{
++			e->m_bAbsolutePositioning = true;
++			e->m_fov = position.x;
++		}
++		if (value > 0.f)
++			e->SetPower(value);
++		if (position.y > 0.f)
++			e->SetSpeed(position.y);
++		e->SetHudAffect((flags & 2) != 0);
++		e->SetType((ECamEffectorType)object);
++		e->SetCyclic((flags & 1) != 0);
++		e->Start(detail);
++		viewer->Cameras().AddCamEffector(e);
++		break;
++	}
++	case campaign::Presentation::CameraEffectorRemove:
++		viewer->Cameras().RemoveCamEffector((ECamEffectorType)object);
++		break;
++	case campaign::Presentation::PostProcess:
++	{
++		CPostprocessAnimator* pp = xr_new<CPostprocessAnimator>(int(object), (flags & 1) != 0);
++		pp->Load(detail);
++		viewer->Cameras().AddPPEffector(pp);
++		break;
++	}
++	case campaign::Presentation::PostProcessRemove:
++	{
++		CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer->Cameras().GetPPEffector((EEffectorPPType)object));
++		if (pp)
++			pp->Stop(1.0f);
++		else
++			applied = "absent";
++		break;
++	}
++	case campaign::Presentation::PostProcessFactor:
++	{
++		CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer->Cameras().GetPPEffector((EEffectorPPType)object));
++		if (pp)
++			pp->SetDesiredFactor(value, position.x);
++		else
++			applied = "absent";
++		break;
++	}
++	case campaign::Presentation::Sound:
++	case campaign::Presentation::SoundAtPos:
++	{
++		ref_sound& sound = g_link->sounds[handle];
++		if (!sound._handle())
++		{
++			string_path path;
++			if (!detail[0] || !FS.exist(path, "$game_sounds$", detail, ".ogg"))
++			{
++				g_link->sounds.erase(handle);
++				++g_link->sounds_missing;
++				applied = "missing";
++				break;
++			}
++			sound.create(detail, st_Effect, SOUND_TYPE_NO_SOUND);
++		}
++		if (kind == campaign::Presentation::Sound)
++			sound.play(viewer, flags, value);
++		else
++			sound.play_at_pos(viewer, position, flags, value);
++		break;
++	}
++	case campaign::Presentation::SoundStop:
++	case campaign::Presentation::SoundStopDeferred:
++	case campaign::Presentation::SoundVolume:
++	case campaign::Presentation::SoundPosition:
++	{
++		auto it = g_link->sounds.find(handle);
++		if (it == g_link->sounds.end() || !it->second._handle())
++		{
++			applied = "absent";
++			break;
++		}
++		ref_sound& sound = it->second;
++		if (kind == campaign::Presentation::SoundStop)
++			sound.stop();
++		else if (kind == campaign::Presentation::SoundStopDeferred)
++			sound.stop_deffered();
++		else if (kind == campaign::Presentation::SoundVolume)
++			sound.set_volume(value);
++		else if (sound._feedback())
++			sound.set_position(position);
++		break;
++	}
++	case campaign::Presentation::Particles:
++	{
++		Link::Particles& entry = g_link->particles[handle];
++		if (!entry.object)
++		{
++			if (!detail[0])
++			{
++				g_link->particles.erase(handle);
++				applied = "missing";
++				break;
++			}
++			entry.object = xr_new<CScriptParticles>(detail);
++		}
++		entry.stopped = false;
++		entry.object->PlayAtPos(position);
++		break;
++	}
++	case campaign::Presentation::ParticlesMove:
++	case campaign::Presentation::ParticlesStop:
++	case campaign::Presentation::ParticlesStopDeferred:
++	{
++		auto it = g_link->particles.find(handle);
++		if (it == g_link->particles.end() || !it->second.object)
++		{
++			applied = "absent";
++			break;
++		}
++		if (kind == campaign::Presentation::ParticlesMove)
++		{
++			if (flags & 1)
++				it->second.object->XFORMMoveTo(position);
++			else
++				it->second.object->MoveTo(position, Fvector().set(0.f, 0.f, 0.f));
++		}
++		else
++		{
++			if (kind == campaign::Presentation::ParticlesStop)
++				it->second.object->Stop();
++			else
++				it->second.object->StopDeffered();
++			it->second.stopped = true;
++		}
++		break;
++	}
++	default:
++		++g_link->presentations_unknown;
++		applied = "unknown";
++		break;
++	}
++	if (!chatty_presentation(kind) || xr_strcmp(applied, "applied"))
++		g_link->log.line("present serial=%u kind=%s object=%u handle=%u detail=%s flags=%u value=%.3f pos=%.1f,%.1f,%.1f %s",
++			serial, campaign::presentation_name(kind), u32(object), handle, detail, flags, value, VPUSH(position), applied);
++}
++
++// Stopped particles are released once they have played out.
++static void sweep_particles()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (now - g_link->last_particles_sweep_ms < 1000)
++		return;
++	g_link->last_particles_sweep_ms = now;
++	for (auto it = g_link->particles.begin(); it != g_link->particles.end();)
++	{
++		if (it->second.stopped && it->second.object && !it->second.object->IsPlaying())
++		{
++			xr_delete(it->second.object);
++			it = g_link->particles.erase(it);
++		}
++		else
++			++it;
++	}
++}
++
++void release_presentation()
++{
++	for (auto& entry : g_link->sounds)
++		if (entry.second._feedback())
++			entry.second.stop();
++	g_link->sounds.clear();
++	for (auto& entry : g_link->particles)
++		xr_delete(entry.second.object);
++	g_link->particles.clear();
++	if (g_pGamePersistent && g_pGamePersistent->Environment().eff_Thunderbolt)
++		g_pGamePersistent->Environment().eff_Thunderbolt->remote_driven = false;
++}
++
++// Every second: this client's environment, beside the server's coop-weather.csv.
++void log_weather_client()
++{
++	if (g_link->world != WorldLive || !g_pGamePersistent || !g_actor)
++		return;
++	sweep_particles();
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (now - g_link->last_weather_log_ms < 1000)
++		return;
++	g_link->last_weather_log_ms = now;
++	if (!g_link->weather_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-weather-client.csv");
++		g_link->weather_csv = fopen(path, "w");
++		if (!g_link->weather_csv)
++			return;
++		fprintf(g_link->weather_csv, "utc_ms,game_ms,cycle,weather,wfx,wfx_time,c0,c0_exec,c1,c1_exec,weight,rain,tb_id,bolts,"
++		                             "presentations,cam2,pp1,sounds,particles,env_events\n");
++	}
++	CEnvironment& env = g_pGamePersistent->Environment();
++	const shared_str c0 = env.bWFX ? shared_str() : descriptor_cycle(env, env.Current[0]);
++	const shared_str c1 = env.bWFX ? shared_str() : descriptor_cycle(env, env.Current[1]);
++	CPostprocessAnimator* pp1 = smart_cast<CPostprocessAnimator*>(g_actor->Cameras().GetPPEffector((EEffectorPPType)1));
++	u32 playing = 0;
++	for (auto& entry : g_link->sounds)
++		if (entry.second._feedback())
++			++playing;
++	fprintf(g_link->weather_csv, "%I64u,%I64u,%s,%s,%d,%.2f,%s,%.2f,%s,%.2f,%.4f,%.3f,%s,%I64u,%I64u,%d,%.4f,%u,%u,%I64u\n",
++		utc_now_ms(), ai().alife().time_manager().game_time(), env.CurrentCycleName.size() ? *env.CurrentCycleName : "-",
++		env.CurrentWeatherName.size() ? *env.CurrentWeatherName : "-", env.bWFX ? 1 : 0, env.wfx_time,
++		c0.size() ? *c0 : "-", env.Current[0] ? env.Current[0]->exec_time : -1.f, c1.size() ? *c1 : "-",
++		env.Current[1] ? env.Current[1]->exec_time : -1.f, env.CurrentEnv ? env.CurrentEnv->weight : -1.f,
++		env.CurrentEnv ? env.CurrentEnv->rain_density : -1.f,
++		env.CurrentEnv && env.CurrentEnv->tb_id.size() ? *env.CurrentEnv->tb_id : "-", g_link->bolts, g_link->presentations,
++		g_actor->Cameras().GetCamEffector((ECamEffectorType)2) ? 1 : 0, pp1 ? pp1->GetCurrentFactor() : -1.f, playing,
++		u32(g_link->particles.size()), g_link->env_events);
++}
++
++// Profile script 5 (S06-T08): stand still and take screenshots through the
++// storm and the emission (every 40 s from 20 s after the other player is
++// there), for the report.
++void run_script5(u32 t)
++{
++	if (!g_link->program_t0)
++	{
++		if (!other_actor())
++		{
++			g_link->other_since = 0;
++			return;
++		}
++		if (!g_link->other_since)
++			g_link->other_since = t;
++		if (t < g_link->other_since + 3000)
++			return;
++		g_link->program_t0 = t;
++		g_link->log.line("script5-program-start slot=%u t=%u", u32(g_link->local_slot), t);
++		return;
++	}
++	const u32 p = t - g_link->program_t0;
++	if (g_link->script_phase < 8 && p >= 20000 + g_link->script_phase * 40000)
++	{
++		++g_link->script_phase;
++		string64 tag;
++		xr_sprintf(tag, "script5-shot-%u", g_link->script_phase);
++		screenshot(tag);
++	}
+ }
+ 
+ void log_actors()
+@@ -2353,7 +2835,16 @@ void on_message(const coop::session::ClientEvent& e)
+ 	if (const auto* event = std::get_if<coop::proto::CampaignEvent>(&e.message.body))
+ 	{
+ 		if (g_link->world == WorldLive && g_pGameLevel && ai().get_alife())
+-			on_world_clock(*event);
++		{
++			switch (event->kind)
++			{
++			case 1: on_world_clock(*event); break;
++			case 2: on_environment(*event); break; // S06-T08
++			case 3: on_thunderbolt(*event); break;
++			case 4: on_presentation(*event); break;
++			default: break;
++			}
++		}
+ 		return;
+ 	}
+ 	if (std::get_if<coop::proto::Spawn>(&e.message.body) || std::get_if<coop::proto::Despawn>(&e.message.body))
+@@ -2582,6 +3073,7 @@ void coop_client_frame()
+ 	}
+ 	inject_step();
+ 	world_frame();
++	log_weather_client(); // S06-T08
+ 	const u32 now = g_link->wall.GetElapsed_ms();
+ 	if (now - g_link->last_status_ms >= 5000)
+ 	{
+@@ -2623,6 +3115,9 @@ void coop_client_app_end()
+ 		fclose(g_link->combat_csv);
+ 	if (g_link->encounter_csv)
+ 		fclose(g_link->encounter_csv);
++	if (g_link->weather_csv)
++		fclose(g_link->weather_csv);
++	release_presentation(); // S06-T08
+ 	if (g_link->client)
+ 		g_link->client->close(coop::net::close_code::kNormal, "client exit");
+ 	if (g_link->transport)
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 468395f..9b94736 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -130,6 +130,9 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.friendly_fire = ini.line_exist("coop", "friendly_fire") ? ini.r_u32("coop", "friendly_fire") : 1;
+ 		out.encounter = ini.line_exist("coop", "encounter") ? ini.r_u32("coop", "encounter") : 0;
+ 		out.lethal = ini.line_exist("coop", "lethal") ? ini.r_u32("coop", "lethal") : 0;
++		out.storm = ini.line_exist("coop", "storm") ? ini.r_u32("coop", "storm") : 0;
++		out.surge = ini.line_exist("coop", "surge") ? ini.r_u32("coop", "surge") : 0;
++		out.psi_storm = ini.line_exist("coop", "psi_storm") ? ini.r_u32("coop", "psi_storm") : 0;
+ 		if (ok && !absolute(out.roster_path))
+ 		{
+ 			Msg("! S05-T01 coop config: roster must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index a36f56b..62df005 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -23,6 +23,11 @@
+ //                 send input until a boar spawns 12 m from participant 2; 0 off),
+ //                 lethal (S06-T05 fixture: seconds after the boar died until
+ //                 participant 2's actor takes a lethal hit from it; 0 off)
++//                 storm (S06-T08 fixture: seconds after both players attach
++//                 until the server's weather is forced to w_storm1; 0 off),
++//                 surge (S06-T08 fixture: seconds after both attach until the
++//                 installed surge_manager starts an emission; 0 off),
++//                 psi_storm (S06-T08 fixture: the same for a psi-storm; 0 off)
+ //   client only:  server (ip:port), key (absolute DPAPI key file), name,
+ //                 exit_after_seconds (0: never), inject (0/1: S05-T01 refusal test),
+ //                 script (0/1: S05-T03 look, walk and screenshot driver;
+@@ -59,6 +64,9 @@ struct CoopConfig
+ 	u32 friendly_fire; // S06-T04: participants' hits damage each other (default 1)
+ 	u32 encounter; // S06-T05 fixture: seconds after both attach until a boar spawns (0 off)
+ 	u32 lethal; // S06-T05 fixture: seconds after the boar died until participant 2 takes a lethal hit (0 off)
++	u32 storm; // S06-T08 fixture: seconds after both attach until the weather is forced to a storm (0 off)
++	u32 surge; // S06-T08 fixture: seconds after both attach until an emission starts (0 off)
++	u32 psi_storm; // S06-T08 fixture: seconds after both attach until a psi-storm starts (0 off)
+ 	// both, S06-T02: simulated impairment of what this process sends (test conditions)
+ 	float net_loss_pct;
+ 	u32 net_lag_ms;
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index ddb00ba..37ef9a3 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -37,6 +37,7 @@
+ #include "xrMessages.h"
+ #include "xrServer.h"
+ #include "../xrEngine/Environment.h"
++#include "CampaignScriptContext.h" // S06-T08: presentation outboxes
+ #include "CampaignActorControl.h"
+ #include "Inventory.h"
+ #include "Weapon.h"
+@@ -80,6 +81,9 @@ struct PlayerLink
+ 	xr_deque<coop::proto::Message> outbox; // lifecycle messages, commit order
+ 	u64 events_sent;
+ 	u64 outbox_peak;
++	// S06-T08: the last presentation record serial sent from this player's outbox and from the broadcast outbox
++	u32 presentation_cursor = 0, presentation_cursor_all = 0;
++	bool presentation_started = false; // ...from the client's first input (it is in the world, not loading)
+ 	// S05-T03/S06-T01: the player's inputs, one consumed per tick for its own actor
+ 	coop::proto::InputQueue inputs;
+ 	u64 input_batches;
+@@ -215,6 +219,24 @@ struct Host
+ 		u64 spawn_tick = 0, death_tick = 0, lethal_tick = 0;
+ 	} encounter;
+ 	FILE* encounter_csv = nullptr;
++	// S06-T08: storm and emission visuals
++	u32 last_env_ms = 0;
++	string512 last_env_key = "";
++	struct Thunder
++	{
++		bool enabled = false;
++		float next = 0.f; // wall seconds of the next bolt
++		float working_until = 0.f;
++		u32 bolts = 0;
++	} thunder;
++	u64 presentations_sent = 0;
++	struct WeatherFixture
++	{
++		u64 both_since = 0;
++		bool storm_done = false, surge_done = false, psi_done = false;
++	} weather;
++	FILE* weather_csv = nullptr;
++	u32 last_weather_log_ms = 0;
+ 	u64 snapshot_rounds = 0;
+ 	u32 drop_next_ms = 0;
+ 	u32 drops = 0;
+@@ -724,6 +746,8 @@ void stream_world(PlayerLink& link)
+ 	if (!g_host->server->send(link.player, coop::proto::Message(end)))
+ 		return;
+ 	link.world = WorldLive;
++	// S06-T08: presentation from the client's first input on; what the scripts showed before stays unsent
++	link.presentation_started = false;
+ 	g_host->log.line("resync-end player=%s resync=%I64u chunks=%u ms=%u queued_events=%u",
+ 		coop_uuid_hex(link.player).c_str(), link.resync_id, link.chunk_count,
+ 		g_host->wall.GetElapsed_ms() - link.resync_started_ms, u32(link.outbox.size()));
+@@ -1128,6 +1152,322 @@ void send_world_clock()
+ 		}
+ }
+ 
++// ------------------------------------------------------------ S06-T08
++// Storm and emission visuals on both clients (docs/validation/S06-T08.md).
++// Three more CampaignEvent kinds to every live client:
++//   2 environment, every second and on change: the weather cycle and the
++//     two descriptors the engine blends (their cycle and exec_time), or the
++//     weather effect playing (fx_blowout_*, fx_psi_storm_*) and its time
++//     left, so each client's CEnvironment blends exactly what the server's
++//     does from the shared game time;
++//   3 thunderbolt: the server decides each bolt as CEffect_Thunderbolt::Bolt
++//     would (period and duration of the blended descriptor, random entry,
++//     life, direction, distance, tilt, "second" bolt) and clients play it;
++//   4 presentation: the installed scripts' camera and post-process effectors,
++//     sounds and particles from the participant and broadcast outboxes
++//     (CampaignScriptContext.h), each once.
++const u16 kEventEnvironment = 2;
++const u16 kEventThunderbolt = 3;
++const u16 kEventPresentation = 4;
++
++static void put_u8(std::vector<u8>& p, u8 v) { p.push_back(v); }
++static void put_u16(std::vector<u8>& p, u16 v)
++{
++	const u8* b = reinterpret_cast<const u8*>(&v);
++	p.insert(p.end(), b, b + sizeof(v));
++}
++static void put_u32(std::vector<u8>& p, u32 v)
++{
++	const u8* b = reinterpret_cast<const u8*>(&v);
++	p.insert(p.end(), b, b + sizeof(v));
++}
++static void put_f32(std::vector<u8>& p, float v)
++{
++	const u8* b = reinterpret_cast<const u8*>(&v);
++	p.insert(p.end(), b, b + sizeof(v));
++}
++static void put_str(std::vector<u8>& p, LPCSTR v)
++{
++	const u32 n = v ? _min(u32(xr_strlen(v)), 255u) : 0u;
++	p.push_back(u8(n));
++	if (n)
++		p.insert(p.end(), v, v + n);
++}
++
++static void queue_event(PlayerLink& link, u16 kind, const std::vector<u8>& payload)
++{
++	coop::proto::CampaignEvent event;
++	event.kind = kind;
++	event.revision = g_host->commit ? g_host->commit : 1;
++	event.payload = payload;
++	event.event_id = ++g_host->event_seq;
++	link.outbox.push_back(coop::proto::Message(event));
++}
++
++// A client in the world and sending input (one that is still loading its
++// level would get a backlog to replay: cweather-1).
++static bool client_in_world(const PlayerLink& link)
++{
++	return link.world == WorldLive && link.session && link.inputs.has_last();
++}
++
++static void broadcast_event(u16 kind, const std::vector<u8>& payload)
++{
++	for (PlayerLink& link : g_host->links)
++		if (client_in_world(link))
++			queue_event(link, kind, payload);
++}
++
++// The weather cycle a descriptor was loaded with; empty for a weather
++// effect's own copies (SetWeatherFX makes them) and for none.
++static shared_str descriptor_cycle(CEnvironment& env, const CEnvDescriptor* d)
++{
++	if (!d)
++		return shared_str();
++	for (auto it = env.WeatherCycles.begin(); it != env.WeatherCycles.end(); ++it)
++		for (auto e = it->second.begin(); e != it->second.end(); ++e)
++			if (*e == d)
++				return it->first;
++	return shared_str();
++}
++
++void send_environment()
++{
++	if (!ai().get_alife() || !g_pGamePersistent)
++		return;
++	CEnvironment& env = g_pGamePersistent->Environment();
++	const u32 now = g_host->wall.GetElapsed_ms();
++	const shared_str c0 = env.bWFX ? shared_str() : descriptor_cycle(env, env.Current[0]);
++	const shared_str c1 = env.bWFX ? shared_str() : descriptor_cycle(env, env.Current[1]);
++	const float exec0 = env.Current[0] ? env.Current[0]->exec_time : -1.f;
++	const float exec1 = env.Current[1] ? env.Current[1]->exec_time : -1.f;
++	string512 key;
++	xr_sprintf(key, "cycle=%s weather=%s wfx=%d c0=%s@%.2f c1=%s@%.2f", env.CurrentCycleName.size() ? *env.CurrentCycleName : "-",
++		env.CurrentWeatherName.size() ? *env.CurrentWeatherName : "-", env.bWFX ? 1 : 0, c0.size() ? *c0 : "-", exec0,
++		c1.size() ? *c1 : "-", exec1);
++	const bool changed = xr_strcmp(key, g_host->last_env_key) != 0;
++	if (now - g_host->last_env_ms < 1000 && !changed)
++		return;
++	if (changed)
++		g_host->log.line("environment %s wfx_time=%.2f", key, env.wfx_time);
++	g_host->last_env_ms = now;
++	xr_strcpy(g_host->last_env_key, key);
++	std::vector<u8> p;
++	put_u8(p, env.bWFX ? 1u : 0u);
++	put_f32(p, env.wfx_time);
++	put_str(p, env.CurrentCycleName.size() ? *env.CurrentCycleName : "");
++	put_str(p, env.CurrentWeatherName.size() ? *env.CurrentWeatherName : "");
++	put_str(p, c0.size() ? *c0 : "");
++	put_f32(p, exec0);
++	put_str(p, c1.size() ? *c1 : "");
++	put_f32(p, exec1);
++	broadcast_event(kEventEnvironment, p);
++}
++
++// The server's bolts, drawn as CEffect_Thunderbolt::Bolt draws them (the
++// effect itself never runs here: UpdateCPU has no thunderbolt frame).
++void server_thunderbolts()
++{
++	if (!ai().get_alife() || !g_pGamePersistent)
++		return;
++	CEnvironment& env = g_pGamePersistent->Environment();
++	if (!env.CurrentEnv || !env.Current[0] || !env.Current[1])
++		return;
++	const float weight = env.CurrentEnv->weight;
++	const shared_str id = (weight < 0.5f) ? env.Current[0]->tb_id : env.Current[1]->tb_id;
++	const float period = env.CurrentEnv->bolt_period;
++	const float duration = env.CurrentEnv->bolt_duration;
++	Host::Thunder& t = g_host->thunder;
++	const float now = float(g_host->wall.GetElapsed_ms()) * 0.001f;
++	const bool enabled = id.size() > 0;
++	if (enabled != t.enabled)
++	{
++		t.enabled = enabled;
++		t.next = now + period + Random.randF(-period * 0.5f, period * 0.5f);
++		g_host->log.line("thunder %s id=%s period=%.1f duration=%.2f", enabled ? "on" : "off", enabled ? *id : "-", period,
++			duration);
++		return;
++	}
++	if (!enabled || now <= t.next || now < t.working_until)
++		return;
++	const int count = env.m_thunderbolt_collections_config && env.m_thunderbolt_collections_config->section_exist(*id)
++		? int(env.m_thunderbolt_collections_config->line_count(*id)) : 0;
++	if (count <= 0)
++	{
++		t.next = now + period;
++		return;
++	}
++	const float life = duration + Random.randF(-duration * 0.5f, duration * 0.5f);
++	const u32 index = u32(Random.randI(count));
++	float sun_h, sun_p;
++	env.CurrentEnv->sun_dir.getHP(sun_h, sun_p);
++	const float lng = Random.randF(sun_h - env.p_var_long + PI, sun_h + env.p_var_long + PI);
++	const float far_plane = env.CurrentEnv->far_plane;
++	const float dist = Random.randF(far_plane * env.p_min_dist, far_plane * .95f);
++	Fvector dev;
++	dev.x = Random.randF(-env.p_tilt, env.p_tilt);
++	dev.y = Random.randF(0, PI_MUL_2);
++	dev.z = Random.randF(-env.p_tilt, env.p_tilt);
++	const bool second = Random.randF() < env.p_second_prop;
++	t.working_until = now + life;
++	t.next = second ? now + duration + EPS_L : now + period + Random.randF(-period * 0.3f, period * 0.3f);
++	++t.bolts;
++	std::vector<u8> p;
++	put_str(p, *id);
++	put_u32(p, index);
++	put_f32(p, life);
++	put_f32(p, lng);
++	put_f32(p, dist);
++	put_f32(p, dev.x);
++	put_f32(p, dev.y);
++	put_f32(p, dev.z);
++	put_u8(p, second ? 1u : 0u);
++	broadcast_event(kEventThunderbolt, p);
++	g_host->log.line("bolt n=%u id=%s index=%u life=%.2f lng=%.2f dist=%.0f second=%d", t.bolts, *id, index, life, lng,
++		dist, second ? 1 : 0);
++}
++
++static bool chatty_presentation(campaign::Presentation kind)
++{
++	return kind == campaign::Presentation::PostProcessFactor || kind == campaign::Presentation::SoundVolume ||
++		kind == campaign::Presentation::SoundPosition || kind == campaign::Presentation::ParticlesMove;
++}
++
++// Each live player's new presentation records (its own outbox, then the
++// broadcast one), oldest first, each once.
++void send_presentation()
++{
++	xr_vector<campaign::PresentationRecord> records;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!client_in_world(link) || !link.bound || link.ref.slot >= campaign::kBroadcastSlot)
++			continue;
++		if (!link.presentation_started)
++		{
++			link.presentation_started = true;
++			link.presentation_cursor = link.presentation_cursor_all = campaign::presentation_serial();
++			g_host->log.line("present-start slot=%u serial=%u", u32(link.ref.slot), campaign::presentation_serial());
++		}
++		for (int source = 0; source < 2; ++source)
++		{
++			const u8 slot = source ? campaign::kBroadcastSlot : link.ref.slot;
++			u32& cursor = source ? link.presentation_cursor_all : link.presentation_cursor;
++			campaign::presentation_outbox(slot, records);
++			for (const campaign::PresentationRecord& r : records)
++			{
++				if (r.serial <= cursor)
++					continue;
++				cursor = r.serial;
++				std::vector<u8> p;
++				put_u8(p, u8(r.kind));
++				put_u16(p, r.object);
++				put_u32(p, r.handle);
++				put_f32(p, r.position.x);
++				put_f32(p, r.position.y);
++				put_f32(p, r.position.z);
++				put_f32(p, r.value);
++				put_u32(p, r.flags);
++				put_u32(p, r.serial);
++				put_str(p, r.detail);
++				queue_event(link, kEventPresentation, p);
++				++g_host->presentations_sent;
++				if (!chatty_presentation(r.kind))
++					g_host->log.line("present slot=%u serial=%u kind=%s object=%u handle=%u detail=%s flags=%u value=%.3f pos=%.1f,%.1f,%.1f",
++						u32(link.ref.slot), r.serial, campaign::presentation_name(r.kind), u32(r.object), r.handle, r.detail,
++						r.flags, r.value, VPUSH(r.position));
++			}
++			// sent records leave the outbox (its capacity then bounds the unsent only)
++			if (!source)
++				campaign::presentation_trim(slot, cursor);
++		}
++	}
++	u32 everyone = u32(-1);
++	bool anyone = false;
++	for (PlayerLink& link : g_host->links)
++		if (client_in_world(link) && link.bound && link.presentation_started)
++		{
++			anyone = true;
++			everyone = _min(everyone, link.presentation_cursor_all);
++		}
++	if (anyone)
++		campaign::presentation_trim(campaign::kBroadcastSlot, everyone);
++}
++
++static bool call_lua(LPCSTR name)
++{
++	luabind::functor<void> function;
++	if (!ai().script_engine().functor(name, function))
++		return false;
++	function();
++	return true;
++}
++
++// Fixtures: a forced storm, and the installed surge_manager / psi_storm_manager
++// started on demand, so many seconds after both players are in the world.
++void weather_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!(config.storm || config.surge || config.psi_storm) || !ai().get_alife() || !g_pGamePersistent)
++		return;
++	Host::WeatherFixture& w = g_host->weather;
++	if (!w.both_since)
++	{
++		u32 attached = 0;
++		for (PlayerLink& link : g_host->links)
++			if (link.bound && client_in_world(link) && participant_actor(link.ref))
++				++attached;
++		if (attached < 2)
++			return;
++		w.both_since = g_host->tick;
++		g_host->log.line("fixture-weather both-attached tick=%I64u", g_host->tick);
++	}
++	const u64 elapsed = (g_host->tick - w.both_since) / 50;
++	if (config.storm && !w.storm_done && elapsed >= config.storm)
++	{
++		w.storm_done = true;
++		g_pGamePersistent->Environment().SetWeather("w_storm1", true);
++		g_host->log.line("fixture-storm weather=w_storm1 forced=1 now=%s",
++			g_pGamePersistent->Environment().CurrentWeatherName.size() ? *g_pGamePersistent->Environment().CurrentWeatherName : "-");
++	}
++	if (config.surge && !w.surge_done && elapsed >= config.surge)
++	{
++		w.surge_done = true;
++		const bool ok = call_lua("surge_manager.start_surge");
++		g_host->log.line("fixture-surge called=%d", ok ? 1 : 0);
++	}
++	if (config.psi_storm && !w.psi_done && elapsed >= config.psi_storm)
++	{
++		w.psi_done = true;
++		const bool ok = call_lua("psi_storm_manager.start_psi_storm");
++		g_host->log.line("fixture-psi-storm called=%d", ok ? 1 : 0);
++	}
++}
++
++// Every second: the server's environment as the clients should show it.
++void log_weather()
++{
++	if (!g_host->weather_csv || !ai().get_alife() || !g_pGamePersistent)
++		return;
++	const u32 now = g_host->wall.GetElapsed_ms();
++	if (now - g_host->last_weather_log_ms < 1000)
++		return;
++	g_host->last_weather_log_ms = now;
++	CEnvironment& env = g_pGamePersistent->Environment();
++	FILETIME ft;
++	GetSystemTimeAsFileTime(&ft);
++	const u64 utc_ms = ((u64(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000ull - 11644473600000ull;
++	const shared_str c0 = env.bWFX ? shared_str() : descriptor_cycle(env, env.Current[0]);
++	const shared_str c1 = env.bWFX ? shared_str() : descriptor_cycle(env, env.Current[1]);
++	fprintf(g_host->weather_csv, "%I64u,%I64u,%I64u,%.2f,%s,%s,%d,%.2f,%s,%.2f,%s,%.2f,%.4f,%.3f,%s,%u,%I64u\n", utc_ms,
++		g_host->tick, ai().alife().time_manager().game_time(), ai().alife().time_manager().time_factor(),
++		env.CurrentCycleName.size() ? *env.CurrentCycleName : "-", env.CurrentWeatherName.size() ? *env.CurrentWeatherName : "-",
++		env.bWFX ? 1 : 0, env.wfx_time, c0.size() ? *c0 : "-", env.Current[0] ? env.Current[0]->exec_time : -1.f,
++		c1.size() ? *c1 : "-", env.Current[1] ? env.Current[1]->exec_time : -1.f, env.CurrentEnv ? env.CurrentEnv->weight : -1.f,
++		env.CurrentEnv ? env.CurrentEnv->rain_density : -1.f,
++		env.CurrentEnv && env.CurrentEnv->tb_id.size() ? *env.CurrentEnv->tb_id : "-", g_host->thunder.bolts,
++		g_host->presentations_sent);
++}
++
+ // ------------------------------------------------------------ S06-T02
+ // Snapshots: each player's snapshot set, as deltas against the snapshot it
+ // acknowledged (coop/proto/snapshot.h), at 20 Hz on the 50 Hz tick.
+@@ -2200,6 +2540,14 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		if (g_host->encounter_csv)
+ 			fprintf(g_host->encounter_csv, "utc_ms,tick,kind,slot,id,health,alive,hitter,x,y,z\n");
+ 	}
++	{
++		// S06-T08
++		string_path weather;
++		FS.update_path(weather, "$logs$", "coop-weather.csv");
++		g_host->weather_csv = fopen(weather, "w");
++		if (g_host->weather_csv)
++			fprintf(g_host->weather_csv, "utc_ms,tick,game_ms,factor,cycle,weather,wfx,wfx_time,c0,c0_exec,c1,c1_exec,weight,rain,tb_id,bolts,presented\n");
++	}
+ 	string_path combat;
+ 	FS.update_path(combat, "$logs$", "coop-combat.csv");
+ 	g_host->combat_csv = fopen(combat, "w");
+@@ -2272,6 +2620,11 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	}
+ 	send_snapshots();
+ 	send_world_clock();
++	weather_fixtures(); // S06-T08
++	send_environment();
++	server_thunderbolts();
++	send_presentation();
++	log_weather();
+ 	const u32 now = g_host->wall.GetElapsed_ms();
+ 	if (now - g_host->last_status_ms >= 5000)
+ 	{
+@@ -2326,6 +2679,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		if (g_host->encounter_csv)
+ 			fclose(g_host->encounter_csv);
+ 		g_host->encounter_csv = nullptr;
++		if (g_host->weather_csv)
++			fclose(g_host->weather_csv);
++		g_host->weather_csv = nullptr;
+ 		timeEndPeriod(1);
+ 		g_host->log.line("server-stopped");
+ 	}
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 72d0c18..d7dcbad 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -845,6 +845,19 @@ static CEffectorCam* viewer_cam_effector(int id)
+ 	return viewer ? viewer->Cameras().GetCamEffector((ECamEffectorType)id) : nullptr;
+ }
+ 
++// S06-T08: on the server a script camera effector is the context participant's
++// presentation, or every player's outside a context (the surge's earthquakes
++// run from level.add_call); the flags and numbers a client needs to play it.
++static campaign::Refusal present_cam_effector(int id, LPCSTR fn, bool cyclic, bool hud, float fov, float power,
++                                              float speed)
++{
++	campaign::PresentationArgs args;
++	args.flags = (cyclic ? 1u : 0u) | (hud ? 2u : 0u);
++	args.value = power;
++	args.position.set(fov, speed, 0.f);
++	return campaign::present_script(campaign::Presentation::CameraEffector, u16(id), fn, args);
++}
++
+ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func)
+ {
+ 	CAnimatorCamEffectorScriptCB* e = xr_new<CAnimatorCamEffectorScriptCB>(cb_func);
+@@ -856,7 +869,7 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func)
+ 	{
+ 		// S03-T05: on the server the effector is the script context
+ 		// participant's presentation (dropped and counted without one).
+-		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++		const float length = present_cam_effector(id, fn, cyclic, false, 0.f, 0.f, 0.f) ==
+ 			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+ 		return length;
+@@ -881,7 +894,7 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	{
+ 		// S03-T05: on the server the effector is the script context
+ 		// participant's presentation (dropped and counted without one).
+-		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++		const float length = present_cam_effector(id, fn, cyclic, false, cam_fov, 0.f, 0.f) ==
+ 			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+ 		return length;
+@@ -907,7 +920,7 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	{
+ 		// S03-T05: on the server the effector is the script context
+ 		// participant's presentation (dropped and counted without one).
+-		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++		const float length = present_cam_effector(id, fn, cyclic, b_hud, cam_fov, 0.f, 0.f) ==
+ 			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+ 		return length;
+@@ -937,7 +950,7 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+ 	{
+ 		// S03-T05: on the server the effector is the script context
+ 		// participant's presentation (dropped and counted without one).
+-		const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++		const float length = present_cam_effector(id, fn, cyclic, b_hud, cam_fov, power, 0.f) ==
+ 			campaign::Refusal::None ? e->GetAnimatorLength() : 0.f;
+ 		xr_delete(e);
+ 		return length;
+@@ -969,7 +982,7 @@ float add_cam_effector(LPCSTR fn, int id, bool cyclic, LPCSTR cb_func, float cam
+     CActor* viewer = campaign::local_view_actor();
+     if (!viewer)
+     {
+-    	const float length = campaign::present_to_context(campaign::Presentation::CameraEffector, u16(id), fn) ==
++    	const float length = present_cam_effector(id, fn, cyclic, b_hud, cam_fov, power, speed) ==
+     		campaign::Refusal::None ? e->GetAnimatorLength() : 0.f; // S03-T05
+     	xr_delete(e);
+     	return length;
+@@ -1084,7 +1097,7 @@ void remove_cam_effector(int id)
+ 	if (CActor* viewer = campaign::local_view_actor())
+ 		viewer->Cameras().RemoveCamEffector((ECamEffectorType)id);
+ 	else
+-		campaign::present_to_context(campaign::Presentation::CameraEffectorRemove, u16(id), ""); // S03-T05
++		campaign::present_script(campaign::Presentation::CameraEffectorRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
+ }
+ 
+ void set_cam_effector_factor(int id, float factor)
+@@ -1200,7 +1213,10 @@ void add_pp_effector(LPCSTR fn, int id, bool cyclic)
+ 	CActor* viewer = campaign::local_view_actor();
+ 	if (!viewer)
+ 	{
+-		campaign::present_to_context(campaign::Presentation::PostProcess, u16(id), fn); // S03-T05
++		// S03-T05; S06-T08: to every player outside a context, with the cyclic flag
++		campaign::PresentationArgs args;
++		args.flags = cyclic ? 1u : 0u;
++		campaign::present_script(campaign::Presentation::PostProcess, u16(id), fn, args);
+ 		return;
+ 	}
+ 	CPostprocessAnimator* pp = xr_new<CPostprocessAnimator>(id, cyclic);
+@@ -1214,7 +1230,17 @@ void remove_pp_effector(int id)
+ 
+ 	if (pp) pp->Stop(1.0f);
+ 	else if (campaign::process_role() == campaign::Role::Server)
+-		campaign::present_to_context(campaign::Presentation::PostProcessRemove, u16(id), ""); // S03-T05
++		campaign::present_script(campaign::Presentation::PostProcessRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
++}
++
++// S06-T08: the surge sets its psychic effector's factor every second from the
++// actor's cover; on the server that is presentation too.
++static void present_pp_factor(int id, float f, float f_sp)
++{
++	campaign::PresentationArgs args;
++	args.value = f;
++	args.position.set(f_sp, 0.f, 0.f);
++	campaign::present_script(campaign::Presentation::PostProcessFactor, u16(id), "", args);
+ }
+ 
+ void set_pp_effector_factor(int id, float f, float f_sp)
+@@ -1222,6 +1248,8 @@ void set_pp_effector_factor(int id, float f, float f_sp)
+     CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+ 
+     if (pp) pp->SetDesiredFactor(f, f_sp);
++    else if (campaign::process_role() == campaign::Role::Server)
++        present_pp_factor(id, f, f_sp);
+ }
+ 
+ void set_pp_effector_factor2(int id, float f)
+@@ -1229,6 +1257,8 @@ void set_pp_effector_factor2(int id, float f)
+     CPostprocessAnimator* pp = smart_cast<CPostprocessAnimator*>(viewer_pp_effector(id));
+ 
+     if (pp) pp->SetCurrentFactor(f);
++    else if (campaign::process_role() == campaign::Role::Server)
++        present_pp_factor(id, f, 0.f);
+ }
+ 
+ bool check_pp_effector(int id)
+diff --git a/src/xrGame/script_particles.cpp b/src/xrGame/script_particles.cpp
+index 6a72bb6..264f171 100644
+--- a/src/xrGame/script_particles.cpp
++++ b/src/xrGame/script_particles.cpp
+@@ -9,6 +9,10 @@
+ #include "stdafx.h"
+ #include "script_particles.h"
+ #include "../xrEngine/objectanimator.h"
++#include "CampaignScriptContext.h"
++#include "CampaignActorAccess.h" // process_role
++
++static u32 s_coop_particles_handles = 0;
+ 
+ CScriptParticlesCustom::CScriptParticlesCustom(CScriptParticles* owner, LPCSTR caParticlesName): CParticlesObject(
+ 	caParticlesName,FALSE, true)
+@@ -88,6 +92,24 @@ CScriptParticles::CScriptParticles(LPCSTR caParticlesName)
+ {
+ 	m_particles = xr_new<CScriptParticlesCustom>(this, caParticlesName);
+ 	m_transform.identity();
++	m_coop_handle = ++s_coop_particles_handles;
++	m_coop_name = caParticlesName;
++}
++
++// S06-T08: 0 play at position, 1 move, 2 stop, 3 stop deferred.
++void CScriptParticles::coop_present(u8 kind, const Fvector* position, u32 flags)
++{
++	if (campaign::process_role() != campaign::Role::Server)
++		return;
++	static const campaign::Presentation kinds[] = {campaign::Presentation::Particles,
++		campaign::Presentation::ParticlesMove, campaign::Presentation::ParticlesStop,
++		campaign::Presentation::ParticlesStopDeferred};
++	campaign::PresentationArgs args;
++	args.handle = m_coop_handle;
++	if (position)
++		args.position = *position;
++	args.flags = flags;
++	campaign::present_script(kinds[kind], 0, *m_coop_name, args);
+ }
+ 
+ CScriptParticles::~CScriptParticles()
+@@ -105,6 +127,7 @@ void CScriptParticles::Play(bool bHudMode)
+ {
+ 	VERIFY(m_particles);
+ 	m_particles->Play(bHudMode);
++	coop_present(0, &m_transform.c, 0);
+ }
+ 
+ void CScriptParticles::PlayAtPos(const Fvector& position, bool bHudMode)
+@@ -115,18 +138,21 @@ void CScriptParticles::PlayAtPos(const Fvector& position, bool bHudMode)
+ 	m_particles->UpdateParent(m_transform, zero_vel);
+ 	m_particles->Play(bHudMode);
+ 	m_particles->UpdateParent(m_transform, zero_vel);
++	coop_present(0, &position, 0);
+ }
+ 
+ void CScriptParticles::Stop()
+ {
+ 	VERIFY(m_particles);
+ 	m_particles->Stop(FALSE);
++	coop_present(2, nullptr, 0);
+ }
+ 
+ void CScriptParticles::StopDeffered()
+ {
+ 	VERIFY(m_particles);
+ 	m_particles->Stop(TRUE);
++	coop_present(3, nullptr, 0);
+ }
+ 
+ void CScriptParticles::MoveTo(const Fvector& pos, const Fvector& vel)
+@@ -134,6 +160,7 @@ void CScriptParticles::MoveTo(const Fvector& pos, const Fvector& vel)
+ 	VERIFY(m_particles);
+ 	m_transform.translate_over(pos);
+ 	m_particles->UpdateParent(m_transform, vel);
++	coop_present(1, &pos, 0);
+ }
+ 
+ void CScriptParticles::XFORMMoveTo(const Fvector& pos)
+@@ -141,6 +168,7 @@ void CScriptParticles::XFORMMoveTo(const Fvector& pos)
+ 	VERIFY(m_particles);
+ 	m_transform.translate_over(pos);
+ 	m_particles->SetXFORM(m_transform);
++	coop_present(1, &pos, 1);
+ }
+ 
+ void CScriptParticles::SetDirection(const Fvector& dir)
+diff --git a/src/xrGame/script_particles.h b/src/xrGame/script_particles.h
+index df46d5c..fbec7cf 100644
+--- a/src/xrGame/script_particles.h
++++ b/src/xrGame/script_particles.h
+@@ -37,6 +37,11 @@ class CScriptParticles
+ {
+ private:
+ 	Fmatrix m_transform;
++	// S06-T08: on the campaign server a particles_object is presentation the
++	// co-op clients play (the surge's waves, the psi-storm's vortices).
++	u32 m_coop_handle;
++	shared_str m_coop_name;
++	void coop_present(u8 kind, const Fvector* position, u32 flags);
+ public:
+ 	CScriptParticlesCustom* m_particles;
+ 	CScriptParticles(LPCSTR caParticlesName);
+diff --git a/src/xrGame/script_sound.cpp b/src/xrGame/script_sound.cpp
+index 4b2034a..06cdecb 100644
+--- a/src/xrGame/script_sound.cpp
++++ b/src/xrGame/script_sound.cpp
+@@ -12,6 +12,35 @@
+ #include "gameobject.h"
+ #include "ai_space.h"
+ #include "script_engine.h"
++#include "actor.h"
++#include "CampaignScriptContext.h"
++#include "CampaignActorAccess.h" // process_role
++
++// S06-T08: presentation kinds, in the order coop_script_sound_present numbers them.
++static const campaign::Presentation s_sound_kinds[] = {campaign::Presentation::Sound, campaign::Presentation::SoundAtPos,
++	campaign::Presentation::SoundStop, campaign::Presentation::SoundStopDeferred, campaign::Presentation::SoundVolume,
++	campaign::Presentation::SoundPosition};
++static u32 s_coop_sound_handles = 0;
++
++void coop_script_sound_present(u8 kind, u32 handle, LPCSTR name, const Fvector* position, float value, u32 flags)
++{
++	if (campaign::process_role() != campaign::Role::Server || kind >= sizeof(s_sound_kinds) / sizeof(s_sound_kinds[0]))
++		return;
++	campaign::PresentationArgs args;
++	args.handle = handle;
++	if (position)
++		args.position = *position;
++	args.value = value;
++	args.flags = flags;
++	campaign::present_script(s_sound_kinds[kind], 0, name, args);
++}
++
++// A sound on no object or on an actor is the players' to hear; one on an NPC
++// or an item stays where it is (not replicated, L05).
++static bool coop_sound_for_players(CScriptGameObject* object)
++{
++	return !object || smart_cast<CActor*>(&object->object()) != nullptr;
++}
+ 
+ // { volume_mult = number } from a sound hook's return. 1.0 (vanilla) when nil, not a table, or not a number.
+ static float ambient_hook_volume_mult(const ::luabind::object& output)
+@@ -48,6 +77,8 @@ static float script_sound_hook_volume_mult(LPCSTR file, const Fvector* pos, CScr
+ CScriptSound::CScriptSound(LPCSTR caSoundName, ESoundTypes sound_type)
+ {
+ 	m_caSoundToPlay = caSoundName;
++	m_coop_handle = ++s_coop_sound_handles;
++	m_coop_routed = false;
+ 	string_path l_caFileName;
+ 	VERIFY(::Sound) ;
+ 	if (FS.exist(l_caFileName, "$game_sounds$", caSoundName, ".ogg"))
+@@ -90,6 +121,11 @@ void CScriptSound::Play(CScriptGameObject* object, float delay, int flags)
+ 	if (volume_mult <= EPS_S)
+ 		return;
+ 	m_sound.play((object) ? &object->object() : NULL, flags, delay);
++	if (campaign::process_role() == campaign::Role::Server && coop_sound_for_players(object))
++	{
++		m_coop_routed = true;
++		coop_script_sound_present(0, m_coop_handle, *m_caSoundToPlay, nullptr, delay, u32(flags)); // S06-T08
++	}
+ 	if (volume_mult < 1.0f)
+ 		m_sound.set_volume(volume_mult);
+ }
+@@ -102,6 +138,11 @@ void CScriptSound::PlayAtPos(CScriptGameObject* object, const Fvector& position,
+ 	if (volume_mult <= EPS_S)
+ 		return;
+ 	m_sound.play_at_pos((object) ? &object->object() : NULL, position, flags, delay);
++	if (campaign::process_role() == campaign::Role::Server && coop_sound_for_players(object))
++	{
++		m_coop_routed = true;
++		coop_script_sound_present(1, m_coop_handle, *m_caSoundToPlay, &position, delay, u32(flags)); // S06-T08
++	}
+ 	if (volume_mult < 1.0f)
+ 		m_sound.set_volume(volume_mult);
+ }
+diff --git a/src/xrGame/script_sound.h b/src/xrGame/script_sound.h
+index 4b661b7..cc96428 100644
+--- a/src/xrGame/script_sound.h
++++ b/src/xrGame/script_sound.h
+@@ -13,10 +13,17 @@
+ 
+ class CScriptGameObject;
+ 
++// S06-T08: on the campaign server a script sound played on an actor or at a
++// position is presentation; the co-op clients play it (kinds in
++// CampaignScriptContext.h). Nothing on a client.
++void coop_script_sound_present(u8 kind, u32 handle, LPCSTR name, const Fvector* position, float value, u32 flags);
++
+ class CScriptSound
+ {
+ 	mutable ref_sound m_sound;
+ 	shared_str m_caSoundToPlay;
++	u32 m_coop_handle; // S06-T08: identifies this sound_object to the clients
++	bool m_coop_routed; // ...once Play/PlayAtPos presented it
+ 
+ 	friend class CScriptSoundAction;
+ public:
+diff --git a/src/xrGame/script_sound_inline.h b/src/xrGame/script_sound_inline.h
+index 28aa102..e134c59 100644
+--- a/src/xrGame/script_sound_inline.h
++++ b/src/xrGame/script_sound_inline.h
+@@ -86,18 +86,24 @@ IC void CScriptSound::Stop()
+ {
+ 	VERIFY(m_sound._handle());
+ 	m_sound.stop();
++	if (m_coop_routed)
++		coop_script_sound_present(2, m_coop_handle, "", nullptr, 0.f, 0); // S06-T08 SoundStop
+ }
+ 
+ IC void CScriptSound::StopDeffered()
+ {
+ 	VERIFY(m_sound._handle());
+ 	m_sound.stop_deffered();
++	if (m_coop_routed)
++		coop_script_sound_present(3, m_coop_handle, "", nullptr, 0.f, 0); // S06-T08 SoundStopDeferred
+ }
+ 
+ IC void CScriptSound::SetPosition(const Fvector& position)
+ {
+ 	VERIFY(m_sound._handle());
+ 	m_sound.set_position(position);
++	if (m_coop_routed)
++		coop_script_sound_present(5, m_coop_handle, "", &position, 0.f, 0); // S06-T08 SoundPosition
+ }
+ 
+ IC void CScriptSound::SetFrequency(float frequency)
+@@ -110,6 +116,8 @@ IC void CScriptSound::SetVolume(float volume)
+ {
+ 	VERIFY(m_sound._handle());
+ 	m_sound.set_volume(volume);
++	if (m_coop_routed)
++		coop_script_sound_present(4, m_coop_handle, "", nullptr, volume, 0); // S06-T08 SoundVolume
+ }
+ 
+ IC const CSound_params* CScriptSound::GetParams()

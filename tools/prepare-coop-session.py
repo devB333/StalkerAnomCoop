@@ -4,7 +4,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--port 27515] [--save "player - autosave"] [--fixture cordon|marsh] [--inject c1,...]
            [--script c1,c2] [--movement c1,c2] [--churn 10] [--drop 6]
            [--net-loss 5] [--net-lag 40] [--no-predict c1,c2] [--combat c1,c2]
-           [--encounter c1,c2]
+           [--encounter c1,c2] [--weather c1,c2 [--psi-storm]]
            [--protocol-build proto-build-32] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
@@ -82,6 +82,12 @@ def main():
                              "the server arms the actors, spawns a boar beside participant 2 20 s after both "
                              "send input and kills participant 2's actor 8 s after the boar died, or 60 s "
                              "after the spawn while it lives (fixtures)")
+    parser.add_argument("--weather", default="",
+                        help="comma-separated client names running the S06-T08 weather program (profile script = 5: "
+                             "stand and take screenshots); the server forces w_storm1 10 s after both players are "
+                             "in the world and starts the installed surge_manager's emission 70 s after (fixtures)")
+    parser.add_argument("--psi-storm", action="store_true",
+                        help="with --weather: a psi-storm instead of the emission (psi_storm_manager)")
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
@@ -114,7 +120,8 @@ def main():
     no_predict = {n for n in args.no_predict.split(",") if n}
     combat = {n for n in args.combat.split(",") if n}
     encounter = {n for n in args.encounter.split(",") if n}
-    if (inject | script | movement) - set(names[1:]):
+    weather = {n for n in args.weather.split(",") if n}
+    if (inject | script | movement | weather) - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
         raise SystemExit("a client runs one driver: --script or --movement")
@@ -188,10 +195,13 @@ def main():
                       f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600",
                       f"churn = {args.churn}", f"drop = {args.drop}",
                       f"arm = {1 if combat or encounter else 0}", f"combat_heal = {1 if combat else 0}",
-                      f"encounter = {20 if encounter else 0}", f"lethal = {8 if encounter else 0}"]
+                      f"encounter = {20 if encounter else 0}", f"lethal = {8 if encounter else 0}",
+                      f"storm = {10 if weather else 0}",
+                      f"surge = {70 if weather and not args.psi_storm else 0}",
+                      f"psi_storm = {70 if weather and args.psi_storm else 0}"]
         else:
-            program = (4 if name in encounter else 3 if name in combat else 2 if name in movement
-                       else 1 if name in script else 0)
+            program = (5 if name in weather else 4 if name in encounter else 3 if name in combat
+                       else 2 if name in movement else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
                       f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",

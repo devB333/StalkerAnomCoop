@@ -546,7 +546,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S06-T07 — Jump and lean as server input
 
-- [ ] **Status: Not Started** · **Reasoning effort: Medium** · **Complexity: Low** · Added 2026-10-21 (user question at G06; L01 had no owner for jump and lean)
+- [ ] **Status: In Progress** · [Validation](docs/validation/S06-T07.md) (part 1: windowed clients release the mouse so windows can be moved, patch 0037; user request) · **Reasoning effort: Medium** · **Complexity: Low** · Added 2026-10-21 (user question at G06; L01 had no owner for jump and lean)
 - **Purpose:** Let players jump and lean through the server like movement and fire.
 - **Prerequisites:** S06-T06.
 - **Relevant files/subsystems:** `protocol/` input buttons; `CoopServerHost.cpp` (`apply_inputs`); `CoopClientLink.cpp` (input capture, prediction).
@@ -1042,7 +1042,7 @@ Statuses are exactly **Not Started**, **In Progress**, **Blocked**, and **Comple
 | S06-T05 | Completed | [NPC encounter and deaths](docs/validation/S06-T05.md) (patch 0035): native participant deaths on the server, native death presentation on clients, the dead take no input, no level change (enc-9 crash fixed); enc-15/19 (nominal), enc-17 (5 % / 40 ms), enc-18 (10 % / 100 ms) pass all 13 checks, agreement ≥ 99.9 %, deaths shown within 120 ms, 50 Hz, 10–19 KB/s per client; combat-16, session-12, snap-18, smoke-163, capture-42/43 pass; capture harness "Press any key" timeout fixed. G06 accepted 2026-10-21. |
 | G06 | Completed | [Accepted 2026-10-21](docs/validation/G06.md) with five user decisions: friendly fire stays on; respawn after a prompt with a lootable corpse (S07-T07); Azazel/Ironman unavailable in co-op; tests move to Cordon without Fanat (S06-T06); storm and emission visuals soon (S06-T08). Jump and lean added (S06-T07). |
 | S06-T06 | Completed | [Cordon fixture](docs/validation/S06-T06.md) (patch 0036, proto-build-31): user-made Cordon save ([record](docs/cordon-fixture.json)); no fixture names Fanat; Cordon's weak boar; fixed: server crash on blood marks (no wallmark engine), join race at 10 % loss (other channels wait for the client's first in-session message), a reused id with the same section kept a stale replica object; cenc-19/20 (nominal), cenc-21 (5 % / 40 ms), cenc-22 (10 % / 100 ms) pass all checks; ccombat-5, cpred-5, csession-5, csnap-5 pass in Cordon; smoke-168, capture-52/53 pass; 98/98 protocol tests. Next: S06-T07. |
-| S06-T07 | Not Started | Jump and lean as server input (added at G06). |
+| S06-T07 | In Progress | Jump and lean as server input (added at G06). Part 1 done ([report](docs/validation/S06-T07.md), patch 0037): windowed co-op clients take the mouse only on a click inside, so a window can be dragged by its title bar; checked with `tools/Test-WindowCapture.ps1` (window-capture-3). Jump and lean remain. |
 | S06-T08 | Not Started | Storm and emission visuals on both clients (added at G06). |
 | S07-T07 | Not Started | Respawn with a lootable corpse (added at G06; after S07-T02/T03). |
 

@@ -1,0 +1,103 @@
+diff --git a/src/xrEngine/Device_wndproc.cpp b/src/xrEngine/Device_wndproc.cpp
+index 213e880..695e8a2 100644
+--- a/src/xrEngine/Device_wndproc.cpp
++++ b/src/xrEngine/Device_wndproc.cpp
+@@ -1,6 +1,8 @@
+ #include "stdafx.h"
+ #include "MonitorList.h"
+ 
++extern u32 g_screenmode;
++
+ bool CRenderDevice::on_message(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT& result)
+ {
+ 	switch (uMsg)
+@@ -42,6 +44,12 @@ bool CRenderDevice::on_message(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
+ 			switch (wParam)
+ 			{
+ 			case SC_MOVE:
++				// the menu's Move in windowed mode (user request, 2026-10-22); a
++				// title-bar drag is SC_MOVE | HTCAPTION and never matched here
++				if (g_screenmode == 0)
++					return (false);
++				result = 1;
++				return (true);
+ 			case SC_SIZE:
+ 			case SC_MAXIMIZE:
+ 			case SC_MONITORPOWER:
+@@ -50,6 +58,11 @@ bool CRenderDevice::on_message(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
+ 			}
+ 			return (false);
+ 		}
++	case WM_LBUTTONDOWN:
++		// a window activated from its title bar takes the mouse at a click in it
++		if (b_cursor_capture_pending && GetForegroundWindow() == hWnd)
++			OnWM_Activate(MAKEWPARAM(WA_ACTIVE, 0), 0);
++		return (false);
+ 	case WM_CLOSE:
+ 		{
+ 			Engine.Event.Defer("KERNEL:disconnect");
+diff --git a/src/xrEngine/Xr_input.cpp b/src/xrEngine/Xr_input.cpp
+index bd94119..aff3355 100644
+--- a/src/xrEngine/Xr_input.cpp
++++ b/src/xrEngine/Xr_input.cpp
+@@ -433,6 +433,9 @@ BOOL CInput::iGetAsyncBtnState(int btn)
+ 
+ void CInput::MouseUpdate()
+ {
++	// not taken yet: a window activated from its title bar (device.h)
++	if (Device.b_cursor_capture_pending)
++		return;
+ 	HRESULT hr;
+ 	DWORD dwElements = MOUSEBUFFERSIZE;
+ 	auto od = std::make_unique<DIDEVICEOBJECTDATA[]>(MOUSEBUFFERSIZE);
+diff --git a/src/xrEngine/device.cpp b/src/xrEngine/device.cpp
+index 479c8ec..c46fd61 100644
+--- a/src/xrEngine/device.cpp
++++ b/src/xrEngine/device.cpp
+@@ -843,6 +843,23 @@ void CRenderDevice::OnWM_Activate(WPARAM wParam, LPARAM lParam)
+ 	{
+ 		Device.b_is_Active = TRUE;
+ 
++		// a click on the title bar or frame activates without taking the mouse,
++		// so the window can be moved; a click in it takes it (on_message)
++		if (bActive && fActive == WA_CLICKACTIVE && m_hWnd)
++		{
++			POINT cursor;
++			RECT client;
++			GetCursorPos(&cursor);
++			GetClientRect(m_hWnd, &client);
++			MapWindowPoints(m_hWnd, nullptr, reinterpret_cast<LPPOINT>(&client), 2);
++			if (!PtInRect(&client, cursor))
++			{
++				Device.b_cursor_capture_pending = TRUE;
++				return;
++			}
++		}
++		Device.b_cursor_capture_pending = FALSE;
++
+ 		if (Device.b_hide_cursor != bActive)
+ 		{
+ 			Device.b_hide_cursor = bActive;
+diff --git a/src/xrEngine/device.h b/src/xrEngine/device.h
+index f974ea2..6cb7dd6 100644
+--- a/src/xrEngine/device.h
++++ b/src/xrEngine/device.h
+@@ -58,6 +58,10 @@ public:
+ 	BOOL b_is_Ready;
+ 	BOOL b_is_Active;
+ 	BOOL b_hide_cursor;
++	// Windowed and always active (co-op clients): activated by a click on the
++	// title bar or frame, the window has not taken the mouse yet (a click in
++	// it does), so the window can be dragged (user request, 2026-10-22).
++	BOOL b_cursor_capture_pending;
+ public:
+ 
+ 	// Engine flow-control
+@@ -283,6 +287,7 @@ public:
+ 		b_is_Active = FALSE;
+ 		b_is_Ready = FALSE;
+ 		b_hide_cursor = FALSE;
++		b_cursor_capture_pending = FALSE;
+ 		Timer.Start();
+ 		m_bNearer = FALSE;
+ 		

@@ -153,6 +153,10 @@
     {
       "path": "patches/engine/0036-coop-cordon-fixture-and-fixes.patch",
       "sha256": "81bd1811abb132f06707899e08391844ed4d89d243f200b2496970686d8a853e"
+    },
+    {
+      "path": "patches/engine/0037-windowed-mouse-capture.patch",
+      "sha256": "590d4b7356248a95a2920fd6cde8d01bd5d93209cb1b4f08ac91da449ac20d23"
     }
   ],
   "submodules": [

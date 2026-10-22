@@ -114,6 +114,14 @@ violation (the receiver closes with transport code 1003).
 
 `coop::proto::transport_config()` returns this layout for the transport.
 
+**Ordering across channels (S06-T06).** Each channel is ordered only within
+itself. After the Welcome the server sends nothing on channels 1–4 until the
+client has sent a message inside the session (`session::PlayerView::confirmed`):
+in cenc-14 (10 % loss, 100 ms) a resync chunk on the bulk channel arrived
+before the resent Welcome and the client closed with 1003 ("message before the
+session started"). The client sends a Heartbeat on its first update after the
+Welcome, so the wait is one round trip.
+
 ### Messages and limits
 
 | Message | Body | Bounds |

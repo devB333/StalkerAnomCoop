@@ -1,11 +1,11 @@
 """Prepare an isolated co-op session: one campaign server and N clients (S05).
 
 Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2]
-           [--port 27515] [--save "player - autosave"] [--inject c1,...]
+           [--port 27515] [--save "player - autosave"] [--fixture cordon|marsh] [--inject c1,...]
            [--script c1,c2] [--movement c1,c2] [--churn 10] [--drop 6]
            [--net-loss 5] [--net-lag 40] [--no-predict c1,c2] [--combat c1,c2]
            [--encounter c1,c2]
-           [--protocol-build proto-build-30] [--keys-from <earlier run>]
+           [--protocol-build proto-build-31] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -52,6 +52,9 @@ def main():
     parser.add_argument("--task", default="S05-T01")
     parser.add_argument("--clients", type=int, default=2)
     parser.add_argument("--port", type=int, default=27515)
+    parser.add_argument("--fixture", default="cordon", choices=("marsh", "cordon"),
+                        help="the served save: cordon (default since S06-T06; docs/cordon-fixture.json, "
+                             "l01_escape) or marsh (the headless fixture, k00_marsh)")
     parser.add_argument("--save", default="player - autosave",
                         help="saved game in the server runtime to serve; copied as coop-campaign "
                              "(no spaces: the engine's ini reader drops them)")
@@ -82,7 +85,7 @@ def main():
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-30")
+    parser.add_argument("--protocol-build", default="proto-build-31")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -126,6 +129,15 @@ def main():
 
     # The served save under a space-free name.
     saves = runtimes["server"] / "appdata/savedgames"
+    if args.fixture == "cordon":
+        # S06-T06: the Cordon pair, hash-checked against its record
+        record = json.loads((workspace / "docs/cordon-fixture.json").read_text())
+        for item in record["inputs"]:
+            source = workspace / item["path"]
+            if hashlib.sha256(source.read_bytes()).hexdigest() != item["sha256"]:
+                raise SystemExit(f"Cordon fixture changed: {item['path']}")
+            shutil.copyfile(source, saves / source.name)
+        args.save = record["save_basename"]
     for extension in (".scop", ".scoc"):
         source = saves / (args.save + extension)
         if not source.exists():
@@ -227,6 +239,7 @@ def main():
         "party_id": party_id,
         "port": args.port,
         "save": args.save,
+        "fixture": args.fixture,
         "protocol_build": args.protocol_build,
         "drop": args.drop,
         "net_loss_pct": args.net_loss,

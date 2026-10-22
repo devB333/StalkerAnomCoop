@@ -58,6 +58,30 @@ SCENARIO("session/two-players-join")
     CHECK(srv.s->counters().joins == 2 && srv.s->counters().violations == 0);
 }
 
+// S06-T06: a player is confirmed only once its client has sent inside the
+// session (it then has its Welcome); the host starts other channels after that.
+SCENARIO("session/confirmed-after-client-speaks")
+{
+    Cast cast = MakeCast(1);
+    Srv srv(rig, cast);
+    Cli a(rig, cast.ids[0], Copy(*cast.keys[0]));
+    REQUIRE(a.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        a.update();
+        return srv.count(SessionEventType::Joined) == 1;
+    }, 8000));
+    // the server has sent the Welcome but processed nothing from the session yet
+    REQUIRE(srv.s->players().size() == 1);
+    CHECK(!srv.s->players()[0].confirmed);
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        a.update();
+        return !srv.s->players().empty() && srv.s->players()[0].confirmed;
+    }, 5000));
+    CHECK(a.c->state() == ClientState::Active);
+}
+
 SCENARIO("session/impersonation-refused")
 {
     Cast cast = MakeCast(2);

@@ -315,6 +315,7 @@ void Server::onMessage(Conn& c, const net::Event& e, std::vector<SessionEvent>& 
         }
         const Slot& s = slots_[std::size_t(c.slot)];
         c.last_heard_us = t_.now_us();
+        c.heard_in_session = true; // the client sends nothing in-session before its Welcome
         if (c.suspect)
         {
             c.suspect = false;
@@ -564,7 +565,10 @@ std::vector<PlayerView> Server::players() const
         p.join_serial = s.join_serial;
         auto it = conns_.find(s.conn);
         if (it != conns_.end())
+        {
             p.suspect = it->second.suspect;
+            p.confirmed = it->second.heard_in_session;
+        }
         net::ConnectionStatus st;
         if (p.connected && t_.status(s.conn, st))
             p.ping_ms = st.ping_ms;

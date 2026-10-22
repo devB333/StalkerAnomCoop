@@ -164,6 +164,13 @@ struct PlayerView
     proto::Uuid128 session_id;
     std::uint64_t join_serial = 0;
     int ping_ms = -1; // transport's estimate
+    // S06-T06: the client has sent a message inside the session, so it has
+    // its Welcome. Reliable channels are ordered only within themselves: a
+    // message on another channel sent right after the Welcome can arrive
+    // before a lost and resent Welcome, and the client closes on it ("message
+    // before the session started", cenc-14 at 10 % loss). Send on the other
+    // channels only once this is true.
+    bool confirmed = false;
 };
 
 class Server
@@ -217,6 +224,7 @@ private:
         int slot = -1;
         std::array<Bucket, proto::kChannelCount> buckets{};
         std::int64_t last_heard_us = 0;
+        bool heard_in_session = false; // PlayerView::confirmed
         bool suspect = false;
         std::uint64_t join_serial = 0;
     };

@@ -1,46 +1,51 @@
-# Session handoff — G06 accepted; next: S06-T06 (Cordon fixture)
+# Session handoff — S06-T06 done; next: S06-T07 (jump and lean)
 
-## State (2026-10-21)
+## State (2026-10-22)
 
-- **G06 accepted** 2026-10-21 with five user decisions
-  ([G06](../../validation/G06.md#user-decision)). Stage 6 stays In Progress
-  for three tasks added at the gate: **S06-T06** Cordon fixture without Fanat
-  (next), **S06-T07** jump and lean, **S06-T08** storm and emission visuals.
-  **S07-T07** (respawn with a lootable corpse) was added after S07-T02/T03.
-- Engine: patches 0001–0035; final build `campaign-202` / `client-105`;
-  protocol v1.4 (`proto-build-30`). New carried limits L28–L31.
-- A hands-on session `play-1` is prepared (not launched), with both players
-  armed and no program. The command is in the last session summary:
-  `Run-CoopSession.ps1 -Run play-1 -Task S06-T05 ... -ClientSeconds '1700,1690'`.
+- **G06 accepted** 2026-10-21 ([G06](../../validation/G06.md#user-decision)).
+  Stage 6 stays In Progress for the tasks added at the gate:
+  - S06-T06 Cordon fixture: **Completed** ([S06-T06](../../validation/S06-T06.md)).
+  - S06-T07 jump and lean: **next**.
+  - S06-T08 storm and emission visuals.
+  - S07-T07 respawn with a lootable corpse (after S07-T02/T03; the respawned
+    player gets the faction's starting kit).
+- Engine: patches 0001–0036 (check `builds/stage2/patch-check-39b`);
+  protocol `proto-build-31` (wire v1.4 unchanged; session join fix). Final
+  build `campaign-210` / `client-113`. Tool defaults: `proto-build-31`, and
+  `prepare-coop-session.py --fixture cordon`.
+- **Cordon fixture:** user-made save `cordon fixture`
+  ([record](../../cordon-fixture.json)), Loner, outdoors about 140 m east of
+  the Rookie Village, slight radiation (0.3 %/min). The marsh fixture stays
+  for the single-player smoke and captures.
 
-## S06-T06 first steps
+## Fixed in S06-T06 (found by running in Cordon)
 
-1. A Cordon save. Only the marsh save exists
-   (`builds/build_2/validation-evidence/20261017-user-gameplay/savedgames`).
-   A new game takes its start from `axr_main.config` `[character_creation]`
-   (`ui_mm_faction_select.script:1671-1760`: faction, map, name, loadout),
-   then `start server(all/single/alife/new)` (`ui_main_menu.script:255`).
-   Plan: an isolated client runtime with those settings written, a new-game
-   start, then a native save, recorded with hashes like the marsh fixture. If
-   that is not representative, ask the user for a save.
-2. Remove Fanat (19409) from the co-op fixtures and programs; find every
-   marsh-specific id and position in `CoopServerHost.cpp`,
-   `CoopClientLink.cpp`, `prepare-*.py` and the compare tools.
-3. Rerun the Stage 6 programs in Cordon.
+- Campaign server crash on blood/bullet marks (no wallmark engine on the
+  server; marks within 100 m of the origin reached it, Cordon only).
+- Join race under loss: other channels now wait until the client has sent a
+  message in-session (it then has its Welcome).
+- Client replica kept a stale offline object when the server reused its id
+  for an object of the same section (participant 2's PDA never appeared).
+- Capture harness: `keypress_on_start off` (the "hung" captures were waiting
+  at "Press any key").
 
-## Open questions for the user
+## S06-T07 first steps
 
-- S07-T07: what a respawned player carries (nothing, a starting kit, or the
-  checkpoint's inventory).
+Add jump and lean (left/right) to the input buttons (`protocol/` input,
+`kButtonFire` is bit 1), press the native keys on the player's own actor on
+the server like fire (`CoopServerHost.cpp` `apply_inputs`), predict jump on
+the client, validate (no jump while airborne or dead), and add legs to the
+movement program; rerun the Stage 6 programs in Cordon.
 
 ## Run names
 
-- Used: builds up to `campaign-202`, `client-105`; `enc-1…19`,
-  `combat-14…16`, `session-11/12`, `snap-17/18`, `smoke-162/163`,
-  `capture-38…43`, `play-1`; patch check 38.
-- Next: `campaign-203`, `client-106`, `smoke-164`, `capture-44`, patch
+- Used: builds up to `campaign-210`, `client-113`; protocol `proto-build-31`,
+  tests `pt-29`; `cordon-1…12`, `cenc-1…22`, `ccombat-1…5`, `cpred-1…5`,
+  `csession-1…5`, `csnap-1…5`; `smoke-164…168`; `capture-44…53`; patch
   check 39.
+- Next: `campaign-211`, `client-114`, `proto-build-32`, `pt-30`,
+  `smoke-169`, `capture-54`, patch check 40.
 
 Preserve the original installation, the reference checkout, the accepted
-source-client runtime and the saved-game fixture.
-Previous snapshot: [before S06-T06](../done/snapshot-before-S06-T06.md).
+source-client runtime and both saved-game fixtures.
+Previous snapshot: [before S06-T07](../done/snapshot-before-S06-T07.md).

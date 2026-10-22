@@ -107,20 +107,31 @@ def main():
     monster = int(m.group(2)) if m else None
     actors = [i for i, (k, _) in kinds.items() if k == "actor"]
     result["server"]["spawn"] = m.group(0) if m else None
-    result["server"]["lines"] = re.findall(r"encounter (?:monster-dead|lethal).*", text)
+    result["server"]["lines"] = re.findall(r"encounter (?:monster-dead|lethal|monster-lethal).*", text)
     M = server.get(monster, [])
     m_dead = first_dead(M)
 
+    # the fixture's own lethal hits (participant 2's, the boar's at 60 s) are
+    # not damage either side dealt: drops of their victim from the hit's time
+    # (its log line) to 500 ms after are left out
+    fixture_hits = [(int(t), int(v)) for t, v in
+                    re.findall(r"^(\d+) encounter (?:lethal|monster-lethal) hit .*?victim=(\d+)", text, re.M)]
+
+    def fixture_hit(victim, t):
+        return any(v == victim and t0 <= t <= t0 + 500 for t0, v in fixture_hits)
+
+    result["server"]["fixture_hits"] = fixture_hits
     # damage
     npc_hits = []
     for aid in actors:
         s = server[aid]
         for (_, r0), (t, r1) in zip(s, s[1:], strict=False):
-            if r1["health"] < r0["health"] and r1["hitter"] == monster and (m_dead is None or t <= m_dead + 200):
+            if (r1["health"] < r0["health"] and r1["hitter"] == monster and (m_dead is None or t <= m_dead + 200)
+                    and not fixture_hit(aid, t)):
                 npc_hits.append((aid, t, r0["health"] - r1["health"]))
     add("npc_damage", npc_hits, f"{len(npc_hits)} drops, first {npc_hits[:3]}")
     player_hits = [(t, r0["health"] - r1["health"], r1["hitter"]) for (_, r0), (t, r1) in zip(M, M[1:], strict=False)
-                   if r1["health"] < r0["health"] and r1["hitter"] in actors]
+                   if r1["health"] < r0["health"] and r1["hitter"] in actors and not fixture_hit(monster, t)]
     other_hitters = sorted({r1["hitter"] for (_, r0), (_t, r1) in zip(M, M[1:], strict=False)
                             if r1["health"] < r0["health"] and r1["hitter"] not in actors})
     add("player_damage", player_hits, f"{len(player_hits)} drops by participants, first {player_hits[:3]}; "
@@ -187,6 +198,12 @@ def main():
         leg = re.search(r"script-leg name=D-dead-walk start_utc=(\d+) end_utc=(\d+)", log)
         if leg:
             s0, s1 = int(leg.group(1)), int(leg.group(2))
+            # the client's own actor where the leg began and ended (its log);
+            # the 10 Hz record's position is the body, whose ragdoll physics a
+            # slope or a creature can move (cenc-3: a boar beside it, 0.93 m)
+            ends = [tuple(float(x) for x in p.split(","))
+                    for p in re.findall(r"script-leg(?:-start)? name=D-dead-walk .*?pos=(\S+)", log)]
+            own_moved = (abs(ends[-1][0] - ends[0][0]) + abs(ends[-1][2] - ends[0][2])) if len(ends) >= 2 else None
             own = next((r["id"] for r in rows if r["local"] == 1), None)
             srv = window(server.get(own, []), s0, s1 + 500)
             moved = max((abs(r["x"] - srv[0]["x"]) + abs(r["z"] - srv[0]["z"]) for r in srv), default=None)
@@ -198,10 +215,10 @@ def main():
             fire_before = before[-1]["fire"].get(str(slot)) if before else None
             fire_after = after["fire"].get(str(slot)) if after else None
             dead_in = after["dead_in"].get(str(slot)) if after else None
-            info["dead_walk"] = {"server_moved": moved, "client_moved": cl_moved, "fire_before": fire_before,
-                                 "fire_after": fire_after, "dead_inputs": dead_in}
-            add(f"{name} dead_inert", moved is not None and moved < 0.10 and cl_moved is not None and cl_moved < 0.10
-                and fire_before == fire_after, f"{info['dead_walk']}")
+            info["dead_walk"] = {"server_moved": moved, "client_actor_moved": own_moved, "body_drift": cl_moved,
+                                 "fire_before": fire_before, "fire_after": fire_after, "dead_inputs": dead_in}
+            add(f"{name} dead_inert", moved is not None and moved < 0.10 and own_moved is not None
+                and own_moved < 0.10 and fire_before == fire_after, f"{info['dead_walk']}")
             ops = re.findall(r"script-action forged-revive operation=(\d+)", log)
             res = {int(o): (int(c), int(r)) for o, c, r in
                    re.findall(r"action-result operation=(\d+) outcome=(\d+) reason=(\d+)", log)}

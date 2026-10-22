@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "fixture_id": "S06-T06-cordon",
+  "status": "User-made 2026-10-21; level and position verified at runtime in S06-T06",
+  "made_by": "The user, with the accepted source-client runtime (Launch-Anomaly.cmd): a new Loner game started at the Rookie Village, walked out to open ground with no companion, saved as 'cordon fixture'",
+  "evidence": "builds/build_2/validation-evidence/20261021-cordon-fixture/user-play (the save pair, its thumbnail, the new game's own autosave and the play log)",
+  "earlier_attempts": "tools/New-FixtureSave.ps1 runs cordon-1/3/5/9/10/11 (generated saves: Rookie Village and car-park starts are indoors; pole_stalker_village loads Meadow; a probed open-ground start was inside a level changer); not used",
+  "expected_level": "l01_escape",
+  "save_basename": "cordon fixture",
+  "inputs": [
+    {
+      "path": "builds/build_2/validation-evidence/20261021-cordon-fixture/user-play/cordon fixture.scop",
+      "sha256": "15f3f544de33b74469133c4cd22117505d16687c8bfebdc2db684d7ece9d13f2"
+    },
+    {
+      "path": "builds/build_2/validation-evidence/20261021-cordon-fixture/user-play/cordon fixture.scoc",
+      "sha256": "bc0f0c02e68e259b38b4bef590cc332eca4622f1d259b297e69c415cf2eac4cd"
+    }
+  ]
+}

@@ -36,7 +36,7 @@ accepted; this file is the working list.
 
 | L28 | Deaths are in memory only; a dead player stays dead (no respawn); the killer is not replicated to clients (a body names itself) | G06 | S07-T07 (respawn, durable death); killer presentation: with L05 | Open |
 | L29 | Hits are resolved at the server's present time; no lag compensation | G06 | No task yet (decide from play tests; S11-T01 latency work) | Open |
-| L30 | Fixture NPCs decide the tests' course: Fanat (companion) follows actor 0, fights, and his melee (`xrs_facer`) drops a punched player's weapon; the boar's AI chooses whether to attack (8 of 10 runs) | G06 | S06-T06 (Cordon, no Fanat) | Open |
+| L30 | Fixture NPCs decide the tests' course: Fanat (companion) follows actor 0, fights, and his melee (`xrs_facer`) drops a punched player's weapon; the boar's AI chooses whether to attack (8 of 10 runs) | G06 | S06-T06 (Cordon, no Fanat) | Open. 2026-10-22: Fanat's part removed: the co-op programs run in Cordon with no companion and no program names him ([S06-T06](validation/S06-T06.md), cenc-19…22, ccombat-5, cpred-5, csession-5, csnap-5). The boar's choice remains; a fixture lethal hit at 60 s makes sure it dies |
 | L31 | Installed death game modes (Azazel, Ironman) do not run for participants | G06 | None: accepted scope (user decision 2026-10-21) | Open |
 
 ## Campaign and scripts

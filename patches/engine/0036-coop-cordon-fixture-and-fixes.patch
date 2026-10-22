@@ -1,0 +1,287 @@
+diff --git a/src/Layers/xrRenderPC_R4/r4.cpp b/src/Layers/xrRenderPC_R4/r4.cpp
+index 0c76765..ef7f3c4 100644
+--- a/src/Layers/xrRenderPC_R4/r4.cpp
++++ b/src/Layers/xrRenderPC_R4/r4.cpp
+@@ -892,6 +892,10 @@ void CRender::add_StaticWallmark(ref_shader& S, const Fvector& P, float s, CDB::
+ 
+ void CRender::add_StaticWallmark(ref_shader& S, const Fvector& P, float s, CDB::TRI* T, Fvector* verts, float ttl, bool ignore_opt, float rotation)
+ {
++	// S06-T06: the wallmark engine exists only after a rendered level load (as
++	// clear_static_wallmarks); the campaign server has none. A blood mark within
++	// wallmark_range_static of its camera (the origin) crashed it in Cordon (cenc-5).
++	if (!Wallmarks) return;
+ 	if (T->suppress_wm) return;
+ 	VERIFY2(_valid(P) && _valid(s) && T && verts && (s > EPS_L), "Invalid static wallmark params");
+ 	Wallmarks->AddStaticWallmark(T, verts, P, &*S, s, ttl, ignore_opt, rotation);
+@@ -924,12 +928,14 @@ void CRender::clear_static_wallmarks()
+ 
+ void CRender::add_SkeletonWallmark(intrusive_ptr<CSkeletonWallmark> wm)
+ {
++	if (!Wallmarks) return; // S06-T06: none on the campaign server
+ 	Wallmarks->AddSkeletonWallmark(wm);
+ }
+ 
+ void CRender::add_SkeletonWallmark(const Fmatrix* xf, CKinematics* obj, ref_shader& sh, const Fvector& start,
+                                    const Fvector& dir, float size, float ttl, bool ignore_opt)
+ {
++	if (!Wallmarks) return; // S06-T06: none on the campaign server
+ 	Wallmarks->AddSkeletonWallmark(xf, obj, sh, start, dir, size, ttl, ignore_opt);
+ }
+ 
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 6779466..f514539 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -526,10 +526,23 @@ void apply_spawn(const coop::proto::Spawn& s)
+ 	}
+ 	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
+ 	CSE_ALifeDynamicObject* known = ai().alife().objects().object(id, true);
+-	if (known && known->s_name != section)
++	// S06-T06: the replica's registry also holds the checkpoint's offline
++	// objects, and the server releases offline objects without an event, then
++	// reuses their ids. A reused id with the same section looked like the same
++	// object coming online, and the stale one kept its old (offline) parent and
++	// never came online (csession-3/4: participant 2's PDA, whose id an NPC's
++	// PDA had held). The same object keeps its entity and its parent.
++	bool replaced = known && known->s_name != section;
++	if (known && !replaced)
++	{
++		const auto ref = g_link->refs.find(id);
++		replaced = (ref != g_link->refs.end() && ref->second.id != s.entity.id) || known->ID_Parent != parent;
++	}
++	if (replaced)
+ 	{
+ 		// the engine id now names another entity: the old one is gone
+-		g_link->log.line("spawn-replaces id=%u old=%s new=%s", u32(id), *known->s_name, *section);
++		g_link->log.line("spawn-replaces id=%u old=%s new=%s old_parent=%u parent=%u", u32(id), *known->s_name,
++			*section, u32(known->ID_Parent), u32(parent));
+ 		campaign::ReplicaPermit permit;
+ 		alife->release(known, true);
+ 		known = nullptr;
+@@ -2007,22 +2020,8 @@ void run_script4(u32 t)
+ 			return;
+ 		g_link->program_t0 = t;
+ 		g_link->log.line("script4-program-start slot=%u t=%u", u32(g_link->local_slot), t);
+-		// away from Fanat (the companion at the base, who otherwise fights
+-		// the boar for them): sprint 4 s facing away from him
+-		if (CObject* fanat = Level().Objects.net_Find(19409))
+-		{
+-			Fvector away = Fvector().set(g_actor->Position()).sub(fanat->Position());
+-			away.y = 0.f;
+-			if (away.magnitude() > 0.1f)
+-			{
+-				away.normalize();
+-				float h, pitch;
+-				away.getHP(h, pitch);
+-				g_actor->cam_Active()->yaw = -h;
+-				g_actor->cam_Active()->pitch = 0.f;
+-			}
+-		}
+-		leg_begin("E-move-away", mcFwd | mcSprint, coop::proto::Stance::Sprint, true, 4000, Link::SendNormal);
++		// S06-T06: no sprint away first; in the marsh it took the players
++		// away from Fanat, who is not in the Cordon fixture
+ 		return;
+ 	}
+ 	const u32 p = t - g_link->program_t0;
+@@ -2051,12 +2050,13 @@ void run_script4(u32 t)
+ 			g_link->log.line("script4-own-death t=%u", t);
+ 		}
+ 		// its body falls for a few seconds first (its ragdoll: up to 3 s in enc-6)
+-		if (g_link->dead_phase == 0 && t >= g_link->dead_since + 5000)
++		// S06-T06: +8 s; on Cordon's slope a body still slid 0.28 m at +5 s (cenc-1)
++		if (g_link->dead_phase == 0 && t >= g_link->dead_since + 8000)
+ 		{
+ 			++g_link->dead_phase;
+ 			combat_leg("D-dead-walk", mcFwd, 2000, Link::SendNormal, 15);
+ 		}
+-		else if (g_link->dead_phase == 1 && t >= g_link->dead_since + 8000)
++		else if (g_link->dead_phase == 1 && t >= g_link->dead_since + 11000)
+ 		{
+ 			++g_link->dead_phase;
+ 			const char forged[] = "revive health=1";
+@@ -2064,7 +2064,7 @@ void run_script4(u32 t)
+ 			params.assign(forged, forged + sizeof(forged) - 1);
+ 			send_action(8, params, "forged-revive");
+ 		}
+-		else if (g_link->dead_phase == 2 && t >= g_link->dead_since + 10000)
++		else if (g_link->dead_phase == 2 && t >= g_link->dead_since + 13000)
+ 		{
+ 			++g_link->dead_phase;
+ 			g_link->log.line("script4-program-end dead=1");
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 3ac62dd..48a4007 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -596,6 +596,19 @@ void put(xr_vector<u8>& out, T value)
+ // stream has said up to its watermark. Format (little-endian):
+ //   u32 'CWLD', u32 1, u8 slot, u8 name_len, name, u8 actors, {u8 slot, u16 id},
+ //   u32 online, {u16 id, u64 entity, u32 generation}, u32 scop, bytes, u32 scoc, bytes
++// S06-T06: the player's client has sent inside the session, so it has its
++// Welcome (session::PlayerView::confirmed). The world stream's chunks go on
++// the bulk channel, which is not ordered against the Welcome on the control
++// channel; at 10 % loss a chunk arrived before a resent Welcome and the client
++// closed (cenc-14, "message before the session started").
++bool player_confirmed(const PlayerLink& link)
++{
++	for (const coop::session::PlayerView& p : g_host->server->players())
++		if (p.player == link.player)
++			return p.connected && p.confirmed;
++	return false;
++}
++
+ bool start_resync(PlayerLink& link)
+ {
+ 	track_lifecycle(); // the watermark and the checkpoint describe the same world
+@@ -1607,24 +1620,31 @@ void combat_fixtures()
+ }
+ 
+ // S06-T05 fixtures (profile encounter, lethal) and the encounter record.
+-// encounter: seconds after both participants' clients send input, a boar (the S02-T06c
+-// monster) is spawned 8-12 m from participant 2's actor, away from Fanat (the
+-// companion at the base) and participant 1, the way a script spawns one; the
+-// native AI picks its enemy. lethal: seconds after the boar died, participant 2's actor
++// encounter: seconds after both participants' clients send input, a boar
++// (kEncounterMonster) is spawned 8-12 m from participant 2's actor, away from participant 1
++// and other creatures, the way a script spawns one; the native AI picks its enemy. lethal: seconds after the boar died, participant 2's actor
+ // takes a lethal wound hit from the boar through the host's event loop (the
+ // S03-T03 hit), unless it is dead already; 60 s after the spawn if the boar
+-// still lives.
+-const u16 kFanat = 19409;
++// still lives, and then the boar takes one too (S06-T06).
++LPCSTR const kEncounterMonster = "boar_01a_weak";
+ 
+ // A reachable node 8-12 m from `actor` in one of 8 directions, the one
+-// farthest (on the ground plane) from Fanat and from `other`. A point straight
+-// away from Fanat can be off the level graph: in enc-12 participant 2 stood at
+-// the level's edge and the fallback put the boar between it and Fanat, who
+-// killed it.
++// farthest (on the ground plane) from `other` and from every other living
++// creature within 60 m (in the marsh, Fanat, a companion who killed the boar
++// before it hurt anyone, enc-3...12).
+ bool encounter_vertex(CActor* actor, CActor* other, u32& vertex, Fvector& position)
+ {
+ 	const CLevelGraph& graph = ai().level_graph();
+-	const CObject* fanat = Level().Objects.net_Find(kFanat);
++	xr_vector<Fvector> avoid;
++	if (other)
++		avoid.push_back(other->Position());
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		const CEntityAlive* e = smart_cast<const CEntityAlive*>(Level().Objects.o_get_by_iterator(i));
++		if (e && e != actor && e != other && e->g_Alive() && !smart_cast<const CActor*>(e) &&
++			e->Position().distance_to(actor->Position()) < 60.f)
++			avoid.push_back(e->Position());
++	}
+ 	float best = -1.f;
+ 	for (int dir = 0; dir < 8; ++dir)
+ 	{
+@@ -1642,10 +1662,8 @@ bool encounter_vertex(CActor* actor, CActor* other, u32& vertex, Fvector& positi
+ 				continue;
+ 			const Fvector at_pos = graph.vertex_position(at);
+ 			float score = flt_max;
+-			if (fanat)
+-				score = _min(score, at_pos.distance_to_xz(fanat->Position()));
+-			if (other)
+-				score = _min(score, at_pos.distance_to_xz(other->Position()));
++			for (const Fvector& p : avoid)
++				score = _min(score, at_pos.distance_to_xz(p));
+ 			if (score > best)
+ 			{
+ 				best = score;
+@@ -1686,8 +1704,7 @@ void encounter_fixtures()
+ 			return;
+ 		u32 vertex = u32(-1);
+ 		Fvector position;
+-		// beside participant 2: Fanat is participant 1's companion (he follows
+-		// actor 0 and shot every boar spawned near it, enc-3...8)
++		// beside participant 2, away from participant 1 and other creatures
+ 		if (!encounter_vertex(second, first, vertex, position))
+ 		{
+ 			g_host->log.line("encounter no-vertex");
+@@ -1696,10 +1713,13 @@ void encounter_fixtures()
+ 		}
+ 		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
+ 		const CSE_ALifeDynamicObject* se = ai().alife().objects().object(u16(second->ID()), true);
+-		CSE_Abstract* entity = se ? alife->spawn_item("boar_normal", position, vertex, se->m_tGraphID, 0xffff) : nullptr;
++		// S06-T06: Cordon's own weak boar (75 % health, fire-wound immunity 0.9
++		// against 0.8); with no Fanat, boar_normal killed both pistol players and
++		// lived (cenc-1)
++		CSE_Abstract* entity = se ? alife->spawn_item(kEncounterMonster, position, vertex, se->m_tGraphID, 0xffff) : nullptr;
+ 		e.monster = entity ? entity->ID : 0xffff;
+ 		e.spawn_tick = g_host->tick;
+-		g_host->log.line("encounter spawn section=boar_normal id=%u pos=%.2f,%.2f,%.2f distance=%.2f", u32(e.monster),
++		g_host->log.line("encounter spawn section=%s id=%u pos=%.2f,%.2f,%.2f distance=%.2f", kEncounterMonster, u32(e.monster),
+ 			VPUSH(position), position.distance_to(second->Position()));
+ 		return;
+ 	}
+@@ -1719,28 +1739,35 @@ void encounter_fixtures()
+ 	if (g_host->config.lethal && !e.lethal_tick && lethal_due)
+ 	{
+ 		e.lethal_tick = g_host->tick;
++		// a lethal wound hit through the host's event loop (the S03-T03 hit)
++		auto lethal = [](CEntityAlive* victim, CObject* source, LPCSTR what) {
++			Fvector dir;
++			dir.set(0.f, 0.f, 1.f);
++			SHit hit(100.f, dir, source, 0, Fvector().set(0.f, 0.f, 0.f), 0.f, ALife::eHitTypeWound, 0.f, false);
++			hit.whoID = source->ID();
++			hit.weaponID = source->ID();
++			hit.BulletID = 0;
++			hit.SenderID = 0;
++			hit.GenHeader(GE_HIT, victim->ID());
++			NET_Packet P;
++			hit.Write_Packet(P);
++			Level().Send(P, net_flags(TRUE, TRUE));
++			g_host->log.line("encounter %s hit power=100 type=wound victim=%u source=%u health=%.3f", what,
++				u32(victim->ID()), u32(source->ID()), victim->GetfHealth());
++		};
+ 		if (!second || !second->g_Alive())
+-		{
+ 			g_host->log.line("encounter lethal skipped: participant 2's actor %s", second ? "already dead" : "absent");
+-			return;
+-		}
+-		CObject* source = monster ? static_cast<CObject*>(monster) : static_cast<CObject*>(second);
+-		Fvector dir;
+-		dir.set(0.f, 0.f, 1.f);
+-		SHit hit(100.f, dir, source, 0, Fvector().set(0.f, 0.f, 0.f), 0.f, ALife::eHitTypeWound, 0.f, false);
+-		hit.whoID = source->ID();
+-		hit.weaponID = source->ID();
+-		hit.BulletID = 0;
+-		hit.SenderID = 0;
+-		hit.GenHeader(GE_HIT, second->ID());
+-		NET_Packet P;
+-		hit.Write_Packet(P);
+-		Level().Send(P, net_flags(TRUE, TRUE));
+-		g_host->log.line("encounter lethal hit power=100 type=wound victim=%u source=%u health=%.3f", u32(second->ID()),
+-			u32(source->ID()), second->GetfHealth());
++		else
++			lethal(second, monster ? static_cast<CObject*>(monster) : static_cast<CObject*>(second), "lethal");
++		// S06-T06: a boar still alive 60 s after it spawned dies too, so every
++		// run has an NPC death to present (in cenc-8 it killed both pistol
++		// players and lived); the death is the native one
++		if (monster && monster->g_Alive())
++			lethal(monster, first ? static_cast<CObject*>(first) : static_cast<CObject*>(monster), "monster-lethal");
+ 	}
+ }
+ 
++
+ // Every 100 ms: the participants and the boar (health, alive, last hitter,
+ // position).
+ void encounter_record()
+@@ -1762,8 +1789,6 @@ void encounter_record()
+ 	if (monster && monster != 0xffff)
+ 		if (CEntityAlive* e = smart_cast<CEntityAlive*>(Level().Objects.net_Find(monster)))
+ 			row("monster", 255, e);
+-	if (CEntityAlive* fanat = smart_cast<CEntityAlive*>(Level().Objects.net_Find(kFanat)))
+-		row("npc", 254, fanat);
+ }
+ 
+ void combat_record(const coop::proto::EntityState& s, u16 id, CActor* actor)
+@@ -2204,7 +2229,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	for (PlayerLink& link : g_host->links)
+ 	{
+ 		if (link.world == WorldPending && link.session && link.pending_actor == kNoEngineId &&
+-			participant_actor(link.ref))
++			participant_actor(link.ref) && player_confirmed(link))
+ 			start_resync(link);
+ 		if (link.world == WorldStreaming)
+ 			stream_world(link);

@@ -422,23 +422,40 @@ Validation: [S06-T05](validation/S06-T05.md). Engine: `Entity.cpp`
   (scripts, console `jump_to_level`). Plain single player is unchanged
   (`level_changer.cpp`, `xrServer.cpp`).
 - **Fixtures** (profile; `prepare-coop-session.py --encounter`): `encounter`
-  spawns a `boar_normal` (the S02-T06c monster) 8–12 m from participant 2, at
-  the reachable node (of 8 directions) farthest from Fanat and participant 1,
-  20 s after both players' clients send input.
-  Fanat is participant 1's companion: he follows actor 0 and shot every boar
-  spawned near it. `lethal`
-  gives participant 2's actor a lethal wound hit from the boar 8 s after the
-  boar died (or 60 s after the spawn while the boar lives), unless it is dead
-  already. `combat_heal` is off. The server writes
-  `coop-encounter.csv` (participants and the boar every 100 ms).
-- **Encounter program** (profile `script = 4`): each player sprints 4 s away
-  from Fanat, takes out the pistol, aims at the boar every frame and holds fire until the boar has hurt
+  spawns a boar 8–12 m from participant 2, at the reachable node (of 8
+  directions) farthest from participant 1 and every other living creature
+  within 60 m, 20 s after both players' clients send input. Since S06-T06 the
+  boar is Cordon's own `boar_01a_weak` (S06-T05 in the marsh used
+  `boar_normal`, the S02-T06c monster; with no Fanat it killed both pistol
+  players and lived, cenc-1). `lethal` gives participant 2's actor a lethal
+  wound hit from the boar 8 s after the boar died (or 60 s after the spawn
+  while the boar lives), unless it is dead already; at that 60 s mark a boar
+  still alive takes a lethal hit too (S06-T06: in cenc-8 it killed both
+  pistol players and lived), so every run has an NPC death. `combat_heal` is
+  off.
+  The server writes `coop-encounter.csv` (participants and the boar every
+  100 ms).
+- **Encounter program** (profile `script = 4`): each player takes out the
+  pistol, aims at the boar every frame and holds fire until the boar has hurt
   one of them (or 12 s), then presses every 300 ms and reloads when empty.
-  After its own death a player tries to walk and fire for 2 s and sends a
-  forged "revive" intent. A player whose pistol is knocked out of their hand
-  (seen in enc-10, a native drop on the server) has no way to pick it up yet
-  (L01). `tools/compare-coop-encounter.py` measures it: damage both ways,
-  every NPC death in the record (the boar or Fanat) and every participant
-  death shown on each client within 1 s, the dead player's attempts,
-  health agreement, no level change, and
+  (In the marsh each player first sprinted 4 s away from Fanat; S06-T06
+  dropped that.) 8 s after its own death a player tries to walk and fire for
+  2 s, and at 11 s sends a forged "revive" intent (5 s and 8 s in S06-T05;
+  on Cordon's slope a body still slid 0.28 m at 5 s, cenc-1). A player whose
+  pistol is knocked out of their hand (seen in enc-10, a native drop on the
+  server) has no way to pick it up yet (L01). `tools/compare-coop-encounter.py`
+  measures it: damage both ways, every NPC death in the record and every
+  participant death shown on each client within 1 s, the dead player's
+  attempts, health agreement, no level change, and
   the server's tick, snapshot and byte rates from the status lines.
+
+## Cordon fixture (S06-T06)
+
+Validation: [S06-T06](validation/S06-T06.md). Since S06-T06 the co-op
+programs run in Cordon (`l01_escape`) from a user-made save
+([record](cordon-fixture.json)): a new Loner game from the Rookie Village,
+walked out to open ground (about −90, −23, −232) with no companion, saved as
+`cordon fixture`. `prepare-coop-session.py` serves it by default
+(hash-checked); `--fixture marsh` still serves the marsh save.
+The single-player smoke and captures stay on the marsh fixture: their NPC and
+monster ids are that save's. No fixture or program names Fanat any more.

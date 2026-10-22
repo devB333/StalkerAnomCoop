@@ -157,6 +157,10 @@
     {
       "path": "patches/engine/0037-windowed-mouse-capture.patch",
       "sha256": "590d4b7356248a95a2920fd6cde8d01bd5d93209cb1b4f08ac91da449ac20d23"
+    },
+    {
+      "path": "patches/engine/0038-player-weapon-actions-and-remote-weapons.patch",
+      "sha256": "9b0115328ec26d701af16a179920ae524fc8da504f48bd745f44f42bbb3ddfac"
     }
   ],
   "submodules": [

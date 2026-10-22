@@ -1,0 +1,149 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index f514539..f0eab20 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -164,6 +164,10 @@ struct Link
+ 		u16 shots = 0xffff;
+ 	};
+ 	xr_map<u16, Outcome> outcomes;
++	// S06-T07: the player's own weapon actions forwarded to the server
++	u8 own_slot_sent = 0xff; // the slot the server was last asked for or reported
++	bool own_reloading = false;
++	u64 player_slot_actions = 0, player_reload_actions = 0;
+ 	u64 shots_presented = 0, slots_applied = 0, ammo_applied = 0, health_applied = 0;
+ 	u64 deaths_presented = 0, creature_health_applied = 0; // S06-T05
+ 	bool fire_sent = false; // the fire button as last sampled
+@@ -1020,6 +1024,8 @@ void apply_actor_outcomes(CActor* actor, const coop::proto::EntityState& s)
+ 	if (s.weapon_slot != o.slot)
+ 	{
+ 		o.slot = s.weapon_slot;
++		if (actor == g_actor)
++			g_link->own_slot_sent = s.weapon_slot; // the server's own change: not a player action to forward
+ 		// the server put an item in that slot (CInventory::Slot sends no
+ 		// event): the same kind of item moves from the backpack here too
+ 		if (s.weapon_slot != NO_ACTIVE_SLOT && !actor->inventory().ItemFromSlot(s.weapon_slot))
+@@ -1402,12 +1408,48 @@ void leg_end_check(u32 now)
+ 	g_link->drive_force_stance = false;
+ }
+ 
++void send_action(u16 kind, const xr_vector<u8>& params, LPCSTR what);
++
++// S06-T07: a player's own weapon switch and reload reach the server as the
++// actions the test programs send. Only the fire key did before: in a hands-on
++// session a player's reload refilled only the local magazine (the server's
++// stayed empty, so later shots hit nobody) and a pistol drawn locally stayed
++// holstered on the server (demo-4). The client's own inventory decides what
++// the player asked for (keys, wheel, menus): the slot its actor is switching
++// to, and a reload starting. A slot the server set (apply_actor_outcomes) is
++// not sent back. Not while the combat or encounter program (scripts 3, 4)
++// sends its own weapon actions.
++void forward_player_actions()
++{
++	if (g_link->config.script == 3 || g_link->config.script == 4 || !g_actor || !g_actor->g_Alive() ||
++		g_link->world != WorldLive)
++		return;
++	const u16 target = g_actor->inventory().GetNextActiveSlot();
++	if (g_link->own_slot_sent != 0xff && target != g_link->own_slot_sent && target <= BOLT_SLOT)
++	{
++		g_link->own_slot_sent = u8(target);
++		xr_vector<u8> slot;
++		slot.push_back(u8(target));
++		send_action(coop::proto::kActionActivateSlot, slot, "player-slot");
++		++g_link->player_slot_actions;
++	}
++	const CWeapon* weapon = smart_cast<const CWeapon*>(g_actor->inventory().ActiveItem());
++	const bool reloading = weapon && weapon->GetState() == CWeapon::eReload;
++	if (reloading && !g_link->own_reloading)
++	{
++		send_action(coop::proto::kActionReload, xr_vector<u8>(), "player-reload");
++		++g_link->player_reload_actions;
++	}
++	g_link->own_reloading = reloading;
++}
++
+ void sample_input()
+ {
+ 	const u32 now = g_link->wall.GetElapsed_ms();
+ 	leg_end_check(now);
+ 	if (!g_actor || !g_link->client || g_link->client->state() != coop::session::ClientState::Active)
+ 		return;
++	forward_player_actions();
+ 	// Replay (script 2, leg D): recorded batches from an earlier leg, as they
+ 	// were, a few per frame. Every tick in them was consumed long ago.
+ 	if (now < g_link->replay_until && g_link->replay_at < g_link->recorded.size())
+@@ -2448,7 +2490,7 @@ void log_status(LPCSTR tag)
+ 		"pred_within=%I64u pred_smoothed=%I64u pred_snapped=%I64u pred_unknown=%I64u pred_max_error=%.3f "
+ 		"view_max_offset=%.3f correction_frames=%I64u hud_still_turn_max=%.3f hud_still_frames=%I64u "
+ 		"shots_presented=%I64u slots_applied=%I64u ammo_applied=%I64u health_applied=%I64u deaths_presented=%I64u "
+-		"creature_health_applied=%I64u",
++		"creature_health_applied=%I64u player_slot_actions=%I64u player_reload_actions=%I64u",
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+@@ -2464,7 +2506,8 @@ void log_status(LPCSTR tag)
+ 		g_link->reconciler.counters().snapped, g_link->reconciler.counters().unknown,
+ 		g_link->reconciler.counters().max_error, g_link->smoother.max_offset(), g_link->correction_frames,
+ 		g_link->hud_still_turn_max, g_link->hud_still_frames, g_link->shots_presented, g_link->slots_applied,
+-		g_link->ammo_applied, g_link->health_applied, g_link->deaths_presented, g_link->creature_health_applied);
++		g_link->ammo_applied, g_link->health_applied, g_link->deaths_presented, g_link->creature_health_applied,
++		g_link->player_slot_actions, g_link->player_reload_actions);
+ }
+ } // namespace
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 48a4007..4a521c7 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -103,6 +103,7 @@ struct PlayerLink
+ 	u64 input_dead; // S06-T05: inputs that reached a dead actor (not applied)
+ 	u64 actions_accepted, actions_refused;
+ 	bool armed;
++	bool arm_settled; // S06-T07: the pistol put away once it is in slot 2
+ 	u64 snapshot_entities_wanted; // summed over snapshots
+ 	u64 snapshot_skipped_unsent; // entities left out: their Spawn had not gone to this player yet
+ 	u32 last_snapshot_ms; // when the last snapshot went to this player
+@@ -1609,6 +1610,18 @@ void combat_fixtures()
+ 						item->object().cNameSect().c_str());
+ 					break;
+ 				}
++		// S06-T07: both players start with the pistol put away. A new actor
++		// (participant 2) took its pistol into empty hands and drew it; the
++		// saved actor's was in its slot (act-1)
++		if (g_host->config.arm && link.armed && !link.arm_settled && actor->inventory().ItemFromSlot(INV_SLOT_2))
++		{
++			link.arm_settled = true;
++			if (actor->inventory().GetNextActiveSlot() != NO_ACTIVE_SLOT)
++			{
++				actor->inventory().Activate(NO_ACTIVE_SLOT);
++				g_host->log.line("arm slot=%u actor=%u put away", u32(link.ref.slot), u32(actor->ID()));
++			}
++		}
+ 		if (g_host->config.combat_heal && actor->GetfHealth() < 0.4f)
+ 		{
+ 			++g_host->heals;
+diff --git a/src/xrGame/HudItem.cpp b/src/xrGame/HudItem.cpp
+index c3e56ad..814d528 100644
+--- a/src/xrGame/HudItem.cpp
++++ b/src/xrGame/HudItem.cpp
+@@ -2,6 +2,7 @@
+ #include "HudItem.h"
+ #include "physic_item.h"
+ #include "actor.h"
++#include "CoopReplica.h" // S06-T07
+ #include "actoreffector.h"
+ #include "Missile.h"
+ #include "xrmessages.h"
+@@ -157,6 +158,13 @@ void CHudItem::SwitchState(u32 S)
+ 		P.w_u8(u8(S));
+ 		object().u_EventSend(P);
+ 	}
++	// S06-T07: on a co-op client the other player's item is remote and no
++	// state event reaches it, so it never left eHidden and its weapon was
++	// never drawn (demo-4: player 1 never saw player 2's pistol). Its state
++	// changes here, as presentation; the server decides the weapon's outcomes.
++	else if (campaign::replica_active() && !object().getDestroy() &&
++		smart_cast<CActor*>(object().H_Parent()))
++		OnStateSwitch(S, GetState());
+ }
+ 
+ void CHudItem::OnEvent(NET_Packet& P, u16 type)

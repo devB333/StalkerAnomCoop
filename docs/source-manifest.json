@@ -165,6 +165,10 @@
     {
       "path": "patches/engine/0039-remote-items-presentation-only.patch",
       "sha256": "e587f5b9ca1be6558106319bdeba8f43cc005f1d71c872f81b76a9a41e3e9db5"
+    },
+    {
+      "path": "patches/engine/0040-jump-and-lean-input.patch",
+      "sha256": "5c859a78c7af2e025dce5fee61315dd4fa64adc030d5c0c1db54daac2d4ed0c0"
     }
   ],
   "submodules": [

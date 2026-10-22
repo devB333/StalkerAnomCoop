@@ -139,7 +139,7 @@ Welcome, so the wait is one round trip.
 | CampaignEvent | event id, kind, revision, payload | ids non-zero; payload ≤ 1,024 |
 | Snapshot | server tick, snapshot id (v1.2), baseline, last input, part, part count, entities; each entity: ref, components, then transform / velocity / health / state bits / rotation (v1.2) / aim (v1.3: an actor's torso yaw and pitch) / weapon (v1.4: active slot, weapon state, rounds in the magazine, shot counter) as the bits say; a removal (v1.2) has no fields | snapshot id ≠ 0; baseline < snapshot id; part < count ≤ 16; ≤ 64 entities, each once; component bits known; removal alone; health ≤ 10,000 (S06-T05: 0 only when dead); rotation a unit quaternion (norm² 0.98–1.02); weapon slot ≤ 15 |
 | SnapshotAck | snapshot id (newest complete, 0: none), missing baseline (v1.2, 0: none), event cursor | not both zero |
-| InputBatch | 1–8 inputs, newest first (input *i* has sequence `header.sequence − i`) | ticks strictly decreasing; axes −1..1; angles bounded; buttons ≤ 16 bits (bit 0 walk, bit 1 fire in v1.4); stance 0–3 |
+| InputBatch | 1–8 inputs, newest first (input *i* has sequence `header.sequence − i`) | ticks strictly decreasing; axes −1..1; angles bounded; buttons ≤ 16 bits (bit 0 walk, bit 1 fire in v1.4; bit 2 jump, bit 3 lean left, bit 4 lean right in v1.5); stance 0–3 |
 | ResyncBegin | resync id, checkpoint id, next epoch, content hash, event watermark, total bytes, chunk size, chunk count | total ≤ 256 MiB; chunk ≤ 60 KiB; count = ⌈total/chunk⌉ ≤ 65,536 |
 | ResyncChunk | resync id, index, CRC-32, data | 1–60 KiB; CRC checked on decode |
 | ResyncEnd | resync id, chunk count, CRC-32 of all data | count ≥ 1 |

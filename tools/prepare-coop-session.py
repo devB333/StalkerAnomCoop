@@ -5,7 +5,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--script c1,c2] [--movement c1,c2] [--churn 10] [--drop 6]
            [--net-loss 5] [--net-lag 40] [--no-predict c1,c2] [--combat c1,c2]
            [--encounter c1,c2]
-           [--protocol-build proto-build-31] [--keys-from <earlier run>]
+           [--protocol-build proto-build-32] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -85,7 +85,7 @@ def main():
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-31")
+    parser.add_argument("--protocol-build", default="proto-build-32")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 

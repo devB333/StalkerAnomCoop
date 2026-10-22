@@ -33,7 +33,8 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.4 (S06-T04): a weapon component (an actor's active slot, weapon state,
 // rounds in the magazine and a shot counter), the fire button, and the first
 // action kinds (activate a slot, reload).
-constexpr std::uint16_t kProtocolMinor = 4;
+// 1.5 (S06-T07): the jump and lean buttons (bits 2-4 of Input.buttons).
+constexpr std::uint16_t kProtocolMinor = 5;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -323,6 +324,9 @@ enum class Stance : std::uint8_t
 constexpr std::uint32_t kKnownButtons = 0x0000FFFF;
 constexpr std::uint32_t kButtonWalk = 1u << 0; // S06-T01
 constexpr std::uint32_t kButtonFire = 1u << 1; // S06-T04: the fire key is held
+constexpr std::uint32_t kButtonJump = 1u << 2;      // S06-T07: the jump key is held
+constexpr std::uint32_t kButtonLeanLeft = 1u << 3;  // S06-T07: leaning left
+constexpr std::uint32_t kButtonLeanRight = 1u << 4; // S06-T07: leaning right
 
 // S06-T04: the action kinds the server defines (ActionIntent.kind); every
 // other kind is refused. Their params are decoded by the server with their

@@ -1,0 +1,67 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index f0eab20..e332d3f 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -1509,6 +1509,13 @@ void sample_input()
+ 	if (driving && g_link->drive_force_stance)
+ 		in.stance = g_link->drive_stance;
+ 	in.buttons = (wishful & mcAccel) ? coop::proto::kButtonWalk : 0u;
++	// S06-T07: jump and lean, as the player's own keys set them
++	if (wishful & mcJump)
++		in.buttons |= coop::proto::kButtonJump;
++	if (wishful & mcLLookout)
++		in.buttons |= coop::proto::kButtonLeanLeft;
++	else if (wishful & mcRLookout)
++		in.buttons |= coop::proto::kButtonLeanRight;
+ 	// S06-T04: the fire key, held by the player or the test driver
+ 	bool fire = false;
+ 	for (int idx = 0; idx < 2 && !fire; ++idx)
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 4a521c7..ddb00ba 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -101,6 +101,7 @@ struct PlayerLink
+ 	u64 fire_presses;
+ 	u64 fire_logged_tick;
+ 	u64 input_dead; // S06-T05: inputs that reached a dead actor (not applied)
++	u32 last_action_log_ms; // S06-T07: jump/lean log pacing
+ 	u64 actions_accepted, actions_refused;
+ 	bool armed;
+ 	bool arm_settled; // S06-T07: the pistol put away once it is in slot 2
+@@ -796,7 +797,8 @@ void churn()
+ // a position, speed or outcome; what it sends is intent, and intent is the
+ // only thing applied. Snapshots: S06-T02, send_snapshots.
+ 
+-const u32 kManagedBits = mcFwd | mcBack | mcLStrafe | mcRStrafe | mcCrouch | mcAccel | mcSprint;
++const u32 kManagedBits = mcFwd | mcBack | mcLStrafe | mcRStrafe | mcCrouch | mcAccel | mcSprint |
++	mcJump | mcLLookout | mcRLookout; // S06-T07: jump and lean
+ const u64 kInputRefusalsLogged = 24; // per player; the counters keep counting
+ 
+ void take_input(PlayerLink& link, const coop::proto::Decoded& message)
+@@ -972,7 +974,26 @@ void apply_inputs()
+ 			bits |= mcSprint;
+ 		if (in.buttons & coop::proto::kButtonWalk)
+ 			bits |= mcAccel;
++		// S06-T07: jump and lean go into the native control bits too; the
++		// actor's controller decides (no jump in the air, none when dead)
++		if (in.buttons & coop::proto::kButtonJump)
++			bits |= mcJump;
++		if (in.buttons & coop::proto::kButtonLeanLeft)
++			bits |= mcLLookout;
++		else if (in.buttons & coop::proto::kButtonLeanRight)
++			bits |= mcRLookout;
+ 		actor->replica_set_wishful(actor->replica_wishful() | bits);
++		if ((bits & (mcJump | mcLookout)) && now - link.last_action_log_ms >= 250)
++		{
++			// the native state these inputs produced on the previous ticks
++			link.last_action_log_ms = now;
++			g_host->log.line("input-jump-lean slot=%u actor=%u tick=%I64u jump=%d lean=%s real_jump=%d real_lookout=%s "
++				"y=%.3f", u32(link.ref.slot), u32(actor->ID()), in.tick, (bits & mcJump) ? 1 : 0,
++				(bits & mcLLookout) ? "left" : (bits & mcRLookout) ? "right" : "-",
++				(actor->MovingState() & mcJump) ? 1 : 0,
++				(actor->MovingState() & mcLLookout) ? "left" : (actor->MovingState() & mcRLookout) ? "right" : "-",
++				actor->Position().y);
++		}
+ 		// The look direction is the player's intent too; the camera's own
+ 		// limits apply to it as they would to a local player's mouse.
+ 		CCameraBase* camera = actor->cam_Active();

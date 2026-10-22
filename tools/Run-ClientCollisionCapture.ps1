@@ -70,6 +70,10 @@ $settings = $settings | ForEach-Object {
     # S06-T05: with keypress_on_start on the loaded level waits at "Press any key to
     # continue"; unattended captures timed out there (capture-32/33, capture-38...41)
     elseif ($_ -match '^keypress_on_start ') { 'keypress_on_start off' }
+    # S06-T07: an unfocused window pauses the game unless it is always active; a capture
+    # launched while the user works in another window never took the focus and sat paused
+    # in game (capture-54/55/56)
+    elseif ($_ -match '^g_always_active ') { 'g_always_active on' }
     else { $_ }
 }
 $settings | Set-Content -Encoding ASCII (Join-Path $appdata 'user.ltx')

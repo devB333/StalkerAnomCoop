@@ -1,6 +1,6 @@
 # Drive a co-op client window as a player would (S06-T07 checks): raise the window of the
 # client that started N-th (1 = first), click inside it so it takes the mouse, then play the
-# steps: a DirectInput key by scan code ("key:0x03" is the 2 key, "key:0x13" is R), "click"
+# steps: a DirectInput key by scan code ("key:0x03" is the 2 key, "key:0x13" is R), "hold:<scan>:<ms>", "click"
 # (the fire button) or "wait:<ms>". It drives the real mouse and keyboard.
 param(
     [Parameter(Mandatory = $true)][int]$Client,
@@ -44,6 +44,11 @@ foreach ($step in $Steps.Split(',')) {
     if ($step -like 'key:*') {
         $scan = [Convert]::ToUInt16($step.Substring(4), 16)
         [D]::Key($scan, $false); Start-Sleep -Milliseconds 90; [D]::Key($scan, $true); Start-Sleep -Milliseconds 400
+    } elseif ($step -like 'hold:*') {
+        # hold:<scan>:<ms>, e.g. hold:0x10:1500 holds Q (lean left) for 1.5 s
+        $parts = $step.Split(':')
+        $scan = [Convert]::ToUInt16($parts[1], 16)
+        [D]::Key($scan, $false); Start-Sleep -Milliseconds ([int]$parts[2]); [D]::Key($scan, $true); Start-Sleep -Milliseconds 300
     } elseif ($step -eq 'click') {
         [D]::Button($false); Start-Sleep -Milliseconds 90; [D]::Button($true); Start-Sleep -Milliseconds 400
     } elseif ($step -like 'wait:*') {

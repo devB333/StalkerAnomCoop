@@ -279,6 +279,17 @@ stop waits for the worker. `xrCampaignLevel_ReportTicks` accepts a dead
 participant actor on a serving server. No gameplay behaviour changes outside
 co-op.
 
+`0043-remote-lean-and-hud-ownership.patch` (G07 play test, 2026-10-23) fixes
+two presentation defects on a co-op client: the other player's lean
+(`CActor::replica_present` computes the remote body's torso roll from the
+server's lean bits with the controlled actor's angle and inertia; K5) and
+the other player's weapons attaching to this player's first-person hands
+(K1: `CHudItem::SwitchState` and `OnEvent` take the show/hide-only path for
+an item whose actor parent is not `local_view_actor()`, which the client's
+in-process server owns as a local object; `ParentIsActor()` means the local
+player on a co-op client). The client logs `remote-lean` while the other
+player leans. No single-player behaviour changes.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

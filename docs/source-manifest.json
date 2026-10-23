@@ -177,6 +177,10 @@
     {
       "path": "patches/engine/0042-checkpoint-generations-and-journal.patch",
       "sha256": "67e9492ca5615d63d8d440a3af6b75273f3b6530967c10a8c10917e3f0c32d7b"
+    },
+    {
+      "path": "patches/engine/0043-remote-lean-and-hud-ownership.patch",
+      "sha256": "8062c07dd4b45b00cfa51b600b2ca53cb139e7d87c12a4b110f9be6053e1011f"
     }
   ],
   "submodules": [

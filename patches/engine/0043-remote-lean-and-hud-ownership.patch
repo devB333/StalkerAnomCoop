@@ -1,0 +1,147 @@
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 0c3d3b8..f06f70c 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -358,6 +358,7 @@ public:
+ 	// S05-T03: the movement state the control path reads (the co-op host sets
+ 	// a participant's input into it; a co-op client samples its player's).
+ 	u32 replica_wishful() const { return mstate_wishful; }
++	float replica_torso_roll() const { return r_torso.roll; } // the lean as presented
+ 	void replica_set_wishful(u32 value) { mstate_wishful = value; }
+ 	// S06-T01: what the last native control step did with its input (the
+ 	// co-op host logs it after each tick that applied an input).
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index d070302..75ceaf7 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -497,6 +497,31 @@ void CActor::replica_present(const Fvector& position, float model_yaw, u32 mstat
+ 	XFORM().set(xform);
+ 	mstate_real = mstate;
+ 	g_SetAnimation(mstate_real);
++	if (!local_view)
++	{
++		// S07 play test: a remote actor's lean. The engine computes the torso
++		// roll only for the controlled actor (g_cl_Orientate's target with
++		// inertia, cam_Lookout's wall check) and the bone callbacks tilt the
++		// spine, shoulders and head from r_torso.roll; a remote body got the
++		// lean bits but no roll, so it never tilted. The same target and
++		// inertia from the server's state, without the wall check (the
++		// server's actor already moved as its walls allowed).
++		float tgt_roll = 0.f;
++		if (mstate_real & mcLookout)
++		{
++			tgt_roll = (mstate_real & mcLLookout) ? -ACTOR_LLOOKOUT_ANGLE : ACTOR_RLOOKOUT_ANGLE;
++			tgt_roll *= m_fLookoutFactor;
++			if ((mstate_real & mcLLookout) && (mstate_real & mcRLookout))
++				tgt_roll = 0.f;
++		}
++		if (!fsimilar(tgt_roll, r_torso_tgt_roll, EPS))
++		{
++			r_torso_tgt_roll = angle_inertion_var(r_torso_tgt_roll, tgt_roll, 0.f, CameraHeight() * PI_MUL_2, PI_DIV_2,
++				Device.fTimeDelta);
++			r_torso_tgt_roll = angle_normalize_signed(r_torso_tgt_roll);
++		}
++		r_torso.roll = r_torso_tgt_roll;
++	}
+ }
+ 
+ void CActor::replica_set_aim(float torso_yaw, float torso_pitch)
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index ab775c3..ca21f66 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -280,6 +280,7 @@ struct Link
+ 	u32 reconnect_backoff_ms = 1000;
+ 	u32 reconnects = 0, worlds_left = 0;
+ 	u64 last_epoch = 0;
++	u32 last_lean_log_ms = 0; // the other player's lean, logged every 250 ms while held
+ 	// S07-T07: the respawn prompt and request
+ 	u32 dead_since_ms = 0; // 0: the own actor is alive (or there is none)
+ 	bool respawn_prompted = false;
+@@ -1200,6 +1201,13 @@ void present_actors()
+ 				continue;
+ 			}
+ 			actor->replica_present(position, s.transform.yaw, s.state_bits, velocity, actor == g_actor);
++			if (actor != g_actor && (s.state_bits & mcLookout) && g_link->wall.GetElapsed_ms() - g_link->last_lean_log_ms >= 250)
++			{
++				// S07 play test: the other player's lean as this client shows it
++				g_link->last_lean_log_ms = g_link->wall.GetElapsed_ms();
++				g_link->log.line("remote-lean id=%u bits=%x roll=%.3f", u32(actor->ID()), s.state_bits & mcLookout,
++					actor->replica_torso_roll());
++			}
+ 			if (actor != g_actor && (s.components & coop::proto::kAim))
+ 				actor->replica_set_aim(s.aim_yaw, s.aim_pitch);
+ 		}
+diff --git a/src/xrGame/HudItem.cpp b/src/xrGame/HudItem.cpp
+index e15df12..69d8d29 100644
+--- a/src/xrGame/HudItem.cpp
++++ b/src/xrGame/HudItem.cpp
+@@ -2,7 +2,8 @@
+ #include "HudItem.h"
+ #include "physic_item.h"
+ #include "actor.h"
+-#include "CoopReplica.h" // S06-T07
++#include "CoopReplica.h"
++#include "CampaignActorAccess.h" // K1: local_view_actor // S06-T07
+ #include "actoreffector.h"
+ #include "Missile.h"
+ #include "xrmessages.h"
+@@ -143,6 +144,20 @@ void CHudItem::renderable_Render()
+ 	}
+ }
+ 
++// S07 play test (K1): on a co-op client, an item held by the other player's
++// actor. Its parent is an actor, but not the one this client views; the
++// client's in-process server owns the object, so object().Local() is true
++// and the engine's own event path would run the full first-person state
++// change on the shared hands (demo-6/7: the other player's knife bent this
++// player's pistol; the other pistol re-drew when this one was drawn).
++static bool other_players_item(CGameObject& object)
++{
++	if (!campaign::replica_active())
++		return false;
++	CActor* parent = smart_cast<CActor*>(object.H_Parent());
++	return parent && parent != campaign::local_view_actor();
++}
++
+ void CHudItem::SwitchState(u32 S)
+ {
+ 	if (OnClient())
+@@ -150,6 +165,17 @@ void CHudItem::SwitchState(u32 S)
+ 
+ 	SetNextState(S);
+ 
++	if (other_players_item(object()) && !object().getDestroy())
++	{
++		// S06-T07/K1: presentation only: shown or hidden, no first-person
++		// motion, no event (the server decides the weapon's outcomes)
++		const u32 shown = (S == eHiding || S == eHidden) ? u32(eHidden) : (S == eShowing ? u32(eIdle) : S);
++		SetState(shown);
++		SetNextState(shown);
++		object().setVisible(shown != eHidden);
++		return;
++	}
++
+ 	if (object().Local() && !object().getDestroy())
+ 	{
+ 		// !!! Just single entry for given state !!!
+@@ -183,6 +209,8 @@ void CHudItem::OnEvent(NET_Packet& P, u16 type)
+ 		{
+ 			u8 S;
+ 			P.r_u8(S);
++			if (other_players_item(object()))
++				break; // K1: never the full switch for the other player's item
+ 			OnStateSwitch(u32(S), GetState());
+ 		}
+ 		break;
+@@ -1021,6 +1049,10 @@ bool CHudItem::ParentIsActor()
+ 	if (!EA)
+ 		return false;
+ 
++	// K1: on a co-op client only this player's own actor counts as "the
++	// actor" for first-person purposes (the HUD hands, PDA, knife, missiles)
++	if (campaign::replica_active())
++		return EA->cast_actor() && EA->cast_actor() == campaign::local_view_actor();
+ 	return !!EA->cast_actor();
+ }
+ 

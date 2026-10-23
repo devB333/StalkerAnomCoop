@@ -14,6 +14,11 @@
 - Carried limits: L15 closed for Stage 7's parts; L32–L36 open (L36:
   inventory, quests and rewards are not durable until Stage 8 gives them
   records and adapters).
+- **Patch 0043** (play-test fixes, campaign-240 / client-140, patch check 47):
+  the other player's lean is shown (K5) and the other player's weapons no
+  longer attach to this player's first-person hands (K1 root cause: the
+  client's in-process server owns them as local objects). Both **pending
+  the user's retest** with `bash tools/start-coop-demo.sh`.
 - Everything is committed; the engine tree matches the exported series.
 
 ## First thing next session: S08-T01 — durable authoritative item pickup
@@ -58,8 +63,8 @@ after an NPC consumed them, is Stage 8's ownership class).
 
 - Used: see the previous snapshot (through campaign-238 / client-138,
   proto-build-37, st-4, rec-4, mx3-1…5, death-4, patch check 46).
-- Next: `proto-build-38`, `st-5`, `campaign-239`, `client-139`, `pt-31`,
-  `smoke-171`, `capture-62`, patch check 47.
+- Next: `proto-build-38`, `st-5`, `campaign-241`, `client-141`, `pt-31`,
+  `smoke-171`, `capture-62`, patch check 48.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

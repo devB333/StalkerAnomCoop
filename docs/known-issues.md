@@ -46,8 +46,23 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   must keep its grip. `tools/Send-ClientActions.ps1` can press the keys
   (`key:0x03` = 2), but its `key:0x02` (1) did not draw the knife in act-3;
   doing it by hand worked.
-- **Owner:** none yet (presentation of the other player; S10-T02 is the
-  closest planned task).
+- **Root cause found (2026-10-23, G07 play test):** on a co-op client the
+  other player's weapon is owned by the client's own in-process server, so
+  `object().Local()` is true and the S06-T07 guard in `CHudItem::SwitchState`
+  (which only covered non-local objects) never applied: the state change went
+  out as `GE_WPN_STATE_CHANGE`, came straight back through `CHudItem::OnEvent`
+  and ran the full first-person switch (`CWeaponKnife::switch2_Showing` →
+  `ParentIsActor()` true for any actor → `g_player_hud->attach_item`) on
+  the shared hands. The same path made the other player's pistol re-draw
+  when this player drew one.
+- **Fix (patch 0043, campaign-240 / client-140):** `other_players_item()`
+  (an actor parent that is not `local_view_actor()`) takes the show/hide-only
+  branch in `SwitchState` and skips `OnStateSwitch` in `OnEvent`;
+  `ParentIsActor()` means the local player's actor on a co-op client.
+  **Pending the user's retest** (the K1 check: player 2 draws the pistol,
+  player 1 takes out the knife; player 2's grip must not change; drawing a
+  pistol must not re-draw the other player's).
+- **Owner:** this fix; S10-T02 for the rest of the other player's presentation.
 
 ### K2. Stalker NPCs shuffle instead of walking
 
@@ -84,6 +99,21 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   an NPC consumed (server `despawn … Destroyed` at commit 3418) while every
   other of their 1,561 replica entities matched the server.
 - **Owner:** S08 (inventory and ownership).
+
+### K5. The other player's lean was not shown
+
+- **Seen** (user, G07 play test, 2026-10-23): leaning tilts only the own
+  view; the other player's body stays upright.
+- **Cause:** the engine's lean is a torso roll (`r_torso.roll`, applied to
+  the spine, shoulder and head bones by the `CActor` bone callbacks) that
+  only `g_cl_Orientate` / `cam_Lookout` compute, for the controlled actor;
+  the server sends the lean bits in the actor's state and the remote body
+  received them (`replica_present`) but nothing computed its roll.
+- **Fix (patch 0043, campaign-240 / client-140):** `CActor::replica_present`
+  computes the remote actor's target roll from the lean bits with the same
+  angle and inertia as the controlled actor (no wall check). The client logs
+  `remote-lean … roll=` while the other player leans. **Pending the user's
+  retest.**
 
 ## Fixed
 

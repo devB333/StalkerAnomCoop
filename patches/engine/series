@@ -41,3 +41,4 @@
 0041-storm-and-emission-visuals.patch
 0042-checkpoint-generations-and-journal.patch
 0043-remote-lean-and-hud-ownership.patch
+0044-remote-hud-motion-guard-and-camera-watch.patch

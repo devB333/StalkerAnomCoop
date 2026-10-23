@@ -62,6 +62,21 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   **Pending the user's retest** (the K1 check: player 2 draws the pistol,
   player 1 takes out the knife; player 2's grip must not change; drawing a
   pistol must not re-draw the other player's).
+- **Retest 2026-10-23 (campaign-240 / client-140):** the bent grip and the
+  re-draw are gone; a **slight sway remains** when the other player equips,
+  "like the sway from the equip animation that travels over". Measured in
+  cam-1 (`builds/logs/S07-T08/run-cam-1/c1/coop-camera-client.csv`: the
+  standing client's camera logged per frame for 2 s after each of the
+  other player's two weapon changes): yaw, pitch, position and FOV did not
+  change at all, so the sway is on the first-person hands/weapon layer, not
+  the camera. **Fix candidate (patch 0044, campaign-244 / client-144,
+  unverified):** `CHudItem::PlayHUDMotion` / `PlayHUDMotion_noCB` return
+  early for the other player's item (its HUD motions, `anm_show`/`anm_idle`,
+  carry the camera-like track the hands follow); the engine log prints
+  `S07 K1 remote-hud-motion-blocked item= motion=` when it blocks one.
+  **Check tomorrow:** the demo; player 2 equips while player 1 watches with a
+  weapon drawn: no sway; the engine log of player 1's client shows the
+  blocked motions.
 - **Owner:** this fix; S10-T02 for the rest of the other player's presentation.
 
 ### K2. Stalker NPCs shuffle instead of walking

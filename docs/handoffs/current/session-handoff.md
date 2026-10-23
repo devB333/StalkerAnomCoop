@@ -1,71 +1,60 @@
-# Session handoff — G07 accepted; next S08-T01 (durable item pickup)
+# Session handoff — G07 accepted; play-test fixes pending retest; next S08-T01
 
-## State (2026-10-23)
+## State (2026-10-23, end of day)
 
-- **G07 accepted** by the user ([G07](../../validation/G07.md)); every Stage 7
-  task Completed under engine patch 0042 (patch check 46), protocol
-  `proto-build-37`, final builds `campaign-238` / `client-138`. Stage 7 is
-  Completed in plan.md.
-- User decisions at acceptance: play-test the remaining checkpoint pause
-  (the world serialization, 45–65 ms, L34) on the current build; keep a
-  **host-triggered save** as the optional **S07-T09** (Not Started; a
-  quicksave-style `checkpoint` action from the host player, no timer).
-  Activate it only if the play test shows a hitch or the user asks.
-- Carried limits: L15 closed for Stage 7's parts; L32–L36 open (L36:
-  inventory, quests and rewards are not durable until Stage 8 gives them
-  records and adapters).
-- **Patch 0043** (play-test fixes, campaign-240 / client-140, patch check 47):
-  the other player's lean is shown (K5) and the other player's weapons no
-  longer attach to this player's first-person hands (K1 root cause: the
-  client's in-process server owns them as local objects). Both **pending
-  the user's retest** with `bash tools/start-coop-demo.sh`.
-- Everything is committed; the engine tree matches the exported series.
+- **G07 accepted** ([G07](../../validation/G07.md)); Stage 7 Completed. The
+  optional host-triggered save is **S07-T09** (Not Started; only if the play
+  test shows the checkpoint pause or the user asks).
+- **Play-test fixes** found with the user on the final Stage 7 build:
+  - Patch **0043** (campaign-240 / client-140): the other player's **lean**
+    is shown (K5); the other player's weapons no longer attach to this
+    player's first-person hands (K1 root cause: the client's in-process
+    server owns them as local objects). **Retested by the user:** lean ok,
+    the bent grip and the re-draw are gone.
+  - Patch **0044** (campaign-244 / client-144, **not retested**): a residual
+    K1 sway when the other player equips ("the sway from the equip
+    animation travels over"). cam-1 showed the standing client's camera
+    does not move (yaw/pitch/position/FOV constant), so it is the
+    hands/weapon layer: `CHudItem::PlayHUDMotion` / `PlayHUDMotion_noCB`
+    now play nothing for the other player's item and log
+    `S07 K1 remote-hud-motion-blocked`. Details and the check in
+    [known issues](../../known-issues.md) K1.
+- Builds campaign-243/244 and client-143/144 were started at the end of the
+  session; their logs are not in the repo (`builds/logs/S02-T02/`). **Check
+  they compiled** before the retest (`msbuild.log` 0 Error(s)); if 244/144
+  failed, the one-line log statement in `PlayHUDMotion` is the only new code
+  since 243/143.
+- Everything is committed; the engine tree matches the exported series
+  (patch check 48).
 
-## First thing next session: S08-T01 — durable authoritative item pickup
+## First thing next session
 
-Spec: plan.md S08-T01 and the [persistence contract](../../persistence-contract.md)
-(§4 phases, §6 record kinds: add `pickup`; `entity`/`tombstone` for items
-created or destroyed after a checkpoint). Design sketch:
-1. **Action** `ActionIntent` kind 5 `pickup` (target = the item's `EntityRef`;
-   params none). Validate on the server: attached session, own actor alive,
-   the item exists online, is on the ground (no parent), within reach
-   (actor-to-item distance ≤ the engine's pickup range), inventory capacity.
-2. **Resolve** the transfer as absolute post-state: item entity → owner
-   entity, revision. **Commit** a `pickup` record (slot, player, operation,
-   item entity, item u16 at commit, owner entity, section) before any
-   change; then **apply** through one adapter that performs the native
-   ownership change the server's own pickup path uses (`CInventory::Take`
-   through the server event, not the client's `GE_OWNERSHIP_TAKE` import,
-   which the message policy refuses); **acknowledge**; the lifecycle stream
-   carries the item's parent change (Spawn with parent / Despawn) so both
-   clients show it.
-3. **Recovery**: replay `pickup` records after the checkpoint (the item
-   exists in the checkpoint without an owner → give it; already owned by
-   the recorded owner → no-op; owned by someone else → `recovery-replay-failed`).
-4. **Concurrent claims**: both clients request the same item in the same
-   tick → exactly one accepted, the other refused (`ItemTaken`); retries
-   with the same id return the stored outcome.
-5. **Client**: the use key on a looked-at item sends the intent (today the
-   engine's local pickup is refused by the replica); a driver `--pickup`
-   program for two clients racing for one dropped item; `compare-coop-pickup.py`.
-6. Crash test with `run-recovery-matrix.py` points `pickup:after-flush`,
-   `pickup:after-apply`, `pickup:after-ack` (add the failpoints), plus a
-   restart; then the report `docs/validation/S08-T01.md`.
-Builds: `campaign-239` / `client-139`; protocol `proto-build-38` if the
-store changes; tests `st-5`.
+1. Confirm campaign-244 / client-144 compiled; if not, fix and rebuild
+   (`campaign-245` / `client-145`).
+2. Retest with `bash tools/start-coop-demo.sh`: player 2 equips and holsters
+   while player 1 holds a weapon and watches: no sway on player 1's screen;
+   player 1's engine log (`appdata/logs/xray_djb20.log` in the client
+   runtime) shows `S07 K1 remote-hud-motion-blocked`. If the sway persists,
+   the remaining suspects are the HUD layer's own update
+   (`player_hud::update`, `attachable_hud_item`) for an item created for
+   the other player's weapon (`HudItemData()` creates one on first use even
+   for a remote weapon), and the `_G.CHudItem__PlayHUDMotion` script hook.
+   Then move K1 and K5 to "Fixed" in known-issues.
+3. Then **S08-T01** (durable item pickup): design sketch in the previous
+   snapshot ([before K1 sway retest](../done/snapshot-before-K1-sway-retest.md)).
 
 ## Known issues (not to chase now)
 
-[known issues](../../known-issues.md): K1–K4 (K4, items kept on clients
-after an NPC consumed them, is Stage 8's ownership class).
+[known issues](../../known-issues.md): K1 (sway residual, fix candidate
+pending), K2–K4 unchanged, K5 (lean, fixed pending the written retest note).
 
 ## Run names
 
-- Used: see the previous snapshot (through campaign-238 / client-138,
-  proto-build-37, st-4, rec-4, mx3-1…5, death-4, patch check 46).
-- Next: `proto-build-38`, `st-5`, `campaign-241`, `client-141`, `pt-31`,
-  `smoke-171`, `capture-62`, patch check 48.
+- Used today: through campaign-244 / client-144, proto-build-37, st-4,
+  rec-4, mx3-1…5, death-1…4, timing-1, cam-1, patch checks 45–48.
+- Next: `proto-build-38`, `st-5`, `campaign-245`, `client-145`, `pt-31`,
+  `smoke-171`, `capture-62`, `cam-2`, patch check 49.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S08-T01](../done/snapshot-before-S08-T01.md).
+Previous snapshot: [before K1 sway retest](../done/snapshot-before-K1-sway-retest.md).

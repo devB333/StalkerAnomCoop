@@ -1,0 +1,101 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index ca21f66..5e861ab 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -47,6 +47,8 @@
+ #include "Weapon.h"
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
++
++ENGINE_API extern float psHUD_FOV; // the camera watch log
+ #include "../xrEngine/xr_input.h"
+ #include "../Include/xrRender/KinematicsAnimated.h"
+ #include "PhysicsShellHolder.h"
+@@ -281,6 +283,8 @@ struct Link
+ 	u32 reconnects = 0, worlds_left = 0;
+ 	u64 last_epoch = 0;
+ 	u32 last_lean_log_ms = 0; // the other player's lean, logged every 250 ms while held
++	u32 camera_watch_until_ms = 0; // the own camera logged per frame after the other player's weapon change
++	FILE* camera_csv = nullptr;
+ 	// S07-T07: the respawn prompt and request
+ 	u32 dead_since_ms = 0; // 0: the own actor is alive (or there is none)
+ 	bool respawn_prompted = false;
+@@ -818,6 +822,25 @@ void world_frame()
+ 			g_link->hud_still_turn_max = _max(g_link->hud_still_turn_max, _abs(g_actor->fFPCamYawMagnitude));
+ 		}
+ 	}
++	if (g_link->world == WorldLive && g_actor && g_link->wall.GetElapsed_ms() < g_link->camera_watch_until_ms)
++	{
++		// the own camera, per frame, while a remote weapon change is watched
++		if (!g_link->camera_csv)
++		{
++			string_path path;
++			FS.update_path(path, "$logs$", "coop-camera-client.csv");
++			g_link->camera_csv = fopen(path, "w");
++			if (g_link->camera_csv)
++				fprintf(g_link->camera_csv, "utc_ms,frame,cam_yaw,cam_pitch,cam_x,cam_y,cam_z,hud_fov,fov,own_slot\n");
++		}
++		if (g_link->camera_csv)
++		{
++			const CCameraBase* cam = g_actor->cam_Active();
++			fprintf(g_link->camera_csv, "%I64u,%u,%.5f,%.5f,%.4f,%.4f,%.4f,%.3f,%.3f,%u\n", utc_now_ms(), Device.dwFrame,
++				cam->yaw, cam->pitch, VPUSH(Device.vCameraPosition), psHUD_FOV, Device.fFOV,
++				u32(g_actor->inventory().GetActiveSlot()));
++		}
++	}
+ 	if (g_link->world == WorldLive)
+ 	{
+ 		present_actors();
+@@ -1091,6 +1114,13 @@ void apply_actor_outcomes(CActor* actor, const coop::proto::EntityState& s)
+ 	Link::Outcome& o = g_link->outcomes[u16(actor->ID())];
+ 	if (s.weapon_slot != o.slot)
+ 	{
++		if (actor != g_actor)
++		{
++			// camera watch (G07 play test): the other player changed weapon;
++			// this client's own camera is logged per frame for 2 s
++			g_link->camera_watch_until_ms = g_link->wall.GetElapsed_ms() + 2000;
++			g_link->log.line("remote-slot-change id=%u slot=%u->%u", u32(actor->ID()), u32(o.slot), u32(s.weapon_slot));
++		}
+ 		o.slot = s.weapon_slot;
+ 		if (actor == g_actor)
+ 			g_link->own_slot_sent = s.weapon_slot; // the server's own change: not a player action to forward
+@@ -3440,6 +3470,8 @@ void coop_client_app_end()
+ 		fclose(g_link->weather_csv);
+ 	if (g_link->ledger_csv)
+ 		fclose(g_link->ledger_csv);
++	if (g_link->camera_csv)
++		fclose(g_link->camera_csv);
+ 	g_link->log.line("respawn-final results=%u refusals=%u rejoins=%u reconnects=%u", g_link->respawn_results,
+ 		g_link->respawn_refusals, g_link->rejoins, g_link->reconnects);
+ 	if (g_link->config.script == 6)
+diff --git a/src/xrGame/HudItem.cpp b/src/xrGame/HudItem.cpp
+index 69d8d29..ba05ece 100644
+--- a/src/xrGame/HudItem.cpp
++++ b/src/xrGame/HudItem.cpp
+@@ -758,6 +758,16 @@ extern float g_end_modif;
+ 
+ u32 CHudItem::PlayHUDMotion(shared_str M, BOOL bMixIn, CHudItem* W, u32 state, float speed, float end, bool bMixIn2)
+ {
++	// K1 follow-up (G07 play test): the other player's item plays no
++	// first-person motion on this client; its HUD motions (anm_show,
++	// anm_idle ...) carry the camera track the player saw as a sway.
++	if (other_players_item(object()))
++	{
++		static u32 blocked = 0;
++		if (++blocked <= 50 || (blocked % 100) == 0)
++			Msg("S07 K1 remote-hud-motion-blocked item=%u motion=%s state=%u count=%u", object().ID(), M.c_str(), state, blocked);
++		return 0;
++	}
+ 	if (IsAttachedToHUD())
+ 	{
+ 		::luabind::functor<::luabind::object> funct;
+@@ -832,6 +842,8 @@ u32 CHudItem::PlayHUDMotion(shared_str M, BOOL bMixIn, CHudItem* W, u32 state, f
+ 
+ u32 CHudItem::PlayHUDMotion_noCB(const shared_str& motion_name, BOOL bMixIn, float speed, bool bMixIn2)
+ {
++	if (other_players_item(object()))
++		return 0; // K1 follow-up: see PlayHUDMotion
+ 	m_current_motion = motion_name;
+ 
+ 	if (bDebug && item().m_pInventory)

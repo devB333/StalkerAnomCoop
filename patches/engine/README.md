@@ -290,6 +290,15 @@ in-process server owns as a local object; `ParentIsActor()` means the local
 player on a co-op client). The client logs `remote-lean` while the other
 player leans. No single-player behaviour changes.
 
+`0044-remote-hud-motion-guard-and-camera-watch.patch` (G07 play test,
+2026-10-23, **unverified by the user yet**): `CHudItem::PlayHUDMotion` and
+`PlayHUDMotion_noCB` play nothing for the other player's item on a co-op
+client (the residual K1 sway: the hands followed the other weapon's HUD
+motion track), logging `S07 K1 remote-hud-motion-blocked`; the client logs
+its own camera per frame for 2 s after the other player's weapon change
+(`coop-camera-client.csv`, `remote-slot-change`), which showed in cam-1 that
+the camera itself did not move. No single-player behaviour changes.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

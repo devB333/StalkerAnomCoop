@@ -181,6 +181,10 @@
     {
       "path": "patches/engine/0043-remote-lean-and-hud-ownership.patch",
       "sha256": "8062c07dd4b45b00cfa51b600b2ca53cb139e7d87c12a4b110f9be6053e1011f"
+    },
+    {
+      "path": "patches/engine/0044-remote-hud-motion-guard-and-camera-watch.patch",
+      "sha256": "cf72e5d4201d67f9d3e61ad51c600290b2734ce414038915e78735660185b5cb"
     }
   ],
   "submodules": [

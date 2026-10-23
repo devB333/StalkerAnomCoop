@@ -39,6 +39,7 @@ enum JournalKind : std::uint8_t
     kRecordRespawn = 4,  // S07-T07
     kRecordEntity = 5,   // a durable entity created after the checkpoint
     kRecordTombstone = 6,
+    kRecordPickup = 7,   // S08-T01: an item taken into a participant actor's inventory
 };
 
 struct JournalHeader

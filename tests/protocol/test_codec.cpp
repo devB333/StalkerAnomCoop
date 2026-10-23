@@ -83,7 +83,7 @@ TEST("codec/round-trip")
         sizes[f.name] = bytes.size();
         ++n;
     }
-    CHECK(n == 22);
+    CHECK(n == 24); // v1.6: two Reparent fixtures
     for (auto& kv : sizes)
         metric("bytes_" + kv.first, double(kv.second));
     // Spot checks of decoded fields.
@@ -322,6 +322,7 @@ TEST("codec/unknown-type-and-header")
     CHECK(as(valid, kControl, Role::Client).ok());
     CHECK(as(Encode(Find("welcome")), kControl, Role::Server).error == DecodeError::WrongDirection);
     CHECK(as(Encode(Find("spawn")), kLifecycle, Role::Server).error == DecodeError::WrongDirection);
+    CHECK(as(Encode(Find("reparent")), kLifecycle, Role::Server).error == DecodeError::WrongDirection); // v1.6
     CHECK(as(Encode(Find("hello")), kControl, Role::Client).error == DecodeError::WrongDirection);
     CHECK(as(Encode(Find("input-batch")), kInput, Role::Client).error == DecodeError::WrongDirection);
     // Epoch: 0 exactly for handshake messages.
@@ -408,6 +409,25 @@ TEST("codec/values")
     s2 = sp;
     s2.parent = {sp.entity.id, 9};
     CHECK(!encode(s2, 5, 1, out));
+    // v1.6 Reparent: no entity, the entity its own parent, a half-set parent,
+    // no commit, a transform out of range.
+    Reparent rp = std::get<Reparent>(Find("reparent").message);
+    rp.entity = {};
+    CHECK(!encode(rp, 5, 1, out));
+    rp = std::get<Reparent>(Find("reparent").message);
+    rp.parent = {rp.entity.id, 7};
+    CHECK(!encode(rp, 5, 1, out));
+    rp.parent = {42, 0};
+    CHECK(!encode(rp, 5, 1, out));
+    rp = std::get<Reparent>(Find("reparent").message);
+    rp.commit_id = 0;
+    CHECK(!encode(rp, 5, 1, out));
+    rp = std::get<Reparent>(Find("reparent").message);
+    rp.transform.x = kMaxCoord * 2.f;
+    CHECK(!encode(rp, 5, 1, out));
+    rp = std::get<Reparent>(Find("reparent-ground").message);
+    CHECK(encode(rp, 5, 1, out));
+    CHECK(DecodeAs(MessageType::Reparent, Encode(Find("reparent"))).ok());
     Welcome w = std::get<Welcome>(Find("welcome").message);
     w.slot_generation = 0;
     CHECK(!encode(w, 0, 1, out));

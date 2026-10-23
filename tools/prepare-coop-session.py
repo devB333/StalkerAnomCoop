@@ -6,7 +6,8 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--net-loss 5] [--net-lag 40] [--no-predict c1,c2] [--combat c1,c2]
            [--encounter c1,c2] [--weather c1,c2 [--psi-storm]]
            [--ledger c1,c2] [--checkpoint-seconds 30] [--failpoint commit:after-apply:3[:fail]]
-           [--protocol-build proto-build-35] [--keys-from <earlier run>]
+           [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
+           [--protocol-build proto-build-39] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -92,6 +93,14 @@ def main():
     parser.add_argument("--ledger", default="",
                         help="comma-separated client names running the S07-T03 ledger program (profile script = 6: "
                              "a ledger intent every 2 s, unacknowledged ones retried every 3 s with the same id)")
+    parser.add_argument("--pickup", default="",
+                        help="comma-separated client names running the S08-T01 pickup race driver "
+                             "(profile script = 7); the server drops an item between the two actors every 8 s "
+                             "and names the tick at which both claim it, then three refusal rounds "
+                             "(fixture pickup_race)")
+    parser.add_argument("--pickup-rounds", type=int, default=8, help="with --pickup: race rounds")
+    parser.add_argument("--pickup-start", type=int, default=20,
+                        help="with --pickup: seconds after both players are in the world until the first round")
     parser.add_argument("--checkpoint-seconds", type=int, default=0,
                         help="seconds between the server's periodic checkpoint generations (S07-T02; 0 off; "
                              "joins and a clean stop always publish one)")
@@ -109,7 +118,7 @@ def main():
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-37")
+    parser.add_argument("--protocol-build", default="proto-build-39")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -140,7 +149,8 @@ def main():
     encounter = {n for n in args.encounter.split(",") if n}
     weather = {n for n in args.weather.split(",") if n}
     ledger = {n for n in args.ledger.split(",") if n}
-    if (inject | script | movement | weather | ledger) - set(names[1:]):
+    pickup = {n for n in args.pickup.split(",") if n}
+    if (inject | script | movement | weather | ledger | pickup) - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
         raise SystemExit("a client runs one driver: --script or --movement")
@@ -218,7 +228,8 @@ def main():
                       f"storm = {10 if weather else 0}",
                       f"surge = {70 if weather and not args.psi_storm else 0}",
                       f"psi_storm = {70 if weather and args.psi_storm else 0}",
-                      f"checkpoint_seconds = {args.checkpoint_seconds}"]
+                      f"checkpoint_seconds = {args.checkpoint_seconds}",
+                      f"pickup_race = {args.pickup_start if pickup else 0}", f"pickup_rounds = {args.pickup_rounds}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -233,7 +244,8 @@ def main():
                 restart.write_text("\n".join(restart_lines) + "\n")
                 profiles["server-restart"] = restart
         else:
-            program = (6 if name in ledger else 5 if name in weather else 4 if name in encounter
+            program = (7 if name in pickup else 6 if name in ledger else 5 if name in weather
+                       else 4 if name in encounter
                        else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
@@ -290,6 +302,8 @@ def main():
         "net_lag_ms": args.net_lag,
         "checkpoint_seconds": args.checkpoint_seconds,
         "failpoint": args.failpoint,
+        "pickup": sorted(pickup),
+        "pickup_rounds": args.pickup_rounds if pickup else 0,
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

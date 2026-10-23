@@ -107,6 +107,9 @@ std::vector<Fixture> AllFixtures()
     sp.state = std::vector<std::uint8_t>(kMaxSpawnState, 0x77);
     f.push_back({"spawn", sp, 5, 1});
     f.push_back({"despawn", Despawn{{555, 2}, DespawnReason::OutOfRange, 9}, 5, 2});
+    // v1.6 (S08-T01): an item taken into an inventory, and one put on the ground.
+    f.push_back({"reparent", Reparent{{556, 3}, {42, 1}, {1.f, 2.f, 3.f, 0.25f}, 10}, 5, 3});
+    f.push_back({"reparent-ground", Reparent{{556, 3}, {}, {-kMaxCoord, 0.f, kMaxCoord, -3.14159f}, 11}, 5, 4});
     CampaignEvent ce;
     ce.event_id = 31;
     ce.kind = 2;

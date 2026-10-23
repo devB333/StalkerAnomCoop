@@ -11,7 +11,7 @@ Run a Stage 2 build or smoke test: $ARGUMENTS
    `powershell.exe -NoProfile -Command "Get-Process | Where-Object { $_.Path -like 'C:\Users\djb20\StalkerAnomCoop\builds\*' } | Select-Object Id,Path"`
    If anything is listed, stop and ask the user.
 3. **Run the command** through Windows PowerShell with a Windows path:
-   - Build: `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Users\djb20\StalkerAnomCoop\tools\Build-Stage2.ps1 -Run <name> -Product <Client|Campaign>`
+   - Build: `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Users\djb20\StalkerAnomCoop\tools\Build-Stage2.ps1 -Run <name> -Product <Client|Campaign> -ProtocolBuild <proto-build-N>` (the newest `builds/protocol/build/proto-build-*` matching the current `protocol/` tree; mandatory)
    - Smoke: run `python3 tools/prepare-stage2-smoke.py <name>` first, then `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Users\djb20\StalkerAnomCoop\tools\Run-Stage2Smoke.ps1 -Run <name> -Scope <Core|GameState>`
    Builds are slow, so use a long timeout or run in the background.
 4. **Read the outcome** from the exit code and the logs under `builds/logs/S02-T02/`. A successful compile is not behavioural acceptance. A smoke passes only if the script says so.

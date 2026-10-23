@@ -89,6 +89,7 @@ constexpr TypeInfo kTypes[] = {
     {MessageType::Spawn, "spawn", kLifecycle, 1},
     {MessageType::Despawn, "despawn", kLifecycle, 1},
     {MessageType::CampaignEvent, "campaign_event", kLifecycle, 1},
+    {MessageType::Reparent, "reparent", kLifecycle, 1},
     {MessageType::ResyncChunk, "resync_chunk", kBulk, 1},
     {MessageType::Snapshot, "snapshot", kSnapshot, 1},
     {MessageType::SnapshotAck, "snapshot_ack", kSnapshot, 0},
@@ -478,6 +479,27 @@ void Read(Reader& r, Despawn& m)
     m.commit_id = r.u64();
 }
 
+void Write(Writer& w, const Reparent& m)
+{
+    WriteRef(w, m.entity);
+    WriteRef(w, m.parent);
+    WriteTransform(w, m.transform);
+    w.u64(m.commit_id);
+}
+void Read(Reader& r, Reparent& m)
+{
+    r.field("reparent.entity");
+    m.entity = ReadRef(r, true);
+    r.field("reparent.parent");
+    m.parent = ReadRef(r, false);
+    if (r.ok() && !m.parent.none() && m.parent.id == m.entity.id)
+        r.fail(DecodeError::BadValue);
+    r.field("reparent.transform");
+    m.transform = ReadTransform(r);
+    r.field("reparent.commit");
+    m.commit_id = NonZero64(r);
+}
+
 void Write(Writer& w, const CampaignEvent& m)
 {
     w.u64(m.event_id);
@@ -770,7 +792,7 @@ MessageType type_of(const Message& m)
         MessageType::Heartbeat, MessageType::ResyncBegin, MessageType::ResyncEnd, MessageType::ActionIntent,
         MessageType::ActionResult, MessageType::Spawn, MessageType::Despawn, MessageType::CampaignEvent,
         MessageType::ResyncChunk, MessageType::Snapshot, MessageType::SnapshotAck, MessageType::InputBatch,
-        MessageType::AuthChallenge, MessageType::AuthProof};
+        MessageType::AuthChallenge, MessageType::AuthProof, MessageType::Reparent};
     static_assert(std::variant_size_v<Message> == sizeof(order) / sizeof(order[0]));
     return order[m.index()];
 }
@@ -839,6 +861,7 @@ DecodeResult decode(net::ChannelId channel, Role receiver, const void* data, std
     case MessageType::Spawn: ReadBody<Spawn>(r, h.type, h.sequence, out.body); break;
     case MessageType::Despawn: ReadBody<Despawn>(r, h.type, h.sequence, out.body); break;
     case MessageType::CampaignEvent: ReadBody<CampaignEvent>(r, h.type, h.sequence, out.body); break;
+    case MessageType::Reparent: ReadBody<Reparent>(r, h.type, h.sequence, out.body); break;
     case MessageType::ResyncChunk: ReadBody<ResyncChunk>(r, h.type, h.sequence, out.body); break;
     case MessageType::Snapshot: ReadBody<Snapshot>(r, h.type, h.sequence, out.body); break;
     case MessageType::SnapshotAck: ReadBody<SnapshotAck>(r, h.type, h.sequence, out.body); break;

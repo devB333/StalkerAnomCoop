@@ -34,7 +34,10 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // rounds in the magazine and a shot counter), the fire button, and the first
 // action kinds (activate a slot, reload).
 // 1.5 (S06-T07): the jump and lean buttons (bits 2-4 of Input.buttons).
-constexpr std::uint16_t kProtocolMinor = 5;
+// 1.6 (S08-T01): the pickup action (kind 5), the named refusal reasons, and
+// Reparent: an entity's owner changed (an item taken into an inventory, or
+// put on the ground), in the lifecycle order.
+constexpr std::uint16_t kProtocolMinor = 6;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -42,7 +45,7 @@ enum Channel : net::ChannelId
 {
     kControl = 0,   // Critical: handshake (hello, challenge, proof, welcome, reject), heartbeat, resync begin/end
     kActions = 1,   // Critical: action intents and results
-    kLifecycle = 2, // Critical: spawn, despawn, campaign events
+    kLifecycle = 2, // Critical: spawn, despawn, reparent, campaign events
     kBulk = 3,      // Bulk: resync chunks
     kSnapshot = 4,  // Transient: snapshots (server) and snapshot acks (client)
     kInput = 5,     // Transient: input batches
@@ -95,6 +98,7 @@ enum class MessageType : std::uint16_t
     Spawn = 0x0020,
     Despawn = 0x0021,
     CampaignEvent = 0x0022,
+    Reparent = 0x0023, // v1.6
     ResyncChunk = 0x0030,
     Snapshot = 0x0040,
     SnapshotAck = 0x0041,
@@ -254,6 +258,17 @@ struct Despawn // server -> client, lifecycle
     std::uint64_t commit_id = 0;
 };
 
+// v1.6 (S08-T01): an entity the client holds changed owner: `parent` is the
+// new owner (an inventory), or none when it was put on the ground at
+// `transform`. Applied in commit order with Spawn and Despawn.
+struct Reparent // server -> client, lifecycle
+{
+    EntityRef entity;
+    EntityRef parent; // none: on the ground; never the entity itself
+    Transform transform;
+    std::uint64_t commit_id = 0;
+};
+
 struct CampaignEvent // server -> client, lifecycle
 {
     std::uint64_t event_id = 0;
@@ -338,6 +353,25 @@ enum ActionKind : std::uint16_t
     kActionLedger = 3,       // S07-T03: params: s32 delta (|delta| <= 1000); the synthetic critical effect on the
                              // player's own participant actor's money (docs/persistence-contract.md §10)
     kActionRespawn = 4,      // S07-T07: params: none; the dead player's confirmed respawn (contract §9)
+    kActionPickup = 5,       // S08-T01: target: the item; params: none; take an item from the ground into the
+                             // player's own actor's inventory (docs/persistence-contract.md §6 `pickup`)
+};
+
+// ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
+// server; the client only presents them.
+enum ActionReason : std::uint16_t
+{
+    kReasonUnsupported = 1, // unknown action kind
+    kReasonMalformed = 2,   // params outside the kind's bounds
+    kReasonNoActor = 3,     // no attached session or no participant actor (or a dead one where alive is needed)
+    kReasonNothing = 4,     // nothing to act on (an empty slot, no weapon)
+    kReasonStoreFailed = 5, // S07-T03: the durable store failed closed
+    kReasonAlive = 6,       // S07-T07: a respawn while alive
+    kReasonNoPoint = 7,     // S07-T07: no respawn point
+    kReasonItemGone = 8,    // S08-T01: the target is not a current object the server holds online
+    kReasonItemTaken = 9,   // S08-T01: the item already has an owner (another player won it)
+    kReasonOutOfReach = 10, // S08-T01: farther than the engine's pickup reach
+    kReasonNotTakeable = 11, // S08-T01: not an item, or one the engine would not let an actor take
 };
 
 struct Input
@@ -383,7 +417,8 @@ struct ResyncEnd // server -> client, control
 };
 
 using Message = std::variant<Hello, Welcome, Reject, Heartbeat, ResyncBegin, ResyncEnd, ActionIntent, ActionResult,
-    Spawn, Despawn, CampaignEvent, ResyncChunk, Snapshot, SnapshotAck, InputBatch, AuthChallenge, AuthProof>;
+    Spawn, Despawn, CampaignEvent, ResyncChunk, Snapshot, SnapshotAck, InputBatch, AuthChallenge, AuthProof,
+    Reparent>;
 
 // Handshake types travel with epoch 0, before the session exists.
 bool handshake_type(std::uint16_t type);

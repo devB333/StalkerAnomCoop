@@ -14,7 +14,7 @@ Planning baseline: 2026-10-15. **The original planning execution authorized no i
 | 5 | Two clients observe the same actors and world | G05 | Completed |
 | 6 | Server movement, reconciliation and combat | G06 | Completed |
 | 7 | Recoverable checkpoints, durable critical outcomes and resynchronization | G07 | Completed |
-| 8 | Durable inventory and one complete shared quest | G08 | Not Started |
+| 8 | Durable inventory and one complete shared quest | G08 | In Progress |
 | 9 | Confirmed party travel with failure recovery | G09 | Not Started |
 | 10 | Broader campaign and simulation coverage | G10 | Not Started |
 | 11 | Reliability, performance, regression and release qualification | G11 | Not Started |

@@ -4,7 +4,9 @@ param(
     [switch]$EvaluateOnly,
     # S05-T01: the Build-Protocol.ps1 run whose co-op libraries are linked, and
     # the Build-NetworkProbe.ps1 run whose GameNetworkingSockets install they use.
-    [ValidatePattern('^[a-zA-Z0-9-]+$')][string]$ProtocolBuild = 'proto-build-35',
+    # Mandatory: a stale default links a store library whose headers no longer
+    # match (client-145 failed at link that way).
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$ProtocolBuild,
     [ValidatePattern('^[a-zA-Z0-9-]+$')][string]$GnsFrom = 'net-build-7'
 )
 $ErrorActionPreference = 'Stop'

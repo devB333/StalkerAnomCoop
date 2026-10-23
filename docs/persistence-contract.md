@@ -170,16 +170,22 @@ a volume whose device honours flush. They are **not** a power-loss guarantee
 on a device that lies about flush completion, and the tests do not cut
 power: this is recorded as a limit, not claimed.
 
-### 5.1 Supplemental record (`.sup`, schema 1, little-endian)
+### 5.1 Supplemental record (`.sup`, schema 2, little-endian)
+
+Schema 2 (2026-10-23, S07-T07 under G07 decision 2) adds each
+participant's level entry point (`entry f32×3, entry vertex u32`) after its
+position; schema 1 stores are refused as incompatible (none existed outside
+tests).
 
 ```
-'CSUP' u32, schema u32 = 1
+'CSUP' u32, schema u32 = 2
 campaign id 16 B, party id 16 B
 generation u32, revision u64 (R_G), epoch u64, server tick u64, game time u64
 level id u32, level name (u8 len + bytes)
 next_entity u64
 participants u8, each: slot u8, slot generation u32, player id 16 B,
     actor u16 (0xffff none), actor entity u64, alive u8, position f32×3,
+    entry position f32×3, entry vertex u32 (0xffffffff unknown),
     name (u8 len + bytes)
 entities u32, each: u16 id, u64 entity          (every saved ALife object)
 operations u32, each: player id 16 B, operation u64, outcome u8, reason u16,

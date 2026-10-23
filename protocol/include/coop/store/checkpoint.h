@@ -27,7 +27,7 @@
 namespace coop::store
 {
 constexpr std::uint32_t kSupplementalMagic = 0x50555343; // "CSUP"
-constexpr std::uint32_t kSupplementalSchema = 1;
+constexpr std::uint32_t kSupplementalSchema = 2; // 2 (S07-T08/T07): the participant's level entry point
 constexpr std::uint32_t kManifestSchema = 1;
 
 struct SupplementalParticipant
@@ -39,6 +39,8 @@ struct SupplementalParticipant
     std::uint64_t actor_entity = 0;
     bool alive = false;
     float position[3] = {0, 0, 0};
+    float entry[3] = {0, 0, 0};              // schema 2: where the participant entered this level (the respawn point)
+    std::uint32_t entry_vertex = 0xffffffffu; // level vertex of the entry point (0xffffffff: unknown)
     std::string name;
 };
 
@@ -145,12 +147,17 @@ public:
     // manifest's files, journal and published time; verifies the .scop
     // header (the engine's "valid saved game" rule: u32(-1) then a version
     // >= alife_version); flushes, renames, writes the manifest, rotates the
-    // journal (the writer passed in is closed and reopened on the new file,
-    // with the header of G), replaces the pointer, applies retention.
-    // On failure before the pointer step nothing published changes and the
-    // writer stays on its old file; detail says which step failed.
+    // journal (with a writer, it is closed and reopened on the new file with
+    // the header of G; with null the new journal is only created and the
+    // caller switches its writer later with open_journal: S07-T08's
+    // asynchronous publication, where the simulation thread keeps appending
+    // to the previous journal meanwhile), replaces the pointer, applies
+    // retention. On failure before the pointer step nothing published
+    // changes and the writer stays on its old file; detail says which step
+    // failed. Safe to run on another thread than the writer's as long as
+    // the writer is not passed in.
     bool publish(std::uint32_t generation, Manifest manifest, const std::vector<std::uint8_t>& supplemental,
-        std::uint32_t alife_version, JournalWriter& journal, std::string& detail);
+        std::uint32_t alife_version, JournalWriter* journal, std::string& detail);
 
     // Verifies one generation fully (manifest, sizes, hashes, .sup decode,
     // journal header). detail says what failed.

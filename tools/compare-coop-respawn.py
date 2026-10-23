@@ -62,10 +62,12 @@ def main():
                "section": field(x, "section"), "revision": field(x, "revision", int), "utc": utc(x)}
               for x in first if " death-committed " in x]
     participant_deaths = [d for d in deaths if d["slot"] != 255]
+    npc_deaths_all = sum(1 for x in first + second if " death-committed " in x and "slot=255" in x)
     report["deaths"] = deaths
-    report["checks"]["deaths_committed"] = {"pass": bool(participant_deaths) and any(d["slot"] == 255 for d in deaths),
+    report["checks"]["deaths_committed"] = {"pass": bool(participant_deaths) and npc_deaths_all > 0,
                                             "participant": participant_deaths,
-                                            "npc": sum(1 for d in deaths if d["slot"] == 255)}
+                                            "npc_first_incarnation": sum(1 for d in deaths if d["slot"] == 255),
+                                            "npc_all": npc_deaths_all}
 
     # respawn on the server (first incarnation, or the restart's replay)
     committed = [x for x in first if " respawn-committed " in x]

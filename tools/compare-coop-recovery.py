@@ -262,6 +262,32 @@ def main():
                                 "generations": [c["generation"] for c in cps if c["ok"]]})
     checks["checkpoints"] = {"pass": ok, "per_incarnation": per_incarnation}
 
+    # S07-T08: the simulation-thread cost of each checkpoint take and the server tick
+    # stall around it (coop-actors.csv: utc_ms and tick per row; a stall is wall time
+    # passing while the tick does not advance), plus the engine's clock warnings
+    stalls = []
+    for folder in incarnations(logs):
+        rows = read_csv(folder / "coop-actors.csv")
+        ticks = sorted({(int(r["utc_ms"]), int(r["tick"])) for r in rows if r.get("tick")})
+        gaps = []
+        for (u0, t0), (u1, t1) in zip(ticks, ticks[1:], strict=False):
+            if t1 != t0:
+                gaps.append((u0, u1 - u0))
+        baseline = sorted(g for _, g in gaps)[len(gaps) // 2] if gaps else None
+        warnings = sum(1 for x in log_lines(folder / "xray-campaign-server_djb20.log") if "campaign clock:" in x)
+        for line in log_lines(folder / "coop-server.log"):
+            if " checkpoint-taken " in line:
+                utc = int(line.split(" ", 1)[0])
+                near = [g for u, g in gaps if abs(u - utc) <= 3000]
+                stalls.append({"folder": folder.name, "generation": field(line, "generation", int),
+                               "reason": field(line, "reason"), "sim_ms": field(line, "sim_ms", int),
+                               "save_ms": field(line, "save_ms", int),
+                               "max_tick_gap_ms_near": max(near) if near else None, "baseline_gap_ms": baseline})
+        if ticks:
+            stalls.append({"folder": folder.name, "clock_warnings": warnings, "baseline_gap_ms": baseline,
+                           "max_tick_gap_ms_overall": max((g for _, g in gaps), default=None)})
+    report["stalls"] = stalls
+
     report["checks"] = checks
     report["pass"] = all(c["pass"] for c in checks.values())
     Path(a.out).write_text(json.dumps(report, indent=2) + "\n")

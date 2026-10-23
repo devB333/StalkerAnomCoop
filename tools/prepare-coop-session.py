@@ -109,7 +109,7 @@ def main():
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-35")
+    parser.add_argument("--protocol-build", default="proto-build-37")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 

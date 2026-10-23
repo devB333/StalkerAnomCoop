@@ -1,43 +1,45 @@
-# Session handoff — Stage 7 complete; G07 ready for acceptance
+# Session handoff — Stage 7 complete (incl. S07-T08); G07 awaits acceptance
 
 ## State (2026-10-23)
 
-- **Every Stage 7 task is Completed** under engine patch 0042
-  (`patches/engine/0042-checkpoint-generations-and-journal.patch`, patch
-  check 45) and protocol `proto-build-35` (v1.5; `coop_store` library).
-  Final builds `campaign-233` / `client-134`. Reports: [S07-T02](../../validation/S07-T02.md)
-  (generations), [S07-T03](../../validation/S07-T03.md) (journal, ledger),
-  [S07-T04](../../validation/S07-T04.md) (recovery), [S07-T05](../../validation/S07-T05.md)
-  (reconnect), [S07-T06](../../validation/S07-T06.md) (termination matrix, deaths),
-  [S07-T07](../../validation/S07-T07.md) (respawn). Spec: [persistence contract](../../persistence-contract.md).
-- **[G07 report](../../validation/G07.md) is ready for the user's acceptance**
-  with three decisions (checkpoint cadence, respawn point, respawn kit).
+- **Every Stage 7 task is Completed**, including **S07-T08** (added by the
+  user at G07: no stall at a checkpoint) and the S07-T07 revision under the
+  user's G07 decisions (respawn at the level entry point; the faction kit).
+  Engine patch 0042 (re-exported, patch check 46), protocol `proto-build-37`
+  (supplemental schema 2), final builds `campaign-238` / `client-138`.
+- **[G07 report](../../validation/G07.md) awaits the user's acceptance.** The
+  three decisions are answered and re-validated (its "User decision" section).
   Stage 7 stays In Progress in plan.md until the user accepts.
-- Observed: st-2 107/107 store+protocol tests; rec-2 and rec-3 (restart
-  with 50 journal records replayed, clients rejoin under epoch 2); matrix
-  mx1 10/10 (campaign-230) and mx2-10 (final build; fail-closed, the client
-  sees reason 5); death-2 (death + respawn committed, server terminated
-  after the apply, both replayed, corpse kept on both clients; all 7
-  checks). Defects found and fixed on the way are in the reports (a
-  result-dispatch bug that sent rejections as Accepted; the HUD prompt
-  fault; the tick check for dead/two actors).
-- Carried limits: L15 closed for Stage 7's parts; L32–L36 added
-  ([carried limits](../../carried-limits.md)). Known issue K4 seen again (rec-3).
-- Unverified: power loss (not claimed, L35); client reconnect UI (main
-  menu shows); the respawn kit is the `actor` section's supplies.
+- Reports: [S07-T02](../../validation/S07-T02.md) … [S07-T07](../../validation/S07-T07.md),
+  [S07-T08](../../validation/S07-T08.md). Observed this session:
+  - rec-4: recovery with the asynchronous publication passes; the client's
+    update gap at a checkpoint fell from 183–367 ms (rec-3) to about 100 ms
+    (one 168 ms); the simulation thread keeps the world serialization
+    (45–65 ms, up to 129 ms under load).
+  - mx3: the five `checkpoint:*` termination points pass on the final build.
+  - death-3 / death-4: respawn at the recorded entry point, the faction kit
+    for both slots (`stalker_loadout`, 13 items + ammo, identity and money
+    copied), the restart replays death and respawn; 7/7 checks.
+  - st-3 / st-4: 108/108 store tests (new `async-publication-keeps-previous-journal`).
+- Unverified: whether a ~100 ms pause at a checkpoint is noticed in real
+  play (L34 revised; a serialization task only if it is); power loss (L35).
+- `git diff --check` flags tabs inside `patches/engine/*.patch` (the
+  engine's indentation in context lines); check docs and tools with
+  `git diff --check -- . ':!patches/engine/*.patch'`.
 
 ## First thing next session
 
-1. Ask the user to accept G07 and answer its three decisions; record the
-   acceptance in `docs/validation/G07.md`, plan.md §I (G07 Completed, Stage 7
-   Completed) and the carried-limits header if rows change.
-2. Then S08-T01 (durable item pickup) under the contract: a `pickup` record
-   and adapter, its crash test with `tools/run-recovery-matrix.py`-style
-   failpoints, and `compare-coop-recovery.py` extended for items.
-3. Store/session tooling to reuse: `prepare-coop-session.py --ledger
-   --checkpoint-seconds --failpoint point[:count][:fail] --auto-respawn`,
-   `Run-CoopSession.ps1 -ServerKill N|0 -ServerRestartAfter M`,
-   `compare-coop-recovery.py`, `compare-coop-respawn.py`, `run-recovery-matrix.py`.
+1. Ask the user to accept G07; on acceptance record it in
+   `docs/validation/G07.md`, plan.md §I (G07 Completed, Stage 7 Completed)
+   and the carried-limits header.
+2. Then S08-T01 (durable item pickup): a `pickup` record and adapter under
+   the contract, a crash test through `tools/run-recovery-matrix.py`-style
+   failpoints, `compare-coop-recovery.py` extended for items.
+3. Tooling: `prepare-coop-session.py` (default protocol build proto-build-37;
+   `--ledger --checkpoint-seconds --failpoint point[:count][:fail]
+   --auto-respawn`), `Run-CoopSession.ps1 -ServerKill N|0 -ServerRestartAfter M`,
+   `compare-coop-recovery.py` (incl. the `stalls` section),
+   `compare-coop-respawn.py`, `run-recovery-matrix.py`.
 
 ## Known issues (not to chase now)
 
@@ -45,12 +47,13 @@
 
 ## Run names
 
-- Used this session: proto-build-33/34/35, st-1/st-2, campaign-223…233,
-  client-125…134, rec-1/rec-2 (S07-T02), rec-3 (S07-T04), mx1-1…10 and
-  mx2-10 (S07-T06), death-1/death-2 (S07-T07), patch check 45.
-- Next: `proto-build-36`, `st-3`, `campaign-234`, `client-135`, `pt-31`,
-  `smoke-171`, `capture-62`, patch check 46.
+- Used this session: proto-build-33…37, st-1…st-4, campaign-223…238,
+  client-125…138, rec-1/rec-2 (S07-T02), rec-3 (S07-T04), mx1-1…10 and
+  mx2-10 (S07-T06), death-1…4 (S07-T07), timing-1, rec-4, mx3-1…5 (S07-T08),
+  patch checks 45 and 46.
+- Next: `proto-build-38`, `st-5`, `campaign-239`, `client-139`, `pt-31`,
+  `smoke-171`, `capture-62`, patch check 47.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before G07 acceptance](../done/snapshot-before-G07-acceptance.md).
+Previous snapshot: [before G07 acceptance (2)](../done/snapshot-before-G07-acceptance-2.md).

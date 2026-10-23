@@ -91,6 +91,10 @@ Supplemental fake_supplemental(std::uint32_t generation, std::uint64_t revision)
     p.position[0] = 1.5f;
     p.position[1] = 2.5f;
     p.position[2] = -3.5f;
+    p.entry[0] = -90.f;
+    p.entry[1] = -22.f;
+    p.entry[2] = -230.f;
+    p.entry_vertex = 176494;
     p.name = "Player 1";
     s.participants.push_back(p);
     p.slot = 1;
@@ -133,7 +137,7 @@ bool publish_fake(CheckpointStore& store, std::uint32_t generation, std::uint64_
 {
     write_fake_save(store, generation, generation);
     return store.publish(generation, fake_manifest(generation, revision), encode_supplemental(fake_supplemental(generation, revision)),
-        kAlifeVersion, journal, detail);
+        kAlifeVersion, &journal, detail);
 }
 
 std::vector<std::uint64_t> revisions_of(const std::vector<JournalRecord>& records)
@@ -328,6 +332,8 @@ TEST("store/supplemental-and-manifest-round-trip")
     REQUIRE(d.participants.size() == 2 && d.entities.size() == 2000 && d.operations.size() == 1);
     CHECK(d.participants[1].player == (proto::Uuid128{3, 4}) && d.participants[1].actor_id == 27000 &&
         !d.participants[1].alive && d.participants[1].name == "Player 2" && d.participants[0].position[2] == -3.5f);
+    CHECK(d.participants[0].entry[0] == -90.f && d.participants[0].entry_vertex == 176494 &&
+        d.participants[1].entry_vertex == 176494);
     CHECK(d.entities[1999].first == 1999 && d.entities[1999].second == 2000);
     CHECK(d.operations[0].operation == 0x10 && d.operations[0].revision == 77);
     std::vector<std::uint8_t> bad = bytes;
@@ -445,7 +451,7 @@ TEST("store/publish-failures-keep-the-previous-generation")
         write_fake_save(store, 2, 2);
         arm_failpoint(point, 1, false);
         const bool ok = store.publish(2, fake_manifest(2, 2), encode_supplemental(fake_supplemental(2, 2)),
-            kAlifeVersion, journal, detail);
+            kAlifeVersion, &journal, detail);
         arm_failpoint("", 0, false);
         CHECK_MSG(!ok, "%s should have failed", point);
         CHECK_MSG(store.current_generation() == 1, "%s moved the pointer", point);
@@ -466,9 +472,53 @@ TEST("store/publish-failures-keep-the-previous-generation")
     const std::string junk = "junk";
     REQUIRE(write_file_durable(store.path_of(StoreNames::temp_file(3, "scop")), junk.data(), junk.size()));
     REQUIRE(write_file_durable(store.path_of(StoreNames::temp_file(3, "scoc")), junk.data(), junk.size()));
-    CHECK(!store.publish(3, fake_manifest(3, 9), encode_supplemental(fake_supplemental(3, 9)), kAlifeVersion, journal, detail));
+    CHECK(!store.publish(3, fake_manifest(3, 9), encode_supplemental(fake_supplemental(3, 9)), kAlifeVersion, &journal, detail));
     CHECK(detail.find("scop") != std::string::npos);
     CHECK(store.current_generation() == 2);
+    journal.close();
+    clean_dir(dir);
+}
+
+// S07-T08: a publication without the writer (another thread's) leaves the
+// writer on the previous journal; records appended there meanwhile, with
+// revisions above the new generation's, are still replayed after the
+// writer switches, and after a termination before the switch.
+TEST("store/async-publication-keeps-previous-journal")
+{
+    const std::string dir = temp_dir("async");
+    CheckpointStore store(dir, kCampaign);
+    JournalWriter journal;
+    std::string detail;
+    REQUIRE(store.open_journal(0, 0, journal, detail));
+    REQUIRE(journal.append(kRecordLedger, 1, 1, 1, payload_of(1)));
+    REQUIRE(publish_fake(store, 1, 1, journal, detail));
+    CHECK(journal.path() == store.path_of("coop-journal-1.log"));
+    REQUIRE(journal.append(kRecordLedger, 1, 2, 2, payload_of(2)));
+    // Generation 2 at revision 2 is published "elsewhere": the writer stays on journal 1.
+    write_fake_save(store, 2, 2);
+    REQUIRE(store.publish(2, fake_manifest(2, 2), encode_supplemental(fake_supplemental(2, 2)), kAlifeVersion, nullptr, detail));
+    CHECK(journal.path() == store.path_of("coop-journal-1.log"));
+    CHECK(store.current_generation() == 2);
+    CHECK(file_exists(store.path_of("coop-journal-2.log")));
+    // Records committed before the switch go to journal 1 with revisions above R_2.
+    REQUIRE(journal.append(kRecordLedger, 1, 3, 3, payload_of(3)));
+    REQUIRE(journal.append(kRecordLedger, 1, 4, 4, payload_of(4)));
+    // A termination here: recovery of 2 must read journal 1 too.
+    Recovered r;
+    REQUIRE(store.recover(r) == RecoverStatus::Recovered);
+    CHECK(r.generation == 2);
+    CHECK_MSG(join(revisions_of(r.replay)) == "3,4", "%s", join(revisions_of(r.replay)).c_str());
+    // The switch: the writer moves to journal 2 and continues.
+    journal.reset();
+    REQUIRE(store.open_journal(2, 2, journal, detail));
+    REQUIRE(journal.append(kRecordLedger, 1, 5, 5, payload_of(5)));
+    REQUIRE(store.recover(r) == RecoverStatus::Recovered);
+    CHECK_MSG(join(revisions_of(r.replay)) == "3,4,5", "%s", join(revisions_of(r.replay)).c_str());
+    // Retention at the next publication keeps journal 1 (G-1) and its records.
+    REQUIRE(publish_fake(store, 3, 5, journal, detail));
+    CHECK(file_exists(store.path_of("coop-journal-2.log")) && !file_exists(store.path_of("coop-journal-1.log")));
+    REQUIRE(store.recover(r) == RecoverStatus::Recovered);
+    CHECK(r.generation == 3 && r.replay.empty());
     journal.close();
     clean_dir(dir);
 }

@@ -256,7 +256,28 @@ committed in its tick (`coop-deaths.csv`) and re-applied at recovery by
 killing the entity natively when the checkpoint still holds it alive
 (`apply_death`); profile key `failpoint_fail` makes an armed failpoint fail
 the store call instead of terminating the process (the fail-closed test).
-No gameplay behaviour changes outside co-op.
+S07-T07 adds the respawn: `ActionIntent` kind 4 validated on the server (a
+living actor is refused), the `respawn` record with a reserved `EntityId`
+committed before the spawn, the slot rebound to the new actor (the corpse
+stays), `CampaignEvent` 5 telling the client to rejoin, the client's
+prompt through the installed `actor_menu.set_msg` and the use key
+(`CLevel::IR_OnKeyboardPress` asks `coop_client_key_press` first), the
+`auto_respawn` driver key; under the G07 decisions the respawn point is the
+participant's level entry point (recorded where its actor is first seen,
+kept in supplemental schema 2) and the new actor gets the faction kit
+(`items\settings\new_game_loadouts.ltx`, the always-given lines of
+`[<faction>_loadout]` plus a weapon's ammo) with the dead actor's community,
+name, rank, reputation, profile and money copied onto its server entity.
+S07-T08 moves publication off the simulation thread: `CALifeStorageManager::save`
+hands the serialized world to `g_alife_save_sink` during a take (and
+reports its phase timings on the campaign server), `CoopPersistence` runs
+compression, the `.scop` write and the store's steps on a worker thread
+(`publish(…, nullptr)`: the journal writer stays on the previous file until
+`poll()` switches it; the store's recovery reads that journal too), joins
+wait in `WorldPublishing` for the generation they requested, and the clean
+stop waits for the worker. `xrCampaignLevel_ReportTicks` accepts a dead
+participant actor on a serving server. No gameplay behaviour changes outside
+co-op.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

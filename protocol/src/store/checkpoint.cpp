@@ -114,6 +114,10 @@ std::vector<std::uint8_t> encode_supplemental(const Supplemental& s)
         put<float>(out, p.position[0]);
         put<float>(out, p.position[1]);
         put<float>(out, p.position[2]);
+        put<float>(out, p.entry[0]);
+        put<float>(out, p.entry[1]);
+        put<float>(out, p.entry[2]);
+        put<std::uint32_t>(out, p.entry_vertex);
         put_string(out, p.name);
     }
     put<std::uint32_t>(out, std::uint32_t(s.entities.size()));
@@ -181,6 +185,10 @@ bool decode_supplemental(const std::vector<std::uint8_t>& bytes, Supplemental& o
         p.position[0] = t.take<float>();
         p.position[1] = t.take<float>();
         p.position[2] = t.take<float>();
+        p.entry[0] = t.take<float>();
+        p.entry[1] = t.take<float>();
+        p.entry[2] = t.take<float>();
+        p.entry_vertex = t.take<std::uint32_t>();
         p.name = t.take_string();
         out.participants.push_back(p);
     }
@@ -546,13 +554,16 @@ RecoverStatus CheckpointStore::recover(Recovered& out)
     out.fallback = fallback;
     out.highest_epoch = out.manifest.epoch;
     out.highest_revision = out.manifest.revision;
-    // The chosen generation's journal, and every later journal present (a
-    // fallback to G-1 must also replay what journal G holds).
+    // The chosen generation's journal, every later journal present (a
+    // fallback to G-1 must also replay what journal G holds) and the one
+    // before it: with an asynchronous publication (S07-T08) the writer stays
+    // on journal G-1 until G is published, so records with revisions above
+    // R_G can sit there; the revision filter below keeps only those.
     std::vector<std::uint32_t> journals;
     for (const std::string& name : list_files(dir_, "coop-journal-"))
     {
         const unsigned long g = std::strtoul(name.c_str() + 13, nullptr, 10);
-        if (g >= chosen)
+        if (g + 1 >= chosen)
             journals.push_back(std::uint32_t(g));
     }
     std::sort(journals.begin(), journals.end());
@@ -621,7 +632,7 @@ bool CheckpointStore::open_journal(std::uint32_t generation, std::uint64_t base_
 }
 
 bool CheckpointStore::publish(std::uint32_t generation, Manifest manifest, const std::vector<std::uint8_t>& supplemental,
-    std::uint32_t alife_version, JournalWriter& journal, std::string& detail)
+    std::uint32_t alife_version, JournalWriter* journal, std::string& detail)
 {
     using clock = std::chrono::steady_clock;
     const auto t_start = clock::now();
@@ -743,9 +754,12 @@ bool CheckpointStore::publish(std::uint32_t generation, Manifest manifest, const
         return false;
     }
     last_timing.pointer_ms = ms_since(t);
-    journal.reset();
-    if (!open_journal(generation, manifest.revision, journal, detail))
-        return false; // published, but the writer could not reopen: the caller fails closed
+    if (journal)
+    {
+        journal->reset();
+        if (!open_journal(generation, manifest.revision, *journal, detail))
+            return false; // published, but the writer could not reopen: the caller fails closed
+    }
     if (!failpoint("checkpoint:after-pointer"))
     {
         detail = "failpoint after pointer";

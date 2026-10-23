@@ -2,7 +2,7 @@
 
 The open limits each accepted gate carried forward, in one place, so they can
 be tracked to closure. Created 2026-10-20 at the user's request when G05 was
-accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, 2026-10-23); it collects the limits recorded in [G01](validation/G01.md),
+accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, accepted 2026-10-23); it collects the limits recorded in [G01](validation/G01.md),
 [G02](validation/G02.md), [G03](validation/G03.md), [G04](validation/G04.md)
 and [G05](validation/G05.md). The gate records stay the source of what was
 accepted; this file is the working list.

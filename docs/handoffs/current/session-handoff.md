@@ -1,59 +1,66 @@
-# Session handoff — Stage 7 complete (incl. S07-T08); G07 awaits acceptance
+# Session handoff — G07 accepted; next S08-T01 (durable item pickup)
 
 ## State (2026-10-23)
 
-- **Every Stage 7 task is Completed**, including **S07-T08** (added by the
-  user at G07: no stall at a checkpoint) and the S07-T07 revision under the
-  user's G07 decisions (respawn at the level entry point; the faction kit).
-  Engine patch 0042 (re-exported, patch check 46), protocol `proto-build-37`
-  (supplemental schema 2), final builds `campaign-238` / `client-138`.
-- **[G07 report](../../validation/G07.md) awaits the user's acceptance.** The
-  three decisions are answered and re-validated (its "User decision" section).
-  Stage 7 stays In Progress in plan.md until the user accepts.
-- Reports: [S07-T02](../../validation/S07-T02.md) … [S07-T07](../../validation/S07-T07.md),
-  [S07-T08](../../validation/S07-T08.md). Observed this session:
-  - rec-4: recovery with the asynchronous publication passes; the client's
-    update gap at a checkpoint fell from 183–367 ms (rec-3) to about 100 ms
-    (one 168 ms); the simulation thread keeps the world serialization
-    (45–65 ms, up to 129 ms under load).
-  - mx3: the five `checkpoint:*` termination points pass on the final build.
-  - death-3 / death-4: respawn at the recorded entry point, the faction kit
-    for both slots (`stalker_loadout`, 13 items + ammo, identity and money
-    copied), the restart replays death and respawn; 7/7 checks.
-  - st-3 / st-4: 108/108 store tests (new `async-publication-keeps-previous-journal`).
-- Unverified: whether a ~100 ms pause at a checkpoint is noticed in real
-  play (L34 revised; a serialization task only if it is); power loss (L35).
-- `git diff --check` flags tabs inside `patches/engine/*.patch` (the
-  engine's indentation in context lines); check docs and tools with
-  `git diff --check -- . ':!patches/engine/*.patch'`.
+- **G07 accepted** by the user ([G07](../../validation/G07.md)); every Stage 7
+  task Completed under engine patch 0042 (patch check 46), protocol
+  `proto-build-37`, final builds `campaign-238` / `client-138`. Stage 7 is
+  Completed in plan.md.
+- User decisions at acceptance: play-test the remaining checkpoint pause
+  (the world serialization, 45–65 ms, L34) on the current build; keep a
+  **host-triggered save** as the optional **S07-T09** (Not Started; a
+  quicksave-style `checkpoint` action from the host player, no timer).
+  Activate it only if the play test shows a hitch or the user asks.
+- Carried limits: L15 closed for Stage 7's parts; L32–L36 open (L36:
+  inventory, quests and rewards are not durable until Stage 8 gives them
+  records and adapters).
+- Everything is committed; the engine tree matches the exported series.
 
-## First thing next session
+## First thing next session: S08-T01 — durable authoritative item pickup
 
-1. Ask the user to accept G07; on acceptance record it in
-   `docs/validation/G07.md`, plan.md §I (G07 Completed, Stage 7 Completed)
-   and the carried-limits header.
-2. Then S08-T01 (durable item pickup): a `pickup` record and adapter under
-   the contract, a crash test through `tools/run-recovery-matrix.py`-style
-   failpoints, `compare-coop-recovery.py` extended for items.
-3. Tooling: `prepare-coop-session.py` (default protocol build proto-build-37;
-   `--ledger --checkpoint-seconds --failpoint point[:count][:fail]
-   --auto-respawn`), `Run-CoopSession.ps1 -ServerKill N|0 -ServerRestartAfter M`,
-   `compare-coop-recovery.py` (incl. the `stalls` section),
-   `compare-coop-respawn.py`, `run-recovery-matrix.py`.
+Spec: plan.md S08-T01 and the [persistence contract](../../persistence-contract.md)
+(§4 phases, §6 record kinds: add `pickup`; `entity`/`tombstone` for items
+created or destroyed after a checkpoint). Design sketch:
+1. **Action** `ActionIntent` kind 5 `pickup` (target = the item's `EntityRef`;
+   params none). Validate on the server: attached session, own actor alive,
+   the item exists online, is on the ground (no parent), within reach
+   (actor-to-item distance ≤ the engine's pickup range), inventory capacity.
+2. **Resolve** the transfer as absolute post-state: item entity → owner
+   entity, revision. **Commit** a `pickup` record (slot, player, operation,
+   item entity, item u16 at commit, owner entity, section) before any
+   change; then **apply** through one adapter that performs the native
+   ownership change the server's own pickup path uses (`CInventory::Take`
+   through the server event, not the client's `GE_OWNERSHIP_TAKE` import,
+   which the message policy refuses); **acknowledge**; the lifecycle stream
+   carries the item's parent change (Spawn with parent / Despawn) so both
+   clients show it.
+3. **Recovery**: replay `pickup` records after the checkpoint (the item
+   exists in the checkpoint without an owner → give it; already owned by
+   the recorded owner → no-op; owned by someone else → `recovery-replay-failed`).
+4. **Concurrent claims**: both clients request the same item in the same
+   tick → exactly one accepted, the other refused (`ItemTaken`); retries
+   with the same id return the stored outcome.
+5. **Client**: the use key on a looked-at item sends the intent (today the
+   engine's local pickup is refused by the replica); a driver `--pickup`
+   program for two clients racing for one dropped item; `compare-coop-pickup.py`.
+6. Crash test with `run-recovery-matrix.py` points `pickup:after-flush`,
+   `pickup:after-apply`, `pickup:after-ack` (add the failpoints), plus a
+   restart; then the report `docs/validation/S08-T01.md`.
+Builds: `campaign-239` / `client-139`; protocol `proto-build-38` if the
+store changes; tests `st-5`.
 
 ## Known issues (not to chase now)
 
-[known issues](../../known-issues.md): K1–K4 unchanged (K4 seen again in rec-3).
+[known issues](../../known-issues.md): K1–K4 (K4, items kept on clients
+after an NPC consumed them, is Stage 8's ownership class).
 
 ## Run names
 
-- Used this session: proto-build-33…37, st-1…st-4, campaign-223…238,
-  client-125…138, rec-1/rec-2 (S07-T02), rec-3 (S07-T04), mx1-1…10 and
-  mx2-10 (S07-T06), death-1…4 (S07-T07), timing-1, rec-4, mx3-1…5 (S07-T08),
-  patch checks 45 and 46.
+- Used: see the previous snapshot (through campaign-238 / client-138,
+  proto-build-37, st-4, rec-4, mx3-1…5, death-4, patch check 46).
 - Next: `proto-build-38`, `st-5`, `campaign-239`, `client-139`, `pt-31`,
   `smoke-171`, `capture-62`, patch check 47.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before G07 acceptance (2)](../done/snapshot-before-G07-acceptance-2.md).
+Previous snapshot: [before S08-T01](../done/snapshot-before-S08-T01.md).

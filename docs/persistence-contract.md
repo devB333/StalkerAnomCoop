@@ -292,6 +292,15 @@ Nothing a client holds is merged: client saves never enter this path.
 
 ## 9. Respawn (S07-T07, under this contract)
 
+Implementation note (2026-10-23, S07-T07): the `respawn` record carries the
+new actor's **reserved** `EntityId` (`CampaignIdentityRegistry::reserve_entity`
+before the commit; the object's `m_campaign_entity` carries it into the id
+assignment at the spawn) and the point (position, level vertex, graph), and
+it is itself the durable definition of the new entity (section `actor`); no
+separate `entity` record is written, and the u16 is assigned at the apply.
+The adapter is idempotent: if the slot already holds the recorded entity, or
+an object with that `EntityId` exists in the checkpoint, nothing is spawned.
+
 Death is a critical outcome (`death` record at the native `Die`); the
 respawn is an operation: intent → validate (the slot's actor is dead, no
 respawn pending, the client confirmed) → resolve (new entity id, point: the

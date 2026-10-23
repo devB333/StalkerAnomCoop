@@ -2,7 +2,7 @@
 
 The open limits each accepted gate carried forward, in one place, so they can
 be tracked to closure. Created 2026-10-20 at the user's request when G05 was
-accepted (L28–L31 added at G06, 2026-10-21); it collects the limits recorded in [G01](validation/G01.md),
+accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, 2026-10-23); it collects the limits recorded in [G01](validation/G01.md),
 [G02](validation/G02.md), [G03](validation/G03.md), [G04](validation/G04.md)
 and [G05](validation/G05.md). The gate records stay the source of what was
 accepted; this file is the working list.
@@ -53,7 +53,12 @@ accepted; this file is the working list.
 
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|
-| L15 | Checkpoint has no crash or journal guarantee; ownership, captured contexts, participant references and actor 2's script state are not persisted (R07, R08) | G02, G03 | Stage 7 (S07-T01–T06) | Open |
+| L15 | Checkpoint has no crash or journal guarantee; ownership, captured contexts, participant references and actor 2's script state are not persisted (R07, R08) | G02, G03 | Stage 7 (S07-T01–T06) | Closed 2026-10-23 for the parts Stage 7 owns: [S07-T02](validation/S07-T02.md) (generations published atomically, store tests st-2 incl. the 8-point termination matrix), [S07-T03](validation/S07-T03.md) (write-through journal, fail-closed), [S07-T04](validation/S07-T04.md) (recovery: rec-2, rec-3 with 50 records replayed, identities and participant references restored), [S07-T06](validation/S07-T06.md) (engine termination matrix mx1). What stays open has its own rows: actor 2's script state (L32), ownership (S08, K4), captured contexts (L33) |
+| L32 | Actor 2 has no Lua binder and no `pstor`: its script state (tasks, info portions, story flags) is not persisted or run; actor 1's is, through the native `.scoc` | G07 (S07-T01 §3 D) | S10-T05 / the presentation-script split (no task yet: R12) | Open |
+| L33 | Captured script contexts and presentation outboxes are not persisted; a restart drops what was queued (presentation only) | G07 | S10-T05 | Open |
+| L34 | Checkpoint publication runs on the simulation thread: the native save (54–128 ms) plus the store's flush, rename, rotation and pointer steps (20–620 ms per generation) stall the tick; `checkpoint_seconds` bounds the rollback and the stall rate | G07 (S07-T02) | S11-T01 (move the store steps off the thread; keep the take inside the tick) | Open |
+| L35 | Durability is tested against process termination only: power loss and devices that misreport flush completion are not tested and not claimed (contract §5, §12); retention keeps one previous generation | G07 (S07-T02/T03) | S11 (R08: record as a product limit; no engineering task) | Open |
+| L36 | Inventory, quest and reward effects have no journal records or adapters: a restart rolls them back to the last generation; only the synthetic ledger, deaths and respawns are durable | G07 | S08-T01–T06 (records and adapters with their crash tests) | Open |
 
 ## Network and security
 

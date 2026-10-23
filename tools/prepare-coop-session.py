@@ -5,7 +5,8 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--script c1,c2] [--movement c1,c2] [--churn 10] [--drop 6]
            [--net-loss 5] [--net-lag 40] [--no-predict c1,c2] [--combat c1,c2]
            [--encounter c1,c2] [--weather c1,c2 [--psi-storm]]
-           [--protocol-build proto-build-32] [--keys-from <earlier run>]
+           [--ledger c1,c2] [--checkpoint-seconds 30] [--failpoint commit:after-apply:3[:fail]]
+           [--protocol-build proto-build-35] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -88,10 +89,27 @@ def main():
                              "in the world and starts the installed surge_manager's emission 70 s after (fixtures)")
     parser.add_argument("--psi-storm", action="store_true",
                         help="with --weather: a psi-storm instead of the emission (psi_storm_manager)")
+    parser.add_argument("--ledger", default="",
+                        help="comma-separated client names running the S07-T03 ledger program (profile script = 6: "
+                             "a ledger intent every 2 s, unacknowledged ones retried every 3 s with the same id)")
+    parser.add_argument("--checkpoint-seconds", type=int, default=0,
+                        help="seconds between the server's periodic checkpoint generations (S07-T02; 0 off; "
+                             "joins and a clean stop always publish one)")
+    parser.add_argument("--failpoint", default="",
+                        help="S07-T06 harness: <point>[:<count>], a coop::store failpoint at which the server "
+                             "terminates itself on its count-th hit after recovery (commit:before-append, "
+                             "commit:after-flush, commit:after-apply, commit:after-ack, checkpoint:after-temp, "
+                             "checkpoint:after-rename, checkpoint:after-manifest, checkpoint:after-rotation, "
+                             "checkpoint:after-pointer, append:after-write ...); a trailing :fail makes the hit "
+                             "fail the store call instead (the fail-closed path). The restart profile "
+                             "(coop-restart.ltx) has no failpoint.")
+    parser.add_argument("--auto-respawn", type=int, default=0,
+                        help="S07-T07 driver: seconds after its own death until a client confirms the respawn by "
+                             "itself (profile auto_respawn; also one early request while alive, expected refused)")
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-32")
+    parser.add_argument("--protocol-build", default="proto-build-35")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -121,7 +139,8 @@ def main():
     combat = {n for n in args.combat.split(",") if n}
     encounter = {n for n in args.encounter.split(",") if n}
     weather = {n for n in args.weather.split(",") if n}
-    if (inject | script | movement | weather) - set(names[1:]):
+    ledger = {n for n in args.ledger.split(",") if n}
+    if (inject | script | movement | weather | ledger) - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
         raise SystemExit("a client runs one driver: --script or --movement")
@@ -198,16 +217,31 @@ def main():
                       f"encounter = {20 if encounter else 0}", f"lethal = {8 if encounter else 0}",
                       f"storm = {10 if weather else 0}",
                       f"surge = {70 if weather and not args.psi_storm else 0}",
-                      f"psi_storm = {70 if weather and args.psi_storm else 0}"]
+                      f"psi_storm = {70 if weather and args.psi_storm else 0}",
+                      f"checkpoint_seconds = {args.checkpoint_seconds}"]
+            if args.failpoint:
+                # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
+                parts = args.failpoint.split(":")
+                fail = parts[-1] == "fail"
+                if fail:
+                    parts = parts[:-1]
+                count = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+                point = ":".join(parts[:2])
+                restart_lines = list(lines)
+                lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
+                restart = runtime / "coop-restart.ltx"
+                restart.write_text("\n".join(restart_lines) + "\n")
+                profiles["server-restart"] = restart
         else:
-            program = (5 if name in weather else 4 if name in encounter else 3 if name in combat
-                       else 2 if name in movement else 1 if name in script else 0)
+            program = (6 if name in ledger else 5 if name in weather else 4 if name in encounter
+                       else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
                       f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",
                       f"inject = {1 if name in inject else 0}",
                       f"script = {program}",
-                      f"predict = {0 if name in no_predict else 1}"]
+                      f"predict = {0 if name in no_predict else 1}",
+                      f"auto_respawn = {args.auto_respawn}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile
@@ -254,6 +288,8 @@ def main():
         "drop": args.drop,
         "net_loss_pct": args.net_loss,
         "net_lag_ms": args.net_lag,
+        "checkpoint_seconds": args.checkpoint_seconds,
+        "failpoint": args.failpoint,
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},
@@ -261,6 +297,8 @@ def main():
                              "fsgame": winpath(runtimes[name] / "fsgame.ltx"),
                              "profile": winpath(profiles[name]),
                              "profile_sha256": sha256(profiles[name]),
+                             "profile_restart": winpath(profiles["server-restart"])
+                             if name == "server" and "server-restart" in profiles else "",
                              "stop_file": winpath(stop_files[name]),
                              "inject": name in inject}
                       for name in names},

@@ -4,7 +4,7 @@ param(
     [switch]$EvaluateOnly,
     # S05-T01: the Build-Protocol.ps1 run whose co-op libraries are linked, and
     # the Build-NetworkProbe.ps1 run whose GameNetworkingSockets install they use.
-    [ValidatePattern('^[a-zA-Z0-9-]+$')][string]$ProtocolBuild = 'proto-build-32',
+    [ValidatePattern('^[a-zA-Z0-9-]+$')][string]$ProtocolBuild = 'proto-build-35',
     [ValidatePattern('^[a-zA-Z0-9-]+$')][string]$GnsFrom = 'net-build-7'
 )
 $ErrorActionPreference = 'Stop'
@@ -23,7 +23,7 @@ if ($revision -ne 'c57fe5b9fab4fe0506659db03137c52d2500eb2f') { throw 'Working s
 $protocolDir = Join-Path $workspace 'protocol'
 $protocolLibDir = Join-Path $workspace "builds\protocol\build\$ProtocolBuild\protocol"
 $gnsDir = Join-Path $workspace "builds\network-probe\install\$GnsFrom\gns"
-foreach ($lib in @('coop_net.lib', 'coop_net_gns.lib', 'coop_protocol.lib', 'coop_session.lib')) {
+foreach ($lib in @('coop_net.lib', 'coop_net_gns.lib', 'coop_protocol.lib', 'coop_session.lib', 'coop_store.lib')) {
     if (-not (Test-Path (Join-Path $protocolLibDir $lib))) { throw "Protocol build $ProtocolBuild has no $lib." }
 }
 $gnsDll = Join-Path $gnsDir 'bin\GameNetworkingSockets.dll'

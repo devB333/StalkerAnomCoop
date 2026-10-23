@@ -9,6 +9,13 @@
 # Logs of every process go to builds/logs/<task>/run-<run>/<process>/.
 # Optional -Restart 'c2:40:30' restarts client c2 40 s after its stop file,
 # for 30 s more (rejoin), repeated per comma-separated entry.
+# S07-T04: -ServerKill N terminates the server (TerminateProcess, no clean
+# stop) N seconds after it started listening, keeps its first run's logs in
+# server-first-run/, and -ServerRestartAfter M seconds later starts it again
+# in the same runtime (the same store), with session.json's profile_restart
+# when there is one (the failpoint profile minus its failpoint). The clients
+# keep running through the outage. With -ServerKill 0 the server exits by
+# itself at its failpoint, and the restart follows its exit.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
     [ValidatePattern('^S[0-9]{2}-T[0-9]{2}[a-z]?$')][string]$Task = 'S05-T01',
@@ -17,7 +24,9 @@ param(
     [string]$ClientSeconds = '90,75',
     [int]$AfterSeconds = 15,
     [string]$Restart = '',
-    [int]$LoadTimeoutSeconds = 420
+    [int]$LoadTimeoutSeconds = 420,
+    [int]$ServerKill = -1,
+    [int]$ServerRestartAfter = 10
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
@@ -76,13 +85,22 @@ $result = [ordered]@{
 $serverProcess = Start-CoopProcess 'server' $serverExe $serverArgs $serverRuntime
 Note 'server-started'
 $serverLog = Join-Path $serverRuntime 'appdata\logs\coop-server.log'
-$listening = $false
-while ($timer.Elapsed.TotalSeconds -lt $LoadTimeoutSeconds -and -not $serverProcess.HasExited) {
-    if ((Test-Path $serverLog) -and (Select-String -Path $serverLog -Pattern 'server-listening' -Quiet)) { $listening = $true; break }
-    Start-Sleep -Milliseconds 500
+function Wait-Listening([System.Diagnostics.Process]$process) {
+    $deadline = $timer.Elapsed.TotalSeconds + $LoadTimeoutSeconds
+    while ($timer.Elapsed.TotalSeconds -lt $deadline -and -not $process.HasExited) {
+        if ((Test-Path $serverLog) -and (Select-String -Path $serverLog -Pattern 'server-listening' -Quiet)) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
 }
+$listening = Wait-Listening $serverProcess
 $result.server_listening = $listening
 if ($listening) { Note 'server-listening' }
+$listeningAt = $timer.Elapsed.TotalSeconds
+$serverKillAt = if ($ServerKill -ge 0) { $listeningAt + $ServerKill } else { -1 }
+$serverRestartAt = -1
+$serverRuns = 0
+$result.server_runs = @()
 
 $clients = @{}
 $plan = @()
@@ -98,7 +116,7 @@ if ($listening) {
         $plan += [pscustomobject]@{ name = $parts[0]; start = $at; stop = $at + [int]$parts[2]; started = $false; stopped = $false; restarts = 1 }
     }
     $serverStopAt = ($plan | Measure-Object -Property stop -Maximum).Maximum + $AfterSeconds
-    while (-not $serverProcess.HasExited) {
+    while (-not $serverProcess.HasExited -or $serverKillAt -ge 0 -or $serverRestartAt -ge 0 -or ($ServerKill -eq 0 -and $serverRuns -eq 0)) {
         $now = $timer.Elapsed.TotalSeconds
         foreach ($p in $plan) {
             $proc = $session.processes.($p.name)
@@ -125,6 +143,33 @@ if ($listening) {
                 $p.stopped = $true
                 Note "$($p.name)-stop-file#$($p.restarts)"
             }
+        }
+        # S07-T04: the server's forced termination and restart
+        if ($serverKillAt -ge 0 -and $now -ge $serverKillAt -and ($ServerKill -gt 0 -or $serverProcess.HasExited)) {
+            if (-not $serverProcess.HasExited) { $serverProcess.Kill(); Note 'server-killed' }
+            else { Note ('server-exited-itself code=' + $serverProcess.ExitCode) }
+            $serverProcess.WaitForExit()
+            $result.server_runs += [ordered]@{ run = $serverRuns; exit_code = $serverProcess.ExitCode; ended_t = [math]::Round($now, 1) }
+            $keep = Join-Path $logDir "server-first-run"
+            if ($serverRuns -gt 0) { $keep = Join-Path $logDir "server-run-$serverRuns" }
+            New-Item -ItemType Directory $keep -Force | Out-Null
+            Get-ChildItem (Join-Path $serverRuntime 'appdata\logs') -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $keep; Remove-Item $_.FullName }
+            $serverKillAt = -1
+            $serverRestartAt = $now + $ServerRestartAfter
+        }
+        if ($serverRestartAt -ge 0 -and $now -ge $serverRestartAt) {
+            $serverRestartAt = -1
+            $serverRuns++
+            $profile = $server.profile
+            if ($server.PSObject.Properties['profile_restart'] -and $server.profile_restart) { $profile = $server.profile_restart }
+            $restartArgs = '-campaign-serve -snd_cpu -fsltx ' + $server.fsgame + ' -coop-config ' + $profile
+            if (Test-Path $server.stop_file) { Remove-Item $server.stop_file }
+            $serverProcess = Start-CoopProcess 'server' $serverExe $restartArgs $serverRuntime
+            Note "server-restarted#$serverRuns"
+            $result.("server_restart_command_$serverRuns") = '"' + $serverExe + '" ' + $restartArgs
+            $relistening = Wait-Listening $serverProcess
+            if ($relistening) { Note "server-listening#$serverRuns" } else { Note "server-restart-not-listening#$serverRuns" }
+            $now = $timer.Elapsed.TotalSeconds
         }
         if ($now -ge $serverStopAt -and -not (Test-Path $server.stop_file)) {
             # every client must have exited first

@@ -1,0 +1,2468 @@
+diff --git a/src/Coop.props b/src/Coop.props
+index 34777a9..f246f99 100644
+--- a/src/Coop.props
++++ b/src/Coop.props
+@@ -25,6 +25,7 @@
+   <Target Name="CoopCheckInputs" BeforeTargets="ClCompile" Condition="'$(CoopProject)' == 'true'">
+     <Error Condition="'$(CoopProtocolDir)' == '' or !Exists('$(CoopProtocolDir)include\coop\session\server.h')" Text="S05-T01: CoopProtocolDir must name the workspace protocol directory (tools/Build-Stage2.ps1 passes it)." />
+     <Error Condition="'$(CoopProtocolLibDir)' == '' or !Exists('$(CoopProtocolLibDir)coop_session.lib')" Text="S05-T01: CoopProtocolLibDir must name a protocol build's library directory." />
++    <Error Condition="!Exists('$(CoopProtocolLibDir)coop_store.lib')" Text="S07-T02: the protocol build must include coop_store.lib (proto-build-35 or later)." />
+     <Error Condition="'$(CoopGnsDir)' == '' or !Exists('$(CoopGnsDir)lib\GameNetworkingSockets.lib')" Text="S05-T01: CoopGnsDir must name the pinned GameNetworkingSockets install." />
+     <Error Condition="'$(CoopBuildId.Length)' != '64'" Text="S05-T01: CoopBuildId must be 64 hex digits." />
+   </Target>
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 1b23a25..e044046 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1034,6 +1034,7 @@ extern "C" bool __cdecl xrCampaignLevel_LightingSnapshot(LPCSTR out_path, LPCSTR
+ // S05-T01: the co-op network host of a serving campaign server (xrGame/CoopServerHost.cpp).
+ extern "C" bool __cdecl xrCoopServer_Prepare(LPCSTR command_line);
+ extern "C" LPCSTR __cdecl xrCoopServer_SaveName();
++extern "C" bool __cdecl xrCoopServer_AfterServerReady(); // S07-T04
+ extern "C" bool __cdecl xrCoopServer_Start();
+ extern "C" void __cdecl xrCoopServer_Tick(u64 tick);
+ extern "C" bool __cdecl xrCoopServer_ShouldStop();
+@@ -1818,6 +1819,19 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                     result = 10;
+                 }
+             }
++            if (result == 0 && serve)
++            {
++                // S07-T04: after the ALife load and before the client stages,
++                // a recovered campaign's saved participant actors are assigned
++                // to their participants by their saved ids.
++                if (xrCoopServer_AfterServerReady())
++                    stage("coop-server-recovered");
++                else
++                {
++                    stage("coop-server-recovery-failed");
++                    result = 42;
++                }
++            }
+             if (result == 0)
+             {
+                 // S02-T05d: the client stages load the level (CFORM, AI data,
+diff --git a/src/xrGame/CampaignIdentity.cpp b/src/xrGame/CampaignIdentity.cpp
+index 971049f..534e4c8 100644
+--- a/src/xrGame/CampaignIdentity.cpp
++++ b/src/xrGame/CampaignIdentity.cpp
+@@ -99,7 +99,7 @@ void clear_identity(Participant& p)
+ 
+ CampaignIdentityRegistry::CampaignIdentityRegistry(Role role, u8 active_slots)
+ 	: m_role(role), m_active_slots(active_slots), m_authority(this), m_next_entity(1), m_bridge_session(0),
+-	  m_bridge_known(false)
++	  m_bridge_known(false), m_stats_restored(0)
+ {
+ 	ZeroMemory(&m_stats, sizeof(m_stats));
+ 	m_stats.next_entity = m_next_entity;
+@@ -155,6 +155,7 @@ EngineEntityKey CampaignIdentityRegistry::on_engine_id_assigned(u16 id, u64* con
+ 		return no_key;
+ 	EngineBinding& binding = m_bindings[id];
+ 	EntityId entity;
++	xr_map<u16, u64>::iterator restored = m_restore.end();
+ 	if (continuity && *continuity != 0)
+ 	{
+ 		// The object already has an identity: the same id re-requested across
+@@ -162,6 +163,16 @@ EngineEntityKey CampaignIdentityRegistry::on_engine_id_assigned(u16 id, u64* con
+ 		entity.value = *continuity;
+ 		++m_stats.continued;
+ 	}
++	else if ((restored = m_restore.find(id)) != m_restore.end())
++	{
++		// S07-T04: the checkpoint load re-creates a saved object under its
++		// saved u16; its EntityId continues from the supplemental record.
++		entity.value = restored->second;
++		m_restore.erase(restored);
++		++m_stats_restored;
++		if (continuity)
++			*continuity = entity.value;
++	}
+ 	else
+ 	{
+ 		entity.value = m_next_entity++;
+@@ -535,6 +546,51 @@ Refusal CampaignIdentityRegistry::context_actor_key(const ActionContext& context
+ 	return participant_actor_key(context.actor, out);
+ }
+ 
++void CampaignIdentityRegistry::restore_entities(const std::vector<std::pair<u16, u64>>& entities, u64 next_entity)
++{
++	m_restore.clear();
++	for (const auto& e : entities)
++		if (e.first < kEngineIdCount && e.second != 0)
++			m_restore[e.first] = e.second;
++	if (next_entity > m_next_entity)
++		m_next_entity = next_entity;
++	m_stats.next_entity = m_next_entity;
++}
++
++EntityId CampaignIdentityRegistry::reserve_entity()
++{
++	EntityId entity;
++	entity.value = m_next_entity++;
++	m_stats.next_entity = m_next_entity;
++	return entity;
++}
++
++Refusal CampaignIdentityRegistry::restore_participant(const ServerAuthority* authority, u8 slot, u32 generation,
++	const PlayerId& player, const PartyId& party, u64 now, ParticipantRef& out)
++{
++	if (!authorized(authority))
++		return Refusal::NotAuthoritative;
++	if (!player.valid() || !party.valid() || generation == 0)
++		return Refusal::InvalidIdentity;
++	if (slot >= m_slots.size())
++		return Refusal::UnknownParticipant;
++	ParticipantRef existing;
++	if (find_player(player, existing) == Refusal::None)
++		return Refusal::AlreadyBound;
++	Participant& p = m_slots[slot];
++	if (p.state != ParticipantState::Free)
++		return Refusal::AlreadyBound;
++	clear_identity(p);
++	p.state = ParticipantState::Bound;
++	p.generation = generation;
++	p.player = player;
++	p.party = party;
++	p.bound_at = now;
++	out.slot = slot;
++	out.generation = generation;
++	return Refusal::None;
++}
++
+ Refusal CampaignIdentityRegistry::adopt_spawned_actor(const ServerAuthority* authority, u16 id, ParticipantRef& out)
+ {
+ 	if (!authorized(authority))
+diff --git a/src/xrGame/CampaignIdentity.h b/src/xrGame/CampaignIdentity.h
+index 4709321..b916ae3 100644
+--- a/src/xrGame/CampaignIdentity.h
++++ b/src/xrGame/CampaignIdentity.h
+@@ -1,5 +1,8 @@
+ #pragma once
+ 
++#include <utility>
++#include <vector>
++
+ // S03-T01: stable participants and authoritative contexts.
+ //
+ // Why this exists. The engine names every server object by a u16 that
+@@ -268,6 +271,24 @@ public:
+ 	// player). UnknownParticipant when no participant can hold it.
+ 	Refusal adopt_spawned_actor(const ServerAuthority* authority, u16 id, ParticipantRef& out);
+ 
++	// S07-T04: recovery (docs/persistence-contract.md §7 step 6). Before the
++	// checkpoint loads, the saved u16 -> EntityId map is installed: the load's
++	// id assignment of a mapped u16 continues that EntityId instead of
++	// allocating one (each entry is consumed once), and the serial continues
++	// from the saved next_entity so no EntityId repeats across restarts.
++	void restore_entities(const std::vector<std::pair<u16, u64>>& entities, u64 next_entity);
++	u32 restore_pending() const { return u32(m_restore.size()); }
++	u64 restored_entities() const { return m_stats_restored; }
++	// Binds a player to its saved slot with its saved slot generation
++	// (UnknownParticipant: slot out of range; AlreadyBound: the slot or the
++	// player is taken).
++	Refusal restore_participant(const ServerAuthority* authority, u8 slot, u32 generation, const PlayerId& player,
++		const PartyId& party, u64 now, ParticipantRef& out);
++	// S07-T07: an EntityId allocated before its object exists (the respawn
++	// record is committed before the spawn); the object's stored entity id
++	// (CSE_Abstract::m_campaign_entity) carries it into the id assignment.
++	EntityId reserve_entity();
++
+ private:
+ 	struct EngineBinding
+ 	{
+@@ -290,6 +311,8 @@ private:
+ 	u64 m_next_entity;
+ 	u32 m_bridge_session;
+ 	bool m_bridge_known;
++	xr_map<u16, u64> m_restore; // S07-T04: saved u16 -> EntityId, consumed at assignment
++	u64 m_stats_restored;
+ };
+ } // namespace campaign
+ 
+diff --git a/src/xrGame/CampaignServerStart.cpp b/src/xrGame/CampaignServerStart.cpp
+index 3a75b74..54ee580 100644
+--- a/src/xrGame/CampaignServerStart.cpp
++++ b/src/xrGame/CampaignServerStart.cpp
+@@ -1,4 +1,5 @@
+ #include "pch_script.h"
++#include "CoopServerHost.h" // S07-T04: coop_server_prepared
+ 
+ // S02-T05b: campaign server level start. These mirror CApplication::OnEvent
+ // (KERNEL:start / KERNEL:disconnect) without the main-menu console commands,
+@@ -310,7 +311,15 @@ extern "C" bool __cdecl xrCampaignLevel_ReportTicks(u32 ticks)
+ 			float(t.game_events) * to_ms, float(t.objects_update) * to_ms, float(t.script_process) * to_ms,
+ 			float(t.ph_commander) * to_ms, float(t.ph_commander_scripts) * to_ms, float(t.script_gc) * to_ms, ticks);
+ 	}
+-	return objects != 0 && actors == 1 && actor && actor->g_Alive() && steps != 0 && no_view;
++	// S07-T04: a serving server recovered from a two-actor checkpoint holds
++	// both participant actors from the load; the smoke's one-actor rule
++	// stays for the fixture scopes.
++	const bool actor_count_ok = actors == 1 || (actors > 1 && campaign::coop_server_prepared());
++	// S07-T07: a recovered checkpoint may hold a dead participant actor (the
++	// player respawns through the server); the smoke's alive rule stays for
++	// the fixture scopes.
++	const bool actor_alive_ok = actor && (actor->g_Alive() || campaign::coop_server_prepared());
++	return objects != 0 && actor_count_ok && actor_alive_ok && steps != 0 && no_view;
+ }
+ 
+ // S02-T06b: does the server's ALife actor follow the live actor? In single
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 90c7169..ab775c3 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -46,6 +46,7 @@
+ #include "Inventory.h"
+ #include "Weapon.h"
+ #include "xr_level_controller.h"
++#include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+ #include "../xrEngine/xr_input.h"
+ #include "../Include/xrRender/KinematicsAnimated.h"
+ #include "PhysicsShellHolder.h"
+@@ -257,6 +258,36 @@ struct Link
+ 	};
+ 	xr_map<u32, Particles> particles; // the server's particles_objects by handle
+ 	u32 last_particles_sweep_ms = 0;
++	// S07-T03: the ledger program (profile script 6, docs/persistence-contract.md §10)
++	struct LedgerPending
++	{
++		u64 operation;
++		s32 delta;
++		u32 sent_ms;
++		u32 retries;
++	};
++	u64 ledger_next_operation = 0; // seeded from the UTC clock: unique across this client's restarts
++	xr_deque<LedgerPending> ledger_pending;
++	u32 ledger_next_send_ms = 0;
++	u32 ledger_index = 0;
++	u64 ledger_sent = 0, ledger_retries = 0, ledger_acked = 0, ledger_rejected = 0, ledger_late = 0;
++	s64 ledger_sum_acked = 0;
++	FILE* ledger_csv = nullptr;
++	// S07-T05: after a connection end the stale world is left and the client
++	// reconnects with backoff (docs/persistence-contract.md §8)
++	bool leaving = false; // the level is being torn down after a connection end
++	u32 reconnect_at_ms = 0; // 0: none scheduled
++	u32 reconnect_backoff_ms = 1000;
++	u32 reconnects = 0, worlds_left = 0;
++	u64 last_epoch = 0;
++	// S07-T07: the respawn prompt and request
++	u32 dead_since_ms = 0; // 0: the own actor is alive (or there is none)
++	bool respawn_prompted = false;
++	u64 respawn_operation = 0; // the pending request's id (0: none)
++	u32 respawn_sent_ms = 0;
++	u32 respawn_results = 0, respawn_refusals = 0, rejoins = 0;
++	bool early_respawn_sent = false; // the driver's one request while alive (expected refused)
++	u32 live_since_ms = 0;
+ };
+ 
+ enum World : u8
+@@ -723,6 +754,7 @@ void log_combat();
+ void log_encounter();
+ void release_presentation(); // S06-T08
+ void log_weather_client();
++void respawn_frame(); // S07-T07
+ 
+ void world_frame()
+ {
+@@ -731,11 +763,21 @@ void world_frame()
+ 	{
+ 		g_link->world = WorldMenu;
+ 		g_link->predicting = false;
++		g_link->leaving = false;
+ 		release_presentation(); // S06-T08
+ 		campaign::replica_end();
+ 		g_link->log.line("world-ended quitting=%d level=%d", g_link->quitting ? 1 : 0, g_pGameLevel ? 1 : 0);
+ 		return;
+ 	}
++	// S07-T05: a load abandoned by a connection end ends with its level
++	if (g_link->world == WorldLoading && g_link->leaving && !g_pGameLevel)
++	{
++		g_link->world = WorldMenu;
++		g_link->leaving = false;
++		campaign::replica_end();
++		g_link->log.line("world-ended quitting=%d level=0 while-loading=1", g_link->quitting ? 1 : 0);
++		return;
++	}
+ 	if (g_link->world == WorldLoading && g_pGameLevel && g_pGameLevel->bReady && ai().get_alife() && g_actor)
+ 	{
+ 		g_link->world = WorldLive;
+@@ -779,6 +821,7 @@ void world_frame()
+ 	{
+ 		present_actors();
+ 		run_script();
++		respawn_frame(); // S07-T07
+ 		sample_input();
+ 		log_actors();
+ 		log_entities();
+@@ -1303,6 +1346,11 @@ void run_script2(u32 t);
+ void run_script3(u32 t);
+ void run_script4(u32 t);
+ void run_script5(u32 t); // S06-T08
++void run_script6(u32 t); // S07-T03
++void ledger_result(const coop::proto::ActionResult& result); // S07-T03
++void respawn_frame(); // S07-T07
++void respawn_result(const coop::proto::ActionResult& result); // S07-T07
++void on_rejoin(const coop::proto::CampaignEvent& event); // S07-T07
+ 
+ void run_script()
+ {
+@@ -1331,6 +1379,8 @@ void run_script()
+ 		return run_script4(t);
+ 	if (g_link->config.script == 5)
+ 		return run_script5(t);
++	if (g_link->config.script == 6)
++		return run_script6(t);
+ 	// S06-T02: the nearest NPC stalker, 26 s in: face it, log its animation
+ 	// blends and remote flag, screenshot it.
+ 	if (g_link->npc_phase == 0 && t >= 26000)
+@@ -2842,6 +2892,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 2: on_environment(*event); break; // S06-T08
+ 			case 3: on_thunderbolt(*event); break;
+ 			case 4: on_presentation(*event); break;
++			case 5: on_rejoin(*event); break; // S07-T07
+ 			default: break;
+ 			}
+ 		}
+@@ -2857,8 +2908,12 @@ void on_message(const coop::session::ClientEvent& e)
+ 	}
+ 	if (const auto* result = std::get_if<coop::proto::ActionResult>(&e.message.body))
+ 	{
+-		g_link->log.line("action-result operation=%I64u outcome=%u reason=%u", result->operation_id,
+-			u32(result->outcome), u32(result->reason));
++		g_link->log.line("action-result operation=%I64u outcome=%u reason=%u commit=%I64u", result->operation_id,
++			u32(result->outcome), u32(result->reason), result->commit_id);
++		if (g_link->config.script == 6)
++			ledger_result(*result);
++		if (result->operation_id == g_link->respawn_operation || (result->operation_id >> 48) == 0x7e5f)
++			respawn_result(*result);
+ 		if (g_link->teleport_operation && result->operation_id == g_link->teleport_operation)
+ 		{
+ 			g_link->teleport_outcome = u32(result->outcome);
+@@ -2902,6 +2957,13 @@ void on_event(const coop::session::ClientEvent& e)
+ 			u32(w.slot), w.slot_generation, w.authority_epoch, w.server_tick, u32(w.tick_rate_hz),
+ 			u32(w.snapshot_rate_hz), coop_uuid_hex(w.session_id).c_str(), coop_uuid_hex(w.player_id).c_str(),
+ 			e.resumed ? 1 : 0);
++		// S07-T05: the authority epoch names the server incarnation; a new
++		// one means a restart and a world that must be streamed afresh.
++		if (g_link->last_epoch && w.authority_epoch != g_link->last_epoch)
++			g_link->log.line("epoch-changed from=%I64u to=%I64u", g_link->last_epoch, w.authority_epoch);
++		g_link->last_epoch = w.authority_epoch;
++		g_link->reconnect_backoff_ms = 1000;
++		g_link->tracker = coop::proto::ResyncTracker();
+ 		// S06-T02: snapshot ids and baselines are per connection.
+ 		g_link->receiver.reset();
+ 		g_link->tracks.clear();
+@@ -2945,6 +3007,34 @@ void on_event(const coop::session::ClientEvent& e)
+ 			g_link->inject = Inject::Rejoin;
+ 			g_link->inject_at_ms = g_link->wall.GetElapsed_ms() + 2000;
+ 		}
++		else if (!g_link->quitting && g_link->inject == Inject::Off)
++		{
++			// S07-T05: the stale world cannot be played on. The level is torn
++			// down (the engine's disconnect: no input, no replica, no
++			// snapshot decodes under the old keys), unacknowledged operations
++			// stay pending, and the client reconnects with backoff (1 s
++			// doubling to 10 s) until its exit time.
++			if (!g_link->leaving && (g_link->world == WorldLive || g_link->world == WorldLoading))
++			{
++				g_link->leaving = true;
++				++g_link->worlds_left;
++				g_link->log.line("world-left reason=connection-ended world=%u pending_operations=%u",
++					u32(g_link->world), u32(g_link->ledger_pending.size()));
++				Console->Execute("disconnect");
++			}
++			else if (g_link->world == WorldReceiving)
++			{
++				g_link->blob.clear();
++				g_link->early_chunks.clear();
++				g_link->have_end = false;
++				g_link->world = WorldMenu;
++			}
++			if (!g_link->reconnect_at_ms)
++				g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + g_link->reconnect_backoff_ms;
++			g_link->log.line("reconnect-scheduled in_ms=%u attempt=%u", g_link->reconnect_backoff_ms,
++				g_link->reconnects + 1);
++			g_link->reconnect_backoff_ms = _min(10000u, g_link->reconnect_backoff_ms * 2);
++		}
+ 		break;
+ 	case coop::session::ClientEventType::Message: on_message(e); break;
+ 	case coop::session::ClientEventType::Suspect: g_link->log.line("server-suspect"); break;
+@@ -2952,6 +3042,219 @@ void on_event(const coop::session::ClientEvent& e)
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S07-T07
++// Respawn (docs/persistence-contract.md §9). While the own actor is dead the
++// HUD shows the prompt; the use key (or, for the unattended driver, profile
++// auto_respawn seconds) sends the respawn intent, re-sent every 3 s until a
++// result arrives. An accepted respawn is followed by the server's rejoin
++// event: this client leaves its world and reconnects (the S07-T05 path) so
++// its player entity is the new actor. The driver also sends one request
++// while alive, which the server must refuse.
++const char* kRespawnPrompt = "You died. Press the USE key to respawn at your last checkpoint.";
++
++bool send_respawn(LPCSTR why)
++{
++	if (!g_link->respawn_operation)
++		g_link->respawn_operation = 0x7e5f000000000000ull | (utc_now_ms() & 0xffffffffffffull); // tag 0x7e5f, UTC ms
++	coop::proto::ActionIntent intent;
++	intent.operation_id = g_link->respawn_operation;
++	intent.kind = coop::proto::kActionRespawn;
++	const bool sent = g_link->client && g_link->client->send(coop::proto::Message(intent));
++	g_link->respawn_sent_ms = g_link->wall.GetElapsed_ms();
++	g_link->log.line("respawn-request why=%s operation=%I64x sent=%d dead_ms=%u", why, intent.operation_id, sent ? 1 : 0,
++		g_link->dead_since_ms ? g_link->wall.GetElapsed_ms() - g_link->dead_since_ms : 0);
++	return sent;
++}
++
++void respawn_frame()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (!g_link->live_since_ms)
++		g_link->live_since_ms = now;
++	if (!g_actor)
++		return;
++	if (g_actor->g_Alive())
++	{
++		g_link->dead_since_ms = 0;
++		g_link->respawn_prompted = false;
++		// the driver's early request, 20 s into the world while alive (refused: reason 6)
++		if (g_link->config.auto_respawn && !g_link->early_respawn_sent && now - g_link->live_since_ms >= 20000)
++		{
++			g_link->early_respawn_sent = true;
++			g_link->respawn_operation = 0;
++			send_respawn("early-while-alive");
++		}
++		return;
++	}
++	if (!g_link->dead_since_ms)
++	{
++		g_link->dead_since_ms = now;
++		g_link->respawn_operation = 0;
++	}
++	if (!g_link->respawn_prompted && now - g_link->dead_since_ms >= 3000)
++	{
++		g_link->respawn_prompted = true;
++		// the installed scripts' HUD message (actor_menu.set_msg, as the Azazel
++		// mode shows its death count); the engine's message log has no game
++		// log in single-player and faulted (death-1)
++		luabind::functor<void> set_msg;
++		const bool shown = ai().script_engine().functor("actor_menu.set_msg", set_msg);
++		if (shown)
++			set_msg(1, kRespawnPrompt, 10);
++		g_link->log.line("respawn-prompt dead_ms=%u shown=%d", now - g_link->dead_since_ms, shown ? 1 : 0);
++	}
++	if (g_link->respawn_operation)
++	{
++		if (now - g_link->respawn_sent_ms >= 3000)
++			send_respawn("retry");
++		return;
++	}
++	if (g_link->config.auto_respawn && g_link->respawn_prompted &&
++		now - g_link->dead_since_ms >= g_link->config.auto_respawn * 1000)
++		send_respawn("auto");
++}
++
++void respawn_result(const coop::proto::ActionResult& result)
++{
++	++g_link->respawn_results;
++	const bool accepted = result.outcome == coop::proto::ActionOutcome::Accepted;
++	if (!accepted)
++		++g_link->respawn_refusals;
++	g_link->log.line("respawn-result operation=%I64x outcome=%u reason=%u commit=%I64u alive=%d %s", result.operation_id,
++		u32(result.outcome), u32(result.reason), result.commit_id, g_actor && g_actor->g_Alive() ? 1 : 0,
++		accepted ? "accepted" : (g_actor && g_actor->g_Alive() ? "refused-as-expected" : "refused"));
++	if (result.operation_id == g_link->respawn_operation)
++		g_link->respawn_operation = 0; // accepted or refused: no more retries of this one
++}
++
++void on_rejoin(const coop::proto::CampaignEvent& event)
++{
++	if (event.payload.size() < 3 || g_link->quitting)
++		return;
++	++g_link->rejoins;
++	g_link->log.line("rejoin-requested slot=%u new_actor=%u revision=%I64u", u32(event.payload[0]),
++		u32(event.payload[1] | (event.payload[2] << 8)), event.revision);
++	// leave the world and come back: the join streams a world in which the
++	// participant's actor is the new one
++	if (g_link->world == WorldLive || g_link->world == WorldLoading)
++	{
++		g_link->leaving = true;
++		++g_link->worlds_left;
++		Console->Execute("disconnect");
++	}
++	if (g_link->client)
++		g_link->client->close(coop::net::close_code::kNormal, "rejoin after respawn");
++	g_link->reconnect_backoff_ms = 1000;
++	g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + 500;
++}
++
++bool respawn_key_press(int key)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || !g_actor || g_actor->g_Alive() ||
++		!g_link->respawn_prompted || g_link->respawn_operation)
++		return false;
++	if (get_binded_action(key) != kUSE)
++		return false;
++	send_respawn("use-key");
++	return true;
++}
++
++// ------------------------------------------------------------ S07-T03
++// Profile script 6: the ledger program (docs/persistence-contract.md §10).
++// Every 2 s a ledger intent with the next delta of a fixed sequence and a
++// fresh operation id; an unacknowledged one is re-sent every 3 s with the
++// same id, across connection ends and reconnects, until its result arrives.
++// Every send and result goes to coop-ledger-client.csv.
++void ledger_csv_line(LPCSTR event, u64 operation, s32 delta, u32 outcome, u32 reason, u64 commit)
++{
++	if (!g_link->ledger_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-ledger-client.csv");
++		g_link->ledger_csv = fopen(path, "w");
++		if (!g_link->ledger_csv)
++			return;
++		fprintf(g_link->ledger_csv, "utc_ms,event,operation,delta,outcome,reason,commit,sum_acked,pending\n");
++	}
++	fprintf(g_link->ledger_csv, "%I64u,%s,%I64u,%d,%u,%u,%I64u,%I64d,%u\n", utc_now_ms(), event, operation, delta, outcome,
++		reason, commit, g_link->ledger_sum_acked, u32(g_link->ledger_pending.size()));
++	fflush(g_link->ledger_csv);
++}
++
++bool ledger_send(const Link::LedgerPending& p, LPCSTR event)
++{
++	coop::proto::ActionIntent intent;
++	intent.operation_id = p.operation;
++	intent.kind = coop::proto::kActionLedger;
++	intent.params.resize(4);
++	memcpy(intent.params.data(), &p.delta, 4);
++	const bool sent = g_link->client && g_link->client->send(coop::proto::Message(intent));
++	ledger_csv_line(sent ? event : "unsent", p.operation, p.delta, 0, 0, 0);
++	return sent;
++}
++
++void run_script6(u32 t)
++{
++	static const s32 deltas[] = {10, -3, 7, 25, -12, 1, 40, -8, 15, -20};
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (!g_link->ledger_next_operation)
++	{
++		g_link->ledger_next_operation = (utc_now_ms() << 16) | 1;
++		g_link->ledger_next_send_ms = now + 2000;
++		g_link->log.line("script6-program-start slot=%u t=%u first_operation=%I64x", u32(g_link->local_slot), t,
++			g_link->ledger_next_operation);
++	}
++	if (now >= g_link->ledger_next_send_ms)
++	{
++		g_link->ledger_next_send_ms = now + 2000;
++		Link::LedgerPending p;
++		p.operation = g_link->ledger_next_operation++;
++		p.delta = deltas[g_link->ledger_index++ % (sizeof(deltas) / sizeof(deltas[0]))];
++		p.sent_ms = now;
++		p.retries = 0;
++		g_link->ledger_pending.push_back(p);
++		++g_link->ledger_sent;
++		ledger_send(p, "sent");
++	}
++	for (Link::LedgerPending& p : g_link->ledger_pending)
++		if (now - p.sent_ms >= 3000)
++		{
++			p.sent_ms = now;
++			++p.retries;
++			++g_link->ledger_retries;
++			ledger_send(p, "retry");
++		}
++}
++
++void ledger_result(const coop::proto::ActionResult& result)
++{
++	// Only ledger operations (seeded from the UTC clock, far above the
++	// weapon actions' counters) are the program's.
++	if (!g_link->ledger_next_operation || result.operation_id < (g_link->ledger_next_operation & ~0xffffull))
++		return;
++	for (auto it = g_link->ledger_pending.begin(); it != g_link->ledger_pending.end(); ++it)
++		if (it->operation == result.operation_id)
++		{
++			if (result.outcome == coop::proto::ActionOutcome::Accepted)
++			{
++				++g_link->ledger_acked;
++				g_link->ledger_sum_acked += it->delta;
++			}
++			else
++				++g_link->ledger_rejected;
++			ledger_csv_line("result", it->operation, it->delta, u32(result.outcome), result.reason, result.commit_id);
++			g_link->ledger_pending.erase(it);
++			return;
++		}
++	// Other programs' operations (small ids: the weapon actions) are not the
++	// ledger's; a ledger id carries the UTC clock in its high bits.
++	if (result.operation_id < (u64(1) << 32) || (result.operation_id >> 48) == 0x7e5f)
++		return;
++	// A result for an operation no longer pending: a duplicate answer.
++	++g_link->ledger_late;
++	ledger_csv_line("late", result.operation_id, 0, u32(result.outcome), result.reason, result.commit_id);
++}
++
+ // S06-T02: creatures this client would simulate itself (must be none on a
+ // replica: CoopReplica replica_keeps_remote).
+ u32 local_creatures()
+@@ -3012,6 +3315,7 @@ void log_status(LPCSTR tag)
+ namespace campaign
+ {
+ bool coop_client_active() { return g_link && g_link->active; }
++bool coop_client_key_press(int key) { return respawn_key_press(key); } // S07-T07
+ 
+ void coop_client_app_start()
+ {
+@@ -3073,6 +3377,15 @@ void coop_client_frame()
+ 	}
+ 	inject_step();
+ 	world_frame();
++	// S07-T05: the reconnect, once the stale world is gone
++	if (g_link->reconnect_at_ms && !g_link->quitting && g_link->world == WorldMenu &&
++		g_link->wall.GetElapsed_ms() >= g_link->reconnect_at_ms)
++	{
++		g_link->reconnect_at_ms = 0;
++		++g_link->reconnects;
++		g_link->log.line("reconnect attempt=%u", g_link->reconnects);
++		connect();
++	}
+ 	log_weather_client(); // S06-T08
+ 	const u32 now = g_link->wall.GetElapsed_ms();
+ 	if (now - g_link->last_status_ms >= 5000)
+@@ -3117,6 +3430,14 @@ void coop_client_app_end()
+ 		fclose(g_link->encounter_csv);
+ 	if (g_link->weather_csv)
+ 		fclose(g_link->weather_csv);
++	if (g_link->ledger_csv)
++		fclose(g_link->ledger_csv);
++	g_link->log.line("respawn-final results=%u refusals=%u rejoins=%u reconnects=%u", g_link->respawn_results,
++		g_link->respawn_refusals, g_link->rejoins, g_link->reconnects);
++	if (g_link->config.script == 6)
++		g_link->log.line("ledger-final sent=%I64u retries=%I64u acked=%I64u rejected=%I64u late=%I64u pending=%u sum_acked=%I64d",
++			g_link->ledger_sent, g_link->ledger_retries, g_link->ledger_acked, g_link->ledger_rejected, g_link->ledger_late,
++			u32(g_link->ledger_pending.size()), g_link->ledger_sum_acked);
+ 	release_presentation(); // S06-T08
+ 	if (g_link->client)
+ 		g_link->client->close(coop::net::close_code::kNormal, "client exit");
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index c0f6685..8b172b5 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -20,6 +20,9 @@ void coop_client_frame();
+ void coop_client_app_end();
+ // This process is a co-op client.
+ bool coop_client_active();
++// S07-T07: a key press on a co-op client, before the level's own handling;
++// true when the link consumed it (the dead player's respawn confirmation).
++bool coop_client_key_press(int key);
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 9b94736..7ae55b6 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -133,6 +133,13 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.storm = ini.line_exist("coop", "storm") ? ini.r_u32("coop", "storm") : 0;
+ 		out.surge = ini.line_exist("coop", "surge") ? ini.r_u32("coop", "surge") : 0;
+ 		out.psi_storm = ini.line_exist("coop", "psi_storm") ? ini.r_u32("coop", "psi_storm") : 0;
++		out.checkpoint_seconds =
++			ini.line_exist("coop", "checkpoint_seconds") ? ini.r_u32("coop", "checkpoint_seconds") : 0;
++		out.failpoint[0] = 0;
++		if (ini.line_exist("coop", "failpoint"))
++			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
++		out.failpoint_count = ini.line_exist("coop", "failpoint_count") ? ini.r_u32("coop", "failpoint_count") : 1;
++		out.failpoint_fail = ini.line_exist("coop", "failpoint_fail") ? ini.r_u32("coop", "failpoint_fail") : 0;
+ 		if (ok && !absolute(out.roster_path))
+ 		{
+ 			Msg("! S05-T01 coop config: roster must be an absolute path");
+@@ -149,6 +156,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.inject = ini.line_exist("coop", "inject") ? ini.r_u32("coop", "inject") : 0;
+ 		out.script = ini.line_exist("coop", "script") ? ini.r_u32("coop", "script") : 0;
+ 		out.predict = ini.line_exist("coop", "predict") ? ini.r_u32("coop", "predict") : 1;
++		out.auto_respawn = ini.line_exist("coop", "auto_respawn") ? ini.r_u32("coop", "auto_respawn") : 0;
+ 		if (ok && !absolute(out.key_path))
+ 		{
+ 			Msg("! S05-T01 coop config: key must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 62df005..3b6cc23 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -28,11 +28,22 @@
+ //                 surge (S06-T08 fixture: seconds after both attach until the
+ //                 installed surge_manager starts an emission; 0 off),
+ //                 psi_storm (S06-T08 fixture: the same for a psi-storm; 0 off)
++//                 checkpoint_seconds (S07-T02: seconds between periodic
++//                 checkpoint generations; 0 off; joins and a clean stop
++//                 always publish one),
++//                 failpoint (S07-T06 test harness: a coop::store failpoint
++//                 name such as commit:after-apply or checkpoint:after-rename;
++//                 the process terminates itself at its failpoint_count-th hit,
++//                 counted from after recovery; empty off),
++//                 failpoint_fail (1: the hit makes the store call fail, as a
++//                 full disk would, instead of terminating: the fail-closed path)
+ //   client only:  server (ip:port), key (absolute DPAPI key file), name,
+ //                 exit_after_seconds (0: never), inject (0/1: S05-T01 refusal test),
+ //                 script (0/1: S05-T03 look, walk and screenshot driver;
+-//                 2: S06-T01 movement validation program),
+-//                 predict (S06-T03: 1, the default, predicts the own actor; 0 waits for the server)
++//                 2: S06-T01 movement validation program; 6: S07-T03 ledger program),
++//                 predict (S06-T03: 1, the default, predicts the own actor; 0 waits for the server),
++//                 auto_respawn (S07-T07 driver: seconds after the own death until the respawn is
++//                 confirmed without a key, plus one early request while alive, expected refused; 0 off)
+ //   both, S06-T02: net_loss (percent of this process's packets dropped),
+ //                 net_lag (ms added to them): declared test network
+ //                 conditions through the library's simulated impairment
+@@ -67,6 +78,10 @@ struct CoopConfig
+ 	u32 storm; // S06-T08 fixture: seconds after both attach until the weather is forced to a storm (0 off)
+ 	u32 surge; // S06-T08 fixture: seconds after both attach until an emission starts (0 off)
+ 	u32 psi_storm; // S06-T08 fixture: seconds after both attach until a psi-storm starts (0 off)
++	u32 checkpoint_seconds; // S07-T02: seconds between periodic checkpoint generations (0 off)
++	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
++	u32 failpoint_count; // ...on its count-th hit (default 1)
++	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+ 	// both, S06-T02: simulated impairment of what this process sends (test conditions)
+ 	float net_loss_pct;
+ 	u32 net_lag_ms;
+@@ -78,6 +93,8 @@ struct CoopConfig
+ 	u32 inject;
+ 	u32 script; // 1: S05-T03 look/walk/screenshot driver; 2: S06-T01 movement validation program
+ 	u32 predict; // S06-T03: 1 predicts the own actor (default), 0 waits for the server
++	u32 auto_respawn; // S07-T07 test driver: seconds after the own death until the client confirms the respawn
++	                  // by itself (0: the player confirms with the use key); also sends one early (refused) request
+ };
+ 
+ // Finds -coop-config in the command line. False when absent.
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+new file mode 100644
+index 0000000..f509d4d
+--- /dev/null
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -0,0 +1,338 @@
++#include "pch_script.h"
++#include "CoopPersistence.h"
++
++// S07-T02/T03/T04: see CoopPersistence.h and docs/persistence-contract.md.
++
++#include "CoopConfig.h"
++#include "../xrServerEntities/alife_space.h" // ALIFE_VERSION
++
++#pragma comment(lib, "coop_store.lib")
++
++using namespace coop::store;
++
++namespace campaign
++{
++namespace
++{
++template <typename T>
++void put(std::vector<u8>& out, T value)
++{
++	const u8* p = reinterpret_cast<const u8*>(&value);
++	out.insert(out.end(), p, p + sizeof(T));
++}
++
++template <typename T>
++bool get(const std::vector<u8>& in, size_t& at, T& value)
++{
++	if (at + sizeof(T) > in.size())
++		return false;
++	memcpy(&value, in.data() + at, sizeof(T));
++	at += sizeof(T);
++	return true;
++}
++} // namespace
++
++// slot u8, player 16 B, operation u64, actor entity u64, delta s32, money after u32
++std::vector<u8> encode_ledger(const LedgerRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.actor_entity);
++	put<s32>(out, r.delta);
++	put<u32>(out, r.money_after);
++	return out;
++}
++
++bool decode_ledger(const std::vector<u8>& payload, LedgerRecord& out)
++{
++	size_t at = 0;
++	return get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++		get(payload, at, out.operation) && get(payload, at, out.actor_entity) && get(payload, at, out.delta) &&
++		get(payload, at, out.money_after) && at == payload.size();
++}
++
++std::vector<u8> encode_death(const DeathRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.entity);
++	put<u64>(out, r.killer);
++	for (float f : r.position)
++		put<float>(out, f);
++	return out;
++}
++
++bool decode_death(const std::vector<u8>& payload, DeathRecord& out)
++{
++	size_t at = 0;
++	return get(payload, at, out.slot) && get(payload, at, out.entity) && get(payload, at, out.killer) &&
++		get(payload, at, out.position[0]) && get(payload, at, out.position[1]) && get(payload, at, out.position[2]) &&
++		at == payload.size();
++}
++
++std::vector<u8> encode_respawn(const RespawnRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.old_entity);
++	put<u64>(out, r.new_entity);
++	for (float f : r.position)
++		put<float>(out, f);
++	put<u32>(out, r.vertex);
++	put<u16>(out, r.graph);
++	return out;
++}
++
++bool decode_respawn(const std::vector<u8>& payload, RespawnRecord& out)
++{
++	size_t at = 0;
++	return get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++		get(payload, at, out.operation) && get(payload, at, out.old_entity) && get(payload, at, out.new_entity) &&
++		get(payload, at, out.position[0]) && get(payload, at, out.position[1]) && get(payload, at, out.position[2]) &&
++		get(payload, at, out.vertex) && get(payload, at, out.graph) && at == payload.size();
++}
++
++CoopPersistence::CoopPersistence(const std::string& directory, const coop::proto::Uuid128& campaign,
++	const coop::proto::Uuid128& party, CoopEventLog* log)
++	: m_store(directory, campaign), m_campaign(campaign), m_party(party), m_log(log)
++{
++}
++
++void CoopPersistence::fail(LPCSTR what, const FileError& error)
++{
++	if (m_failed)
++		return;
++	m_failed = true;
++	m_failure = std::string(what) + ": " + (error.what.empty() ? "unknown" : error.what);
++	m_log->line("store-failed what=%s code=%u", m_failure.c_str(), error.code);
++}
++
++bool CoopPersistence::recover(xr_string& save_name, xr_string& reason)
++{
++	save_name = "";
++	reason = "";
++	Recovered& r = m_recovered_state;
++	const RecoverStatus status = m_store.recover(r);
++	for (const std::string& d : r.detail)
++		m_log->line("recovery-detail %s", d.c_str());
++	std::string detail;
++	switch (status)
++	{
++	case RecoverStatus::Fresh:
++	{
++		// The campaign's first start: the base save. A journal 0 of an earlier
++		// incarnation that never published may hold acknowledged records.
++		m_generation = 0;
++		const std::string path = m_store.path_of(StoreNames::journal_file(0));
++		if (file_exists(path))
++		{
++			JournalContents contents;
++			const JournalStatus js = read_journal(path, contents);
++			if (js != JournalStatus::Ok && js != JournalStatus::TornTail)
++			{
++				reason = "recovery-journal";
++				m_log->line("recovery-refused reason=%s journal=0 status=%s detail=%s", reason.c_str(), to_string(js),
++					contents.detail.c_str());
++				return false;
++			}
++			if (js == JournalStatus::TornTail)
++				++r.torn_tails;
++			for (const JournalRecord& record : contents.records)
++			{
++				r.highest_epoch = _max(r.highest_epoch, record.epoch);
++				r.highest_revision = _max(r.highest_revision, record.revision);
++				if (record.kind != kRecordEpoch)
++					r.replay.push_back(record);
++			}
++		}
++		break;
++	}
++	case RecoverStatus::Recovered:
++		m_recovered = true;
++		m_generation = r.generation;
++		save_name = StoreNames::save_name(r.generation).c_str();
++		break;
++	case RecoverStatus::NoPointer: reason = "recovery-no-pointer"; break;
++	case RecoverStatus::NoValidGeneration: reason = "recovery-no-valid-generation"; break;
++	case RecoverStatus::Incompatible: reason = "recovery-incompatible"; break;
++	}
++	if (!reason.empty())
++	{
++		m_log->line("recovery-refused reason=%s status=%s", reason.c_str(), to_string(status));
++		return false;
++	}
++	m_base_revision = _max(r.highest_revision, r.manifest.revision);
++	m_epoch = r.highest_epoch + 1;
++	// The operation index up to R_G from the supplemental, then from the
++	// replay list (ledger records name their operation).
++	for (const SupplementalOperation& o : r.supplemental.operations)
++	{
++		StoredOutcome s = {o.outcome, o.reason, o.revision};
++		remember(o.player, o.operation, s);
++	}
++	for (const JournalRecord& record : r.replay)
++	{
++		LedgerRecord ledger;
++		if (record.kind == kRecordLedger && decode_ledger(record.payload, ledger))
++		{
++			StoredOutcome s = {1 /* Accepted */, 0, record.revision};
++			remember(ledger.player, ledger.operation, s);
++		}
++	}
++	// Step 4: the epoch, durably, before anything else (the journal of the
++	// chosen generation; a fresh campaign writes journal 0).
++	if (!m_store.open_journal(m_generation, m_recovered ? r.manifest.revision : 0, m_journal, detail))
++	{
++		reason = "recovery-journal";
++		m_log->line("recovery-refused reason=%s detail=%s", reason.c_str(), detail.c_str());
++		return false;
++	}
++	if (!commit(kRecordEpoch, 0, m_base_revision, {}))
++	{
++		reason = "recovery-journal";
++		m_log->line("recovery-refused reason=%s detail=epoch-record %s", reason.c_str(), m_failure.c_str());
++		return false;
++	}
++	m_log->line("recovery status=%s generation=%u fallback=%d revision=%I64u epoch=%I64u replay=%u torn_tails=%u "
++		"index=%u participants=%u entities=%u save=%s",
++		to_string(status), m_generation, r.fallback ? 1 : 0, m_base_revision, m_epoch, u32(r.replay.size()),
++		r.torn_tails, u32(m_index.size()), u32(r.supplemental.participants.size()),
++		u32(r.supplemental.entities.size()), save_name.empty() ? "(base)" : save_name.c_str());
++	return true;
++}
++
++void CoopPersistence::restore_identities(CampaignIdentityRegistry& registry) const
++{
++	if (!m_recovered)
++		return;
++	const Supplemental& s = m_recovered_state.supplemental;
++	registry.restore_entities(s.entities, s.next_entity);
++	m_log->line("recovery-identities entities=%u next_entity=%I64u", u32(s.entities.size()), s.next_entity);
++}
++
++bool CoopPersistence::lookup(const coop::proto::Uuid128& player, u64 operation, StoredOutcome& out) const
++{
++	const IndexKey key = {player, operation};
++	const auto it = m_index.find(key);
++	if (it == m_index.end())
++		return false;
++	out = it->second;
++	return true;
++}
++
++void CoopPersistence::remember(const coop::proto::Uuid128& player, u64 operation, const StoredOutcome& outcome)
++{
++	const IndexKey key = {player, operation};
++	m_index[key] = outcome;
++}
++
++void CoopPersistence::fail_closed(LPCSTR why)
++{
++	FileError error;
++	error.what = why ? why : "injected";
++	fail("fail-closed", error);
++}
++
++bool CoopPersistence::commit(u8 kind, u64 tick, u64 revision, const std::vector<u8>& payload)
++{
++	if (m_failed)
++		return false;
++	FileError error;
++	if (!m_journal.is_open())
++	{
++		error.what = "journal not open";
++		fail("commit", error);
++		return false;
++	}
++	if (!m_journal.append(kind, m_epoch, tick, revision, payload, &error))
++	{
++		fail("commit", error);
++		return false;
++	}
++	++m_commits;
++	return true;
++}
++
++std::string CoopPersistence::generation_path(const char* extension) const
++{
++	return m_store.path_of(StoreNames::generation_file(m_generation, extension));
++}
++
++bool CoopPersistence::publish(u32 generation, u64 revision, u64 tick, u64 game_time, u32 level_id, LPCSTR level,
++	const std::vector<PersistParticipant>& participants, const std::vector<std::pair<u16, u64>>& entities,
++	u64 next_entity, LPCSTR build_id, LPCSTR content_digest, u16 protocol_major, std::string& detail)
++{
++	if (m_failed)
++	{
++		detail = "store failed: " + m_failure;
++		return false;
++	}
++	Supplemental s;
++	s.campaign = m_campaign;
++	s.party = m_party;
++	s.generation = generation;
++	s.revision = revision;
++	s.epoch = m_epoch;
++	s.tick = tick;
++	s.game_time = game_time;
++	s.level_id = level_id;
++	s.level = level ? level : "";
++	s.next_entity = next_entity;
++	for (const PersistParticipant& p : participants)
++	{
++		SupplementalParticipant sp;
++		sp.slot = p.slot;
++		sp.slot_generation = p.slot_generation;
++		sp.player = p.player;
++		sp.actor_id = p.actor_id;
++		sp.actor_entity = p.actor_entity;
++		sp.alive = p.alive;
++		sp.position[0] = p.position.x;
++		sp.position[1] = p.position.y;
++		sp.position[2] = p.position.z;
++		sp.name = p.name.c_str();
++		s.participants.push_back(sp);
++	}
++	s.entities = entities;
++	for (const auto& entry : m_index)
++	{
++		SupplementalOperation o;
++		o.player = entry.first.player;
++		o.operation = entry.first.operation;
++		o.outcome = entry.second.outcome;
++		o.reason = entry.second.reason;
++		o.revision = entry.second.revision;
++		s.operations.push_back(o);
++	}
++	Manifest m;
++	m.campaign = m_campaign;
++	m.generation = generation;
++	m.revision = revision;
++	m.epoch = m_epoch;
++	m.tick = tick;
++	m.game_time = game_time;
++	m.level_id = level_id;
++	m.level = s.level;
++	m.build_id = build_id ? build_id : "";
++	m.content_digest = content_digest ? content_digest : "";
++	m.protocol_major = protocol_major;
++	const bool ok = m_store.publish(generation, m, encode_supplemental(s), ALIFE_VERSION, m_journal, detail);
++	if (ok)
++		m_generation = generation;
++	else if (!m_journal.is_open() || m_journal.failed())
++	{
++		// The generation may be published but the writer could not continue
++		// (contract §5 step 6/7): fail closed.
++		FileError error;
++		error.what = detail;
++		fail("publish", error);
++	}
++	return ok;
++}
++} // namespace campaign
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+new file mode 100644
+index 0000000..647d870
+--- /dev/null
++++ b/src/xrGame/CoopPersistence.h
+@@ -0,0 +1,186 @@
++#pragma once
++
++// S07-T02/T03/T04: the campaign server's persistence, docs/persistence-contract.md.
++//
++// The project-owned store (protocol/, coop::store) owns the files; this is
++// the engine side of the contract:
++//   recovery   (§7 steps 1-4) before the services: choose the generation,
++//              verify it, read its journals, allocate the epoch durably;
++//   identities (§7 step 6) the registry continues every saved object's
++//              EntityId and the participants are bound to their saved slots
++//              and actors before the client stages spawn anything;
++//   replay     (§7 step 7) the committed records after the checkpoint's
++//              revision are re-applied through idempotent adapters;
++//   publication (§5) a native save under the temporary name plus the
++//              supplemental record, published as one generation;
++//   the journal (§4, §6) a critical effect is appended and flushed before it
++//              is applied or acknowledged; a storage failure fails closed.
++// Nothing here trusts a client's save.
++
++#include "CampaignIdentity.h"
++#include "coop/store/checkpoint.h"
++#include "coop/store/journal.h"
++
++#include <string>
++#include <vector>
++
++namespace campaign
++{
++class CoopEventLog;
++
++// What the host knows about a participant at a publication (contract §5.1).
++struct PersistParticipant
++{
++	u8 slot;
++	u32 slot_generation;
++	coop::proto::Uuid128 player;
++	u16 actor_id; // 0xffff none
++	u64 actor_entity;
++	bool alive;
++	Fvector position;
++	xr_string name;
++};
++
++// A stored operation outcome (contract §2, §4 phase 1).
++struct StoredOutcome
++{
++	u8 outcome; // coop::proto::ActionOutcome
++	u16 reason;
++	u64 revision;
++};
++
++// The ledger record (contract §6, §10): the resolved effect.
++struct LedgerRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 actor_entity;
++	s32 delta;
++	u32 money_after;
++};
++std::vector<u8> encode_ledger(const LedgerRecord& r);
++bool decode_ledger(const std::vector<u8>& payload, LedgerRecord& out);
++
++// The death record (contract §6): a participant's (slot) or an NPC's
++// (slot 0xff) death, resolved: the dead entity, its killer (0 none), where.
++struct DeathRecord
++{
++	u8 slot;
++	u64 entity;
++	u64 killer;
++	float position[3];
++};
++std::vector<u8> encode_death(const DeathRecord& r);
++bool decode_death(const std::vector<u8>& payload, DeathRecord& out);
++
++// The respawn record (contract §9): the slot, the dead actor, the new actor's
++// reserved EntityId (its u16 is assigned at the spawn), where it spawns.
++// It is also the durable definition of the new entity (section "actor").
++struct RespawnRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 old_entity;
++	u64 new_entity;
++	float position[3];
++	u32 vertex;
++	u16 graph;
++};
++std::vector<u8> encode_respawn(const RespawnRecord& r);
++bool decode_respawn(const std::vector<u8>& payload, RespawnRecord& out);
++
++// Reason codes of ActionResult for the critical operations (S07-T03).
++const u16 kActionReasonStoreFailed = 5;
++
++class CoopPersistence
++{
++public:
++	CoopPersistence(const std::string& directory, const coop::proto::Uuid128& campaign,
++		const coop::proto::Uuid128& party, CoopEventLog* log);
++
++	// Contract §7 steps 1-4. On success save_name is the generation's save
++	// (coop-gen-<G>) or empty for a fresh campaign (the profile's save is
++	// loaded), the epoch is allocated and the journal is open for appending.
++	// False: refuse to start; reason names why (recovery-no-pointer,
++	// recovery-no-valid-generation, recovery-incompatible, recovery-journal).
++	bool recover(xr_string& save_name, xr_string& reason);
++	bool recovered() const { return m_recovered; }
++	const coop::store::Recovered& recovered_state() const { return m_recovered_state; }
++	u64 epoch() const { return m_epoch; }
++	// The revision the host's commit counter continues from.
++	u64 base_revision() const { return m_base_revision; }
++	u32 current_generation() const { return m_generation; }
++
++	// Step 6: the registry continues the saved u16 -> EntityId map and the
++	// next entity serial. Call before the level loads.
++	void restore_identities(CampaignIdentityRegistry& registry) const;
++
++	// Step 7: the replay list after the checkpoint (revision order).
++	const std::vector<coop::store::JournalRecord>& replay() const { return m_recovered_state.replay; }
++
++	// The operation index (contract §2): a known (player, operation) returns
++	// its stored outcome.
++	bool lookup(const coop::proto::Uuid128& player, u64 operation, StoredOutcome& out) const;
++	void remember(const coop::proto::Uuid128& player, u64 operation, const StoredOutcome& outcome);
++
++	// Phase 4 (contract §4): appends and flushes one record. False: the
++	// store failed (closed from now on) or was already failed.
++	bool commit(u8 kind, u64 tick, u64 revision, const std::vector<u8>& payload);
++	// The store is failed from now on (a test's injected storage failure at
++	// an engine boundary, or a real one): every later commit is refused.
++	void fail_closed(LPCSTR why);
++	bool failed() const { return m_failed; }
++	LPCSTR failure() const { return m_failure.c_str(); }
++	u64 commits() const { return m_commits; }
++	double last_commit_us() const { return m_journal.last_append_us(); }
++	double max_commit_us() const { return m_journal.max_append_us(); }
++
++	// Contract §5: publishes generation G from the native save the host wrote
++	// under temp_save_name(G) (coop-tmp-gen-<G>), with the supplemental
++	// built from the arguments and the ALife object registry. The journal
++	// rotates to coop-journal-<G>.log. False: nothing published (detail says
++	// which step); the previous generation stays current. A failed store
++	// publishes nothing.
++	u32 next_generation() const { return m_generation + 1; }
++	bool publish(u32 generation, u64 revision, u64 tick, u64 game_time, u32 level_id, LPCSTR level,
++		const std::vector<PersistParticipant>& participants, const std::vector<std::pair<u16, u64>>& entities,
++		u64 next_entity, LPCSTR build_id, LPCSTR content_digest, u16 protocol_major, std::string& detail);
++	const coop::store::CheckpointStore::Timing& last_publish_timing() const { return m_store.last_timing; }
++	// The published files of the current generation (for the join stream).
++	std::string generation_path(const char* extension) const;
++
++	coop::store::CheckpointStore& store() { return m_store; }
++
++private:
++	void fail(LPCSTR what, const coop::store::FileError& error);
++
++	coop::store::CheckpointStore m_store;
++	coop::store::JournalWriter m_journal;
++	coop::proto::Uuid128 m_campaign, m_party;
++	CoopEventLog* m_log;
++	bool m_recovered = false;
++	coop::store::Recovered m_recovered_state;
++	u64 m_epoch = 0;
++	u64 m_base_revision = 0;
++	u32 m_generation = 0; // current published generation (0: none)
++	bool m_failed = false;
++	std::string m_failure;
++	u64 m_commits = 0;
++	struct IndexKey
++	{
++		coop::proto::Uuid128 player;
++		u64 operation;
++		bool operator<(const IndexKey& o) const
++		{
++			if (player.hi != o.player.hi)
++				return player.hi < o.player.hi;
++			if (player.lo != o.player.lo)
++				return player.lo < o.player.lo;
++			return operation < o.operation;
++		}
++	};
++	xr_map<IndexKey, StoredOutcome> m_index;
++};
++} // namespace campaign
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 37ef9a3..607189d 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -45,6 +45,8 @@
+ #include "CampaignActivityCapture.h" // S06-T05: ActivityFixtureChooseVertex
+ #include "Hit.h"
+ #include "entity_alive.h"
++#include "CoopPersistence.h" // S07-T02/T03: checkpoint generations and the journal
++#include "coop/store/file.h" // S07-T06: failpoints
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -113,6 +115,10 @@ struct PlayerLink
+ 	u64 snapshot_skipped_unsent; // entities left out: their Spawn had not gone to this player yet
+ 	u32 last_snapshot_ms; // when the last snapshot went to this player
+ 	u64 snapshot_paced; // snapshot slots skipped: nothing acknowledged yet
++	// S07-T07: the respawn point when no checkpoint since the join holds the living actor
++	Fvector last_alive_position = {0.f, 0.f, 0.f};
++	bool have_alive_position = false;
++	u64 respawns = 0, respawn_refused = 0;
+ };
+ 
+ enum WorldState : u8
+@@ -244,6 +250,22 @@ struct Host
+ 	xr_vector<u32> dropped_release_ms;
+ 	xr_vector<bool> dropped_tossed;
+ 	u32 tosses = 0;
++	// S07-T02/T03: persistence (docs/persistence-contract.md)
++	CoopPersistence* persistence = nullptr;
++	xr_string recovered_save; // the generation's save to load, or empty for the profile's
++	coop::proto::LocalBuild build;
++	FILE* ledger_csv = nullptr;
++	FILE* deaths_csv = nullptr; // S07-T06
++	FILE* checkpoints_csv = nullptr;
++	u64 deaths_committed = 0, deaths_replayed = 0, deaths_unrecorded = 0;
++	// S07-T07: the participants as the latest published generation holds them (the respawn point)
++	std::vector<PersistParticipant> last_published;
++	u64 respawns_committed = 0, respawns_replayed = 0;
++	u32 last_checkpoint_ms = 0;
++	u32 checkpoints = 0, checkpoint_failures = 0;
++	u64 ledger_commits = 0, ledger_duplicates = 0, ledger_rejected = 0, ledger_store_failed = 0, ledger_replayed = 0;
++	u64 save_ms_total = 0, publish_ms_total = 0;
++	u32 save_ms_max = 0;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -301,12 +323,15 @@ bool spawn_position(CActor* anchor, u32& vertex, Fvector& position)
+ // start_position_filled is set. The saved actor carries it in its state; a
+ // participant's new actor joins a running campaign, so it is set before the
+ // registration (without it, ~2,700 objects were spawned a second time, coop-8).
+-CSE_Abstract* create_participant_actor(const Fvector& position, u32 vertex, GameGraph::_GRAPH_ID graph, bool& marked)
++CSE_Abstract* create_participant_actor(const Fvector& position, u32 vertex, GameGraph::_GRAPH_ID graph, bool& marked,
++	u64 reserved_entity = 0)
+ {
+ 	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
+ 	CSE_Abstract* abstract = F_entity_Create(kActorSection);
+ 	if (!abstract)
+ 		return nullptr;
++	// S07-T07: a respawn's new actor continues the EntityId its record reserved
++	abstract->m_campaign_entity = reserved_entity;
+ 	abstract->s_name = kActorSection;
+ 	abstract->s_RP = 0xff;
+ 	abstract->ID = alife->server().PerformIDgen(0xffff, abstract);
+@@ -633,30 +658,153 @@ bool player_confirmed(const PlayerLink& link)
+ 	return false;
+ }
+ 
+-bool start_resync(PlayerLink& link)
++// ------------------------------------------------------------ S07-T02
++// Checkpoint generations (docs/persistence-contract.md §5). The native save
++// is requested under the store's temporary name (M_SAVE_GAME, handled
++// synchronously by the in-process server: the S02-T06d path), the
++// supplemental record is built from the participants and the ALife object
++// registry's identities, and the store publishes both as one generation
++// (verify, flush, rename, manifest, journal rotation, pointer, retention).
++
++// The native save of `name` into $game_saves$ (name.scop and name.scoc).
++u32 native_save(LPCSTR name)
+ {
+-	track_lifecycle(); // the watermark and the checkpoint describe the same world
+-	const u64 watermark = g_host->commit;
+-	string64 save;
+-	xr_sprintf(save, "coop-join-%u", u32(++g_host->resyncs));
+ 	CTimer timer;
+ 	timer.Start();
+ 	NET_Packet packet;
+ 	packet.w_begin(M_SAVE_GAME);
+-	packet.w_stringZ(save);
++	packet.w_stringZ(name);
+ 	packet.w_u8(1);
+ 	Level().Send(packet, net_flags(TRUE));
+-	const u32 save_ms = timer.GetElapsed_ms();
+-	string_path scop_name, scoc_name, scop_path, scoc_path;
+-	xr_sprintf(scop_name, "%s.scop", save);
+-	xr_sprintf(scoc_name, "%s.scoc", save);
+-	FS.update_path(scop_path, "$game_saves$", scop_name);
+-	FS.update_path(scoc_path, "$game_saves$", scoc_name);
++	return timer.GetElapsed_ms();
++}
++
++void checkpoint_csv(u32 generation, u64 revision, LPCSTR reason, u32 save_ms, double publish_ms, bool ok, LPCSTR detail)
++{
++	if (g_host->checkpoints_csv)
++	{
++		fprintf(g_host->checkpoints_csv, "%I64u,%I64u,%u,%I64u,%s,%u,%.1f,%d,%s\n", coop::store::utc_now_ms(), g_host->tick,
++			generation, revision, reason, save_ms, publish_ms, ok ? 1 : 0, detail);
++		fflush(g_host->checkpoints_csv);
++	}
++}
++
++// Publishes the next generation at the end of this tick. False: nothing
++// published (logged); the previous generation stays current.
++bool publish_generation(LPCSTR reason)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence || persistence->failed() || !g_pGameLevel || !ai().get_alife())
++		return false;
++	track_lifecycle(); // the revision and the checkpoint describe the same world
++	const u32 generation = persistence->next_generation();
++	const u64 revision = g_host->commit;
++	const u32 save_ms = native_save(coop::store::StoreNames::temp_save_name(generation).c_str());
++	std::vector<PersistParticipant> participants;
++	for (const PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		PersistParticipant p;
++		p.slot = link.ref.slot;
++		p.slot_generation = link.ref.generation;
++		p.player = link.player;
++		p.actor_id = kNoEngineId;
++		p.actor_entity = 0;
++		p.alive = false;
++		p.position.set(0.f, 0.f, 0.f);
++		p.name = link.name;
++		EngineEntityKey key;
++		EntityId entity;
++		if (g_campaign_identity->participant_actor_key(link.ref, key) == Refusal::None &&
++			g_campaign_identity->resolve(key, entity) == Refusal::None)
++		{
++			p.actor_id = key.id;
++			p.actor_entity = entity.value;
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				p.alive = actor->g_Alive();
++				p.position = actor->Position();
++			}
++			else if (CSE_Abstract* se = Level().Server->ID_to_entity(key.id))
++				p.position = se->o_Position;
++		}
++		participants.push_back(p);
++	}
++	std::vector<std::pair<u16, u64>> entities;
++	for (const auto& o : ai().alife().objects().objects())
++	{
++		EngineEntityKey key;
++		EntityId entity;
++		if (g_campaign_identity->current_key(o.first, key) && g_campaign_identity->resolve(key, entity) == Refusal::None)
++			entities.push_back({o.first, entity.value});
++	}
++	std::string detail;
++	CTimer timer;
++	timer.Start();
++	const bool ok = persistence->publish(generation, revision, g_host->tick, ai().alife().time_manager().game_time(),
++		ai().level_graph().level_id(), Level().name().c_str(), participants, entities,
++		g_campaign_identity->engine_id_stats().next_entity, coop_hex(g_host->build.build_id).c_str(),
++		coop_hex(g_host->build.content_digest).c_str(), coop::proto::kProtocolMajor, detail);
++	const double publish_ms = double(timer.GetElapsed_ms());
++	if (ok)
++		g_host->last_published = participants; // S07-T07: the respawn point
++	g_host->save_ms_total += save_ms;
++	g_host->save_ms_max = _max(g_host->save_ms_max, save_ms);
++	g_host->publish_ms_total += u64(publish_ms);
++	if (ok)
++		++g_host->checkpoints;
++	else
++		++g_host->checkpoint_failures;
++	const coop::store::CheckpointStore::Timing& t = persistence->last_publish_timing();
++	g_host->log.line("checkpoint-%s generation=%u revision=%I64u reason=%s save_ms=%u publish_ms=%.1f verify=%.1f "
++		"flush=%.1f rename=%.1f manifest=%.1f rotate=%.1f pointer=%.1f retention=%.1f participants=%u entities=%u "
++		"detail=%s",
++		ok ? "published" : "failed", generation, revision, reason, save_ms, publish_ms, t.verify_ms, t.flush_ms,
++		t.rename_ms, t.manifest_ms, t.rotate_ms, t.pointer_ms, t.retention_ms, u32(participants.size()),
++		u32(entities.size()), detail.c_str());
++	checkpoint_csv(generation, revision, reason, save_ms, publish_ms, ok, detail.c_str());
++	if (!ok && persistence->failed())
++	{
++		g_host->log.line("store-failed-stop reason=%s", persistence->failure());
++		g_host->stop_requested = true;
++	}
++	return ok;
++}
++
++bool start_resync(PlayerLink& link)
++{
++	track_lifecycle(); // the watermark and the checkpoint describe the same world
++	string64 save;
++	xr_sprintf(save, "coop-join-%u", u32(++g_host->resyncs));
++	// S07-T02: a join publishes a generation and streams its files; with a
++	// failed store the join still gets a plain (non-durable) save.
++	const bool published = publish_generation("join");
++	const u64 watermark = g_host->commit;
++	u32 save_ms = 0;
++	std::string scop_path, scoc_path;
++	if (published)
++	{
++		scop_path = g_host->persistence->generation_path("scop");
++		scoc_path = g_host->persistence->generation_path("scoc");
++	}
++	else
++	{
++		save_ms = native_save(save);
++		string_path scop_name, scoc_name, scop_file, scoc_file;
++		xr_sprintf(scop_name, "%s.scop", save);
++		xr_sprintf(scoc_name, "%s.scoc", save);
++		FS.update_path(scop_file, "$game_saves$", scop_name);
++		FS.update_path(scoc_file, "$game_saves$", scoc_name);
++		scop_path = scop_file;
++		scoc_path = scoc_file;
++		g_host->log.line("resync-fallback player=%s save=%s", coop_uuid_hex(link.player).c_str(), save);
++	}
+ 	xr_vector<u8> scop, scoc;
+-	if (!read_file(scop_path, scop) || !read_file(scoc_path, scoc))
++	if (!read_file(scop_path.c_str(), scop) || !read_file(scoc_path.c_str(), scoc))
+ 	{
+ 		g_host->log.line("resync-failed player=%s reason=checkpoint-missing save=%s", coop_uuid_hex(link.player).c_str(),
+-			save);
++			published ? scop_path.c_str() : save);
+ 		return false;
+ 	}
+ 	xr_vector<u8>& blob = link.blob;
+@@ -699,7 +847,7 @@ bool start_resync(PlayerLink& link)
+ 	coop::proto::ResyncBegin begin;
+ 	begin.resync_id = link.resync_id;
+ 	begin.checkpoint_id = link.resync_id;
+-	begin.authority_epoch = 1; // a join does not change the epoch
++	begin.authority_epoch = g_host->persistence ? g_host->persistence->epoch() : 1; // a join does not change the epoch
+ 	begin.content_hash = coop::session::sha256(blob.data(), blob.size());
+ 	begin.event_watermark = watermark;
+ 	begin.total_bytes = blob.size();
+@@ -712,10 +860,12 @@ bool start_resync(PlayerLink& link)
+ 	}
+ 	link.world = WorldStreaming;
+ 	link.resync_started_ms = g_host->wall.GetElapsed_ms();
+-	g_host->log.line("resync-begin player=%s resync=%I64u save=%s save_ms=%u scop=%u scoc=%u online=%u actors=%u "
+-		"watermark=%I64u bytes=%u chunks=%u",
+-		coop_uuid_hex(link.player).c_str(), link.resync_id, save, save_ms, u32(scop.size()), u32(scoc.size()),
+-		u32(g_host->published.size()), u32(actors.size()), watermark, u32(blob.size()), link.chunk_count);
++	g_host->log.line("resync-begin player=%s resync=%I64u save=%s generation=%u save_ms=%u scop=%u scoc=%u online=%u "
++		"actors=%u watermark=%I64u bytes=%u chunks=%u epoch=%I64u",
++		coop_uuid_hex(link.player).c_str(), link.resync_id, save,
++		published ? g_host->persistence->current_generation() : 0u, save_ms, u32(scop.size()), u32(scoc.size()),
++		u32(g_host->published.size()), u32(actors.size()), watermark, u32(blob.size()), link.chunk_count,
++		begin.authority_epoch);
+ 	return true;
+ }
+ 
+@@ -1868,6 +2018,414 @@ void drop_objects()
+ // actor: the action acts on the actor its session's context resolves
+ // (Scope::Self). Returns 0 when accepted, else the refusal reason:
+ //   1 unsupported kind, 2 malformed params, 3 no actor, 4 nothing to act on
++// ------------------------------------------------------------ S07-T03
++// The synthetic critical effect (docs/persistence-contract.md §4, §10):
++// ActionIntent kind 3 `ledger` (s32 delta) on the player's own participant
++// actor, through the six phases: the operation index, validation, the
++// resolved record (money after), the durable commit, the idempotent apply
++// and the acknowledgement. A storage failure fails closed (reason 5).
++
++void ledger_csv(LPCSTR phase, u64 revision, const LedgerRecord& r)
++{
++	if (g_host->ledger_csv)
++	{
++		fprintf(g_host->ledger_csv, "%I64u,%I64u,%I64u,%u,%I64u,%d,%u,%s\n", coop::store::utc_now_ms(), g_host->tick,
++			revision, u32(r.slot), r.operation, r.delta, r.money_after, phase);
++		fflush(g_host->ledger_csv);
++	}
++}
++
++// The adapter: sets the slot's live actor to the recorded money (absolute,
++// so a second application changes nothing). False when the slot holds no
++// live actor or another entity than the record names.
++bool apply_ledger(const LedgerRecord& r, LPCSTR phase, u64 revision)
++{
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound || link.ref.slot != r.slot)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		coop::proto::EntityRef ref;
++		if (!actor || !entity_ref_of(actor->ID(), ref) || ref.id != r.actor_entity)
++		{
++			g_host->log.line("ledger-apply-failed phase=%s revision=%I64u slot=%u actor=%u entity=%I64u expected=%I64u",
++				phase, revision, u32(r.slot), actor ? u32(actor->ID()) : 0xffffu, ref.id, r.actor_entity);
++			return false;
++		}
++		const u32 before = actor->get_money();
++		actor->set_money(r.money_after, true); // the GE_MONEY event keeps the server entity's money in step
++		ledger_csv(phase, revision, r);
++		g_host->log.line("ledger-%s revision=%I64u slot=%u actor=%u operation=%I64u delta=%d money=%u->%u", phase,
++			revision, u32(r.slot), u32(actor->ID()), r.operation, r.delta, before, actor->get_money());
++		return true;
++	}
++	g_host->log.line("ledger-apply-failed phase=%s revision=%I64u slot=%u reason=no-participant", phase, revision,
++		u32(r.slot));
++	return false;
++}
++
++// Phases 1-5; the caller sends the result (phase 6). Returns the reason (0:
++// accepted) and fills the result's outcome, commit and revision.
++u16 take_ledger(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		++g_host->ledger_duplicates;
++		g_host->log.line("ledger-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (!link.session)
++		return 3;
++	if (intent.params.size() != 4)
++		return 2;
++	s32 delta = 0;
++	memcpy(&delta, intent.params.data(), 4);
++	if (delta < -1000 || delta > 1000)
++		return 2;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor)
++		return 3; // dead or alive: the ledger acts on the participant's actor while it exists
++	coop::proto::EntityRef ref;
++	if (!entity_ref_of(actor->ID(), ref))
++		return 3;
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	// 3. Resolve: the absolute post-state and a revision.
++	LedgerRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.actor_entity = ref.id;
++	record.delta = delta;
++	const s64 after = s64(actor->get_money()) + delta;
++	record.money_after = u32(clampr<s64>(after, 0, s64(1) << 31));
++	const u64 revision = ++g_host->commit;
++	// 4. Durable commit, before anything is applied or acknowledged. A
++	// failpoint in fail mode here stands for a storage failure of the append.
++	if (!coop::store::failpoint("commit:before-append"))
++		persistence->fail_closed("failpoint commit:before-append");
++	if (!persistence->commit(coop::store::kRecordLedger, g_host->tick, revision, encode_ledger(record)))
++	{
++		// Fail closed: not applied, not acknowledged as accepted; the store
++		// refuses every later critical intent; a clean stop is requested and
++		// the world keeps running for the transient play already admitted.
++		++g_host->ledger_store_failed;
++		g_host->log.line("ledger-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("commit:after-flush");
++	++g_host->ledger_commits;
++	ledger_csv("commit", revision, record);
++	// 5. Apply (idempotent). A failure here is a defect, not a storage
++	// condition: the record is committed and will be re-applied at recovery.
++	apply_ledger(record, "apply", revision);
++	coop::store::failpoint("commit:after-apply");
++	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++	stored.reason = 0;
++	stored.revision = revision;
++	persistence->remember(link.player, intent.operation_id, stored);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.commit_id = revision;
++	result.revision = revision;
++	return 0;
++}
++
++// ------------------------------------------------------------ S07-T06
++// Deaths (contract §6 `death`): every CEntityAlive::Die of an ALife object
++// on the serving server is resolved (entity, killer, position) and
++// committed in the tick it happens; at recovery a record whose entity is
++// still alive in the checkpoint is re-applied by killing it natively.
++
++void death_csv(LPCSTR phase, u64 revision, const DeathRecord& r, u16 id)
++{
++	if (g_host->deaths_csv)
++	{
++		fprintf(g_host->deaths_csv, "%I64u,%I64u,%I64u,%u,%u,%I64u,%I64u,%.2f,%.2f,%.2f,%s\n", coop::store::utc_now_ms(),
++			g_host->tick, revision, u32(r.slot), u32(id), r.entity, r.killer, r.position[0], r.position[1], r.position[2],
++			phase);
++		fflush(g_host->deaths_csv);
++	}
++}
++
++// The adapter. The entity's u16 is looked up through the ALife registry
++// (the identities were restored before the load).
++bool apply_death(const DeathRecord& r, u64 revision)
++{
++	u16 id = kNoEngineId, killer_id = kNoEngineId;
++	for (const auto& o : ai().alife().objects().objects())
++	{
++		EngineEntityKey key;
++		EntityId entity;
++		if (!g_campaign_identity->current_key(o.first, key) || g_campaign_identity->resolve(key, entity) != Refusal::None)
++			continue;
++		if (entity.value == r.entity)
++			id = o.first;
++		else if (r.killer && entity.value == r.killer)
++			killer_id = o.first;
++	}
++	if (id == kNoEngineId)
++	{
++		// released after its death (a tombstone would say so): nothing to do
++		g_host->log.line("death-replay-skipped revision=%I64u entity=%I64u reason=not-in-checkpoint", revision, r.entity);
++		return true;
++	}
++	CEntityAlive* alive = smart_cast<CEntityAlive*>(Level().Objects.net_Find(id));
++	if (alive)
++	{
++		if (!alive->g_Alive())
++		{
++			g_host->log.line("death-replay-noop revision=%I64u id=%u entity=%I64u reason=already-dead", revision, u32(id),
++				r.entity);
++			return true;
++		}
++		alive->KillEntity(killer_id != kNoEngineId ? killer_id : id, TRUE);
++		death_csv("replay", revision, r, id);
++		g_host->log.line("death-replay revision=%I64u slot=%u id=%u entity=%I64u killer=%u alive_after=%d", revision,
++			u32(r.slot), u32(id), r.entity, u32(killer_id), alive->g_Alive() ? 1 : 0);
++		return true;
++	}
++	// offline: the server entity's health, so it spawns dead when it comes online
++	CSE_ALifeCreatureAbstract* creature = smart_cast<CSE_ALifeCreatureAbstract*>(ai().alife().objects().object(id, true));
++	if (!creature)
++	{
++		g_host->log.line("death-replay-failed revision=%I64u id=%u entity=%I64u reason=not-a-creature", revision, u32(id),
++			r.entity);
++		return false;
++	}
++	creature->set_health(0.f);
++	death_csv("replay-offline", revision, r, id);
++	g_host->log.line("death-replay-offline revision=%I64u slot=%u id=%u entity=%I64u", revision, u32(r.slot), u32(id),
++		r.entity);
++	return true;
++}
++
++// ------------------------------------------------------------ S07-T07
++// Respawn (contract §9): a dead player's confirmed respawn is an operation.
++// Validate (attached, the slot's actor dead, bounded), resolve (the point:
++// the slot's position in the latest published generation when it holds this
++// actor, else the last position the server saw it alive; a reserved
++// EntityId), commit the record, apply (spawn a genuine actor from the actor
++// section at the point, with the section's supplies, bound to the slot: the
++// old actor stays as a corpse with its inventory), acknowledge, and tell the
++// client to rejoin (CampaignEvent kind 5) so its player entity is the new
++// actor by construction.
++
++bool respawn_point(PlayerLink& link, u16 dead_id, Fvector& position, u32& vertex, u16& graph, LPCSTR& source)
++{
++	position = link.last_alive_position;
++	source = "last-alive";
++	for (const PersistParticipant& p : g_host->last_published)
++		if (p.slot == link.ref.slot && p.actor_id == dead_id)
++		{
++			position = p.position;
++			source = "checkpoint";
++			break;
++		}
++	if (source[0] == 'l' && !link.have_alive_position)
++		return false;
++	const CLevelGraph& level_graph = ai().level_graph();
++	vertex = level_graph.valid_vertex_position(position) ? level_graph.vertex_id(position) : u32(-1);
++	if (!level_graph.valid_vertex_id(vertex) || !level_graph.is_accessible(vertex))
++	{
++		// beside the corpse
++		CActor* dead = smart_cast<CActor*>(Level().Objects.net_Find(dead_id));
++		if (!dead || !spawn_position(dead, vertex, position))
++			return false;
++		source = "beside-corpse";
++	}
++	else
++		position = level_graph.vertex_position(vertex);
++	const CSE_ALifeCreatureActor* se_actor = ai().alife().graph().actor();
++	graph = se_actor ? se_actor->m_tGraphID : 0;
++	return se_actor != nullptr;
++}
++
++// The adapter: spawn the recorded new actor and bind it to the slot, unless
++// the slot already holds it (idempotent).
++bool apply_respawn(const RespawnRecord& r, LPCSTR phase, u64 revision)
++{
++	PlayerLink* link = nullptr;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot == r.slot)
++			link = &l;
++	if (!link)
++	{
++		g_host->log.line("respawn-apply-failed phase=%s revision=%I64u slot=%u reason=no-participant", phase, revision,
++			u32(r.slot));
++		return false;
++	}
++	EngineEntityKey held;
++	EntityId held_entity;
++	if (g_campaign_identity->participant_actor_key(link->ref, held) == Refusal::None &&
++		g_campaign_identity->resolve(held, held_entity) == Refusal::None && held_entity.value == r.new_entity)
++	{
++		g_host->log.line("respawn-%s-noop revision=%I64u slot=%u reason=already-holds entity=%I64u", phase, revision,
++			u32(r.slot), r.new_entity);
++		return true;
++	}
++	// Does the recorded entity exist already (the checkpoint holds it)?
++	u16 existing = kNoEngineId;
++	for (const auto& o : ai().alife().objects().objects())
++	{
++		EngineEntityKey key;
++		EntityId entity;
++		if (g_campaign_identity->current_key(o.first, key) && g_campaign_identity->resolve(key, entity) == Refusal::None &&
++			entity.value == r.new_entity)
++			existing = o.first;
++	}
++	u16 id = existing;
++	if (existing == kNoEngineId)
++	{
++		Fvector position;
++		position.set(r.position[0], r.position[1], r.position[2]);
++		bool marked = false;
++		CSE_Abstract* entity = create_participant_actor(position, r.vertex, GameGraph::_GRAPH_ID(r.graph), marked, r.new_entity);
++		if (!entity || !smart_cast<CSE_ALifeCreatureActor*>(entity))
++		{
++			g_host->log.line("respawn-apply-failed phase=%s revision=%I64u slot=%u reason=spawn", phase, revision, u32(r.slot));
++			return false;
++		}
++		id = entity->ID;
++		++g_host->actors_spawned;
++	}
++	EngineEntityKey key;
++	EntityId entity;
++	if (!g_campaign_identity->current_key(id, key) || g_campaign_identity->resolve(key, entity) != Refusal::None ||
++		entity.value != r.new_entity)
++	{
++		g_host->log.line("respawn-apply-failed phase=%s revision=%I64u slot=%u reason=entity-mismatch id=%u got=%I64u "
++			"expected=%I64u", phase, revision, u32(r.slot), u32(id), entity.value, r.new_entity);
++		return false;
++	}
++	// the slot's actor binding moves from the corpse to the new actor
++	const Refusal bound = g_campaign_identity->bind_actor(g_campaign_identity->authority(), link->ref, key);
++	link->pending_actor = id;
++	link->have_alive_position = false;
++	g_host->log.line("respawn-%s revision=%I64u slot=%u old_entity=%I64u new_entity=%I64u id=%u existing=%d "
++		"pos=%.2f,%.2f,%.2f vertex=%u bind=%s",
++		phase, revision, u32(r.slot), r.old_entity, r.new_entity, u32(id), existing != kNoEngineId ? 1 : 0,
++		r.position[0], r.position[1], r.position[2], r.vertex, refusal_name(bound));
++	return bound == Refusal::None;
++}
++
++u16 take_respawn(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		g_host->log.line("respawn-duplicate player=%s operation=%I64u revision=%I64u", coop_uuid_hex(link.player).c_str(),
++			intent.operation_id, stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (!link.session)
++		return 3;
++	if (!intent.params.empty())
++		return 2;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor)
++		return 3;
++	if (actor->g_Alive())
++	{
++		++link.respawn_refused;
++		return 6; // alive: nothing to respawn from (an early or forged request)
++	}
++	coop::proto::EntityRef old_ref;
++	if (!entity_ref_of(actor->ID(), old_ref))
++		return 3;
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	// 3. Resolve: the point and the new identity.
++	RespawnRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.old_entity = old_ref.id;
++	Fvector position;
++	u32 vertex = u32(-1);
++	u16 graph = 0;
++	LPCSTR source = "";
++	if (!respawn_point(link, u16(actor->ID()), position, vertex, graph, source))
++		return 7; // no respawn point (no checkpoint holds this actor and it was never seen alive here)
++	record.new_entity = g_campaign_identity->reserve_entity().value;
++	record.position[0] = position.x;
++	record.position[1] = position.y;
++	record.position[2] = position.z;
++	record.vertex = vertex;
++	record.graph = graph;
++	const u64 revision = ++g_host->commit;
++	// 4. Durable commit.
++	if (!coop::store::failpoint("respawn:before-append"))
++		persistence->fail_closed("failpoint respawn:before-append");
++	if (!persistence->commit(coop::store::kRecordRespawn, g_host->tick, revision, encode_respawn(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("respawn-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("respawn:after-commit");
++	++g_host->respawns_committed;
++	g_host->log.line("respawn-committed revision=%I64u slot=%u operation=%I64u old_entity=%I64u new_entity=%I64u "
++		"point=%s pos=%.2f,%.2f,%.2f vertex=%u",
++		revision, u32(record.slot), intent.operation_id, record.old_entity, record.new_entity, source, VPUSH(position),
++		vertex);
++	// 5. Apply.
++	apply_respawn(record, "apply", revision);
++	coop::store::failpoint("respawn:after-apply");
++	++link.respawns;
++	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++	stored.reason = 0;
++	stored.revision = revision;
++	persistence->remember(link.player, intent.operation_id, stored);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.commit_id = revision;
++	result.revision = revision;
++	return 0;
++}
++
+ u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
+ {
+ 	if (intent.kind != coop::proto::kActionActivateSlot && intent.kind != coop::proto::kActionReload)
+@@ -2272,14 +2830,50 @@ void on_message(const coop::session::SessionEvent& e)
+ 		coop::proto::ActionResult result;
+ 		result.operation_id = intent->operation_id;
+ 		result.server_tick = g_host->tick;
+-		const u16 reason = take_action(*link, *intent);
+-		result.outcome = reason ? coop::proto::ActionOutcome::Rejected : coop::proto::ActionOutcome::Accepted;
+-		result.reason = reason;
++		u16 reason;
++		if (intent->kind == coop::proto::kActionLedger)
++		{
++			// S07-T03: the critical path; the outcome may be a stored one.
++			reason = take_ledger(*link, *intent, result);
++		}
++		else if (intent->kind == coop::proto::kActionRespawn)
++			reason = take_respawn(*link, *intent, result); // S07-T07
++		else
++			reason = take_action(*link, *intent);
++		if (reason)
++		{
++			// a rejection (a stored rejected outcome is never kept, so this is
++			// always this evaluation's): nothing changed, no commit
++			result.outcome = coop::proto::ActionOutcome::Rejected;
++			result.reason = reason;
++		}
++		else if (result.outcome != coop::proto::ActionOutcome::Duplicate)
++			result.outcome = coop::proto::ActionOutcome::Accepted;
++		// 6. Acknowledge.
+ 		g_host->server->send(e.player, coop::proto::Message(result));
++		if (intent->kind == coop::proto::kActionLedger)
++			coop::store::failpoint("commit:after-ack");
++		if (intent->kind == coop::proto::kActionRespawn && !reason)
++		{
++			// S07-T07: the player's entity changed: the client rejoins for a
++			// world stream in which its actor is the new one (CampaignEvent 5).
++			std::vector<u8> payload;
++			put_u8(payload, link->ref.slot);
++			put_u16(payload, link->pending_actor);
++			coop::proto::CampaignEvent event;
++			event.event_id = ++g_host->event_seq;
++			event.kind = 5;
++			event.revision = result.commit_id;
++			event.payload = payload;
++			g_host->server->send(e.player, coop::proto::Message(event));
++			coop::store::failpoint("respawn:after-ack");
++		}
+ 		if (reason)
+ 		{
+ 			++g_host->intents_refused;
+ 			++link->actions_refused;
++			if (intent->kind == coop::proto::kActionLedger)
++				++g_host->ledger_rejected;
+ 		}
+ 		else
+ 			++link->actions_accepted;
+@@ -2368,7 +2962,8 @@ void log_status(LPCSTR tag)
+ 	g_host->log.line("%s tick=%I64u frame=%u weather=%s game_ms=%I64u alife_objects=%u online_objects=%u%s joins=%I64u "
+ 		"violations=%I64u rejected_auth=%I64u rejected_build=%I64u rejected_content=%I64u intents_refused=%I64u "
+ 		"inputs=%I64u rate_drops=%I64u acks=%I64u commit=%I64u published=%u spawns=%I64u despawns=%I64u/%I64u oversize=%I64u "
+-		"churn=%u/%u drops=%u/%u heals=%u%s",
++		"churn=%u/%u drops=%u/%u heals=%u generation=%u epoch=%I64u checkpoints=%u/%u ledger=%I64u/%I64u/%I64u/%I64u "
++		"store_failed=%d%s",
+ 		tag, g_host->tick, Device.dwFrame,
+ 		g_pGamePersistent && g_pGamePersistent->Environment().CurrentWeatherName.size() ?
+ 			*g_pGamePersistent->Environment().CurrentWeatherName : "-",
+@@ -2376,7 +2971,11 @@ void log_status(LPCSTR tag)
+ 		c.joins, c.violations, c.rejected_auth, c.rejected_build, c.rejected_content, g_host->intents_refused,
+ 		g_host->inputs_ignored, c.rate_limited_drops, g_host->acks, g_host->commit, u32(g_host->published.size()), g_host->spawns,
+ 		g_host->despawns_range, g_host->despawns_destroyed, g_host->spawn_oversize, g_host->churn_spawned,
+-		g_host->churn_released, g_host->drops, g_host->tosses, g_host->heals, worlds);
++		g_host->churn_released, g_host->drops, g_host->tosses, g_host->heals,
++		g_host->persistence ? g_host->persistence->current_generation() : 0u,
++		g_host->persistence ? g_host->persistence->epoch() : 0ull, g_host->checkpoints, g_host->checkpoint_failures,
++		g_host->ledger_commits, g_host->ledger_duplicates, g_host->ledger_rejected, g_host->ledger_store_failed,
++		g_host->persistence && g_host->persistence->failed() ? 1 : 0, worlds);
+ }
+ 
+ // S04-T01 finding 5: Windows power throttling stretches Sleep-paced loops
+@@ -2401,6 +3000,8 @@ void disable_power_throttling()
+ }
+ } // namespace
+ 
++extern "C" LPCSTR __cdecl xrCoopServer_SaveName();
++
+ namespace campaign
+ {
+ bool coop_server_prepare(LPCSTR command_line)
+@@ -2441,9 +3042,33 @@ bool coop_server_prepare(LPCSTR command_line)
+ 	coop::proto::Digest content;
+ 	if (!coop_content_digest(content))
+ 		return false;
+-	g_host->log.line("server-prepared campaign=%s party=%s roster_players=%u listen=%s save=%s",
++	// S07-T02/T04: the store in $game_saves$; recovery chooses the save to
++	// load and allocates the epoch (contract §7 steps 1-4) before any service.
++	{
++		const std::string store_dir = FS.get_path("$game_saves$")->m_Path;
++		g_host->persistence = xr_new<CoopPersistence>(store_dir, g_host->config.campaign_id, g_host->config.party_id,
++			&g_host->log);
++		xr_string reason;
++		if (!g_host->persistence->recover(g_host->recovered_save, reason))
++		{
++			Msg("! S07-T04 recovery refused: %s (store %s)", reason.c_str(), store_dir.c_str());
++			return false;
++		}
++		if (g_host->config.failpoint[0])
++		{
++			// S07-T06: armed after recovery so the epoch record does not count.
++			coop::store::arm_failpoint(g_host->config.failpoint, g_host->config.failpoint_count,
++				g_host->config.failpoint_fail == 0);
++			g_host->log.line("failpoint-armed point=%s count=%u mode=%s", g_host->config.failpoint,
++				g_host->config.failpoint_count, g_host->config.failpoint_fail ? "fail" : "terminate");
++		}
++	}
++	g_host->log.line("server-prepared campaign=%s party=%s roster_players=%u listen=%s save=%s recovered=%d "
++		"generation=%u epoch=%I64u checkpoint_seconds=%u",
+ 		coop_uuid_hex(g_host->config.campaign_id).c_str(), coop_uuid_hex(g_host->config.party_id).c_str(),
+-		u32(g_host->links.size()), g_host->config.listen, g_host->config.save_name);
++		u32(g_host->links.size()), g_host->config.listen, xrCoopServer_SaveName(),
++		g_host->persistence->recovered() ? 1 : 0, g_host->persistence->current_generation(),
++		g_host->persistence->epoch(), g_host->config.checkpoint_seconds);
+ 	g_host->prepared = true;
+ 	return true;
+ }
+@@ -2453,6 +3078,50 @@ bool coop_server_friendly_fire()
+ 	return !g_host || g_host->config.friendly_fire != 0;
+ }
+ 
++void coop_server_on_death(CEntityAlive* victim, CObject* killer)
++{
++	if (!g_host || !g_host->started || !victim || !ai().get_alife())
++		return;
++	const u16 id = u16(victim->ID());
++	if (!ai().alife().objects().object(id, true))
++		return; // not an ALife object: nothing a checkpoint would hold
++	DeathRecord record;
++	coop::proto::EntityRef ref, killer_ref;
++	if (!entity_ref_of(id, ref))
++		return;
++	ParticipantRef who;
++	record.slot = g_campaign_identity->participant_of_engine_id(id, who) == Refusal::None ? who.slot : 0xff;
++	record.entity = ref.id;
++	record.killer = killer && entity_ref_of(u16(killer->ID()), killer_ref) ? killer_ref.id : 0;
++	record.position[0] = victim->Position().x;
++	record.position[1] = victim->Position().y;
++	record.position[2] = victim->Position().z;
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence || persistence->failed())
++	{
++		++g_host->deaths_unrecorded;
++		g_host->log.line("death-unrecorded id=%u entity=%I64u slot=%u reason=store-failed", u32(id), ref.id,
++			u32(record.slot));
++		return;
++	}
++	const u64 revision = ++g_host->commit;
++	if (!coop::store::failpoint("death:before-append"))
++		persistence->fail_closed("failpoint death:before-append");
++	if (!persistence->commit(coop::store::kRecordDeath, g_host->tick, revision, encode_death(record)))
++	{
++		++g_host->deaths_unrecorded;
++		g_host->log.line("death-store-failed revision=%I64u id=%u entity=%I64u reason=%s", revision, u32(id), ref.id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return;
++	}
++	coop::store::failpoint("death:after-commit");
++	++g_host->deaths_committed;
++	death_csv("commit", revision, record, id);
++	g_host->log.line("death-committed revision=%I64u slot=%u id=%u entity=%I64u killer=%I64u section=%s", revision,
++		u32(record.slot), u32(id), ref.id, record.killer, victim->cNameSect().c_str());
++}
++
+ bool coop_server_prepared() { return g_host && g_host->prepared; }
+ 
+ bool coop_server_bind_roster(CampaignIdentityRegistry& registry)
+@@ -2463,9 +3132,34 @@ bool coop_server_bind_roster(CampaignIdentityRegistry& registry)
+ 	party.hi = g_host->config.party_id.hi;
+ 	party.lo = g_host->config.party_id.lo;
+ 	bool ok = true;
++	// S07-T04 (contract §7 step 6): a recovered campaign continues its saved
++	// identities, and each saved participant's player gets its saved slot.
++	if (g_host->persistence && g_host->persistence->recovered())
++	{
++		g_host->persistence->restore_identities(registry);
++		for (const coop::store::SupplementalParticipant& saved : g_host->persistence->recovered_state().supplemental.participants)
++		{
++			PlayerLink* link = link_of(saved.player);
++			if (!link)
++			{
++				g_host->log.line("recovery-roster-mismatch slot=%u player=%s reason=not-in-roster", u32(saved.slot),
++					coop_uuid_hex(saved.player).c_str());
++				return false;
++			}
++			const Refusal bound = registry.restore_participant(registry.authority(), saved.slot, saved.slot_generation,
++				player_of(saved.player), party, 0, link->ref);
++			link->bound = bound == Refusal::None;
++			ok = ok && link->bound;
++			g_host->log.line("restored player=%s name=%s participant=%u/%u actor=%u entity=%I64u alive=%d restore=%s",
++				coop_uuid_hex(link->player).c_str(), link->name.c_str(), u32(saved.slot), saved.slot_generation,
++				u32(saved.actor_id), saved.actor_entity, saved.alive ? 1 : 0, refusal_name(bound));
++		}
++	}
+ 	for (PlayerLink& link : g_host->links)
+ 	{
+-		if (u32(&link - &g_host->links.front()) >= registry.active_slots())
++		if (link.bound)
++			continue; // restored above
++		if (registry.bound_count() >= registry.active_slots())
+ 		{
+ 			g_host->log.line("bind-skipped player=%s reason=more-roster-players-than-slots",
+ 				coop_uuid_hex(link.player).c_str());
+@@ -2483,7 +3177,53 @@ bool coop_server_bind_roster(CampaignIdentityRegistry& registry)
+ 
+ extern "C" bool __cdecl xrCoopServer_Prepare(LPCSTR command_line) { return coop_server_prepare(command_line); }
+ 
+-extern "C" LPCSTR __cdecl xrCoopServer_SaveName() { return coop_server_prepared() ? g_host->config.save_name : ""; }
++extern "C" LPCSTR __cdecl xrCoopServer_SaveName()
++{
++	if (!g_host || !g_host->persistence)
++		return "";
++	return g_host->recovered_save.empty() ? g_host->config.save_name : g_host->recovered_save.c_str();
++}
++
++// S07-T04 (contract §7 step 6): after the ALife load and before the client
++// stages spawn anything, each saved participant actor is assigned to its
++// participant by its saved u16, and the continued identities are checked.
++extern "C" bool __cdecl xrCoopServer_AfterServerReady()
++{
++	if (!coop_server_prepared())
++		return false;
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence->recovered())
++		return true;
++	const coop::store::Supplemental& saved = persistence->recovered_state().supplemental;
++	const u32 pending = g_campaign_identity->restore_pending();
++	g_host->log.line("recovery-load generation=%u entities_saved=%u entities_restored=%I64u not_loaded=%u next_entity=%I64u",
++		persistence->current_generation(), u32(saved.entities.size()), g_campaign_identity->restored_entities(), pending,
++		g_campaign_identity->engine_id_stats().next_entity);
++	bool ok = true;
++	for (const coop::store::SupplementalParticipant& p : saved.participants)
++	{
++		if (p.actor_id == kNoEngineId)
++			continue;
++		PlayerLink* link = link_of(p.player);
++		EngineEntityKey key;
++		EntityId entity;
++		const bool live = g_campaign_identity->current_key(p.actor_id, key) &&
++			g_campaign_identity->resolve(key, entity) == Refusal::None;
++		if (!link || !link->bound || !live || entity.value != p.actor_entity)
++		{
++			g_host->log.line("recovery-identity-mismatch slot=%u actor=%u entity=%I64u found=%I64u live=%d bound=%d",
++				u32(p.slot), u32(p.actor_id), p.actor_entity, live ? entity.value : 0ull, live ? 1 : 0,
++				link && link->bound ? 1 : 0);
++			ok = false;
++			continue;
++		}
++		const Refusal assigned = assign_participant_actor(link->ref, p.actor_id);
++		g_host->log.line("recovery-actor slot=%u actor=%u entity=%I64u generation=%u assign=%s", u32(p.slot),
++			u32(p.actor_id), p.actor_entity, key.generation, refusal_name(assigned));
++		ok = ok && assigned == Refusal::None;
++	}
++	return ok;
++}
+ 
+ extern "C" bool __cdecl xrCoopServer_Start()
+ {
+@@ -2495,7 +3235,8 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 	config.campaign_id = g_host->config.campaign_id;
+ 	config.party_id = g_host->config.party_id;
+ 	config.max_players = 2;
+-	config.authority_epoch = 1;
++	config.authority_epoch = g_host->persistence->epoch(); // S07-T04: allocated durably at recovery
++	g_host->build = config.build;
+ 	config.tick_rate_hz = u16(_max(1u, 1000u / _max(1u, Device.dwTimeDelta ? Device.dwTimeDelta : 20u)));
+ 	config.snapshot_rate_hz = u16(_min<u32>(20u, config.tick_rate_hz));
+ 	std::string error;
+@@ -2558,6 +3299,97 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 	g_host->snapshots_csv = fopen(snapshots, "w");
+ 	if (g_host->snapshots_csv)
+ 		fprintf(g_host->snapshots_csv, "utc_ms,tick,id,entity,generation,kind,x,y,z,yaw,health,state,vx,vy,vz\n");
++	{
++		// S07-T03: the ledger and checkpoint records.
++		string_path ledger;
++		FS.update_path(ledger, "$logs$", "coop-ledger.csv");
++		g_host->ledger_csv = fopen(ledger, "w");
++		if (g_host->ledger_csv)
++			fprintf(g_host->ledger_csv, "utc_ms,tick,revision,slot,operation,delta,money_after,phase\n");
++		string_path deaths;
++		FS.update_path(deaths, "$logs$", "coop-deaths.csv");
++		g_host->deaths_csv = fopen(deaths, "w");
++		if (g_host->deaths_csv)
++			fprintf(g_host->deaths_csv, "utc_ms,tick,revision,slot,id,entity,killer,x,y,z,phase\n");
++		string_path checkpoints;
++		FS.update_path(checkpoints, "$logs$", "coop-checkpoints.csv");
++		g_host->checkpoints_csv = fopen(checkpoints, "w");
++		if (g_host->checkpoints_csv)
++			fprintf(g_host->checkpoints_csv, "utc_ms,tick,generation,revision,reason,save_ms,publish_ms,ok,detail\n");
++	}
++	// S07-T04 (contract §7 step 7): the revision counter continues from the
++	// store, and the committed records after the checkpoint are re-applied
++	// before anyone connects. A record that cannot be applied stops the start.
++	g_host->commit = g_host->persistence->base_revision();
++	if (g_host->persistence->recovered())
++		for (const coop::store::SupplementalParticipant& sp : g_host->persistence->recovered_state().supplemental.participants)
++		{
++			PersistParticipant p;
++			p.slot = sp.slot;
++			p.slot_generation = sp.slot_generation;
++			p.player = sp.player;
++			p.actor_id = sp.actor_id;
++			p.actor_entity = sp.actor_entity;
++			p.alive = sp.alive;
++			p.position.set(sp.position[0], sp.position[1], sp.position[2]);
++			p.name = sp.name.c_str();
++			g_host->last_published.push_back(p);
++		}
++	for (const coop::store::JournalRecord& record : g_host->persistence->replay())
++	{
++		if (record.kind == coop::store::kRecordEpoch)
++			continue;
++		if (record.kind == coop::store::kRecordLedger)
++		{
++			LedgerRecord ledger;
++			if (!decode_ledger(record.payload, ledger) || !apply_ledger(ledger, "replay", record.revision))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			++g_host->ledger_replayed;
++			continue;
++		}
++		if (record.kind == coop::store::kRecordRespawn)
++		{
++			RespawnRecord respawn;
++			if (!decode_respawn(record.payload, respawn) || !apply_respawn(respawn, "replay", record.revision))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			if (CoopPersistence* p = g_host->persistence)
++			{
++				StoredOutcome s = {1, 0, record.revision};
++				p->remember(respawn.player, respawn.operation, s);
++			}
++			++g_host->respawns_replayed;
++			continue;
++		}
++		if (record.kind == coop::store::kRecordDeath)
++		{
++			DeathRecord death;
++			if (!decode_death(record.payload, death) || !apply_death(death, record.revision))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			++g_host->deaths_replayed;
++			continue;
++		}
++		g_host->log.line("recovery-replay-skipped kind=%u revision=%I64u reason=no-adapter-yet", u32(record.kind),
++			record.revision);
++	}
++	for (const PlayerLink& link : g_host->links)
++		if (link.bound)
++			if (CActor* actor = participant_actor(link.ref))
++				g_host->log.line("ledger-state slot=%u actor=%u money=%u alive=%d", u32(link.ref.slot), u32(actor->ID()),
++					actor->get_money(), actor->g_Alive() ? 1 : 0);
++	g_host->log.line("recovery-replayed records=%I64u deaths=%I64u commit=%I64u epoch=%I64u", g_host->ledger_replayed,
++		g_host->deaths_replayed, g_host->commit, g_host->persistence->epoch());
+ 	disable_power_throttling();
+ 	g_host->wall.Start();
+ 	g_host->started = true;
+@@ -2599,6 +3431,16 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	for (PlayerLink& link : g_host->links)
+ 		if (link.session && (link.pending_actor != kNoEngineId || !participant_actor(link.ref)))
+ 			give_actor(link);
++	// S07-T07: where each participant's actor last was while alive (the
++	// respawn point when no checkpoint since the join holds it).
++	for (PlayerLink& link : g_host->links)
++		if (link.bound)
++			if (CActor* actor = participant_actor(link.ref))
++				if (actor->g_Alive())
++				{
++					link.last_alive_position = actor->Position();
++					link.have_alive_position = true;
++				}
+ 	// S05-T03: the players' inputs reach their actors before this tick runs.
+ 	apply_inputs();
+ 	// S05-T02: lifecycle, the server-controlled change fixture, world streams.
+@@ -2626,6 +3468,14 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	send_presentation();
+ 	log_weather();
+ 	const u32 now = g_host->wall.GetElapsed_ms();
++	// S07-T02: the periodic generation, at the end of the tick (no commit
++	// between the take and the pointer).
++	if (g_host->config.checkpoint_seconds && !g_host->persistence->failed() &&
++		now - g_host->last_checkpoint_ms >= g_host->config.checkpoint_seconds * 1000)
++	{
++		g_host->last_checkpoint_ms = now;
++		publish_generation("periodic");
++	}
+ 	if (now - g_host->last_status_ms >= 5000)
+ 	{
+ 		g_host->last_status_ms = now;
+@@ -2655,6 +3505,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		return;
+ 	if (g_host->started)
+ 	{
++		// S07-T02: a clean stop publishes a generation (unless the store failed).
++		if (g_host->persistence && !g_host->persistence->failed())
++			publish_generation("stop");
+ 		log_status("final");
+ 		g_host->events.clear();
+ 		g_host->server->shutdown(1000, g_host->events);
+@@ -2682,9 +3535,19 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		if (g_host->weather_csv)
+ 			fclose(g_host->weather_csv);
+ 		g_host->weather_csv = nullptr;
++		if (g_host->ledger_csv)
++			fclose(g_host->ledger_csv);
++		g_host->ledger_csv = nullptr;
++		if (g_host->checkpoints_csv)
++			fclose(g_host->checkpoints_csv);
++		g_host->checkpoints_csv = nullptr;
++		if (g_host->deaths_csv)
++			fclose(g_host->deaths_csv);
++		g_host->deaths_csv = nullptr;
+ 		timeEndPeriod(1);
+ 		g_host->log.line("server-stopped");
+ 	}
++	xr_delete(g_host->persistence);
+ 	g_host->log.close();
+ 	xr_delete(g_host);
+ }
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index e231fef..538e950 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -18,6 +18,9 @@
+ // Network input reaches the world only from coop_server_tick(), which the
+ // serve loop calls once before each simulation tick (D6, S04-T02).
+ 
++class CEntityAlive;
++class CObject;
++
+ namespace campaign
+ {
+ class CampaignIdentityRegistry;
+@@ -34,4 +37,8 @@ bool coop_server_bind_roster(CampaignIdentityRegistry& registry);
+ // (profile friendly_fire, default 1). Not asked on a client or in
+ // single-player.
+ bool coop_server_friendly_fire();
++// S07-T06: a death on the serving campaign server is a critical outcome
++// (docs/persistence-contract.md §6 `death`): committed to the journal from
++// CEntityAlive::Die. No-op on a client or in single-player.
++void coop_server_on_death(::CEntityAlive* victim, ::CObject* killer);
+ } // namespace campaign
+diff --git a/src/xrGame/Level_input.cpp b/src/xrGame/Level_input.cpp
+index 3971fff..4936a37 100644
+--- a/src/xrGame/Level_input.cpp
++++ b/src/xrGame/Level_input.cpp
+@@ -2,6 +2,7 @@
+ #include <dinput.h>
+ #include "../xrEngine/xr_ioconsole.h"
+ #include "entity_alive.h"
++#include "CoopClientLink.h" // S07-T07
+ #include "game_sv_single.h"
+ #include "alife_simulator.h"
+ #include "alife_simulator_header.h"
+@@ -161,6 +162,9 @@ void CLevel::IR_OnKeyboardPress(int key)
+ {
+ 	if (Device.dwPrecacheFrame)
+ 		return;
++	// S07-T07: a dead co-op player's respawn confirmation (no-op otherwise)
++	if (campaign::coop_client_key_press(key))
++		return;
+ 
+ 	bool b_ui_exist = (!!CurrentGameUI());
+ 
+diff --git a/src/xrGame/entity_alive.cpp b/src/xrGame/entity_alive.cpp
+index 226f33e..4b1c95e 100644
+--- a/src/xrGame/entity_alive.cpp
++++ b/src/xrGame/entity_alive.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "entity_alive.h"
++#include "CoopServerHost.h" // S07-T06
+ #include "inventoryowner.h"
+ #include "inventory.h"
+ #include "../xrphysics/physicsshell.h"
+@@ -327,6 +328,9 @@ void CEntityAlive::Die(CObject* who)
+ {
+ 	// S02-T06c: observation only (the combat fixture's death trace).
+ 	CombatTraceDeath(ID(), who ? who->ID() : u16(-1));
++	// S07-T06: on the serving campaign server the death is a critical
++	// outcome, committed to the journal before the consequences run.
++	campaign::coop_server_on_death(this, who);
+ 	// S06-T05: on a co-op client a death is the server's outcome shown here
+ 	// (CoopClientLink); the server already ran its consequences: relations,
+ 	// the scripts' death callbacks and the killer record.
+diff --git a/src/xrGame/xrGame.vcxproj b/src/xrGame/xrGame.vcxproj
+index 02b58da..cf1589a 100644
+--- a/src/xrGame/xrGame.vcxproj
++++ b/src/xrGame/xrGame.vcxproj
+@@ -2005,6 +2005,7 @@
+     <ClInclude Include="CampaignCombatCapture.h" />
+     <ClInclude Include="CoopIdentity.h" />
+     <ClInclude Include="CoopConfig.h" />
++    <ClInclude Include="CoopPersistence.h" />
+     <ClInclude Include="CoopServerHost.h" />
+     <ClInclude Include="CoopReplica.h" />
+     <ClInclude Include="CoopClientLink.h" />
+@@ -4357,6 +4358,10 @@
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
+     </ClCompile>
++    <ClCompile Include="CoopPersistence.cpp">
++      <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
++      <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
++    </ClCompile>
+     <ClCompile Include="CoopServerHost.cpp">
+       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
+       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

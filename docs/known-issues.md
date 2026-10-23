@@ -79,6 +79,10 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
 - **Known cause:** ownership changes are not replicated
   ([S06-T02](validation/S06-T02.md) limits); details in
   [S06-T07](validation/S06-T07.md).
+- **Seen again** (rec-3, 2026-10-23, [S07-T05](validation/S07-T05.md)):
+  after the server restart both clients kept one `sigaret_for_nps` (7228)
+  an NPC consumed (server `despawn … Destroyed` at commit 3418) while every
+  other of their 1,561 replica entities matched the server.
 - **Owner:** S08 (inventory and ownership).
 
 ## Fixed

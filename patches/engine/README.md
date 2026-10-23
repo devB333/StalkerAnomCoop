@@ -232,6 +232,32 @@ and the player-bound abilities that dereferenced `Actor()` on reachable paths
 monster aura strength) are explicit no-ops while it refuses. To be re-exported
 under its final name once built and validated.
 
+`0042-checkpoint-generations-and-journal.patch` (S07-T02/T03/T04/T05) adds the
+campaign server's persistence (`xrGame/CoopPersistence.{h,cpp}`, the
+project-owned `coop_store` library linked through `Coop.props`): recovery at
+`xrCoopServer_Prepare` (the store's pointer, generation verification with
+fallback to G−1, journal reading, the durable `epoch` record before anything
+else), identity restore in the registry (`restore_entities`: the saved
+u16 → EntityId map consumed by the load's `PerformIDgen`; `restore_participant`:
+saved slots and slot generations) and the new `xrCoopServer_AfterServerReady`
+hook in `x_ray.cpp` that assigns each saved actor to its participant by its
+saved id (stage `coop-server-recovered`); replay of committed records at
+`xrCoopServer_Start`; checkpoint generations published at every join, every
+`checkpoint_seconds` and at a clean stop (`publish_generation`: the native save
+under the store's temporary name plus the supplemental record); the synthetic
+`ledger` action (kind 3) through the six transaction phases with the operation
+index and fail-closed reason 5; `coop-ledger.csv` and `coop-checkpoints.csv`;
+profile keys `checkpoint_seconds`, `failpoint`, `failpoint_count`. The client
+gets the ledger program (profile `script = 6`) and, on a connection end, leaves
+its stale level and reconnects with backoff (S07-T05). The Stage 2 tick check
+accepts more than one actor on a serving server. S07-T06 adds the `death`
+record: every `CEntityAlive::Die` of an ALife object on the serving server is
+committed in its tick (`coop-deaths.csv`) and re-applied at recovery by
+killing the entity natively when the checkpoint still holds it alive
+(`apply_death`); profile key `failpoint_fail` makes an armed failpoint fail
+the store call instead of terminating the process (the fail-closed test).
+No gameplay behaviour changes outside co-op.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

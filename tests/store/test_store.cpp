@@ -439,8 +439,13 @@ TEST("store/publish-failures-keep-the-previous-generation")
         "checkpoint:after-manifest", "checkpoint:after-rotation"};
     for (const char* point : points)
     {
+        // The fake native save is written before the point is armed: the
+        // engine writes it outside the store, and the store's own writes
+        // (the supplemental, the manifest, the pointer) are what fail here.
+        write_fake_save(store, 2, 2);
         arm_failpoint(point, 1, false);
-        const bool ok = publish_fake(store, 2, 2, journal, detail);
+        const bool ok = store.publish(2, fake_manifest(2, 2), encode_supplemental(fake_supplemental(2, 2)),
+            kAlifeVersion, journal, detail);
         arm_failpoint("", 0, false);
         CHECK_MSG(!ok, "%s should have failed", point);
         CHECK_MSG(store.current_generation() == 1, "%s moved the pointer", point);

@@ -173,6 +173,10 @@
     {
       "path": "patches/engine/0041-storm-and-emission-visuals.patch",
       "sha256": "2a00639462160a9df19c8ec3813f72b490e4330c5fd56524e1021ccdef6de797"
+    },
+    {
+      "path": "patches/engine/0042-checkpoint-generations-and-journal.patch",
+      "sha256": "976f72012026fe7f6edea73b0335ea3ffab465c4e6b56b64073a9db9ac8d5691"
     }
   ],
   "submodules": [

@@ -335,6 +335,9 @@ enum ActionKind : std::uint16_t
 {
     kActionActivateSlot = 1, // params: u8 inventory slot; the item in it becomes the active one
     kActionReload = 2,       // params: none; reload the active weapon from the actor's own ammo
+    kActionLedger = 3,       // S07-T03: params: s32 delta (|delta| <= 1000); the synthetic critical effect on the
+                             // player's own participant actor's money (docs/persistence-contract.md §10)
+    kActionRespawn = 4,      // S07-T07: params: none; the dead player's confirmed respawn (contract §9)
 };
 
 struct Input

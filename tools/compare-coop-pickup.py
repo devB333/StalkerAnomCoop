@@ -10,7 +10,8 @@ coop-world-final.csv.
 
 Checks:
   one_winner          every race item (fixture round kind 0) has exactly one Accepted claim over
-                      both clients, and the other client's claim was refused ItemTaken (9)
+                      both clients, and the other client's claim was refused ItemTaken (9); a round at
+                      which the store failed closed has every claim refused StoreFailed (5) and no commit
   one_commit_per_item no item entity was committed by two pickup records (any incarnation)
   duplicates_same     every repeat of a claim with the same id returned the original outcome and
                       commit
@@ -23,6 +24,9 @@ Checks:
   clients_agree       each client's final replica shows every pickup item with the server's owner
   confirmed           every applied pickup was confirmed by the server's level actor (none reverted)
   no_pending          no client ended with an unanswered pickup request
+  use_key             each client claimed its share of the race rounds (round % 2 == its slot) through the
+                      real use key (a `key-linked` row: the request came from SendPickUpEvent), none fell
+                      back to a direct intent (with --expect-restart a fallback during the outage is allowed)
 With --expect-restart also:
   restart_recovered   the restarted server recovered and its recovered pickup-state is all ok
 """
@@ -48,7 +52,7 @@ def rows(path):
     if not path.exists():
         return []
     with open(path, newline="") as f:
-        return list(csv.DictReader(f))
+        return list(csv.DictReader(x for x in f if not x.startswith("#")))  # world files start with a comment
 
 
 def main():
@@ -89,13 +93,20 @@ def main():
     report["commits"] = len(commits)
     report["checks"]["one_commit_per_item"] = {"pass": not doubles, "double": doubles}
     owner_of_revision = {c["revision"]: c for c in commits}
+    # A commit killed right after its flush logs no pickup-committed line; the restart's replay rows name it.
+    for d in incarnations:
+        for r in rows(d / "coop-pickups.csv"):
+            if r["phase"] in ("commit", "apply", "replay", "recreated", "noop") and int(r["revision"]):
+                owner_of_revision.setdefault(int(r["revision"]), {"owner_entity": int(r["owner_entity"])})
 
-    # Arrival ticks of the two claims per race item (server csv: commit and refused rows).
+    # Arrival tick of each slot's first claim per race item (server csv: commit and refused rows;
+    # later rows are the repeats).
     ticks = {}
     for d in incarnations:
         for r in rows(d / "coop-pickups.csv"):
             if r["phase"] in ("commit", "refused"):
-                ticks.setdefault(int(r["item_entity"]), []).append((int(r["tick"]), r["phase"], int(r["reason"])))
+                ticks.setdefault(int(r["item_entity"]), {}).setdefault(
+                    int(r["slot"]), (int(r["tick"]), r["phase"], int(r["reason"])))
 
     # Client results.
     clients = sorted(p.name for p in logs.iterdir() if p.is_dir() and re.fullmatch(r"c\d+", p.name))
@@ -130,15 +141,20 @@ def main():
         got = {c: results.get((c, target)) for c in clients}
         accepted = [c for c, r in got.items() if r and r["outcome"] == "1"]
         refused9 = [c for c, r in got.items() if r and r["outcome"] == "2" and r["reason"] == "9"]
-        t = sorted(ticks.get(target, []))
+        t = sorted(ticks.get(target, {}).values())
         race[target] = {"round": info["round"], "accepted": accepted, "refused_taken": refused9,
                         "missing": [c for c, r in got.items() if not r],
                         "arrival_ticks": t, "same_tick": len(t) == 2 and t[0][0] == t[1][0],
                         "tick_gap": (t[1][0] - t[0][0]) if len(t) == 2 else None,
+                        # the store failed closed at this round: every claim refused StoreFailed, nothing committed
+                        "store_failed": bool(got) and all(r and r["outcome"] == "2" and r["reason"] == "5"
+                                                          for r in got.values()) and target not in by_item,
                         "ok": len(accepted) == 1 and len(refused9) == len(clients) - 1}
+        race[target]["ok"] = race[target]["ok"] or race[target]["store_failed"]
     report["race"] = {str(k): v for k, v in race.items()}
     report["checks"]["one_winner"] = {"pass": bool(race) and all(v["ok"] for v in race.values()),
                                       "rounds": len(race),
+                                      "store_failed": sum(1 for v in race.values() if v["store_failed"]),
                                       "same_tick": sum(1 for v in race.values() if v["same_tick"]),
                                       "within_2_ticks": sum(1 for v in race.values()
                                                             if v["tick_gap"] is not None and v["tick_gap"] <= 2),
@@ -180,7 +196,8 @@ def main():
 
     agree = {}
     for c in clients:
-        world = {int(r["entity"]): r for r in rows(logs / c / "coop-world-final.csv")}
+        # rows outside the replica set (in_set 0) are ids the client knew before a restart
+        world = {int(r["entity"]): r for r in rows(logs / c / "coop-world-final.csv") if r.get("in_set") == "1"}
         bad = []
         seen = 0
         for item, s in final.items():
@@ -200,18 +217,37 @@ def main():
     report["checks"]["clients_agree"] = {"pass": all(v["items_seen"] > 0 and not v["bad"] for v in agree.values())
                                          and bool(agree), "clients": agree}
 
-    confirmed = sum(1 for x in every if " pickup-confirmed " in x)
+    # Per incarnation; a terminated one may end between an apply and its confirmation (the restart
+    # re-applies it), the last one may not.
+    per = []
+    for log, d in zip(server_logs, incarnations, strict=True):
+        applied = sum(1 for x in log if (" pickup-apply " in x or " pickup-replay " in x) and " ok=1" in x) + \
+            sum(1 for x in log if "-recreated " in x and " ok=1" in x)
+        per.append({"incarnation": d.name, "applied": applied,
+                    "confirmed": sum(1 for x in log if " pickup-confirmed " in x)})
     reverted = [x.split(" ", 1)[1] for x in every if " pickup-reverted " in x or " pickup-unconfirmed " in x]
-    applied = sum(1 for x in every if (" pickup-apply " in x or " pickup-replay " in x) and " ok=1" in x) + \
-        sum(1 for x in every if "-recreated " in x and " ok=1" in x)
-    report["checks"]["confirmed"] = {"pass": confirmed >= applied and not reverted, "applied": applied,
-                                     "confirmed": confirmed, "reverted": reverted}
+    report["checks"]["confirmed"] = {"pass": bool(per) and per[-1]["confirmed"] >= per[-1]["applied"] and
+                                     all(p["confirmed"] >= p["applied"] - 1 for p in per) and not reverted,
+                                     "incarnations": per, "reverted": reverted}
     report["checks"]["no_pending"] = {"pass": all(v == 0 for v in pending_end.values()), "pending": pending_end}
+
+    keys = {}
+    for c in clients:
+        crows = rows(logs / c / "coop-pickup-client.csv")
+        expected = {int(r["target"]) for r in crows if r["event"] == "round" and r["kind"] == "0"
+                    and int(r["round"]) % 2 == int(r["slot"])}
+        linked = {int(r["target"]) for r in crows if r["event"] == "key-linked"}
+        missed = [x.split(" ", 1)[1] for x in lines(logs / c / f"coop-{c}.log") if " pickup-key-missed " in x]
+        keys[c] = {"expected": len(expected), "linked": len(linked & expected), "missed": missed}
+    report["checks"]["use_key"] = {
+        "pass": bool(keys) and all(v["linked"] > 0 and (a.expect_restart or (not v["missed"] and
+                                                                          v["linked"] == v["expected"]))
+                                   for v in keys.values()), "clients": keys}
 
     if a.expect_restart:
         second = server_logs[-1] if len(server_logs) > 1 else []
         recovered = state(second, "recovered")
-        rec = [x.split(" ", 1)[1] for x in second if " recovery-" in x][:6]
+        rec = [x.split(" ", 1)[1] for x in second if " recovery-" in x]
         replay = [x.split(" ", 1)[1] for x in second if " pickup-replay" in x]
         index = [x.split(" ", 1)[1] for x in second if " pickup-duplicate " in x]
         report["restart"] = {"recovery": rec, "replay": replay, "answered_from_index": index}

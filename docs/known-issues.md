@@ -113,7 +113,12 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   after the server restart both clients kept one `sigaret_for_nps` (7228)
   an NPC consumed (server `despawn … Destroyed` at commit 3418) while every
   other of their 1,561 replica entities matched the server.
-- **Owner:** S08 (inventory and ownership).
+- **Narrowed** (S08-T01, patch 0045, 2026-10-24): the server now sends
+  every owner change of a published entity to both clients (`Reparent`,
+  protocol v1.6), NPC takes and drops included. The S08-T01 runs had no NPC
+  take near the players, so whether this removes K4 (and what a client does
+  with an NPC's items when the NPC goes offline) is untested.
+- **Owner:** S08-T02/T03 (inventory and ownership).
 
 ### K5. The other player's lean was not shown
 

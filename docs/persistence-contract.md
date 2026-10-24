@@ -215,7 +215,7 @@ record:      length u32 (payload bytes), CRC-32 u32 (of the rest of the record),
              revision u64, payload
 ```
 
-Record kinds in Stage 7:
+Record kinds (Stage 7, and Stage 8 from S08-T01):
 
 | Kind | Payload | Adapter (apply at commit; re-apply at recovery) |
 |---|---|---|
@@ -223,6 +223,7 @@ Record kinds in Stage 7:
 | `ledger` (synthetic, S07-T03) | slot, player id, operation id, actor entity, delta s32, money after u32 | sets the participant actor's money to `money after` on its live object and ALife entity; idempotent |
 | `death` (S07-T06/T07) | slot, actor entity, killer entity (0 none), position | if the entity's live object is alive, kill it natively (`KillEntity`) without a killer when the killer is gone; if already dead, nothing |
 | `respawn` (S07-T07) | slot, old actor entity, new actor entity, new u16, position, vertex, graph | if the slot's live actor is the old one or none, spawn the new actor as the server does at a join, bind it to the recorded entity id and the slot; if the recorded entity already exists, nothing |
+| `pickup` (S08-T01) | slot, player id, operation id, owner (participant actor) entity, item entity, item u16 at commit, section, position, the item's native spawn state (`Spawn_Write`, M_SPAWN header and section) | **absolute post-state**: the item entity ends in the owner entity's inventory from wherever it is now. Already there: nothing. Held by another parent (an NPC, a corpse or a box after a rollback): `GE_OWNERSHIP_REJECT` from it, then `GE_OWNERSHIP_TAKE` to the owner. Only offline: the offline copy is released and the item is re-created. Absent (the checkpoint predates its spawn): re-created from the recorded spawn state in the owner's inventory under the recorded EntityId (`expect_entity`). The owner's level object not there yet (a respawned owner at recovery): deferred and retried every tick for up to 10 s. The owner entity missing: the adapter fails (the start stops) |
 | `entity` / `tombstone` | entity id, u16 at creation, section | definitions for durable entities created or destroyed after `R_G` (used by `respawn`; Stage 8 items) |
 
 Reading rules: a record whose length runs past the end of the file, or

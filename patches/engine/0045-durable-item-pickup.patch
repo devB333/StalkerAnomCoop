@@ -1,3 +1,17 @@
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index f06f70c..9444add 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -440,6 +440,9 @@ public:
+ 	virtual bool feel_touch_on_contact(CObject* O);
+ 
+ 	CGameObject* ObjectWeLookingAt() { return m_pObjectWeLookingAt; }
++	// S08-T01: the co-op race driver holds the use key as a player does (with
++	// g_multi_item_pickup, UpdateCL sets pickup mode while the key is down)
++	void coop_hold_use_key() { m_bPickupMode = true; }
+ 	CInventoryOwner* PersonWeLookingAt() { return m_pPersonWeLookingAt; }
+ 	LPCSTR GetDefaultActionForObject() { return *m_sDefaultObjAction; }
+ protected:
 diff --git a/src/xrGame/CampaignIdentity.cpp b/src/xrGame/CampaignIdentity.cpp
 index 534e4c8..81faedb 100644
 --- a/src/xrGame/CampaignIdentity.cpp
@@ -31,10 +45,18 @@ index b916ae3..74908dd 100644
  private:
  	struct EngineBinding
 diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
-index 5e861ab..ebc7932 100644
+index 5e861ab..5db239a 100644
 --- a/src/xrGame/CoopClientLink.cpp
 +++ b/src/xrGame/CoopClientLink.cpp
-@@ -293,6 +293,31 @@ struct Link
+@@ -42,6 +42,7 @@
+ #include "CustomMonster.h"
+ #include "ai/crow/ai_crow.h"
+ #include "ai/stalker/ai_stalker.h"
++#include "HUDManager.h" // S08-T01: the crosshair pick
+ #include "ai/monsters/basemonster/base_monster.h" // S06-T05
+ #include "Inventory.h"
+ #include "Weapon.h"
+@@ -293,6 +294,34 @@ struct Link
  	u32 respawn_results = 0, respawn_refusals = 0, rejoins = 0;
  	bool early_respawn_sent = false; // the driver's one request while alive (expected refused)
  	u32 live_since_ms = 0;
@@ -56,17 +78,20 @@ index 5e861ab..ebc7932 100644
 +		u64 claim_tick;
 +		u64 operation, retry_operation;
 +		bool dup_sent;
++		bool key; // claimed through the real use key (the player's path), not a direct intent
++		u32 key_since_ms, key_presses;
++		bool key_down;
 +	};
 +	xr_vector<PickupRace> pickup_races;
 +	u32 pickup_counter = 0;
 +	u64 pickup_presses = 0, pickup_requests = 0, pickup_accepted = 0, pickup_refused = 0, pickup_retries = 0;
-+	u64 pickup_late = 0;
++	u64 pickup_late = 0, pickup_key_linked = 0, pickup_key_missed = 0;
 +	u64 reparents_applied = 0, reparents_noop = 0, reparents_failed = 0, reparents_unknown = 0;
 +	FILE* pickup_csv = nullptr;
  };
  
  enum World : u8
-@@ -711,12 +736,16 @@ void apply_despawn(const coop::proto::Despawn& d)
+@@ -711,12 +740,16 @@ void apply_despawn(const coop::proto::Despawn& d)
  	}
  }
  
@@ -83,7 +108,7 @@ index 5e861ab..ebc7932 100644
  }
  
  // What the replica holds, for comparison with the server's lifecycle log.
-@@ -729,8 +758,8 @@ void write_world_summary(LPCSTR tag)
+@@ -729,8 +762,8 @@ void write_world_summary(LPCSTR tag)
  	FILE* file = fopen(path, "w");
  	if (!file)
  		return;
@@ -94,7 +119,7 @@ index 5e861ab..ebc7932 100644
  	u32 in_set = 0, objects = 0;
  	for (const auto& r : g_link->refs)
  	{
-@@ -739,8 +768,17 @@ void write_world_summary(LPCSTR tag)
+@@ -739,8 +772,17 @@ void write_world_summary(LPCSTR tag)
  		const bool online_object = g_pGameLevel && Level().Objects.net_Find(r.first) != nullptr;
  		in_set += wanted ? 1 : 0;
  		objects += online_object && wanted ? 1 : 0;
@@ -114,7 +139,7 @@ index 5e861ab..ebc7932 100644
  	}
  	fclose(file);
  	g_link->log.line("world-summary tag=%s applied=%I64u set=%u present=%u level_objects=%u reconciled=%I64u "
-@@ -760,6 +798,7 @@ void log_encounter();
+@@ -760,6 +802,7 @@ void log_encounter();
  void release_presentation(); // S06-T08
  void log_weather_client();
  void respawn_frame(); // S07-T07
@@ -122,7 +147,7 @@ index 5e861ab..ebc7932 100644
  
  void world_frame()
  {
-@@ -846,6 +885,7 @@ void world_frame()
+@@ -846,6 +889,7 @@ void world_frame()
  		present_actors();
  		run_script();
  		respawn_frame(); // S07-T07
@@ -130,7 +155,7 @@ index 5e861ab..ebc7932 100644
  		sample_input();
  		log_actors();
  		log_entities();
-@@ -1389,6 +1429,12 @@ void ledger_result(const coop::proto::ActionResult& result); // S07-T03
+@@ -1389,6 +1433,12 @@ void ledger_result(const coop::proto::ActionResult& result); // S07-T03
  void respawn_frame(); // S07-T07
  void respawn_result(const coop::proto::ActionResult& result); // S07-T07
  void on_rejoin(const coop::proto::CampaignEvent& event); // S07-T07
@@ -143,7 +168,7 @@ index 5e861ab..ebc7932 100644
  
  void run_script()
  {
-@@ -1419,6 +1465,8 @@ void run_script()
+@@ -1419,6 +1469,8 @@ void run_script()
  		return run_script5(t);
  	if (g_link->config.script == 6)
  		return run_script6(t);
@@ -152,7 +177,7 @@ index 5e861ab..ebc7932 100644
  	// S06-T02: the nearest NPC stalker, 26 s in: face it, log its animation
  	// blends and remote flag, screenshot it.
  	if (g_link->npc_phase == 0 && t >= 26000)
-@@ -2931,12 +2979,14 @@ void on_message(const coop::session::ClientEvent& e)
+@@ -2931,12 +2983,14 @@ void on_message(const coop::session::ClientEvent& e)
  			case 3: on_thunderbolt(*event); break;
  			case 4: on_presentation(*event); break;
  			case 5: on_rejoin(*event); break; // S07-T07
@@ -168,7 +193,7 @@ index 5e861ab..ebc7932 100644
  	{
  		if (g_link->world == WorldLive && g_pGameLevel && ai().get_alife())
  			apply_lifecycle(e.message.body);
-@@ -2952,6 +3002,8 @@ void on_message(const coop::session::ClientEvent& e)
+@@ -2952,6 +3006,8 @@ void on_message(const coop::session::ClientEvent& e)
  			ledger_result(*result);
  		if (result->operation_id == g_link->respawn_operation || (result->operation_id >> 48) == 0x7e5f)
  			respawn_result(*result);
@@ -177,7 +202,7 @@ index 5e861ab..ebc7932 100644
  		if (g_link->teleport_operation && result->operation_id == g_link->teleport_operation)
  		{
  			g_link->teleport_outcome = u32(result->outcome);
-@@ -3197,6 +3249,248 @@ bool respawn_key_press(int key)
+@@ -3197,6 +3253,319 @@ bool respawn_key_press(int key)
  	return true;
  }
  
@@ -333,20 +358,91 @@ index 5e861ab..ebc7932 100644
 +	race.operation = 0;
 +	race.retry_operation = 0;
 +	race.dup_sent = false;
++	// one client per race round claims with the use key (alternating by slot)
++	race.key = race.kind == 0 && (race.round % 2) == g_link->local_slot;
++	race.key_since_ms = 0;
++	race.key_presses = 0;
++	race.key_down = false;
 +	g_link->pickup_races.push_back(race);
 +	pickup_csv_line("round", race.round, race.kind, 0, race.target, 0, 0, race.claim_tick);
 +	g_link->log.line("pickup-round round=%u kind=%u target=%I64u/%u claim_tick=%I64u", race.round, race.kind,
 +		race.target.id, race.target.generation, race.claim_tick);
 +}
 +
++// The use-key claim: the camera on the item's center from this actor's eye
++// and the USE key pressed and held as a player would: the press
++// (CActor::IR_OnKeyboardPress kUSE) and, every frame while held, what the
++// held key does under g_multi_item_pickup (CActor::UpdateCL sets pickup mode
++// while iGetAsyncKeyState reports it down, Actor.cpp 1134-1142). The engine
++// then takes the object under the crosshair or the COD-mode nearest item
++// (CActor::PickupModeUpdate / PickupModeUpdate_COD, Actor_Feel.cpp) through
++// SendPickUpEvent. Released when the request is made; after 2 s without one
++// the round falls back to a direct intent.
++void claim_with_key(Link::PickupRace& race, u32 now)
++{
++	const auto it = g_link->by_entity.find(race.target.id);
++	CObject* item = it != g_link->by_entity.end() ? Level().Objects.net_Find(it->second) : nullptr;
++	if (!race.key_since_ms)
++		race.key_since_ms = now;
++	if (!g_actor)
++		return;
++	if (item)
++	{
++		Fvector center;
++		item->Center(center);
++		Fvector to = Fvector().set(center).sub(g_actor->Cameras().Position());
++		if (to.magnitude() > EPS_L)
++		{
++			to.normalize();
++			float h, p;
++			to.getHP(h, p);
++			g_actor->cam_Active()->yaw = -h;
++			g_actor->cam_Active()->pitch = -p;
++		}
++	}
++	if (!race.key_down)
++	{
++		++race.key_presses;
++		race.key_down = true;
++		g_actor->IR_OnKeyboardPress(kUSE);
++	}
++	g_actor->coop_hold_use_key();
++	if (!race.operation && now - race.key_since_ms >= 2000)
++	{
++		++g_link->pickup_key_missed;
++		const collide::rq_result& rq = HUD().GetRQ();
++		Fvector center = {0.f, 0.f, 0.f};
++		if (item)
++			item->Center(center);
++		g_link->log.line("pickup-key-missed round=%u target=%I64u/%u item=%d looking_at=%d pick=%d pick_range=%.2f "
++			"eye_distance=%.2f", race.round, race.target.id, race.target.generation, item ? int(item->ID()) : -1,
++			g_actor->ObjectWeLookingAt() ? int(g_actor->ObjectWeLookingAt()->ID()) : -1, rq.O ? int(rq.O->ID()) : -1,
++			rq.range, item ? center.distance_to(g_actor->Cameras().Position()) : -1.f);
++		g_actor->IR_OnKeyboardRelease(kUSE);
++		race.key_down = false;
++		race.operation = request_pickup(race.target, race.round, race.kind, false, "key-fallback");
++	}
++}
++
 +void run_script7(u32 t)
 +{
 +	if (!g_link->clock.ready())
 +		return;
-+	const double server_ms = g_link->clock.server_now(double(g_link->wall.GetElapsed_ms()));
++	const u32 now = g_link->wall.GetElapsed_ms();
++	const double server_ms = g_link->clock.server_now(double(now));
 +	for (Link::PickupRace& race : g_link->pickup_races)
 +		if (!race.operation && server_ms >= double(race.claim_tick) * double(kServerTickMs))
-+			race.operation = request_pickup(race.target, race.round, race.kind, false, "race");
++		{
++			if (race.key)
++				claim_with_key(race, now);
++			else
++				race.operation = request_pickup(race.target, race.round, race.kind, false, "race");
++		}
++		else if (race.key_down && g_actor)
++		{
++			g_actor->IR_OnKeyboardRelease(kUSE);
++			race.key_down = false;
++		}
 +}
 +
 +// The lifecycle's owner change, through the engine's own ownership events on
@@ -426,7 +522,7 @@ index 5e861ab..ebc7932 100644
  // ------------------------------------------------------------ S07-T03
  // Profile script 6: the ledger program (docs/persistence-contract.md §10).
  // Every 2 s a ledger intent with the next delta of a fixed sequence and a
-@@ -3286,7 +3580,7 @@ void ledger_result(const coop::proto::ActionResult& result)
+@@ -3286,7 +3655,7 @@ void ledger_result(const coop::proto::ActionResult& result)
  		}
  	// Other programs' operations (small ids: the weapon actions) are not the
  	// ledger's; a ledger id carries the UTC clock in its high bits.
@@ -435,7 +531,7 @@ index 5e861ab..ebc7932 100644
  		return;
  	// A result for an operation no longer pending: a duplicate answer.
  	++g_link->ledger_late;
-@@ -3355,6 +3649,27 @@ namespace campaign
+@@ -3355,6 +3724,40 @@ namespace campaign
  bool coop_client_active() { return g_link && g_link->active; }
  bool coop_client_key_press(int key) { return respawn_key_press(key); } // S07-T07
  
@@ -456,22 +552,37 @@ index 5e861ab..ebc7932 100644
 +	for (const Link::PickupPending& p : g_link->pickup_pending)
 +		if (p.target == ref->second)
 +			return true; // already asked
-+	request_pickup(ref->second, 0xffffffff, 0xffffffff, true, "player");
++	const u64 operation = request_pickup(ref->second, 0xffffffff, 0xffffffff, true, "player");
++	// the race driver's use-key claim (script 7): this request is that round's claim
++	for (Link::PickupRace& race : g_link->pickup_races)
++		if (race.key && !race.operation && race.target == ref->second)
++		{
++			race.operation = operation;
++			++g_link->pickup_key_linked;
++			Link::PickupPending& p = g_link->pickup_pending.back();
++			p.round = race.round;
++			p.kind = race.kind;
++			pickup_csv_line("key-linked", race.round, race.kind, operation, race.target, 0, 0, race.key_presses);
++			g_link->log.line("pickup-key-linked round=%u operation=%I64x presses=%u ms=%u", race.round, operation,
++				race.key_presses, g_link->wall.GetElapsed_ms() - race.key_since_ms);
++		}
 +	return true;
 +}
 +
  void coop_client_app_start()
  {
  	string_path path;
-@@ -3440,6 +3755,11 @@ void coop_client_frame()
+@@ -3440,6 +3843,13 @@ void coop_client_frame()
  		{
  			g_link->quitting = true;
  			g_link->log.line("client-exit reason=%s", stop_file ? "stop-file" : "time");
 +			g_link->log.line("pickup-summary presses=%I64u requests=%I64u accepted=%I64u refused=%I64u retries=%I64u "
-+				"late=%I64u pending=%u reparents=%I64u/%I64u/%I64u/%I64u", g_link->pickup_presses, g_link->pickup_requests,
++				"late=%I64u pending=%u reparents=%I64u/%I64u/%I64u/%I64u key_linked=%I64u key_missed=%I64u",
++				g_link->pickup_presses, g_link->pickup_requests,
 +				g_link->pickup_accepted, g_link->pickup_refused, g_link->pickup_retries, g_link->pickup_late,
 +				u32(g_link->pickup_pending.size()), g_link->reparents_applied, g_link->reparents_noop,
-+				g_link->reparents_failed, g_link->reparents_unknown);
++				g_link->reparents_failed, g_link->reparents_unknown, g_link->pickup_key_linked,
++				g_link->pickup_key_missed);
  			log_status("final");
  			if (g_link->world == WorldLive)
  			{
@@ -610,7 +721,7 @@ index 9b053bd..ceb4560 100644
  const u16 kActionReasonStoreFailed = 5;
  
 diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
-index dff112b..8343326 100644
+index dff112b..47e905d 100644
 --- a/src/xrGame/CoopServerHost.cpp
 +++ b/src/xrGame/CoopServerHost.cpp
 @@ -48,6 +48,10 @@
@@ -633,7 +744,7 @@ index dff112b..8343326 100644
  };
  
  // S06-T02: the last pose the host saw for each physics object, to tell the
-@@ -279,6 +285,33 @@ struct Host
+@@ -279,6 +285,40 @@ struct Host
  	u64 ledger_commits = 0, ledger_duplicates = 0, ledger_rejected = 0, ledger_store_failed = 0, ledger_replayed = 0;
  	u64 save_ms_total = 0, publish_ms_total = 0;
  	u32 save_ms_max = 0;
@@ -663,11 +774,18 @@ index dff112b..8343326 100644
 +	{
 +		u64 both_since = 0;
 +		u32 round = 0;
++		// a spawned round item waits for its publication: going online turns
++		// its generation, so the round names the ref the clients were sent
++		u16 waiting = 0xffff;
++		u8 waiting_kind = 0;
++		u32 waiting_round = 0;
++		u64 waiting_since = 0;
++		Fvector waiting_at;
 +	} pickup_fixture;
  };
  
  Host* g_host = nullptr;
-@@ -712,11 +745,46 @@ void track_lifecycle()
+@@ -712,11 +752,46 @@ void track_lifecycle()
  		}
  		spawn.commit_id = ++g_host->commit;
  		published.commit = spawn.commit_id;
@@ -714,7 +832,7 @@ index dff112b..8343326 100644
  }
  
  void flush_outbox(PlayerLink& link)
-@@ -734,6 +802,8 @@ void flush_outbox(PlayerLink& link)
+@@ -734,6 +809,8 @@ void flush_outbox(PlayerLink& link)
  			link.sent_commit = _max(link.sent_commit, spawn->commit_id);
  		else if (const auto* despawn = std::get_if<coop::proto::Despawn>(&link.outbox.front()))
  			link.sent_commit = _max(link.sent_commit, despawn->commit_id);
@@ -723,7 +841,7 @@ index dff112b..8343326 100644
  		link.outbox.pop_front();
  		++link.events_sent;
  	}
-@@ -2672,6 +2742,523 @@ u16 take_respawn(PlayerLink& link, const coop::proto::ActionIntent& intent, coop
+@@ -2672,6 +2749,575 @@ u16 take_respawn(PlayerLink& link, const coop::proto::ActionIntent& intent, coop
  	return 0;
  }
  
@@ -1162,6 +1280,9 @@ index dff112b..8343326 100644
 +// nothing (gone).
 +const char* kRaceSections[] = {"medkit", "bandage", "conserva", "wpn_pm", "ammo_9x18_fmj", "vodka", "bread", "wpn_knife"};
 +
++void announce_pickup_round(u32 round, u8 kind, const coop::proto::EntityRef& target, u16 spawned, const Fvector& at,
++	CActor* const* actors, u32 attached);
++
 +void pickup_fixtures()
 +{
 +	const CoopConfig& config = g_host->config;
@@ -1169,17 +1290,42 @@ index dff112b..8343326 100644
 +		return;
 +	Host::PickupFixture& f = g_host->pickup_fixture;
 +	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
 +	u32 attached = 0;
 +	for (PlayerLink& link : g_host->links)
 +		if (link.bound && client_in_world(link) && attached < 2)
 +			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
 +				actors[attached++] = actor;
++			}
 +	if (!f.both_since)
 +	{
 +		if (attached < 2)
 +			return;
 +		f.both_since = g_host->tick;
 +		g_host->log.line("fixture-pickup both-attached tick=%I64u", g_host->tick);
++	}
++	if (f.waiting != 0xffff)
++	{
++		const auto p = g_host->published.find(f.waiting);
++		bool delivered = p != g_host->published.end() && p->second.sent;
++		for (PlayerLink& link : g_host->links)
++			if (delivered && link.bound && client_in_world(link) && link.sent_commit < p->second.commit)
++				delivered = false; // its Spawn has not gone out to this client yet
++		if (delivered)
++		{
++			const u16 id = f.waiting;
++			f.waiting = 0xffff;
++			announce_pickup_round(f.waiting_round, f.waiting_kind, p->second.ref, id, f.waiting_at, actors, attached);
++		}
++		else if (g_host->tick - f.waiting_since > 10 * 50)
++		{
++			g_host->log.line("fixture-pickup-round round=%u kind=%u unpublished id=%u", f.waiting_round,
++				u32(f.waiting_kind), u32(f.waiting));
++			f.waiting = 0xffff;
++		}
++		return;
 +	}
 +	const u32 total = config.pickup_rounds + 3;
 +	if (f.round >= total || attached < 2 || !actors[0]->g_Alive() || !actors[1]->g_Alive())
@@ -1193,6 +1339,14 @@ index dff112b..8343326 100644
 +	u16 spawned = kNoEngineId;
 +	Fvector at;
 +	at.add(actors[0]->Position(), actors[1]->Position()).mul(0.5f);
++	if (kind == 0)
++	{
++		// 30 % of the way from the client that claims this round with the use
++		// key (round % 2 == its slot): the engine's crosshair pick reaches 2 m
++		// from the eye; the other client's claim stays within the server's reach
++		const u32 keyed = slots[1] == u8(round % 2) ? 1 : 0;
++		at.lerp(actors[keyed]->Position(), actors[1 - keyed]->Position(), 0.3f);
++	}
 +	if (kind <= 1)
 +	{
 +		if (kind == 1)
@@ -1220,6 +1374,14 @@ index dff112b..8343326 100644
 +			return;
 +		}
 +		spawned = item->ID;
++		f.waiting = spawned;
++		f.waiting_kind = kind;
++		f.waiting_round = round;
++		f.waiting_since = g_host->tick;
++		f.waiting_at = at;
++		g_host->log.line("fixture-pickup-spawned round=%u kind=%u id=%u section=%s", round, u32(kind), u32(spawned),
++			section);
++		return;
 +	}
 +	else if (kind == 2)
 +		entity_ref_of(u16(actors[1]->ID()), target);
@@ -1228,6 +1390,13 @@ index dff112b..8343326 100644
 +		target.id = 0x7fffffffffffull;
 +		target.generation = 1;
 +	}
++	announce_pickup_round(round, kind, target, spawned, at, actors, attached);
++}
++
++// Tells both clients the round's target and the server tick to claim it at.
++void announce_pickup_round(u32 round, u8 kind, const coop::proto::EntityRef& target, u16 spawned, const Fvector& at,
++	CActor* const* actors, u32 attached)
++{
 +	const u64 claim_tick = g_host->tick + 100; // 2 s: the item's Spawn reaches both clients first
 +	std::vector<u8> payload;
 +	put_u8(payload, u8(round));
@@ -1241,13 +1410,14 @@ index dff112b..8343326 100644
 +	broadcast_event(6, payload);
 +	g_host->log.line("fixture-pickup-round round=%u kind=%u id=%u target=%I64u/%u claim_tick=%I64u pos=%.2f,%.2f,%.2f "
 +		"d1=%.2f d2=%.2f", round, u32(kind), u32(spawned), target.id, target.generation, claim_tick, VPUSH(at),
-+		at.distance_to(actors[0]->Position()), at.distance_to(actors[1]->Position()));
++		attached > 0 ? at.distance_to(actors[0]->Position()) : -1.f,
++		attached > 1 ? at.distance_to(actors[1]->Position()) : -1.f);
 +}
 +
  u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
  {
  	if (intent.kind != coop::proto::kActionActivateSlot && intent.kind != coop::proto::kActionReload)
-@@ -3084,6 +3671,8 @@ void on_message(const coop::session::SessionEvent& e)
+@@ -3084,6 +3730,8 @@ void on_message(const coop::session::SessionEvent& e)
  		}
  		else if (intent->kind == coop::proto::kActionRespawn)
  			reason = take_respawn(*link, *intent, result); // S07-T07
@@ -1256,7 +1426,7 @@ index dff112b..8343326 100644
  		else
  			reason = take_action(*link, *intent);
  		if (reason)
-@@ -3099,6 +3688,23 @@ void on_message(const coop::session::SessionEvent& e)
+@@ -3099,6 +3747,23 @@ void on_message(const coop::session::SessionEvent& e)
  		g_host->server->send(e.player, coop::proto::Message(result));
  		if (intent->kind == coop::proto::kActionLedger)
  			coop::store::failpoint("commit:after-ack");
@@ -1280,7 +1450,7 @@ index dff112b..8343326 100644
  		if (intent->kind == coop::proto::kActionRespawn && !reason)
  		{
  			// S07-T07: the player's entity changed: the client rejoins for a
-@@ -3559,6 +4165,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
+@@ -3559,6 +4224,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
  		g_host->ledger_csv = fopen(ledger, "w");
  		if (g_host->ledger_csv)
  			fprintf(g_host->ledger_csv, "utc_ms,tick,revision,slot,operation,delta,money_after,phase\n");
@@ -1292,7 +1462,7 @@ index dff112b..8343326 100644
  		string_path deaths;
  		FS.update_path(deaths, "$logs$", "coop-deaths.csv");
  		g_host->deaths_csv = fopen(deaths, "w");
-@@ -3623,6 +4234,27 @@ extern "C" bool __cdecl xrCoopServer_Start()
+@@ -3623,6 +4293,27 @@ extern "C" bool __cdecl xrCoopServer_Start()
  			++g_host->respawns_replayed;
  			continue;
  		}
@@ -1320,7 +1490,7 @@ index dff112b..8343326 100644
  		if (record.kind == coop::store::kRecordDeath)
  		{
  			DeathRecord death;
-@@ -3714,9 +4346,16 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+@@ -3714,9 +4405,16 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
  	apply_inputs();
  	// S05-T02: lifecycle, the server-controlled change fixture, world streams.
  	track_lifecycle();
@@ -1337,7 +1507,7 @@ index dff112b..8343326 100644
  	encounter_fixtures();
  	encounter_record();
  	poll_publications(false); // S07-T08: the worker's results and the joins waiting on them
-@@ -3784,6 +4423,7 @@ extern "C" void __cdecl xrCoopServer_Stop()
+@@ -3784,6 +4482,7 @@ extern "C" void __cdecl xrCoopServer_Stop()
  			poll_publications(true);
  		}
  		log_status("final");
@@ -1345,7 +1515,7 @@ index dff112b..8343326 100644
  		g_host->events.clear();
  		g_host->server->shutdown(1000, g_host->events);
  		for (const coop::session::SessionEvent& e : g_host->events)
-@@ -3819,6 +4459,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+@@ -3819,6 +4518,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
  		if (g_host->deaths_csv)
  			fclose(g_host->deaths_csv);
  		g_host->deaths_csv = nullptr;

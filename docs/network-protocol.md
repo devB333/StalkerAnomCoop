@@ -62,13 +62,13 @@ Cap message sizes, command rates, outstanding operations, entity counts and resy
 
 Implemented 2026-10-20 (S04-T03, [validation](validation/S04-T03.md)) in
 `protocol/include/coop/proto/` (`wire.h`, `messages.h`, `guard.h`) and
-`protocol/src/proto/`. Version **1.4** (1.0 in S04-T03; 1.1 in S05-T01 raised the
+`protocol/src/proto/`. Version **1.6** (1.0 in S04-T03; 1.1 in S05-T01 raised the
 Spawn state to 16 KiB for native spawn packets, lifecycle messages to 20 KiB
 with a 1 MiB backlog, and the send buffer to 2 MiB; **1.2** in S06-T02 gave
 Snapshot its own id, rotation and removal components and delta semantics
 against acknowledged baselines, and SnapshotAck a missing-baseline field; **1.3** in S06-T03 added the aim
 component; **1.4** in S06-T04 added the weapon component, the fire button and
-the first two action kinds: both
+the first two action kinds; 1.5 in S06-T07 the jump and lean buttons; **1.6** in S08-T01 the pickup action (kind 5), the named refusal reasons and the Reparent lifecycle message: both
 peers come from one build, so the layout change is not negotiated). The code is the reference; this
 section is its summary.
 
@@ -132,10 +132,11 @@ Welcome, so the wait is one round trip.
 | Welcome | major (must match), negotiated minor, campaign/session/player/party ids, slot, slot generation, authority epoch, server tick, tick and snapshot rates, resume token | ids non-zero; slot < 8; epoch ≥ 1; 1 ≤ snapshot rate ≤ tick rate ≤ 240; token 16–64 |
 | Reject | reason, server major/minor, detail | reason ≠ 0 (unknown values kept); detail ≤ 128 |
 | Heartbeat | nonce, echo, sent tick | nonce ≠ 0 |
-| ActionIntent | operation id, kind, target ref, expected revision, params | operation id ≠ 0; kind 1–1023; params ≤ 256 (decoded per kind, with its own bounds). Kinds (v1.4): 1 activate slot (params: one byte, the slot: 0 holsters, 1–6 must hold an item), 2 reload (no params); 3 ledger (S07-T03, the synthetic critical effect of [persistence contract](persistence-contract.md) §10: params `s32 delta`, abs ≤ 1000, on the player's own participant actor's money; committed to the journal before apply and acknowledgement; a known operation id returns its stored outcome and commit; reason 5 `StoreFailed` when the store has failed closed); 4 respawn (S07-T07, contract §9: no params; the dead player's confirmed respawn; reason 6 while the actor is alive, 7 with no respawn point; a `respawn` journal record precedes the spawn; the result is followed by CampaignEvent kind 5); any other kind is refused with reason 1 |
+| ActionIntent | operation id, kind, target ref, expected revision, params | operation id ≠ 0; kind 1–1023; params ≤ 256 (decoded per kind, with its own bounds). Kinds (v1.4): 1 activate slot (params: one byte, the slot: 0 holsters, 1–6 must hold an item), 2 reload (no params); 3 ledger (S07-T03, the synthetic critical effect of [persistence contract](persistence-contract.md) §10: params `s32 delta`, abs ≤ 1000, on the player's own participant actor's money; committed to the journal before apply and acknowledgement; a known operation id returns its stored outcome and commit; reason 5 `StoreFailed` when the store has failed closed); 4 respawn (S07-T07, contract §9: no params; the dead player's confirmed respawn; reason 6 while the actor is alive, 7 with no respawn point; a `respawn` journal record precedes the spawn; the result is followed by CampaignEvent kind 5); 5 pickup (v1.6, S08-T01, [contract](persistence-contract.md) §6 `pickup`: target the item, no params; the server validates on its state at that tick (attached session, own actor alive, the target a current online inventory item with no owner, one the engine lets an actor take, within 2 m + 0.5 m of the actor's feet-to-eyes axis), commits a `pickup` record, applies it through the engine's ownership event and acknowledges; a known operation id returns its stored outcome); any other kind is refused with reason 1. Named reasons (v1.6, `ActionReason`): 1 unsupported, 2 malformed, 3 no actor, 4 nothing, 5 store failed, 6 alive, 7 no point, 8 item gone, 9 item taken (another player won it), 10 out of reach, 11 not takeable |
 | ActionResult | operation id, outcome, reason, commit id, tick, revision | outcome 1–3; accepted ⇔ reason 0 (duplicate: either) |
 | Spawn | entity ref, archetype, level, transform, parent ref, commit id, state | archetype 1–64; parent ≠ self; state ≤ 16,384 (opaque, decoded later with bounds) |
 | Despawn | entity ref, reason, commit id | reason 1–3 |
+| Reparent (v1.6, 0x0023) | entity ref, parent ref (none: on the ground), transform, commit id | parent ≠ self; sent on the lifecycle channel in commit order with Spawn and Despawn for **every** parent change the server sees (a player's pickup, an NPC taking or dropping an item) |
 | CampaignEvent | event id, kind, revision, payload | ids non-zero; payload ≤ 1,024. Kinds (application level, server to client, decoded with bounds by the client): 1 world clock (S05-T03: u64 game ms, f32 time factor, weather name), 2 environment (S06-T08: wfx flag, f32 wfx time, cycle, weather, the two blended descriptors as section + f32 exec time), 3 thunderbolt (S06-T08: collection, u32 entry, f32 life, longitude, distance, tilt ×3, second flag), 4 presentation (S06-T08: u8 kind, u16 object, u32 handle, f32 position ×3, f32 value, u32 flags, u32 serial, detail string), 5 rejoin (S07-T07: u8 slot, u16 new actor id; the client leaves its world and reconnects so its player entity is the new actor); strings are u8 length + bytes; unknown kinds are ignored |
 | Snapshot | server tick, snapshot id (v1.2), baseline, last input, part, part count, entities; each entity: ref, components, then transform / velocity / health / state bits / rotation (v1.2) / aim (v1.3: an actor's torso yaw and pitch) / weapon (v1.4: active slot, weapon state, rounds in the magazine, shot counter) as the bits say; a removal (v1.2) has no fields | snapshot id ≠ 0; baseline < snapshot id; part < count ≤ 16; ≤ 64 entities, each once; component bits known; removal alone; health ≤ 10,000 (S06-T05: 0 only when dead); rotation a unit quaternion (norm² 0.98–1.02); weapon slot ≤ 15 |
 | SnapshotAck | snapshot id (newest complete, 0: none), missing baseline (v1.2, 0: none), event cursor | not both zero |
@@ -154,6 +155,8 @@ refuse garbage.
   Reject `VersionMismatch` (1); a client refuses a Welcome of another major.
 - **Minor**: both sides use the lower one. Additions in a later minor are
   optional message types (bit `0x8000`), which older peers skip.
+  Exception: v1.6's Reparent (0x0023) is a required lifecycle type; an older
+  peer cannot reach it because the build id must match (below).
 - **Build and content**: the Hello's build id and content digest must equal
   the server's (`check_hello`), else Reject `BuildMismatch` (2) or
   `ContentMismatch` (3). What the digests cover:

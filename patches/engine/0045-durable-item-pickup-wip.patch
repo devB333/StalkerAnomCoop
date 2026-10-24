@@ -1,0 +1,1378 @@
+diff --git a/src/xrGame/CampaignIdentity.cpp b/src/xrGame/CampaignIdentity.cpp
+index 534e4c8..81faedb 100644
+--- a/src/xrGame/CampaignIdentity.cpp
++++ b/src/xrGame/CampaignIdentity.cpp
+@@ -557,6 +557,12 @@ void CampaignIdentityRegistry::restore_entities(const std::vector<std::pair<u16,
+ 	m_stats.next_entity = m_next_entity;
+ }
+ 
++void CampaignIdentityRegistry::expect_entity(u16 id, EntityId entity)
++{
++	if (id < kEngineIdCount && entity.valid())
++		m_restore[id] = entity.value;
++}
++
+ EntityId CampaignIdentityRegistry::reserve_entity()
+ {
+ 	EntityId entity;
+diff --git a/src/xrGame/CampaignIdentity.h b/src/xrGame/CampaignIdentity.h
+index b916ae3..74908dd 100644
+--- a/src/xrGame/CampaignIdentity.h
++++ b/src/xrGame/CampaignIdentity.h
+@@ -288,6 +288,10 @@ public:
+ 	// record is committed before the spawn); the object's stored entity id
+ 	// (CSE_Abstract::m_campaign_entity) carries it into the id assignment.
+ 	EntityId reserve_entity();
++	// S08-T01: the next assignment of engine id `id` continues `entity` (an
++	// item re-created at recovery from its durable record, under a new u16).
++	// Consumed at that assignment, as a checkpoint's restored ids are.
++	void expect_entity(u16 id, EntityId entity);
+ 
+ private:
+ 	struct EngineBinding
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 5e861ab..ebc7932 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -293,6 +293,31 @@ struct Link
+ 	u32 respawn_results = 0, respawn_refusals = 0, rejoins = 0;
+ 	bool early_respawn_sent = false; // the driver's one request while alive (expected refused)
+ 	u32 live_since_ms = 0;
++	// S08-T01: pickups
++	struct PickupPending
++	{
++		u64 operation;
++		coop::proto::EntityRef target;
++		u32 sent_ms;
++		u32 retries;
++		u32 round, kind; // the race driver's round (0xffff...: the player's own)
++		bool player;
++	};
++	xr_deque<PickupPending> pickup_pending;
++	struct PickupRace
++	{
++		u32 round, kind; // kind: 0 race, 1 far, 2 the other actor, 3 nothing
++		coop::proto::EntityRef target;
++		u64 claim_tick;
++		u64 operation, retry_operation;
++		bool dup_sent;
++	};
++	xr_vector<PickupRace> pickup_races;
++	u32 pickup_counter = 0;
++	u64 pickup_presses = 0, pickup_requests = 0, pickup_accepted = 0, pickup_refused = 0, pickup_retries = 0;
++	u64 pickup_late = 0;
++	u64 reparents_applied = 0, reparents_noop = 0, reparents_failed = 0, reparents_unknown = 0;
++	FILE* pickup_csv = nullptr;
+ };
+ 
+ enum World : u8
+@@ -711,12 +736,16 @@ void apply_despawn(const coop::proto::Despawn& d)
+ 	}
+ }
+ 
++void apply_reparent(const coop::proto::Reparent& r); // S08-T01
++
+ void apply_lifecycle(const coop::proto::Message& m)
+ {
+ 	if (const auto* s = std::get_if<coop::proto::Spawn>(&m))
+ 		apply_spawn(*s);
+ 	else if (const auto* d = std::get_if<coop::proto::Despawn>(&m))
+ 		apply_despawn(*d);
++	else if (const auto* r = std::get_if<coop::proto::Reparent>(&m))
++		apply_reparent(*r); // S08-T01
+ }
+ 
+ // What the replica holds, for comparison with the server's lifecycle log.
+@@ -729,8 +758,8 @@ void write_world_summary(LPCSTR tag)
+ 	FILE* file = fopen(path, "w");
+ 	if (!file)
+ 		return;
+-	fprintf(file, "# applied_commit=%I64u watermark=%I64u\nid,entity,generation,section,in_set,online_object,alife_online\n",
+-		g_link->applied, g_link->watermark);
++	fprintf(file, "# applied_commit=%I64u watermark=%I64u\nid,entity,generation,section,in_set,online_object,alife_online,"
++		"parent_entity,level_parent_entity\n", g_link->applied, g_link->watermark);
+ 	u32 in_set = 0, objects = 0;
+ 	for (const auto& r : g_link->refs)
+ 	{
+@@ -739,8 +768,17 @@ void write_world_summary(LPCSTR tag)
+ 		const bool online_object = g_pGameLevel && Level().Objects.net_Find(r.first) != nullptr;
+ 		in_set += wanted ? 1 : 0;
+ 		objects += online_object && wanted ? 1 : 0;
+-		fprintf(file, "%u,%I64u,%u,%s,%d,%d,%d\n", u32(r.first), r.second.id, r.second.generation,
+-			object ? *object->s_name : "-", wanted ? 1 : 0, online_object ? 1 : 0, object && object->m_bOnline ? 1 : 0);
++		// S08-T01: the owner as the replica's registry and its level hold it (0: none)
++		auto entity_at = [](u16 id) -> u64 {
++			const auto e = id != 0xffff ? g_link->refs.find(id) : g_link->refs.end();
++			return e != g_link->refs.end() ? e->second.id : 0;
++		};
++		CObject* level_object = g_pGameLevel ? Level().Objects.net_Find(r.first) : nullptr;
++		const u64 parent_entity = object ? entity_at(object->ID_Parent) : 0;
++		const u64 level_parent = level_object && level_object->H_Parent() ? entity_at(u16(level_object->H_Parent()->ID())) : 0;
++		fprintf(file, "%u,%I64u,%u,%s,%d,%d,%d,%I64u,%I64u\n", u32(r.first), r.second.id, r.second.generation,
++			object ? *object->s_name : "-", wanted ? 1 : 0, online_object ? 1 : 0, object && object->m_bOnline ? 1 : 0,
++			parent_entity, level_parent);
+ 	}
+ 	fclose(file);
+ 	g_link->log.line("world-summary tag=%s applied=%I64u set=%u present=%u level_objects=%u reconciled=%I64u "
+@@ -760,6 +798,7 @@ void log_encounter();
+ void release_presentation(); // S06-T08
+ void log_weather_client();
+ void respawn_frame(); // S07-T07
++void pickup_frame(); // S08-T01
+ 
+ void world_frame()
+ {
+@@ -846,6 +885,7 @@ void world_frame()
+ 		present_actors();
+ 		run_script();
+ 		respawn_frame(); // S07-T07
++		pickup_frame(); // S08-T01
+ 		sample_input();
+ 		log_actors();
+ 		log_entities();
+@@ -1389,6 +1429,12 @@ void ledger_result(const coop::proto::ActionResult& result); // S07-T03
+ void respawn_frame(); // S07-T07
+ void respawn_result(const coop::proto::ActionResult& result); // S07-T07
+ void on_rejoin(const coop::proto::CampaignEvent& event); // S07-T07
++void run_script7(u32 t); // S08-T01
++void on_pickup_round(const coop::proto::CampaignEvent& event);
++bool pickup_operation(u64 operation);
++void pickup_result(const coop::proto::ActionResult& result);
++void pickup_frame();
++void apply_reparent(const coop::proto::Reparent& r);
+ 
+ void run_script()
+ {
+@@ -1419,6 +1465,8 @@ void run_script()
+ 		return run_script5(t);
+ 	if (g_link->config.script == 6)
+ 		return run_script6(t);
++	if (g_link->config.script == 7)
++		return run_script7(t); // S08-T01
+ 	// S06-T02: the nearest NPC stalker, 26 s in: face it, log its animation
+ 	// blends and remote flag, screenshot it.
+ 	if (g_link->npc_phase == 0 && t >= 26000)
+@@ -2931,12 +2979,14 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 3: on_thunderbolt(*event); break;
+ 			case 4: on_presentation(*event); break;
+ 			case 5: on_rejoin(*event); break; // S07-T07
++			case 6: on_pickup_round(*event); break; // S08-T01 fixture
+ 			default: break;
+ 			}
+ 		}
+ 		return;
+ 	}
+-	if (std::get_if<coop::proto::Spawn>(&e.message.body) || std::get_if<coop::proto::Despawn>(&e.message.body))
++	if (std::get_if<coop::proto::Spawn>(&e.message.body) || std::get_if<coop::proto::Despawn>(&e.message.body) ||
++		std::get_if<coop::proto::Reparent>(&e.message.body))
+ 	{
+ 		if (g_link->world == WorldLive && g_pGameLevel && ai().get_alife())
+ 			apply_lifecycle(e.message.body);
+@@ -2952,6 +3002,8 @@ void on_message(const coop::session::ClientEvent& e)
+ 			ledger_result(*result);
+ 		if (result->operation_id == g_link->respawn_operation || (result->operation_id >> 48) == 0x7e5f)
+ 			respawn_result(*result);
++		if (pickup_operation(result->operation_id))
++			pickup_result(*result); // S08-T01
+ 		if (g_link->teleport_operation && result->operation_id == g_link->teleport_operation)
+ 		{
+ 			g_link->teleport_outcome = u32(result->outcome);
+@@ -3197,6 +3249,248 @@ bool respawn_key_press(int key)
+ 	return true;
+ }
+ 
++// ------------------------------------------------------------ S08-T01
++// Pickup (docs/persistence-contract.md §6 `pickup`). Every pickup path of
++// the engine (the use key on a looked-at item, the COD pickup, a script's
++// make_item_pickup) ends in game_cl_GameState::SendPickUpEvent; on a co-op
++// client it becomes the pickup intent naming the item, and the local event
++// is never sent (the replica's own server would refuse it). What the player
++// then sees is the server's owner change in the lifecycle stream
++// (Reparent). An unanswered request is re-sent every 3 s with the same id,
++// across reconnects. Profile script 7 is the race driver: it claims the
++// fixture's items at the server tick the server names (CampaignEvent 6),
++// then repeats each claim with the same id (the stored outcome comes back)
++// and, after losing, once with a new id (refused again).
++const u64 kPickupTag = 0x91c5ull;
++
++bool pickup_operation(u64 operation) { return (operation >> 48) == kPickupTag; }
++
++void pickup_csv_line(LPCSTR event, u32 round, u32 kind, u64 operation, const coop::proto::EntityRef& target,
++	u32 outcome, u32 reason, u64 commit)
++{
++	if (!g_link->pickup_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-pickup-client.csv");
++		g_link->pickup_csv = fopen(path, "w");
++		if (!g_link->pickup_csv)
++			return;
++		fprintf(g_link->pickup_csv,
++			"utc_ms,event,round,kind,operation,target,generation,outcome,reason,commit,server_ms,slot\n");
++	}
++	const double server_ms =
++		g_link->clock.ready() ? g_link->clock.server_now(double(g_link->wall.GetElapsed_ms())) : 0.0;
++	fprintf(g_link->pickup_csv, "%I64u,%s,%d,%d,%I64u,%I64u,%u,%u,%u,%I64u,%.0f,%u\n", utc_now_ms(), event, int(round),
++		int(kind), operation, target.id, target.generation, outcome, reason, commit, server_ms, u32(g_link->local_slot));
++	fflush(g_link->pickup_csv);
++}
++
++bool pickup_send(Link::PickupPending& p, LPCSTR event)
++{
++	coop::proto::ActionIntent intent;
++	intent.operation_id = p.operation;
++	intent.kind = coop::proto::kActionPickup;
++	intent.target = p.target;
++	const bool sent = g_link->client && g_link->client->send(coop::proto::Message(intent));
++	p.sent_ms = g_link->wall.GetElapsed_ms();
++	pickup_csv_line(sent ? event : "unsent", p.round, p.kind, p.operation, p.target, 0, 0, 0);
++	return sent;
++}
++
++u64 request_pickup(const coop::proto::EntityRef& target, u32 round, u32 kind, bool player, LPCSTR why)
++{
++	Link::PickupPending p;
++	p.operation = (kPickupTag << 48) | ((utc_now_ms() & 0xffffffffffull) << 8) | (++g_link->pickup_counter & 0xff);
++	p.target = target;
++	p.round = round;
++	p.kind = kind;
++	p.player = player;
++	p.retries = 0;
++	++g_link->pickup_requests;
++	g_link->pickup_pending.push_back(p);
++	pickup_send(g_link->pickup_pending.back(), "sent");
++	g_link->log.line("pickup-request why=%s operation=%I64x target=%I64u/%u round=%d kind=%d", why, p.operation,
++		target.id, target.generation, int(round), int(kind));
++	return p.operation;
++}
++
++void pickup_message(LPCSTR text)
++{
++	luabind::functor<void> set_msg;
++	if (ai().script_engine().functor("actor_menu.set_msg", set_msg))
++		set_msg(1, text, 3);
++}
++
++void pickup_result(const coop::proto::ActionResult& result)
++{
++	const bool accepted = result.outcome == coop::proto::ActionOutcome::Accepted;
++	Link::PickupRace* race = nullptr;
++	for (Link::PickupRace& r : g_link->pickup_races)
++		if (r.operation == result.operation_id || r.retry_operation == result.operation_id)
++			race = &r;
++	for (auto it = g_link->pickup_pending.begin(); it != g_link->pickup_pending.end(); ++it)
++		if (it->operation == result.operation_id)
++		{
++			const Link::PickupPending p = *it;
++			g_link->pickup_pending.erase(it);
++			if (accepted)
++				++g_link->pickup_accepted;
++			else
++				++g_link->pickup_refused;
++			const bool retry = race && race->retry_operation == result.operation_id;
++			pickup_csv_line(retry ? "retry-new-result" : "result", p.round, p.kind, p.operation, p.target,
++				u32(result.outcome), result.reason, result.commit_id);
++			g_link->log.line("pickup-result operation=%I64x outcome=%u reason=%u commit=%I64u round=%d", p.operation,
++				u32(result.outcome), u32(result.reason), result.commit_id, int(p.round));
++			if (p.player && !accepted)
++				pickup_message(result.reason == coop::proto::kReasonItemTaken ? "Someone else took it." :
++					(result.reason == coop::proto::kReasonOutOfReach ? "Too far to pick up." : "You can't pick that up."));
++			if (race && !retry)
++			{
++				// the same id again: the stored outcome, nothing applied twice
++				Link::PickupPending dup = p;
++				pickup_send(dup, "dup-sent");
++				race->dup_sent = true;
++				if (!accepted && result.reason == coop::proto::kReasonItemTaken && !race->retry_operation)
++					race->retry_operation = request_pickup(p.target, p.round, p.kind, false, "retry-new");
++			}
++			return;
++		}
++	if (race)
++	{
++		pickup_csv_line("dup-result", race->round, race->kind, result.operation_id, race->target, u32(result.outcome),
++			result.reason, result.commit_id);
++		return;
++	}
++	++g_link->pickup_late;
++	pickup_csv_line("late", 0xffffffff, 0xffffffff, result.operation_id, coop::proto::EntityRef(), u32(result.outcome),
++		result.reason, result.commit_id);
++}
++
++void pickup_frame()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (!g_link->client || g_link->client->state() != coop::session::ClientState::Active || g_link->world != WorldLive)
++		return;
++	for (Link::PickupPending& p : g_link->pickup_pending)
++		if (now - p.sent_ms >= 3000)
++		{
++			++p.retries;
++			++g_link->pickup_retries;
++			pickup_send(p, "retry");
++		}
++}
++
++void on_pickup_round(const coop::proto::CampaignEvent& event)
++{
++	if (g_link->config.script != 7 || event.payload.size() != 22)
++		return;
++	const u8* b = event.payload.data();
++	Link::PickupRace race;
++	race.round = b[0];
++	race.kind = b[1];
++	race.target.id = 0;
++	for (int i = 0; i < 8; ++i)
++		race.target.id |= u64(b[2 + i]) << (8 * i);
++	race.target.generation = 0;
++	for (int i = 0; i < 4; ++i)
++		race.target.generation |= u32(b[10 + i]) << (8 * i);
++	race.claim_tick = 0;
++	for (int i = 0; i < 8; ++i)
++		race.claim_tick |= u64(b[14 + i]) << (8 * i);
++	race.operation = 0;
++	race.retry_operation = 0;
++	race.dup_sent = false;
++	g_link->pickup_races.push_back(race);
++	pickup_csv_line("round", race.round, race.kind, 0, race.target, 0, 0, race.claim_tick);
++	g_link->log.line("pickup-round round=%u kind=%u target=%I64u/%u claim_tick=%I64u", race.round, race.kind,
++		race.target.id, race.target.generation, race.claim_tick);
++}
++
++void run_script7(u32 t)
++{
++	if (!g_link->clock.ready())
++		return;
++	const double server_ms = g_link->clock.server_now(double(g_link->wall.GetElapsed_ms()));
++	for (Link::PickupRace& race : g_link->pickup_races)
++		if (!race.operation && server_ms >= double(race.claim_tick) * double(kServerTickMs))
++			race.operation = request_pickup(race.target, race.round, race.kind, false, "race");
++}
++
++// The lifecycle's owner change, through the engine's own ownership events on
++// this client's in-process server (permitted for replication): the previous
++// owner gives the item up (GE_OWNERSHIP_REJECT) and the new one takes it
++// (GE_OWNERSHIP_TAKE); the level then shows it as the server does (in the
++// inventory, or on the ground where snapshots place it).
++void apply_reparent(const coop::proto::Reparent& r)
++{
++	if (r.commit_id <= g_link->applied)
++		return;
++	g_link->applied = r.commit_id;
++	const auto it = g_link->by_entity.find(r.entity.id);
++	if (it == g_link->by_entity.end() || !(g_link->refs[it->second] == r.entity))
++	{
++		++g_link->reparents_unknown;
++		g_link->log.line("reparent-unknown entity=%I64u/%u", r.entity.id, r.entity.generation);
++		return;
++	}
++	const u16 id = it->second;
++	u16 parent = 0xffff;
++	if (!r.parent.none())
++	{
++		const auto p = g_link->by_entity.find(r.parent.id);
++		if (p == g_link->by_entity.end())
++		{
++			++g_link->reparents_failed;
++			g_link->log.line("reparent-no-parent id=%u parent_entity=%I64u", u32(id), r.parent.id);
++			return;
++		}
++		parent = p->second;
++	}
++	CSE_ALifeDynamicObject* object = ai().alife().objects().object(id, true);
++	if (!object)
++	{
++		++g_link->reparents_failed;
++		return;
++	}
++	const u16 from = object->ID_Parent;
++	if (from == parent)
++	{
++		++g_link->reparents_noop;
++		return;
++	}
++	if (!Level().Objects.net_Find(id) || (parent != 0xffff && !Level().Objects.net_Find(parent)) ||
++		(from != 0xffff && !Level().Objects.net_Find(from)))
++	{
++		++g_link->reparents_failed;
++		g_link->log.line("reparent-offline id=%u from=%u parent=%u", u32(id), u32(from), u32(parent));
++		return;
++	}
++	campaign::ReplicaPermit permit;
++	auto send = [](u16 type, u16 destination, u16 item) {
++		NET_Packet packet;
++		packet.w_begin(M_EVENT);
++		packet.w_u32(Level().timeServer());
++		packet.w_u16(type);
++		packet.w_u16(destination);
++		packet.w_u16(item);
++		Level().Send(packet, net_flags(TRUE, TRUE));
++	};
++	if (from != 0xffff)
++		send(GE_OWNERSHIP_REJECT, from, id);
++	if (parent != 0xffff)
++		send(GE_OWNERSHIP_TAKE, parent, id);
++	else
++		object->o_Position.set(r.transform.x, r.transform.y, r.transform.z);
++	const bool ok = object->ID_Parent == parent;
++	if (ok)
++		++g_link->reparents_applied;
++	else
++		++g_link->reparents_failed;
++	g_link->log.line("reparent-applied id=%u entity=%I64u from=%u parent=%u parent_entity=%I64u own=%d ok=%d", u32(id),
++		r.entity.id, u32(from), u32(parent), r.parent.id, g_actor && parent == g_actor->ID() ? 1 : 0, ok ? 1 : 0);
++}
++
+ // ------------------------------------------------------------ S07-T03
+ // Profile script 6: the ledger program (docs/persistence-contract.md §10).
+ // Every 2 s a ledger intent with the next delta of a fixed sequence and a
+@@ -3286,7 +3580,7 @@ void ledger_result(const coop::proto::ActionResult& result)
+ 		}
+ 	// Other programs' operations (small ids: the weapon actions) are not the
+ 	// ledger's; a ledger id carries the UTC clock in its high bits.
+-	if (result.operation_id < (u64(1) << 32) || (result.operation_id >> 48) == 0x7e5f)
++	if (result.operation_id < (u64(1) << 32) || (result.operation_id >> 48) == 0x7e5f || pickup_operation(result.operation_id))
+ 		return;
+ 	// A result for an operation no longer pending: a duplicate answer.
+ 	++g_link->ledger_late;
+@@ -3355,6 +3649,27 @@ namespace campaign
+ bool coop_client_active() { return g_link && g_link->active; }
+ bool coop_client_key_press(int key) { return respawn_key_press(key); } // S07-T07
+ 
++// S08-T01: see the pickup section above.
++bool coop_client_pickup(u16 who, u16 what)
++{
++	if (!g_link || !g_link->active)
++		return false;
++	++g_link->pickup_presses;
++	if (g_link->world != WorldLive || !g_actor || who != g_actor->ID())
++		return true; // nothing is taken locally on a replica
++	const auto ref = g_link->refs.find(what);
++	if (ref == g_link->refs.end())
++	{
++		g_link->log.line("pickup-press-unknown id=%u", u32(what));
++		return true;
++	}
++	for (const Link::PickupPending& p : g_link->pickup_pending)
++		if (p.target == ref->second)
++			return true; // already asked
++	request_pickup(ref->second, 0xffffffff, 0xffffffff, true, "player");
++	return true;
++}
++
+ void coop_client_app_start()
+ {
+ 	string_path path;
+@@ -3440,6 +3755,11 @@ void coop_client_frame()
+ 		{
+ 			g_link->quitting = true;
+ 			g_link->log.line("client-exit reason=%s", stop_file ? "stop-file" : "time");
++			g_link->log.line("pickup-summary presses=%I64u requests=%I64u accepted=%I64u refused=%I64u retries=%I64u "
++				"late=%I64u pending=%u reparents=%I64u/%I64u/%I64u/%I64u", g_link->pickup_presses, g_link->pickup_requests,
++				g_link->pickup_accepted, g_link->pickup_refused, g_link->pickup_retries, g_link->pickup_late,
++				u32(g_link->pickup_pending.size()), g_link->reparents_applied, g_link->reparents_noop,
++				g_link->reparents_failed, g_link->reparents_unknown);
+ 			log_status("final");
+ 			if (g_link->world == WorldLive)
+ 			{
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 8b172b5..af97767 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -23,6 +23,10 @@ bool coop_client_active();
+ // S07-T07: a key press on a co-op client, before the level's own handling;
+ // true when the link consumed it (the dead player's respawn confirmation).
+ bool coop_client_key_press(int key);
++// S08-T01: the local actor's pickup (game_cl_GameState::SendPickUpEvent);
++// true when the link took it (it becomes the pickup intent; nothing is
++// taken locally).
++bool coop_client_pickup(u16 who, u16 what);
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 7ae55b6..25184e8 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -135,6 +135,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.psi_storm = ini.line_exist("coop", "psi_storm") ? ini.r_u32("coop", "psi_storm") : 0;
+ 		out.checkpoint_seconds =
+ 			ini.line_exist("coop", "checkpoint_seconds") ? ini.r_u32("coop", "checkpoint_seconds") : 0;
++		out.pickup_race = ini.line_exist("coop", "pickup_race") ? ini.r_u32("coop", "pickup_race") : 0;
++		out.pickup_rounds = ini.line_exist("coop", "pickup_rounds") ? ini.r_u32("coop", "pickup_rounds") : 8;
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 3b6cc23..cae72de 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -28,6 +28,9 @@
+ //                 surge (S06-T08 fixture: seconds after both attach until the
+ //                 installed surge_manager starts an emission; 0 off),
+ //                 psi_storm (S06-T08 fixture: the same for a psi-storm; 0 off)
++//                 pickup_race (S08-T01 fixture: seconds after both attach
++//                 until the first pickup round; 0 off), pickup_rounds (how
++//                 many rounds, one every 8 s; default 8)
+ //                 checkpoint_seconds (S07-T02: seconds between periodic
+ //                 checkpoint generations; 0 off; joins and a clean stop
+ //                 always publish one),
+@@ -79,6 +82,8 @@ struct CoopConfig
+ 	u32 surge; // S06-T08 fixture: seconds after both attach until an emission starts (0 off)
+ 	u32 psi_storm; // S06-T08 fixture: seconds after both attach until a psi-storm starts (0 off)
+ 	u32 checkpoint_seconds; // S07-T02: seconds between periodic checkpoint generations (0 off)
++	u32 pickup_race; // S08-T01 fixture: seconds after both attach until the first pickup round (0 off)
++	u32 pickup_rounds; // S08-T01 fixture: rounds, one every 8 s (default 8)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+index d98fa37..87e0506 100644
+--- a/src/xrGame/CoopPersistence.cpp
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -102,6 +102,46 @@ bool decode_respawn(const std::vector<u8>& payload, RespawnRecord& out)
+ 		get(payload, at, out.vertex) && get(payload, at, out.graph) && at == payload.size();
+ }
+ 
++std::vector<u8> encode_pickup(const PickupRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.owner_entity);
++	put<u64>(out, r.item_entity);
++	put<u16>(out, r.item_id);
++	const u8 length = u8(_min(r.section.size(), size_t(255)));
++	put<u8>(out, length);
++	out.insert(out.end(), r.section.begin(), r.section.begin() + length);
++	for (float f : r.position)
++		put<float>(out, f);
++	put<u16>(out, u16(_min(r.state.size(), size_t(0xffff))));
++	out.insert(out.end(), r.state.begin(), r.state.begin() + _min(r.state.size(), size_t(0xffff)));
++	return out;
++}
++
++bool decode_pickup(const std::vector<u8>& payload, PickupRecord& out)
++{
++	size_t at = 0;
++	u8 length = 0;
++	if (!(get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++			get(payload, at, out.operation) && get(payload, at, out.owner_entity) &&
++			get(payload, at, out.item_entity) && get(payload, at, out.item_id) && get(payload, at, length)) ||
++		at + length > payload.size() || length == 0)
++		return false;
++	out.section.assign(reinterpret_cast<const char*>(payload.data() + at), length);
++	at += length;
++	u16 state = 0;
++	if (!(get(payload, at, out.position[0]) && get(payload, at, out.position[1]) &&
++			get(payload, at, out.position[2]) && get(payload, at, state)) ||
++		at + state != payload.size() || !out.owner_entity || !out.item_entity)
++		return false;
++	out.state.assign(payload.begin() + at, payload.end());
++	return true;
++}
++
+ CoopPersistence::CoopPersistence(const std::string& directory, const coop::proto::Uuid128& campaign,
+ 	const coop::proto::Uuid128& party, CoopEventLog* log)
+ 	: m_store(directory, campaign), m_campaign(campaign), m_party(party), m_log(log)
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+index 9b053bd..ceb4560 100644
+--- a/src/xrGame/CoopPersistence.h
++++ b/src/xrGame/CoopPersistence.h
+@@ -99,6 +99,27 @@ struct RespawnRecord
+ std::vector<u8> encode_respawn(const RespawnRecord& r);
+ bool decode_respawn(const std::vector<u8>& payload, RespawnRecord& out);
+ 
++// S08-T01: the pickup record (contract §6 `pickup`): the resolved transfer
++// of one item from the ground into a participant actor's inventory, as
++// absolute post-state (item entity -> owner entity). It is also the item's
++// durable definition: its section and native spawn state at the commit, so
++// recovery can re-create an item the checkpoint does not hold under the
++// same EntityId.
++struct PickupRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 owner_entity; // the participant actor that takes it
++	u64 item_entity;
++	u16 item_id; // the u16 at the commit (diagnostics; the entity is the identity)
++	xr_string section;
++	float position[3]; // where it lay
++	std::vector<u8> state; // CSE_Abstract::Spawn_Write(.., FALSE) at the commit
++};
++std::vector<u8> encode_pickup(const PickupRecord& r);
++bool decode_pickup(const std::vector<u8>& payload, PickupRecord& out);
++
+ // Reason codes of ActionResult for the critical operations (S07-T03).
+ const u16 kActionReasonStoreFailed = 5;
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index dff112b..8343326 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -48,6 +48,10 @@
+ #include "CoopPersistence.h" // S07-T02/T03: checkpoint generations and the journal
+ #include "character_community.h" // S07-T07: the faction kit
+ #include "coop/store/file.h" // S07-T06: failpoints
++#include "inventory_item.h" // S08-T01: pickup
++#include "Missile.h"
++#include "ExplosiveRocket.h"
++#include "xrServer_svclient_validation.h"
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -143,6 +147,8 @@ struct Published
+ 	coop::proto::EntityRef ref;
+ 	shared_str section;
+ 	u64 commit; // the commit that published it (a client knows it once that commit was sent)
++	coop::proto::EntityRef parent; // S08-T01: its owner as the clients were told (none: on the ground)
++	bool sent = false; // its Spawn went out (an unrepresentable one is published but never sent)
+ };
+ 
+ // S06-T02: the last pose the host saw for each physics object, to tell the
+@@ -279,6 +285,33 @@ struct Host
+ 	u64 ledger_commits = 0, ledger_duplicates = 0, ledger_rejected = 0, ledger_store_failed = 0, ledger_replayed = 0;
+ 	u64 save_ms_total = 0, publish_ms_total = 0;
+ 	u32 save_ms_max = 0;
++	// S08-T01: pickups
++	struct PendingPickup
++	{
++		PickupRecord record;
++		u64 revision;
++		u32 since_ms;
++		LPCSTR phase;
++	};
++	xr_vector<PendingPickup> pickups_pending; // waiting for the owner's or the item's level object
++	struct PickupConfirm
++	{
++		u16 item, owner;
++		u64 item_entity;
++		u32 since_ms;
++	};
++	xr_vector<PickupConfirm> pickup_confirm; // applied; waiting for the level's actor to hold it
++	xr_map<u64, u64> pickup_expected; // item entity -> owner entity, per the records this incarnation applied
++	FILE* pickups_csv = nullptr;
++	u64 pickups_committed = 0, pickups_duplicate = 0, pickups_refused = 0, pickups_replayed = 0, pickups_recreated = 0;
++	u64 pickups_confirmed = 0, pickups_unconfirmed = 0, pickups_apply_failed = 0;
++	u64 reparents = 0;
++	bool pickup_recovery_logged = false;
++	struct PickupFixture
++	{
++		u64 both_since = 0;
++		u32 round = 0;
++	} pickup_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -712,11 +745,46 @@ void track_lifecycle()
+ 		}
+ 		spawn.commit_id = ++g_host->commit;
+ 		published.commit = spawn.commit_id;
++		published.parent = spawn.parent;
++		published.sent = true;
+ 		queue_event(coop::proto::Message(spawn));
+ 		++g_host->spawns;
+ 		lifecycle_csv("spawn", f.second, published.ref, 0, *entity->s_name, entity->o_Position);
+ 		g_host->published[f.second] = published;
+ 	}
++	// S08-T01: owner changes (a pickup, an NPC taking or dropping an item, a
++	// corpse's items), after the spawns so a new owner is known first. The
++	// server entity's parent is the canonical one.
++	for (auto& p : g_host->published)
++	{
++		if (!p.second.sent)
++			continue;
++		CSE_Abstract* entity = Level().Server->ID_to_entity(p.first);
++		if (!entity)
++			continue;
++		coop::proto::EntityRef parent;
++		if (entity->ID_Parent != 0xffff && !entity_ref_of(entity->ID_Parent, parent))
++			continue; // an owner with no identity: nothing a client could name
++		if (parent == p.second.parent)
++			continue;
++		coop::proto::Reparent r;
++		r.entity = p.second.ref;
++		r.parent = parent;
++		const Fvector& at = entity->o_Position;
++		if (_valid(at) && _abs(at.x) <= coop::proto::kMaxCoord && _abs(at.y) <= coop::proto::kMaxCoord &&
++			_abs(at.z) <= coop::proto::kMaxCoord)
++		{
++			r.transform.x = at.x;
++			r.transform.y = at.y;
++			r.transform.z = at.z;
++			r.transform.yaw = angle_normalize_signed(entity->o_Angle.y);
++		}
++		r.commit_id = ++g_host->commit;
++		queue_event(coop::proto::Message(r));
++		++g_host->reparents;
++		lifecycle_csv("reparent", p.first, p.second.ref, u32(entity->ID_Parent), *entity->s_name, at);
++		p.second.parent = parent;
++	}
+ }
+ 
+ void flush_outbox(PlayerLink& link)
+@@ -734,6 +802,8 @@ void flush_outbox(PlayerLink& link)
+ 			link.sent_commit = _max(link.sent_commit, spawn->commit_id);
+ 		else if (const auto* despawn = std::get_if<coop::proto::Despawn>(&link.outbox.front()))
+ 			link.sent_commit = _max(link.sent_commit, despawn->commit_id);
++		else if (const auto* reparent = std::get_if<coop::proto::Reparent>(&link.outbox.front()))
++			link.sent_commit = _max(link.sent_commit, reparent->commit_id);
+ 		link.outbox.pop_front();
+ 		++link.events_sent;
+ 	}
+@@ -2672,6 +2742,523 @@ u16 take_respawn(PlayerLink& link, const coop::proto::ActionIntent& intent, coop
+ 	return 0;
+ }
+ 
++// ------------------------------------------------------------ S08-T01
++// Item pickup (docs/persistence-contract.md §6 `pickup`, §12): the first
++// real ownership conflict, through the six phases. ActionIntent kind 5 names
++// the item (target) and acts on the player's own participant actor.
++// Validate on canonical state at this tick: an attached session, the own
++// actor alive, the target a current online inventory item with no owner and
++// no pickup applying, one the engine would let an actor take
++// (CInventory::CanTakeItem: an actor has no carry limit), within the
++// engine's reach. Resolve the transfer as absolute post-state (item entity
++// -> owner entity) plus the item's definition (section, native spawn state),
++// commit the record, apply it through the engine's own ownership event (the
++// server's GE_OWNERSHIP_TAKE from the bridge: xrServer::Process_event_ownership
++// sets the parent synchronously, so a second claim later in the same tick
++// sees the owner), acknowledge. The lifecycle stream reports the owner
++// change (Reparent) to both clients like any other parent change.
++
++const float kPickupReach = 2.f; // the engine's: the look-at pick (CActor::UpdateCL, RQ.range < 2) and the COD radius
++                                // (CActor::PickupModeUpdate_COD, 2 m from the actor)
++const float kPickupSlack = 0.5f; // the client saw the item up to a snapshot interval or two earlier
++const float kPickupEyeHeight = 1.8f; // the reach is measured from the actor's vertical axis, feet to eyes
++
++// The host's wall clock starts when serving starts (after the replay).
++u32 host_ms() { return g_host->started ? g_host->wall.GetElapsed_ms() : 0; }
++
++u16 engine_id_of(const coop::proto::EntityRef& ref)
++{
++	if (ref.none())
++		return kNoEngineId;
++	for (const auto& p : g_host->published)
++		if (p.second.ref == ref)
++		{
++			coop::proto::EntityRef now;
++			return entity_ref_of(p.first, now) && now == ref ? p.first : kNoEngineId;
++		}
++	return kNoEngineId;
++}
++
++// Any ALife object (recovery: identities were restored before the load).
++u16 engine_id_of_entity(u64 entity)
++{
++	for (const auto& o : ai().alife().objects().objects())
++	{
++		EngineEntityKey key;
++		EntityId e;
++		if (g_campaign_identity->current_key(o.first, key) && g_campaign_identity->resolve(key, e) == Refusal::None &&
++			e.value == entity)
++			return o.first;
++	}
++	return kNoEngineId;
++}
++
++u64 entity_of(u16 id)
++{
++	coop::proto::EntityRef ref;
++	return id != kNoEngineId && entity_ref_of(id, ref) ? ref.id : 0;
++}
++
++float pickup_distance(CActor* actor, CObject* item)
++{
++	Fvector center;
++	item->Center(center);
++	const Fvector& feet = actor->Position();
++	const Fvector axis = {feet.x, clampr(center.y, feet.y, feet.y + kPickupEyeHeight), feet.z};
++	return axis.distance_to(center);
++}
++
++void pickup_csv(LPCSTR phase, u64 revision, const PickupRecord& r, u16 id, u32 reason)
++{
++	if (g_host->pickups_csv)
++	{
++		fprintf(g_host->pickups_csv, "%I64u,%I64u,%I64u,%u,%I64u,%I64u,%u,%I64u,%s,%s,%u\n", coop::store::utc_now_ms(),
++			g_host->tick, revision, u32(r.slot), r.operation, r.item_entity, u32(id), r.owner_entity, r.section.c_str(),
++			phase, reason);
++		fflush(g_host->pickups_csv);
++	}
++}
++
++void send_ownership_event(u16 type, u16 destination, u16 item)
++{
++	NET_Packet packet;
++	packet.w_begin(M_EVENT);
++	packet.w_u32(Level().timeServer());
++	packet.w_u16(type);
++	packet.w_u16(destination);
++	packet.w_u16(item);
++	Level().Send(packet, net_flags(TRUE, TRUE)); // from the bridge: the server's own path
++}
++
++// Re-creates an item the checkpoint does not hold (or holds only offline)
++// in the owner's inventory from the record's definition, under the record's
++// EntityId: the script's alife():create-with-parent path
++// (CALifeSimulator__spawn_item2) with the recorded spawn state.
++u16 recreate_pickup_item(const PickupRecord& r, u16 owner)
++{
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CSE_ALifeDynamicObject* owner_se = alife ? ai().alife().objects().object(owner, true) : nullptr;
++	if (!owner_se || !owner_se->m_bOnline || r.state.size() < 16 || r.state.size() > sizeof(NET_Packet().B.data))
++		return kNoEngineId;
++	NET_Packet in;
++	in.B.count = u32(r.state.size());
++	memcpy(in.B.data, r.state.data(), r.state.size());
++	u16 type = 0;
++	in.r_begin(type);
++	string256 section;
++	in.r_stringZ(section);
++	if (type != M_SPAWN || xr_strcmp(section, r.section.c_str()))
++		return kNoEngineId;
++	CSE_Abstract* entity = F_entity_Create(section);
++	CSE_ALifeDynamicObject* dynamic = entity ? smart_cast<CSE_ALifeDynamicObject*>(entity) : nullptr;
++	if (!dynamic)
++	{
++		if (entity)
++			F_entity_Destroy(entity);
++		return kNoEngineId;
++	}
++	entity->Spawn_Read(in);
++	entity->s_name = section;
++	entity->s_RP = 0xff;
++	entity->m_campaign_entity = r.item_entity;
++	entity->ID = alife->server().PerformIDgen(0xffff, entity);
++	entity->ID_Parent = owner;
++	entity->ID_Phantom = 0xffff;
++	entity->o_Position = owner_se->o_Position;
++	dynamic->m_tNodeID = owner_se->m_tNodeID;
++	dynamic->m_tGraphID = owner_se->m_tGraphID;
++	dynamic->m_tSpawnID = u16(-1);
++	NET_Packet out;
++	entity->Spawn_Write(out, FALSE);
++	const u16 id = entity->ID;
++	alife->server().FreeID(id, 0);
++	F_entity_Destroy(entity);
++	g_campaign_identity->expect_entity(id, EntityId{r.item_entity});
++	ClientID client;
++	client.set(0xffff);
++	u16 dummy;
++	out.r_begin(dummy);
++	CSE_Abstract* created = alife->server().Process_spawn(out, client);
++	return created ? created->ID : kNoEngineId;
++}
++
++enum class PickupApply
++{
++	Applied,
++	NoOp,
++	Deferred, // the owner's or the item's level object is not there yet (a respawned owner at recovery)
++	Failed,
++};
++
++LPCSTR pickup_apply_name(PickupApply a)
++{
++	switch (a)
++	{
++	case PickupApply::Applied: return "applied";
++	case PickupApply::NoOp: return "noop";
++	case PickupApply::Deferred: return "deferred";
++	default: return "failed";
++	}
++}
++
++// The adapter (absolute post-state, idempotent): the recorded item ends in
++// the recorded owner's inventory, from wherever it is now (the ground, an
++// NPC's or a corpse's inventory after a rollback); an item the server does
++// not hold online is re-created from the record under its EntityId.
++PickupApply apply_pickup(const PickupRecord& r, LPCSTR phase, u64 revision)
++{
++	const u16 owner = engine_id_of_entity(r.owner_entity);
++	CSE_Abstract* owner_se = owner != kNoEngineId ? Level().Server->ID_to_entity(owner) : nullptr;
++	if (!owner_se)
++	{
++		g_host->log.line("pickup-%s-failed revision=%I64u item_entity=%I64u owner_entity=%I64u reason=no-owner", phase,
++			revision, r.item_entity, r.owner_entity);
++		pickup_csv("apply-failed", revision, r, kNoEngineId, 1);
++		return PickupApply::Failed;
++	}
++	if (!is_object_valid_on_svclient(owner))
++		return PickupApply::Deferred;
++	u16 item = engine_id_of_entity(r.item_entity);
++	CSE_ALifeDynamicObject* item_se = item != kNoEngineId ? ai().alife().objects().object(item, true) : nullptr;
++	if (item_se && item_se->ID_Parent == owner)
++	{
++		g_host->log.line("pickup-%s-noop revision=%I64u item=%u item_entity=%I64u owner=%u reason=already-owned", phase,
++			revision, u32(item), r.item_entity, u32(owner));
++		pickup_csv("noop", revision, r, item, 0);
++		g_host->pickup_expected[r.item_entity] = r.owner_entity;
++		return PickupApply::NoOp;
++	}
++	if (item_se && !item_se->m_bOnline)
++	{
++		// held only offline (far from every participant after the rollback):
++		// the record's definition replaces the stale offline copy
++		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++		alife->release(item_se, true);
++		item_se = nullptr;
++		item = kNoEngineId;
++		g_host->log.line("pickup-%s-released-offline revision=%I64u item_entity=%I64u", phase, revision, r.item_entity);
++	}
++	if (!item_se)
++	{
++		const u16 created = recreate_pickup_item(r, owner);
++		g_host->log.line("pickup-%s-recreated revision=%I64u item=%u item_entity=%I64u entity_now=%I64u owner=%u "
++			"section=%s ok=%d", phase, revision, u32(created), r.item_entity, entity_of(created), u32(owner),
++			r.section.c_str(), created != kNoEngineId ? 1 : 0);
++		pickup_csv(created != kNoEngineId ? "recreated" : "apply-failed", revision, r, created, 2);
++		if (created == kNoEngineId)
++			return PickupApply::Failed;
++		g_host->pickup_expected[r.item_entity] = r.owner_entity;
++		++g_host->pickups_recreated;
++		g_host->pickup_confirm.push_back({created, owner, r.item_entity, host_ms()});
++		return PickupApply::Applied;
++	}
++	if (!is_object_valid_on_svclient(item))
++		return PickupApply::Deferred;
++	const u16 from = item_se->ID_Parent;
++	if (from != 0xffff)
++		send_ownership_event(GE_OWNERSHIP_REJECT, from, item); // from an NPC, a corpse or a box after a rollback
++	send_ownership_event(GE_OWNERSHIP_TAKE, owner, item);
++	const bool ok = item_se->ID_Parent == owner;
++	g_host->log.line("pickup-%s revision=%I64u slot=%u operation=%I64u item=%u item_entity=%I64u owner=%u "
++		"owner_entity=%I64u from=%u section=%s ok=%d", phase, revision, u32(r.slot), r.operation, u32(item),
++		r.item_entity, u32(owner), r.owner_entity, u32(from), r.section.c_str(), ok ? 1 : 0);
++	pickup_csv(ok ? phase : "apply-failed", revision, r, item, ok ? 0 : 3);
++	if (!ok)
++		return PickupApply::Failed;
++	g_host->pickup_expected[r.item_entity] = r.owner_entity;
++	g_host->pickup_confirm.push_back({item, owner, r.item_entity, host_ms()});
++	return PickupApply::Applied;
++}
++
++// Records whose objects were not in the level yet; retried every tick.
++void retry_pickups()
++{
++	const u32 now = host_ms();
++	for (size_t i = 0; i < g_host->pickups_pending.size();)
++	{
++		Host::PendingPickup& p = g_host->pickups_pending[i];
++		const PickupApply a = apply_pickup(p.record, p.phase, p.revision);
++		if (a == PickupApply::Deferred && now - p.since_ms < 10000)
++		{
++			++i;
++			continue;
++		}
++		if (a == PickupApply::Deferred || a == PickupApply::Failed)
++		{
++			++g_host->pickups_apply_failed;
++			g_host->log.line("pickup-%s-gave-up revision=%I64u item_entity=%I64u result=%s waited_ms=%u", p.phase,
++				p.revision, p.record.item_entity, pickup_apply_name(a), now - p.since_ms);
++		}
++		g_host->pickups_pending.erase(g_host->pickups_pending.begin() + i);
++	}
++	// The level's actor takes the item when it processes the server's
++	// broadcast (CActor::OnEvent GE_OWNERSHIP_TAKE: CanTakeItem, Take); a
++	// refusal there would send it back (GE_OWNERSHIP_REJECT).
++	for (size_t i = 0; i < g_host->pickup_confirm.size();)
++	{
++		const Host::PickupConfirm& c = g_host->pickup_confirm[i];
++		CObject* object = Level().Objects.net_Find(c.item);
++		CSE_Abstract* se = Level().Server->ID_to_entity(c.item);
++		const bool held = object && object->H_Parent() && object->H_Parent()->ID() == c.owner;
++		const bool reverted = !se || se->ID_Parent != c.owner;
++		if (!held && !reverted && now - c.since_ms < 5000)
++		{
++			++i;
++			continue;
++		}
++		if (held)
++			++g_host->pickups_confirmed;
++		else
++			++g_host->pickups_unconfirmed;
++		g_host->log.line("pickup-%s item=%u item_entity=%I64u owner=%u ms=%u", held ? "confirmed" :
++			(reverted ? "reverted" : "unconfirmed"), u32(c.item), c.item_entity, u32(c.owner), now - c.since_ms);
++		g_host->pickup_confirm.erase(g_host->pickup_confirm.begin() + i);
++	}
++}
++
++// False: the adapter failed (at recovery: the start stops).
++bool apply_or_defer(const PickupRecord& r, LPCSTR phase, u64 revision)
++{
++	const PickupApply a = apply_pickup(r, phase, revision);
++	if (a == PickupApply::Deferred)
++	{
++		g_host->log.line("pickup-%s-deferred revision=%I64u item_entity=%I64u", phase, revision, r.item_entity);
++		g_host->pickups_pending.push_back({r, revision, host_ms(), phase});
++	}
++	if (a == PickupApply::Failed)
++		++g_host->pickups_apply_failed;
++	return a != PickupApply::Failed;
++}
++
++u16 take_pickup(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		++g_host->pickups_duplicate;
++		g_host->log.line("pickup-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	coop::proto::EntityRef owner_ref;
++	if (!actor || !actor->g_Alive() || !entity_ref_of(actor->ID(), owner_ref))
++		return coop::proto::kReasonNoActor;
++	const u16 id = engine_id_of(intent.target);
++	CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
++	CObject* object = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
++	if (!se || !object || object->getDestroy())
++		return coop::proto::kReasonItemGone;
++	CInventoryItem* item = smart_cast<CInventoryItem*>(object);
++	if (!smart_cast<CSE_ALifeInventoryItem*>(se) || !item)
++		return coop::proto::kReasonNotTakeable;
++	if (se->ID_Parent != 0xffff || object->H_Parent())
++		return coop::proto::kReasonItemTaken;
++	for (const Host::PickupConfirm& c : g_host->pickup_confirm)
++		if (c.item == id)
++			return coop::proto::kReasonItemTaken; // taken this tick or just before, the level not yet caught up
++	const CMissile* missile = smart_cast<const CMissile*>(object);
++	if (!item->CanTake() || smart_cast<CExplosiveRocket*>(object) || (missile && !missile->Useful()) ||
++		!actor->inventory().CanTakeItem(item))
++		return coop::proto::kReasonNotTakeable;
++	const float distance = pickup_distance(actor, object);
++	if (distance > kPickupReach + kPickupSlack)
++	{
++		g_host->log.line("pickup-out-of-reach slot=%u item=%u distance=%.2f", u32(link.ref.slot), u32(id), distance);
++		return coop::proto::kReasonOutOfReach;
++	}
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	// 3. Resolve: the absolute post-state and the item's definition.
++	PickupRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.owner_entity = owner_ref.id;
++	record.item_entity = intent.target.id;
++	record.item_id = id;
++	record.section = *se->s_name;
++	record.position[0] = object->Position().x;
++	record.position[1] = object->Position().y;
++	record.position[2] = object->Position().z;
++	{
++		NET_Packet packet;
++		se->Spawn_Write(packet, FALSE); // writes its own M_SPAWN header and section
++		record.state.assign(packet.B.data, packet.B.data + packet.B.count);
++	}
++	const u64 revision = ++g_host->commit;
++	// 4. Durable commit, before anything is applied or acknowledged.
++	if (!coop::store::failpoint("pickup:before-append"))
++		persistence->fail_closed("failpoint pickup:before-append");
++	if (!persistence->commit(coop::store::kRecordPickup, g_host->tick, revision, encode_pickup(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("pickup-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("pickup:after-flush");
++	++g_host->pickups_committed;
++	g_host->log.line("pickup-committed revision=%I64u slot=%u operation=%I64u item=%u item_entity=%I64u "
++		"owner_entity=%I64u section=%s distance=%.2f state_bytes=%u", revision, u32(record.slot), record.operation,
++		u32(id), record.item_entity, record.owner_entity, record.section.c_str(), distance, u32(record.state.size()));
++	pickup_csv("commit", revision, record, id, 0);
++	// 5. Apply.
++	apply_or_defer(record, "apply", revision);
++	coop::store::failpoint("pickup:after-apply");
++	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++	stored.reason = 0;
++	stored.revision = revision;
++	persistence->remember(link.player, intent.operation_id, stored);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.commit_id = revision;
++	result.revision = revision;
++	return 0;
++}
++
++// Where every item a pickup named is now (the comparison's server view).
++void log_pickup_state(LPCSTR tag)
++{
++	u32 held = 0, wrong = 0, missing = 0;
++	for (const auto& e : g_host->pickup_expected)
++	{
++		const u16 item = engine_id_of_entity(e.first);
++		const CSE_Abstract* se = item != kNoEngineId ? Level().Server->ID_to_entity(item) : nullptr;
++		const u16 parent = se ? se->ID_Parent : 0xffff;
++		const u64 parent_entity = parent != 0xffff ? entity_of(parent) : 0;
++		const bool ok = parent_entity == e.second;
++		if (!se)
++			++missing;
++		else if (ok)
++			++held;
++		else
++			++wrong;
++		g_host->log.line("pickup-state tag=%s item=%u item_entity=%I64u parent=%u parent_entity=%I64u "
++			"expected_owner=%I64u ok=%d", tag, u32(item), e.first, u32(parent), parent_entity, e.second, ok ? 1 : 0);
++	}
++	g_host->log.line("pickup-state-summary tag=%s items=%u held=%u wrong=%u missing=%u committed=%I64u "
++		"duplicates=%I64u refused=%I64u replayed=%I64u recreated=%I64u confirmed=%I64u unconfirmed=%I64u "
++		"apply_failed=%I64u reparents=%I64u", tag, u32(g_host->pickup_expected.size()), held, wrong, missing,
++		g_host->pickups_committed, g_host->pickups_duplicate, g_host->pickups_refused, g_host->pickups_replayed,
++		g_host->pickups_recreated, g_host->pickups_confirmed, g_host->pickups_unconfirmed, g_host->pickups_apply_failed,
++		g_host->reparents);
++}
++
++// The race fixture (profile pickup_race / pickup_rounds): once both players
++// are in the world, every 8 s an item appears on the ground between the two
++// actors and both clients are told (CampaignEvent kind 6) the server tick at
++// which to claim it, so both claims arrive within a tick or two. After the
++// race rounds, three refusal rounds: an item 8 m away (out of reach), the
++// other player's actor as the target (not an item), and a target that names
++// nothing (gone).
++const char* kRaceSections[] = {"medkit", "bandage", "conserva", "wpn_pm", "ammo_9x18_fmj", "vodka", "bread", "wpn_knife"};
++
++void pickup_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.pickup_race || !ai().get_alife())
++		return;
++	Host::PickupFixture& f = g_host->pickup_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++				actors[attached++] = actor;
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-pickup both-attached tick=%I64u", g_host->tick);
++	}
++	const u32 total = config.pickup_rounds + 3;
++	if (f.round >= total || attached < 2 || !actors[0]->g_Alive() || !actors[1]->g_Alive())
++		return;
++	const u64 due = f.both_since + u64(config.pickup_race) * 50 + u64(f.round) * 8 * 50;
++	if (g_host->tick < due)
++		return;
++	const u32 round = f.round++;
++	const u8 kind = round < config.pickup_rounds ? 0 : u8(round - config.pickup_rounds + 1); // 0 race, 1 far, 2 actor, 3 gone
++	coop::proto::EntityRef target;
++	u16 spawned = kNoEngineId;
++	Fvector at;
++	at.add(actors[0]->Position(), actors[1]->Position()).mul(0.5f);
++	if (kind <= 1)
++	{
++		if (kind == 1)
++		{
++			Fvector side;
++			side.sub(actors[1]->Position(), actors[0]->Position());
++			side.y = 0.f;
++			if (side.square_magnitude() < 0.01f)
++				side.set(1.f, 0.f, 0.f);
++			side.normalize();
++			at.mad(Fvector().set(-side.z, 0.f, side.x), 8.f);
++		}
++		const CLevelGraph& graph = ai().level_graph();
++		u32 vertex = graph.valid_vertex_position(at) ? graph.vertex_id(at) : u32(-1);
++		if (!graph.valid_vertex_id(vertex))
++			vertex = actors[0]->ai_location().level_vertex_id();
++		at.y = graph.vertex_position(vertex).y + 0.3f;
++		LPCSTR section = kRaceSections[round % (sizeof(kRaceSections) / sizeof(kRaceSections[0]))];
++		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++		const CSE_ALifeDynamicObject* anchor = ai().alife().objects().object(u16(actors[0]->ID()), true);
++		CSE_Abstract* item = anchor ? alife->spawn_item(section, at, vertex, anchor->m_tGraphID, u16(-1)) : nullptr;
++		if (!item || !entity_ref_of(item->ID, target))
++		{
++			g_host->log.line("fixture-pickup-round round=%u kind=%u spawn-failed section=%s", round, u32(kind), section);
++			return;
++		}
++		spawned = item->ID;
++	}
++	else if (kind == 2)
++		entity_ref_of(u16(actors[1]->ID()), target);
++	else
++	{
++		target.id = 0x7fffffffffffull;
++		target.generation = 1;
++	}
++	const u64 claim_tick = g_host->tick + 100; // 2 s: the item's Spawn reaches both clients first
++	std::vector<u8> payload;
++	put_u8(payload, u8(round));
++	put_u8(payload, kind);
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(target.id >> (8 * b)));
++	for (int b = 0; b < 4; ++b)
++		payload.push_back(u8(target.generation >> (8 * b)));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(claim_tick >> (8 * b)));
++	broadcast_event(6, payload);
++	g_host->log.line("fixture-pickup-round round=%u kind=%u id=%u target=%I64u/%u claim_tick=%I64u pos=%.2f,%.2f,%.2f "
++		"d1=%.2f d2=%.2f", round, u32(kind), u32(spawned), target.id, target.generation, claim_tick, VPUSH(at),
++		at.distance_to(actors[0]->Position()), at.distance_to(actors[1]->Position()));
++}
++
+ u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
+ {
+ 	if (intent.kind != coop::proto::kActionActivateSlot && intent.kind != coop::proto::kActionReload)
+@@ -3084,6 +3671,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 		}
+ 		else if (intent->kind == coop::proto::kActionRespawn)
+ 			reason = take_respawn(*link, *intent, result); // S07-T07
++		else if (intent->kind == coop::proto::kActionPickup)
++			reason = take_pickup(*link, *intent, result); // S08-T01
+ 		else
+ 			reason = take_action(*link, *intent);
+ 		if (reason)
+@@ -3099,6 +3688,23 @@ void on_message(const coop::session::SessionEvent& e)
+ 		g_host->server->send(e.player, coop::proto::Message(result));
+ 		if (intent->kind == coop::proto::kActionLedger)
+ 			coop::store::failpoint("commit:after-ack");
++		if (intent->kind == coop::proto::kActionPickup)
++		{
++			if (reason && result.outcome != coop::proto::ActionOutcome::Duplicate)
++			{
++				++g_host->pickups_refused;
++				PickupRecord r = {};
++				r.slot = link->ref.slot;
++				r.operation = intent->operation_id;
++				r.item_entity = intent->target.id;
++				r.section = "-";
++				pickup_csv("refused", 0, r, engine_id_of(intent->target), reason);
++				g_host->log.line("pickup-refused slot=%u operation=%I64u target=%I64u/%u reason=%u", u32(r.slot),
++					intent->operation_id, intent->target.id, intent->target.generation, u32(reason));
++			}
++			else if (!reason)
++				coop::store::failpoint("pickup:after-ack");
++		}
+ 		if (intent->kind == coop::proto::kActionRespawn && !reason)
+ 		{
+ 			// S07-T07: the player's entity changed: the client rejoins for a
+@@ -3559,6 +4165,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		g_host->ledger_csv = fopen(ledger, "w");
+ 		if (g_host->ledger_csv)
+ 			fprintf(g_host->ledger_csv, "utc_ms,tick,revision,slot,operation,delta,money_after,phase\n");
++		string_path pickups;
++		FS.update_path(pickups, "$logs$", "coop-pickups.csv");
++		g_host->pickups_csv = fopen(pickups, "w");
++		if (g_host->pickups_csv)
++			fprintf(g_host->pickups_csv, "utc_ms,tick,revision,slot,operation,item_entity,item,owner_entity,section,phase,reason\n");
+ 		string_path deaths;
+ 		FS.update_path(deaths, "$logs$", "coop-deaths.csv");
+ 		g_host->deaths_csv = fopen(deaths, "w");
+@@ -3623,6 +4234,27 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 			++g_host->respawns_replayed;
+ 			continue;
+ 		}
++		if (record.kind == coop::store::kRecordPickup)
++		{
++			// S08-T01: the item ends in the recorded owner's inventory; a record
++			// whose owner the server does not hold stops the start. One whose
++			// level objects are not there yet (a respawned owner) is retried
++			// once serving starts.
++			PickupRecord pickup;
++			if (!decode_pickup(record.payload, pickup) || !apply_or_defer(pickup, "replay", record.revision))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			if (CoopPersistence* p = g_host->persistence)
++			{
++				StoredOutcome s = {1, 0, record.revision};
++				p->remember(pickup.player, pickup.operation, s);
++			}
++			++g_host->pickups_replayed;
++			continue;
++		}
+ 		if (record.kind == coop::store::kRecordDeath)
+ 		{
+ 			DeathRecord death;
+@@ -3714,9 +4346,16 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	apply_inputs();
+ 	// S05-T02: lifecycle, the server-controlled change fixture, world streams.
+ 	track_lifecycle();
++	retry_pickups(); // S08-T01
++	if (!g_host->pickup_recovery_logged && g_host->pickups_pending.empty() && g_host->pickup_confirm.empty())
++	{
++		g_host->pickup_recovery_logged = true;
++		log_pickup_state("recovered");
++	}
+ 	churn();
+ 	drop_objects();
+ 	combat_fixtures();
++	pickup_fixtures(); // S08-T01
+ 	encounter_fixtures();
+ 	encounter_record();
+ 	poll_publications(false); // S07-T08: the worker's results and the joins waiting on them
+@@ -3784,6 +4423,7 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 			poll_publications(true);
+ 		}
+ 		log_status("final");
++		log_pickup_state("final"); // S08-T01
+ 		g_host->events.clear();
+ 		g_host->server->shutdown(1000, g_host->events);
+ 		for (const coop::session::SessionEvent& e : g_host->events)
+@@ -3819,6 +4459,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		if (g_host->deaths_csv)
+ 			fclose(g_host->deaths_csv);
+ 		g_host->deaths_csv = nullptr;
++		if (g_host->pickups_csv)
++			fclose(g_host->pickups_csv);
++		g_host->pickups_csv = nullptr;
+ 		timeEndPeriod(1);
+ 		g_host->log.line("server-stopped");
+ 	}
+diff --git a/src/xrGame/game_cl_base.cpp b/src/xrGame/game_cl_base.cpp
+index 352c03d..9524494 100644
+--- a/src/xrGame/game_cl_base.cpp
++++ b/src/xrGame/game_cl_base.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "game_cl_base.h"
++#include "CoopClientLink.h" // S08-T01: the co-op pickup intent
+ #include "level.h"
+ #include "GamePersistent.h"
+ #include "UIGameCustom.h"
+@@ -436,6 +437,9 @@ void game_cl_GameState::SendPickUpEvent(u16 ID_who, u16 ID_what)
+ {
+ 	CObject* O = Level().Objects.net_Find(ID_what);
+ 	Level().m_feel_deny.feel_touch_deny(O, 1000);
++	// S08-T01: on a co-op client the pickup is an intent to the server
++	if (campaign::coop_client_pickup(ID_who, ID_what))
++		return;
+ 
+ 	NET_Packet P;
+ 	u_EventGen(P, GE_OWNERSHIP_TAKE, ID_who);

@@ -185,6 +185,10 @@
     {
       "path": "patches/engine/0044-remote-hud-motion-guard-and-camera-watch.patch",
       "sha256": "cf72e5d4201d67f9d3e61ad51c600290b2734ce414038915e78735660185b5cb"
+    },
+    {
+      "path": "patches/engine/0045-durable-item-pickup-wip.patch",
+      "sha256": "717e74a822ef3f056997f1d899438218beeb34de23ae53f434ac9fd609b32808"
     }
   ],
   "submodules": [

@@ -197,6 +197,10 @@
     {
       "path": "patches/engine/0047-inventory-recovery-and-item-graph.patch",
       "sha256": "ee17d819335a10abb34d8dc5c32dc452e29c6b192d1d0363dd657a029ee31e39"
+    },
+    {
+      "path": "patches/engine/0048-party-quest.patch",
+      "sha256": "e8d9ec045f7125c247361ca5597d161c30070b49d44b52f144d42a21d64672e4"
     }
   ],
   "submodules": [

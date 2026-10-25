@@ -7,8 +7,8 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--encounter c1,c2] [--weather c1,c2 [--psi-storm]]
            [--ledger c1,c2] [--checkpoint-seconds 30] [--failpoint commit:after-apply:3[:fail]]
            [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
-           [--transfer c1,c2 [--transfer-start 20]]
-           [--protocol-build proto-build-41] [--keys-from <earlier run>]
+           [--transfer c1,c2 [--transfer-start 20]] [--quest c1,c2 [--quest-start 20]]
+           [--protocol-build proto-build-42] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
 logs, saves and temp; archives read in place from the accepted content copy):
@@ -108,6 +108,19 @@ def main():
                              "and transfers through the clients' own inventory events (fixture transfer_race)")
     parser.add_argument("--transfer-start", type=int, default=20,
                         help="with --transfer: seconds after both players are in the world until the set-up")
+    parser.add_argument("--quest", default="",
+                        help="comma-separated client names running the S08-T04 party quest rounds (profile script = 8, "
+                             "the transfer driver's steps); the server places both actors beside Sidorovich "
+                             "(fixture quest_party)")
+    parser.add_argument("--quest-start", type=int, default=20,
+                        help="with --quest: seconds after both players are in the world until the actors are placed")
+    parser.add_argument("--quest-holder", type=int, default=2,
+                        help="with --quest: the slot whose accept comes first (0 or 1; 2: both at the same tick)")
+    parser.add_argument("--quest-variant", type=int, default=0,
+                        help="with --quest: round 6: 0 both turn in at once, 1 the contributor disconnects first")
+    parser.add_argument("--restart-no-fixture", action="store_true",
+                        help="with --failpoint: the restarted server runs no fixture (the clients' pending "
+                             "requests are retried against the recovered world) (S08-T06)")
     parser.add_argument("--checkpoint-seconds", type=int, default=0,
                         help="seconds between the server's periodic checkpoint generations (S07-T02; 0 off; "
                              "joins and a clean stop always publish one)")
@@ -125,7 +138,7 @@ def main():
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
-    parser.add_argument("--protocol-build", default="proto-build-41")
+    parser.add_argument("--protocol-build", default="proto-build-42")
     parser.add_argument("--keys-from", default="", help="reuse the keys and roster of an earlier session run")
     args = parser.parse_args()
 
@@ -158,7 +171,8 @@ def main():
     ledger = {n for n in args.ledger.split(",") if n}
     pickup = {n for n in args.pickup.split(",") if n}
     transfer = {n for n in args.transfer.split(",") if n}
-    if (inject | script | movement | weather | ledger | pickup | transfer) - set(names[1:]):
+    quest = {n for n in args.quest.split(",") if n}
+    if (inject | script | movement | weather | ledger | pickup | transfer | quest) - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
         raise SystemExit("a client runs one driver: --script or --movement")
@@ -238,7 +252,9 @@ def main():
                       f"psi_storm = {70 if weather and args.psi_storm else 0}",
                       f"checkpoint_seconds = {args.checkpoint_seconds}",
                       f"pickup_race = {args.pickup_start if pickup else 0}", f"pickup_rounds = {args.pickup_rounds}",
-                      f"transfer_race = {args.transfer_start if transfer else 0}"]
+                      f"transfer_race = {args.transfer_start if transfer else 0}",
+                      f"quest_party = {args.quest_start if quest else 0}", f"quest_holder = {args.quest_holder}",
+                      f"quest_variant = {args.quest_variant}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -248,12 +264,24 @@ def main():
                 count = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
                 point = ":".join(parts[:2])
                 restart_lines = list(lines)
+                if args.restart_no_fixture:
+                    fixtures = ("pickup_race", "transfer_race", "quest_party")
+                    restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
+                                     for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(restart_lines) + "\n")
                 profiles["server-restart"] = restart
+            elif args.restart_no_fixture:
+                # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
+                fixtures = ("pickup_race", "transfer_race", "quest_party")
+                restart = runtime / "coop-restart.ltx"
+                restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
+                                             for ln in lines) + "\n")
+                profiles["server-restart"] = restart
         else:
-            program = (8 if name in transfer else 7 if name in pickup else 6 if name in ledger else 5 if name in weather
+            program = (8 if name in transfer | quest else 7 if name in pickup else 6 if name in ledger
+                       else 5 if name in weather
                        else 4 if name in encounter
                        else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
@@ -314,6 +342,7 @@ def main():
         "pickup": sorted(pickup),
         "pickup_rounds": args.pickup_rounds if pickup else 0,
         "transfer": sorted(transfer),
+        "quest": sorted(quest),
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

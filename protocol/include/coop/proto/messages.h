@@ -361,6 +361,8 @@ enum ActionKind : std::uint16_t
                              // each, 24 bytes); one side the player's own actor, the other a container (an
                              // inventory box or a dead body); expected revision: the client's lifecycle cursor
                              // (the item must not have changed owner after it; 0: no precondition)
+    kActionQuest = 8,        // S08-T04: target: the task giver; params: u8 op (1 accept, 2 turn in), u8 length,
+                             // the task id; a party task: one instance for both players (plan.md S08-T04)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -382,6 +384,11 @@ enum ActionReason : std::uint16_t
     kReasonNotContainer = 13, // S08-T02: the other side is not a container this slice supports (a living actor
                               // or NPC, a trader, another object)
     kReasonNotDroppable = 14, // S08-T02: a quest item, or one not in the player's own inventory
+    kReasonQuestUnsupported = 15, // S08-T04: not a task this slice adapts, or the target is not a giver
+    kReasonQuestActive = 16,      // S08-T04: the party already has this task
+    kReasonQuestNotOffered = 17,  // S08-T04: the giver does not offer it now
+    kReasonQuestNotActive = 18,   // S08-T04: the party does not have this task
+    kReasonQuestNotFinished = 19, // S08-T04: its objective is not met (both players' contributions counted)
 };
 
 struct Input

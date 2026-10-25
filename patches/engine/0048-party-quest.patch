@@ -1,0 +1,1266 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index e8241d2..e5196ba 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -63,6 +63,8 @@ using namespace campaign;
+ 
+ // S08-T02: the inventory UI's move (GE_TRADE_SELL + GE_TRADE_BUY)
+ void move_item_from_to(u16 from_id, u16 to_id, u16 what_id); // ui/UIActorMenuDeadBodySearch.cpp
++// S08-T04: the PDA news line (script_game_object_inventory_owner.cpp)
++void _give_news(LPCSTR caption, LPCSTR text, LPCSTR texture_name, int delay, int show_time, int type);
+ 
+ namespace
+ {
+@@ -2671,6 +2673,12 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 	const char* applied = "applied";
+ 	switch (kind)
+ 	{
++	case campaign::Presentation::News:
++		// S08-T04: the party's task news (and any news the server gave this
++		// player's actor): the PDA news line, as single player shows it
++		_give_news(detail, "", "ui_inGame2_Mesta_evakuatsii", 0, 6000, 0);
++		g_link->log.line("news-shown serial=%u text=\"%s\"", serial, detail);
++		break;
+ 	case campaign::Presentation::CameraEffector:
+ 	{
+ 		CAnimatorCamEffectorScriptCB* e = xr_new<CAnimatorCamEffectorScriptCB>("");
+@@ -4052,6 +4060,53 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 				}
+ 		}
+ 		break;
++	case coop::proto::kActionQuest:
++	{
++		if (st.extra == 5)
++		{
++			// S08-T05: no request (the step only drops the connection: flags bit 2)
++			st.linked = st.done = true;
++			pickup_csv_line("no-request", st.round, 0, 0, st.item, 0, 0, 0, st.action, st.step);
++			break;
++		}
++		if (st.extra == 4)
++		{
++			// S08-T04: a client's own completion attempt: the installed turn-in and
++			// reward functions run locally, as a client's script or its own talk
++			// window would run them; the server must not change
++			const u16 giver = id_of(st.item);
++			string512 chunk;
++			xr_sprintf(chunk,
++				"local npc = level.object_by_id(%u)\n"
++				"local r1 = npc and pcall(dialogs.npc_set_finished_task_complete, db.actor, npc)\n"
++				"local r2 = pcall(function() db.actor:give_money(10000) end)\n"
++				"local r3 = npc and pcall(xr_effects.reward_random_money, db.actor, npc, {5000, 5000})\n"
++				"__coop_local_attempt = tostring(r1) .. ',' .. tostring(r2) .. ',' .. tostring(r3)\n",
++				u32(giver));
++			lua_State* L = ai().script_engine().lua();
++			const bool ran = L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_local_attempt") == 0 &&
++				lua_pcall(L, 0, 0, 0) == 0;
++			if (!ran && L)
++				lua_pop(L, 1);
++			g_link->log.line("quest-local-attempt round=%u giver=%u ran=%d money_now=%u", st.round, u32(giver),
++				ran ? 1 : 0, g_actor->get_money());
++			st.linked = st.done = true;
++			pickup_csv_line("local-attempt", st.round, 0, 0, st.item, ran ? 1 : 0, 0, 0, st.action, st.step);
++			break;
++		}
++		// S08-T04: the party quest's accept (extra 1) or turn-in (2) at the giver;
++		// flags bit 3 names a task this slice does not adapt; extra 3 is undefined
++		LPCSTR task = (st.flags & 8) ? "esc_m_trader_task_99" : "esc_m_trader_task_3";
++		xr_vector<u8> params;
++		params.push_back(st.extra);
++		params.push_back(u8(xr_strlen(task)));
++		params.insert(params.end(), task, task + xr_strlen(task));
++		st.operation = request_ownership(coop::proto::kActionQuest, st.item, params, 0, st.round, 0, false, "driver");
++		g_link->pickup_pending.back().step = st.step;
++		st.linked = true;
++		pickup_csv_line("linked", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
++		break;
++	}
+ 	case coop::proto::kActionActivateSlot:
+ 	{
+ 		xr_vector<u8> slot;
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 2b73302..2d98005 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -138,6 +138,9 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.pickup_race = ini.line_exist("coop", "pickup_race") ? ini.r_u32("coop", "pickup_race") : 0;
+ 		out.pickup_rounds = ini.line_exist("coop", "pickup_rounds") ? ini.r_u32("coop", "pickup_rounds") : 8;
+ 		out.transfer_race = ini.line_exist("coop", "transfer_race") ? ini.r_u32("coop", "transfer_race") : 0;
++		out.quest_party = ini.line_exist("coop", "quest_party") ? ini.r_u32("coop", "quest_party") : 0;
++		out.quest_holder = ini.line_exist("coop", "quest_holder") ? ini.r_u32("coop", "quest_holder") : 2;
++		out.quest_variant = ini.line_exist("coop", "quest_variant") ? ini.r_u32("coop", "quest_variant") : 0;
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 7b4edb7..206dd47 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -87,6 +87,9 @@ struct CoopConfig
+ 	u32 pickup_race; // S08-T01 fixture: seconds after both attach until the first pickup round (0 off)
+ 	u32 pickup_rounds; // S08-T01 fixture: rounds, one every 8 s (default 8)
+ 	u32 transfer_race; // S08-T02 fixture: seconds after both attach until the transfer rounds start (0 off)
++	u32 quest_party; // S08-T04 fixture: seconds after both attach until the party quest rounds start (0 off)
++	u32 quest_holder; // S08-T04 fixture: the slot whose accept comes first in round 1 (the other's 10 ticks later)
++	u32 quest_variant; // S08-T05 fixture: round 6: 0 both turn in at once, 1 the other disconnects first
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 59aa7ef..dd70a83 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -54,6 +54,8 @@
+ #include "Missile.h"
+ #include "ExplosiveRocket.h"
+ #include "xrServer_svclient_validation.h"
++#include "GameTask.h" // S08-T04: the party quest
++#include "GametaskManager.h"
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -313,6 +315,63 @@ struct Host
+ 	// S08-T02: drops and transfers
+ 	FILE* transfers_csv = nullptr;
+ 	FILE* item_graph_csv = nullptr; // S08-T03: every item-graph point's items
++	// S08-T04: the party's quest (one task instance for both players)
++	struct PartyTask
++	{
++		xr_string id;
++		u8 holder_slot = 0;
++		u16 holder = 0xffff; // the party's anchor actor: the task's native owner and its portable store
++		u8 accepted_by = 0; // the slot that asked for it
++		u16 giver = 0xffff;
++		u64 instance = 0;
++		u64 accepted_tick = 0;
++		s32 count = -1, need = -1; // the pooled count as last told to the players
++	};
++	xr_vector<PartyTask> party_tasks;
++	u64 quest_instances = 0;
++	struct QuestWaiter
++	{
++		coop::proto::Uuid128 player;
++		u64 join_serial;
++		coop::proto::ActionResult result;
++		u8 slot;
++	};
++	struct PendingTurnIn // S08-T04: the task completes on the native task manager's next update
++	{
++		xr_vector<QuestWaiter> waiters; // the requester, and any player who turned it in meanwhile (S08-T05)
++		xr_string task;
++		u64 since_tick;
++		u8 slot;
++	};
++	xr_vector<PendingTurnIn> turn_ins;
++	// S08-T05: an accept or a completion is answered once a checkpoint
++	// generation that holds it is published (the task's native and Lua state
++	// has no journal adapter: the checkpoint is its durable form)
++	struct QuestAnswer
++	{
++		QuestWaiter w;
++		u32 generation = 0; // 0: its publication not requested yet
++		u64 since_tick = 0;
++		xr_string what;
++	};
++	xr_vector<QuestAnswer> quest_answers;
++	bool party_adapter = false;
++	u16 party_actor_ids[2] = {0xffff, 0xffff};
++	u64 quests_accepted = 0, quests_completed = 0, quest_money_paid = 0, quest_items_taken = 0;
++	struct QuestFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0; // 0 waiting, 1 placed, 2 rounds
++		u64 phase_tick = 0;
++		u32 round = 0;
++		u64 round_tick = 0;
++		u16 giver = 0xffff;
++		u16 actors[2] = {0xffff, 0xffff};
++		xr_vector<u16> patches[2]; // spawned beside each actor (index: slot)
++		u32 spawn_round = 0xffffffff;
++		u16 dead_giver = 0xffff; // S08-T05: a stalker killed for round 8
++		u64 dead_since = 0;
++	} quest_fixture;
+ 	u64 item_graph_seq = 0, item_graph_last_tick = 0;
+ 	u64 transfers_committed = 0, transfers_duplicate = 0, transfers_refused = 0, transfers_replayed = 0;
+ 	u64 invariant_checks = 0, invariant_failures = 0;
+@@ -959,6 +1018,7 @@ void participants_now(std::vector<PersistParticipant>& participants)
+ }
+ 
+ void check_ownership(LPCSTR tag); // S08-T02
++void answer_quests(u32 generation, bool ok); // S08-T05
+ 
+ // S08-T02: EntityIds in blocks, each made durable before its first id is
+ // issued (journal kind `entity-reserve`, payload: the new limit).
+@@ -1087,6 +1147,7 @@ void poll_publications(bool final_stop)
+ 			g_host->log.line("store-failed-stop reason=%s", persistence->failure());
+ 			g_host->stop_requested = true;
+ 		}
++		answer_quests(r.generation, r.ok); // S08-T05
+ 		// the joins that waited for this generation
+ 		for (PlayerLink& link : g_host->links)
+ 			if (link.world == WorldPublishing && link.waiting_generation == r.generation)
+@@ -3608,6 +3669,753 @@ const char* kRaceSections[] = {"medkit", "bandage", "conserva", "wpn_pm", "ammo_
+ void announce_pickup_round(u32 round, u8 kind, const coop::proto::EntityRef& target, u16 spawned, const Fvector& at,
+ 	CActor* const* actors, u32 attached);
+ 
++// ------------------------------------------------------------ S08-T04
++// The party quest (plan.md S08-T04, the user's decisions of 2026-10-24):
++// Sidorovich's repeatable fetch "Mobbing the Mob" (esc_m_trader_task_3,
++// configs/misc/task/tm_escape.ltx:275-297) as ONE task instance for both
++// players. Action kind 8 (op 1 accept, op 2 turn in) runs the installed
++// dialogue phrases on the server (S02-T06e / S03-T05: dialogue_open, the
++// accept and turn-in functions of dialogs.script) in a participant's script
++// context: the accepting player is the task's holder (its native owner and
++// the portable store the task's variables live in); either player may turn
++// it in. The holder is always participant 1's actor (slot 0, the campaign's
++// original actor): its Lua binder and portable store are the ones the native
++// checkpoint saves (participant 2's actor has neither, L32), so the party's
++// task survives a restart whoever asked for it. The installed scripts are not edited: a server-only Lua adapter
++// (party_source below) wraps three functions for a party task only:
++//   task_status_functor.actor_has_fetch_item  progress = the patches in BOTH
++//                                             players' inventories (pooled)
++//   xr_effects.fetch_reward_and_remove         resolved, not applied: which
++//                                             patches leave which inventory
++//                                             (the holder's first) and what
++//                                             each player is paid for his own
++//   xr_effects.complete_task_inc_goodwill      resolved, not applied: the
++//                                             goodwill changes (main and the
++//                                             random side factions), the same
++//                                             for both players
++// The server applies the resolved effects (journal-ready for S08-T05: commit
++// before apply), then answers the turn-in. Everything else in the task's
++// on_complete (the stash, the task stage, the store resets) runs once, in
++// the holder's context, as in single player.
++
++const char* kPartyTasks[] = {"esc_m_trader_task_3"};
++const u16 kQuestPending = 0xfffe; // take_quest: the result goes out later (quest_tick)
++const float kGiverReach = 3.f; // the talk pick is 2 m (CActor::UpdateCL); a seated trader is larger
++
++LPCSTR const party_source =
++	"local P = rawget(_G, '__campaign_party')\n"
++	"if type(P) == 'table' and P.installed then return end\n"
++	"P = { installed = false, tasks = {}, actors = {}, turnin = nil, effects = nil, counts = {}, needs = {}, wrapped = 0 }\n"
++	"rawset(_G, '__campaign_party', P)\n"
++	"local function obj(id) if id and id >= 0 and id < 65535 then return level.object_by_id(id) end return nil end\n"
++	"function campaign_party_set_actors(a, b)\n"
++	"  local t = {}\n"
++	"  if a >= 0 and a < 65535 then t[#t + 1] = a end\n"
++	"  if b >= 0 and b < 65535 then t[#t + 1] = b end\n"
++	"  P.actors = t\n"
++	"end\n"
++	"function campaign_party_set_task(id, holder)\n"
++	"  if holder >= 0 then P.tasks[id] = holder else P.tasks[id] = nil P.counts[id] = nil P.needs[id] = nil end\n"
++	"end\n"
++	"local function amount(a, sec)\n"
++	"  local n = 0\n"
++	"  a:iterate_inventory(function(_, o) if o:section() == sec then n = n + 1 end end, nil)\n"
++	"  return n\n"
++	"end\n"
++	"local function pooled(id)\n"
++	"  local h = obj(P.tasks[id]) if not h then return nil end\n"
++	"  local sec = load_var(h, id .. '_fetch') if not sec then return nil end\n"
++	"  local need = load_var(h, id .. '_fetch_count') or 1\n"
++	"  local total = 0\n"
++	"  for _, aid in ipairs(P.actors) do local a = obj(aid) if a then total = total + amount(a, sec) end end\n"
++	"  P.counts[id] = total P.needs[id] = need\n"
++	"  return total, need, sec\n"
++	"end\n"
++	"function campaign_party_count(id) local t, n = pooled(id) return t or -1 end\n"
++	"function campaign_party_need(id) local t, n = pooled(id) return n or -1 end\n"
++	"function campaign_party_section(id) local t, n, s = pooled(id) return s or '' end\n"
++	"function campaign_party_check(id)\n"
++	"  local tm = task_manager.get_task_manager()\n"
++	"  local t = tm and tm.task_info and tm.task_info[id]\n"
++	"  if t and t.check_task then t:check_task() end\n"
++	"  return t and t.stage or -1\n"
++	"end\n"
++	"function campaign_party_begin_turnin(id) P.turnin = id P.effects = { items = {}, money = {}, goodwill = {}, done = false } end\n"
++	"function campaign_party_effects() return P.effects end\n"
++	"function campaign_party_end_turnin() P.turnin = nil P.effects = nil end\n"
++	"local tsf = task_status_functor\n"
++	"if tsf and tsf.actor_has_fetch_item then\n"
++	"  local orig = tsf.actor_has_fetch_item\n"
++	"  tsf.actor_has_fetch_item = function(tsk, task_id)\n"
++	"    if not P.tasks[task_id] then return orig(tsk, task_id) end\n"
++	"    local total, need = pooled(task_id)\n"
++	"    if not total then return end\n"
++	"    tsk.stage = (total >= need) and 1 or 0\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"local xe = xr_effects\n"
++	"if xe and xe.fetch_reward_and_remove then\n"
++	"  local orig = xe.fetch_reward_and_remove\n"
++	"  xe.fetch_reward_and_remove = function(actor, npc, p)\n"
++	"    local id = P.turnin\n"
++	"    if not (id and P.tasks[id] and P.effects) then return orig(actor, npc, p) end\n"
++	"    local holder = P.tasks[id]\n"
++	"    local h = obj(holder) local sec = h and load_var(h, p[1]) if not sec then P.effects.done = true return end\n"
++	"    local need = load_var(h, p[1] .. '_count') or 1\n"
++	"    local mult = tonumber(p[2]) or 1\n"
++	"    local cost = ini_sys:r_float_ex(sec, 'cost') or 0\n"
++	"    local order = { holder }\n"
++	"    for _, aid in ipairs(P.actors) do if aid ~= holder then order[#order + 1] = aid end end\n"
++	"    for _, aid in ipairs(order) do\n"
++	"      local a = obj(aid)\n"
++	"      if a and need > 0 then\n"
++	"        local total, n = 0, 0\n"
++	"        a:iterate_inventory(function(_, o)\n"
++	"          if need > 0 and o:section() == sec then\n"
++	"            local c = o:condition()\n"
++	"            total = total + cost * c * c * mult\n"
++	"            P.effects.items[#P.effects.items + 1] = { actor = aid, item = o:id() }\n"
++	"            need = need - 1 n = n + 1\n"
++	"          end\n"
++	"        end, nil)\n"
++	"        if n > 0 then\n"
++	"          if total < 50 then total = 50 end\n"
++	"          local d = math.floor(total * 0.1)\n"
++	"          local lo, hi = math.floor(total - d), math.floor(total + d)\n"
++	"          P.effects.money[#P.effects.money + 1] = { actor = aid, amount = math.random(lo, hi), count = n }\n"
++	"        end\n"
++	"      end\n"
++	"    end\n"
++	"    P.effects.section = sec\n"
++	"    P.effects.done = true\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"if xe and xe.complete_task_inc_goodwill and game_relations and game_relations.change_factions_community_num then\n"
++	"  local orig = xe.complete_task_inc_goodwill\n"
++	"  xe.complete_task_inc_goodwill = function(actor, npc, p)\n"
++	"    local id = P.turnin\n"
++	"    if not (id and P.tasks[id] and P.effects) then return orig(actor, npc, p) end\n"
++	"    local gr = game_relations\n"
++	"    local real = gr.change_factions_community_num\n"
++	"    gr.change_factions_community_num = function(community, aid, delta)\n"
++	"      P.effects.goodwill[#P.effects.goodwill + 1] = { community = community, delta = tonumber(delta) or 0 }\n"
++	"    end\n"
++	"    local ok, err = pcall(orig, actor, npc, p)\n"
++	"    gr.change_factions_community_num = real\n"
++	"    if not ok then error(err, 0) end\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"P.installed = true\n";
++
++void sync_party_actors();
++Host::PartyTask* party_task(LPCSTR id);
++
++// S08-T06: after a restart, the party's task as the recovered world holds it:
++// a supported task in process on the native task manager is the party's,
++// held by participant 1's actor, with the instance its portable store keeps.
++void rebuild_party_tasks()
++{
++	CActor* anchor = nullptr;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot == 0)
++			anchor = participant_actor(l.ref);
++	if (!anchor)
++		anchor = smart_cast<CActor*>(Level().Objects.net_Find(0));
++	// The tasks a checkpoint holds come back unowned, and an unowned task's
++	// checks are refused while two actors exist (S03-T02), so none of them
++	// could complete after a restart (qx-2). The native save is participant
++	// 1's actor's: its tasks are participant 1's (participant 2's tasks are
++	// not in it, L32).
++	if (anchor)
++	{
++		u32 owned = 0, loaded = 0;
++		for (SGameTaskKey& key : Level().GameTaskManager().GetGameTasks())
++			if (CGameTask* task = key.game_task)
++			{
++				++loaded;
++				if (!task->m_campaign_owned)
++				{
++					campaign::set_task_owner(task, anchor);
++					owned += task->m_campaign_owned ? 1 : 0;
++				}
++			}
++		g_host->log.line("quest-owners-restored tasks=%u given_to_participant_1=%u actor=%u", loaded, owned,
++			u32(anchor->ID()));
++	}
++	for (LPCSTR id : kPartyTasks)
++	{
++		if (party_task(id) || !Level().GameTaskManager().HasGameTask(shared_str(id), true) || !anchor)
++			continue;
++		int instance = 0;
++		luabind::functor<luabind::object> load_var;
++		if (ai().script_engine().functor("_G.load_var", load_var))
++		{
++			luabind::object v = load_var(anchor->lua_game_object(), (xr_string(id) + "_coop_instance").c_str());
++			if (v.type() == LUA_TNUMBER)
++				instance = luabind::object_cast<int>(v);
++		}
++		Host::PartyTask t;
++		t.id = id;
++		t.holder_slot = 0;
++		t.holder = u16(anchor->ID());
++		t.instance = instance > 0 ? u64(instance) : ++g_host->quest_instances;
++		g_host->quest_instances = _max(g_host->quest_instances, t.instance);
++		t.accepted_tick = g_host->tick;
++		g_host->party_tasks.push_back(t);
++		luabind::functor<void> set_task;
++		if (ai().script_engine().functor("campaign_party_set_task", set_task))
++			set_task(id, int(anchor->ID()));
++		g_host->log.line("quest-rebuilt task=%s instance=%I64u holder=%u", id, t.instance, u32(t.holder));
++	}
++}
++
++void install_party_adapter()
++{
++	if (g_host->party_adapter)
++		return;
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	if (luaL_loadbuffer(L, party_source, xr_strlen(party_source), "campaign_party") != 0 || lua_pcall(L, 0, 0, 0) != 0)
++	{
++		g_host->log.line("party-adapter-failed error=%s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		return;
++	}
++	g_host->party_adapter = true;
++	luabind::object P = luabind::get_globals(L)["__campaign_party"];
++	const int wrapped = P.type() == LUA_TTABLE && luabind::object(P["wrapped"]).type() == LUA_TNUMBER ?
++		luabind::object_cast<int>(P["wrapped"]) : -1;
++	g_host->log.line("party-adapter installed wrapped=%d", wrapped);
++}
++
++template <typename R, typename... A>
++bool lua_call_ok(LPCSTR name, R& out, A... args)
++{
++	luabind::functor<R> f;
++	if (!ai().script_engine().functor(name, f))
++		return false;
++	out = f(args...);
++	return true;
++}
++
++bool lua_call_void(LPCSTR name)
++{
++	luabind::functor<void> f;
++	if (!ai().script_engine().functor(name, f))
++		return false;
++	f();
++	return true;
++}
++
++bool party_task_supported(LPCSTR id)
++{
++	for (LPCSTR t : kPartyTasks)
++		if (!xr_strcmp(t, id))
++			return true;
++	return false;
++}
++
++Host::PartyTask* party_task(LPCSTR id)
++{
++	for (Host::PartyTask& t : g_host->party_tasks)
++		if (t.id == id)
++			return &t;
++	return nullptr;
++}
++
++// Both party actors' presentation: what this player sees of the party's task.
++void party_news(LPCSTR text)
++{
++	for (u16 id : g_host->party_actor_ids)
++		if (id != 0xffff)
++			if (CObject* actor = Level().Objects.net_Find(id))
++				campaign::present_to_actor(actor, campaign::Presentation::News, 0, text);
++	g_host->log.line("quest-news text=\"%s\"", text);
++}
++
++void sync_party_actors()
++{
++	u16 ids[2] = {0xffff, 0xffff};
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++				ids[link.ref.slot] = u16(actor->ID());
++	if (ids[0] == g_host->party_actor_ids[0] && ids[1] == g_host->party_actor_ids[1])
++		return;
++	g_host->party_actor_ids[0] = ids[0];
++	g_host->party_actor_ids[1] = ids[1];
++	luabind::functor<void> f;
++	if (ai().script_engine().functor("campaign_party_set_actors", f))
++		f(ids[0] == 0xffff ? -1 : int(ids[0]), ids[1] == 0xffff ? -1 : int(ids[1]));
++	g_host->log.line("party-actors p0=%d p1=%d", ids[0] == 0xffff ? -1 : int(ids[0]), ids[1] == 0xffff ? -1 : int(ids[1]));
++}
++
++// The installed accept phrases in `actor`'s context (CampaignQuestCapture's
++// dialog_accept_task for any participant): generate the giver's tasks, skip
++// until `task` is offered, show its job text (the fetch roll), accept.
++bool quest_accept_phrases(CActor* actor, CGameObject* npc, LPCSTR task)
++{
++	CScriptGameObject* actor_go = actor->lua_game_object();
++	CScriptGameObject* npc_go = npc->lua_game_object();
++	luabind::functor<void> generate, skip, give;
++	luabind::functor<bool> has_task;
++	luabind::functor<luabind::object> text;
++	if (!ai().script_engine().functor("dialogs.generate_available_tasks", generate) ||
++		!ai().script_engine().functor("dialogs.npc_has_task", has_task) ||
++		!ai().script_engine().functor("dialogs.npc_skip_task", skip) ||
++		!ai().script_engine().functor("dialogs.text_npc_has_task", text) ||
++		!ai().script_engine().functor("dialogs.npc_give_task", give))
++		return false;
++	generate(actor_go, npc_go);
++	lua_State* L = ai().script_engine().lua();
++	luabind::object available = luabind::get_globals(L)["axr_task_manager"];
++	for (u32 skipped = 0; skipped < 16; ++skipped)
++	{
++		if (!has_task(actor_go, npc_go))
++			break;
++		LPCSTR first = "-";
++		if (available.type() == LUA_TTABLE)
++		{
++			// a default luabind::object has no state and faults on type(): nil is object(L)
++			luabind::object list = available["available_tasks"];
++			luabind::object mine = list.type() == LUA_TTABLE ? luabind::object(list[int(npc->ID())]) : luabind::object(L);
++			luabind::object head = mine.type() == LUA_TTABLE ? luabind::object(mine[1]) : luabind::object(L);
++			if (head.type() == LUA_TSTRING)
++				first = luabind::object_cast<LPCSTR>(head);
++		}
++		if (!xr_strcmp(first, task))
++		{
++			text(actor_go, npc_go);
++			give(actor_go, npc_go);
++			g_host->log.line("quest-offered task=%s skipped=%u", task, skipped);
++			return true;
++		}
++		g_host->log.line("quest-skip offered=%s", first);
++		skip(actor_go, npc_go);
++	}
++	return false;
++}
++
++bool quest_turnin_phrases(CActor* actor, CGameObject* npc)
++{
++	CScriptGameObject* actor_go = actor->lua_game_object();
++	CScriptGameObject* npc_go = npc->lua_game_object();
++	luabind::functor<bool> finished;
++	luabind::functor<luabind::object> text;
++	luabind::functor<void> complete;
++	if (!ai().script_engine().functor("dialogs.actor_has_finished_task", finished) ||
++		!ai().script_engine().functor("dialogs.text_npc_task_finish", text) ||
++		!ai().script_engine().functor("dialogs.npc_set_finished_task_complete", complete))
++		return false;
++	if (!finished(actor_go, npc_go))
++		return false;
++	text(actor_go, npc_go);
++	complete(actor_go, npc_go);
++	return true;
++}
++
++u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// S08-T05: first, before the stored outcome (remembered before its
++	// publication): a request whose answer is still on its way gets it later
++	for (const Host::PendingTurnIn& t : g_host->turn_ins)
++		for (const Host::QuestWaiter& w : t.waiters)
++			if (w.player == link.player && w.result.operation_id == intent.operation_id)
++				return kQuestPending; // the same request again while it completes: one answer, later
++	for (const Host::QuestAnswer& a : g_host->quest_answers)
++		if (a.w.player == link.player && a.w.result.operation_id == intent.operation_id)
++			return kQuestPending; // its answer waits for the publication
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		g_host->log.line("quest-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (intent.params.size() < 3 || intent.params.size() != size_t(2 + intent.params[1]) || intent.params[1] > 64)
++		return coop::proto::kReasonMalformed;
++	const u8 op = intent.params[0];
++	if (op != 1 && op != 2)
++		return coop::proto::kReasonMalformed;
++	string128 task;
++	memcpy(task, intent.params.data() + 2, intent.params[1]);
++	task[intent.params[1]] = 0;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor || !actor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	if (!party_task_supported(task) || !g_host->party_adapter)
++		return coop::proto::kReasonQuestUnsupported;
++	const u16 giver_id = engine_id_of(intent.target);
++	CGameObject* npc = giver_id != kNoEngineId ? smart_cast<CGameObject*>(Level().Objects.net_Find(giver_id)) : nullptr;
++	CEntityAlive* alive = npc ? smart_cast<CEntityAlive*>(npc) : nullptr;
++	CInventoryOwner* owner = npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++	if (!npc || !alive || !alive->g_Alive() || !owner || smart_cast<CActor*>(npc))
++		return coop::proto::kReasonQuestUnsupported;
++	const float distance = pickup_distance(actor, npc);
++	if (distance > kGiverReach)
++	{
++		g_host->log.line("quest-out-of-reach slot=%u giver=%u distance=%.2f", u32(link.ref.slot), u32(giver_id), distance);
++		return coop::proto::kReasonOutOfReach;
++	}
++	sync_party_actors();
++	Host::PartyTask* t = party_task(task);
++	// the party's anchor: participant 1's actor
++	CActor* anchor = nullptr;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot == 0)
++			anchor = participant_actor(l.ref);
++	if (op == 1)
++	{
++		if (t)
++			return coop::proto::kReasonQuestActive;
++		if (!anchor || !anchor->g_Alive())
++			return coop::proto::kReasonNoActor;
++		bool ok = false;
++		const campaign::Refusal opened = campaign::dialogue_open(anchor, owner, false);
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "party-quest-accept");
++			ok = opened == campaign::Refusal::None && quest_accept_phrases(anchor, npc, task);
++		}
++		campaign::dialogue_close(anchor, owner);
++		CGameTask* native = Level().GameTaskManager().HasGameTask(shared_str(task), true);
++		g_host->log.line("quest-accept slot=%u task=%s dialogue=%s ok=%d native=%d", u32(link.ref.slot), task,
++			campaign::refusal_name(opened), ok ? 1 : 0, native ? 1 : 0);
++		if (!ok || !native)
++			return coop::proto::kReasonQuestNotOffered;
++		Host::PartyTask nt;
++		nt.id = task;
++		nt.holder_slot = 0;
++		nt.holder = u16(anchor->ID());
++		nt.accepted_by = link.ref.slot;
++		nt.giver = giver_id;
++		nt.instance = ++g_host->quest_instances;
++		nt.accepted_tick = g_host->tick;
++		g_host->party_tasks.push_back(nt);
++		{
++			// S08-T06: the instance lives with the task in the anchor's portable
++			// store (the native save holds it), so a restart rebuilds the party's task
++			luabind::functor<void> save_var;
++			if (ai().script_engine().functor("_G.save_var", save_var))
++				save_var(anchor->lua_game_object(), (xr_string(task) + "_coop_instance").c_str(), int(nt.instance));
++		}
++		luabind::functor<void> set_task;
++		if (ai().script_engine().functor("campaign_party_set_task", set_task))
++			set_task(task, int(anchor->ID()));
++		s32 need = -1;
++		lua_call_ok("campaign_party_need", need, (LPCSTR)task);
++		++g_host->quests_accepted;
++		g_host->log.line("quest-accepted slot=%u task=%s instance=%I64u holder=%u giver=%u need=%d", u32(link.ref.slot),
++			task, nt.instance, u32(nt.holder), u32(giver_id), need);
++		string128 news;
++		xr_sprintf(news, "Party task accepted by Player %u: bring %d bandit patches to Sidorovich", u32(link.ref.slot) + 1,
++			need);
++		party_news(news);
++		const u64 revision = ++g_host->commit;
++		stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++		stored.reason = 0;
++		stored.revision = revision;
++		if (persistence)
++			persistence->remember(link.player, intent.operation_id, stored);
++		result.outcome = coop::proto::ActionOutcome::Accepted;
++		result.reason = 0;
++		result.commit_id = revision;
++		result.revision = revision;
++		coop::store::failpoint("quest:after-accept");
++		Host::QuestAnswer answer;
++		answer.w = {link.player, link.join_serial, result, link.ref.slot};
++		answer.since_tick = g_host->tick;
++		answer.what = "accept";
++		g_host->quest_answers.push_back(answer);
++		return kQuestPending;
++	}
++	// op 2: turn in
++	if (!t)
++		return coop::proto::kReasonQuestNotActive;
++	for (Host::PendingTurnIn& p : g_host->turn_ins)
++		if (p.task == task)
++		{
++			// S08-T05: two turn-ins of one task: one completion, both answered with it
++			p.waiters.push_back({link.player, link.join_serial, result, link.ref.slot});
++			g_host->log.line("quest-turnin-joined slot=%u task=%s waiters=%u", u32(link.ref.slot), task,
++				u32(p.waiters.size()));
++			return kQuestPending;
++		}
++	CActor* holder = smart_cast<CActor*>(Level().Objects.net_Find(t->holder));
++	if (!holder || !holder->g_Alive())
++		return coop::proto::kReasonQuestNotActive; // the holder's task went with its actor (S08-T05: defined)
++	s32 stage = -1;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
++		lua_call_ok("campaign_party_check", stage, (LPCSTR)task);
++	}
++	if (stage != 1)
++	{
++		g_host->log.line("quest-not-finished slot=%u task=%s stage=%d count=%d need=%d", u32(link.ref.slot), task, stage,
++			t->count, t->need);
++		return coop::proto::kReasonQuestNotFinished;
++	}
++	luabind::functor<void> begin;
++	if (ai().script_engine().functor("campaign_party_begin_turnin", begin))
++		begin((LPCSTR)task);
++	bool ok = false;
++	const campaign::Refusal opened = campaign::dialogue_open(holder, owner, false);
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-turnin");
++		ok = opened == campaign::Refusal::None && quest_turnin_phrases(holder, npc);
++	}
++	campaign::dialogue_close(holder, owner);
++	g_host->log.line("quest-turnin slot=%u task=%s holder=%u dialogue=%s ok=%d", u32(link.ref.slot), task,
++		u32(t->holder), campaign::refusal_name(opened), ok ? 1 : 0);
++	if (!ok)
++	{
++		lua_call_void("campaign_party_end_turnin");
++		return coop::proto::kReasonQuestNotFinished;
++	}
++	Host::PendingTurnIn pending;
++	pending.waiters.push_back({link.player, link.join_serial, result, link.ref.slot});
++	pending.task = task;
++	pending.since_tick = g_host->tick;
++	pending.slot = link.ref.slot;
++	g_host->turn_ins.push_back(pending);
++	return kQuestPending;
++}
++
++PlayerLink* link_of(const coop::proto::Uuid128& player);
++
++// The resolved effects of a completed party turn-in, applied by the server:
++// the patches leave their owners' inventories, each player is paid for his
++// own (dialogs.relocate_money in that player's context: the money and its
++// news), and every party actor gets the same goodwill changes.
++bool apply_party_effects(const Host::PendingTurnIn& p, u64 revision)
++{
++	lua_State* L = ai().script_engine().lua();
++	luabind::functor<luabind::object> effects_of;
++	if (!ai().script_engine().functor("campaign_party_effects", effects_of))
++		return false;
++	luabind::object e = effects_of();
++	if (e.type() != LUA_TTABLE || luabind::object(e["done"]).type() != LUA_TBOOLEAN ||
++		!luabind::object_cast<bool>(e["done"]))
++		return false;
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	u32 items = 0, payments = 0, goodwill = 0;
++	luabind::object list = e["items"];
++	for (int i = 1; list.type() == LUA_TTABLE; ++i)
++	{
++		luabind::object one = list[i];
++		if (one.type() != LUA_TTABLE)
++			break;
++		const u16 item = u16(luabind::object_cast<int>(one["item"]));
++		const u16 from = u16(luabind::object_cast<int>(one["actor"]));
++		CSE_ALifeDynamicObject* se = ai().alife().objects().object(item, true);
++		g_host->log.line("quest-item-taken revision=%I64u task=%s item=%u item_entity=%I64u from=%u ok=%d", revision,
++			p.task.c_str(), u32(item), entity_of(item), u32(from), se ? 1 : 0);
++		if (se)
++		{
++			alife->release(se, true);
++			++items;
++		}
++	}
++	luabind::object money = e["money"];
++	for (int i = 1; money.type() == LUA_TTABLE; ++i)
++	{
++		luabind::object one = money[i];
++		if (one.type() != LUA_TTABLE)
++			break;
++		const u16 to = u16(luabind::object_cast<int>(one["actor"]));
++		const int amount = luabind::object_cast<int>(one["amount"]);
++		const int count = luabind::object_cast<int>(one["count"]);
++		CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(to));
++		const u32 before = a ? a->get_money() : 0;
++		if (a && amount > 0)
++		{
++			// natively on the paid player's own actor (dialogs.relocate_money pays
++			// db.actor, which outside an entered context is participant 1's)
++			a->set_money(a->get_money() + u32(amount), true);
++			string128 news;
++			xr_sprintf(news, "Party task reward: %d RU for %d bandit patches", amount, count);
++			campaign::present_to_actor(a, campaign::Presentation::News, 0, news);
++			++payments;
++			g_host->quest_money_paid += u64(amount);
++		}
++		g_host->log.line("quest-paid revision=%I64u task=%s actor=%u entity=%I64u patches=%d amount=%d money=%u->%u",
++			revision, p.task.c_str(), u32(to), entity_of(to), count, amount, before, a ? a->get_money() : 0);
++	}
++	luabind::functor<void> change;
++	const bool have_change = ai().script_engine().functor("game_relations.change_factions_community_num", change);
++	luabind::object gw = e["goodwill"];
++	for (int i = 1; gw.type() == LUA_TTABLE; ++i)
++	{
++		luabind::object one = gw[i];
++		if (one.type() != LUA_TTABLE)
++			break;
++		LPCSTR community = luabind::object_cast<LPCSTR>(one["community"]);
++		const int delta = int(luabind::object_cast<float>(one["delta"]));
++		for (u16 id : g_host->party_actor_ids)
++			if (id != 0xffff && have_change)
++			{
++				change(community, int(id), delta);
++				++goodwill;
++				g_host->log.line("quest-goodwill revision=%I64u task=%s actor=%u entity=%I64u community=%s delta=%d",
++					revision, p.task.c_str(), u32(id), entity_of(id), community, delta);
++			}
++	}
++	g_host->quest_items_taken += items;
++	g_host->log.line("quest-effects revision=%I64u task=%s items=%u payments=%u goodwill=%u", revision, p.task.c_str(),
++		items, payments, goodwill);
++	(void)L;
++	return true;
++}
++
++// Every tick: the party's actors to the adapter, the pooled progress to both
++// players, and the pending turn-ins: once the task completed (the native task
++// manager's next update runs its on_complete, which the adapter resolved),
++// apply the effects and answer the turn-in.
++void quest_tick()
++{
++	if (!g_host->party_adapter || !ai().get_alife())
++		return;
++	if (g_host->tick % 25 == 0)
++		sync_party_actors();
++	for (Host::PartyTask& t : g_host->party_tasks)
++		if (g_host->tick % 50 == 0)
++		{
++			s32 count = -1, need = -1;
++			lua_call_ok("campaign_party_count", count, t.id.c_str());
++			lua_call_ok("campaign_party_need", need, t.id.c_str());
++			if (count != t.count || need != t.need)
++			{
++				t.count = count;
++				t.need = need;
++				g_host->log.line("quest-progress task=%s instance=%I64u count=%d need=%d", t.id.c_str(), t.instance, count,
++					need);
++				string128 news;
++				xr_sprintf(news, "Party task: %d of %d bandit patches", _max(count, 0), need);
++				party_news(news);
++			}
++		}
++	for (size_t i = 0; i < g_host->turn_ins.size();)
++	{
++		Host::PendingTurnIn& p = g_host->turn_ins[i];
++		const u64 revision = g_host->commit + 1;
++		const bool done = apply_party_effects(p, revision);
++		if (!done && g_host->tick - p.since_tick < 10 * 50)
++		{
++			++i;
++			continue;
++		}
++		lua_call_void("campaign_party_end_turnin");
++		if (done)
++		{
++			++g_host->commit;
++			++g_host->quests_completed;
++			Host::PartyTask* t = party_task(p.task.c_str());
++			g_host->log.line("quest-completed task=%s instance=%I64u revision=%I64u by_slot=%u holder=%u waiters=%u "
++				"ticks=%I64u", p.task.c_str(), t ? t->instance : 0, revision, u32(p.slot),
++				t ? u32(t->holder) : 0xffffu, u32(p.waiters.size()), g_host->tick - p.since_tick);
++			luabind::functor<void> set_task;
++			if (ai().script_engine().functor("campaign_party_set_task", set_task))
++				set_task(p.task.c_str(), -1);
++			if (t)
++				g_host->party_tasks.erase(g_host->party_tasks.begin() + (t - g_host->party_tasks.data()));
++			party_news("Party task complete: Mobbing the Mob");
++			coop::store::failpoint("quest:after-apply");
++		}
++		else
++			g_host->log.line("quest-turnin-timeout task=%s slot=%u", p.task.c_str(), u32(p.slot));
++		for (Host::QuestWaiter& w : p.waiters)
++		{
++			coop::proto::ActionResult& result = w.result;
++			if (done)
++			{
++				result.outcome = coop::proto::ActionOutcome::Accepted;
++				result.reason = 0;
++				result.commit_id = revision;
++				result.revision = revision;
++				StoredOutcome stored = {u8(coop::proto::ActionOutcome::Accepted), 0, revision};
++				if (g_host->persistence)
++					g_host->persistence->remember(w.player, result.operation_id, stored);
++				Host::QuestAnswer answer;
++				answer.w = w;
++				answer.since_tick = g_host->tick;
++				answer.what = "complete";
++				g_host->quest_answers.push_back(answer);
++			}
++			else
++			{
++				result.outcome = coop::proto::ActionOutcome::Rejected;
++				result.reason = coop::proto::kReasonQuestNotFinished;
++				result.server_tick = g_host->tick;
++				g_host->server->send(w.player, coop::proto::Message(result));
++			}
++		}
++		g_host->turn_ins.erase(g_host->turn_ins.begin() + i);
++	}
++	// S08-T05: the answers wait for a generation that holds their effects
++	CoopPersistence* persistence = g_host->persistence;
++	bool requested = false;
++	for (Host::QuestAnswer& a : g_host->quest_answers)
++		if (!a.generation && persistence && !persistence->failed() && !persistence->in_flight() && !requested)
++		{
++			if (request_publication("quest"))
++			{
++				const u32 generation = persistence->next_generation();
++				for (Host::QuestAnswer& b : g_host->quest_answers)
++					if (!b.generation)
++						b.generation = generation;
++				g_host->log.line("quest-publication-requested generation=%u answers=%u", generation,
++					u32(g_host->quest_answers.size()));
++			}
++			requested = true;
++		}
++}
++
++// S08-T05: a published generation releases the quest answers that waited for it.
++void answer_quests(u32 generation, bool ok)
++{
++	for (size_t i = 0; i < g_host->quest_answers.size();)
++	{
++		Host::QuestAnswer& a = g_host->quest_answers[i];
++		if (a.generation != generation)
++		{
++			++i;
++			continue;
++		}
++		coop::proto::ActionResult result = a.w.result;
++		if (!ok)
++		{
++			result.outcome = coop::proto::ActionOutcome::Rejected;
++			result.reason = kActionReasonStoreFailed;
++		}
++		result.server_tick = g_host->tick;
++		coop::store::failpoint("quest:before-ack");
++		g_host->server->send(a.w.player, coop::proto::Message(result));
++		g_host->log.line("intent-%s player=%s operation=%I64u kind=8 reason=%u (quest %s answered after generation %u, "
++			"%I64u ticks)", ok ? "accepted" : "refused", coop_uuid_hex(a.w.player).c_str(), result.operation_id,
++			u32(result.reason), a.what.c_str(), generation, g_host->tick - a.since_tick);
++		g_host->quest_answers.erase(g_host->quest_answers.begin() + i);
++	}
++}
++
+ // ------------------------------------------------------------ S08-T02
+ // The transfer fixture (profile transfer_race): once both players are in
+ // the world, an inventory box appears between them with four items, a second
+@@ -3954,6 +4762,263 @@ void transfer_fixtures()
+ 		u32(steps.size()), detail);
+ }
+ 
++// ------------------------------------------------------------ S08-T04
++// The party quest fixture (profile quest_party): once both players are in
++// the world, both actors are placed beside Sidorovich (section m_trader; as
++// the script API's SetActorPosition, the S03-T05 fixture's place_beside_giver)
++// and rounds run through the transfer driver's steps (CampaignEvent 7, client
++// script 8; step action 8 = quest: item = the giver, extra = op, flags bit 3 =
++// an unsupported task id, extra 3 = an undefined op):
++//   0  p2 turns in before anyone accepted                   -> NotActive (18)
++//   1  both accept at the same tick                          -> one Accepted, one Active (16)
++//   2  (patches appear: the holder's half beside the holder, the rest beside
++//      the other player) the holder picks up its half
++//   3  the other player turns in with only the holder's half -> NotFinished (19)
++//   4  the other player picks up its half
++//   5  p1 an unsupported task id (15), p2 an undefined op (2)
++//   6  quest_variant 0: both turn in at the same tick      -> one completion, both Accepted with its commit
++//      quest_variant 1: the other player drops its connection, then the
++//      one who accepted turns in                           -> Accepted; the absent contributor still paid
++//   7  the one who accepted turns in again                  -> NotActive (18)
++//   8  asking a dead stalker for work                       -> QuestUnsupported (15)
++// S08-T05: every Accepted quest answer waits for a published generation.
++const u32 kQuestRounds = 9;
++
++u16 find_giver()
++{
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CObject* o = Level().Objects.o_get_by_iterator(i);
++		if (o && !xr_strcmp(*o->cNameSect(), "m_trader") && smart_cast<CEntityAlive*>(o))
++			return u16(o->ID());
++	}
++	return 0xffff;
++}
++
++void place_beside(CActor* actor, const Fvector& at)
++{
++	Fmatrix F = actor->XFORM();
++	F.c = at;
++	actor->XFORM().set(F);
++	if (actor->character_physics_support()->movement()->CharacterExist())
++	{
++		actor->character_physics_support()->movement()->SetPosition(F.c);
++		actor->character_physics_support()->movement()->SetVelocity(0.f, 0.f, 0.f);
++	}
++}
++
++void quest_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.quest_party || !ai().get_alife())
++		return;
++	Host::QuestFixture& f = g_host->quest_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-quest both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2)
++		return;
++	if (f.phase == 0)
++	{
++		if (g_host->tick < f.both_since + u64(config.quest_party) * 50)
++			return;
++		f.giver = find_giver();
++		CObject* giver = f.giver != 0xffff ? Level().Objects.net_Find(f.giver) : nullptr;
++		if (!giver)
++		{
++			if (g_host->tick - f.both_since > u64(config.quest_party) * 50 + 30 * 50)
++			{
++				g_host->log.line("fixture-quest giver-missing");
++				f.phase = 99;
++			}
++			return;
++		}
++		const Fvector g = giver->Position();
++		for (u32 k = 0; k < 2; ++k)
++		{
++			f.actors[k] = u16(actors[k]->ID());
++			const Fvector from = actors[k]->Position();
++			Fvector at = g;
++			at.x += k ? -1.2f : 1.2f;
++			place_beside(actors[k], at);
++			g_host->log.line("fixture-quest placed slot=%u actor=%u was=%.1f giver=%u at=%.2f,%.2f,%.2f", k,
++				u32(f.actors[k]), from.distance_to(g), u32(f.giver), VPUSH(at));
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 5 * 50)
++			return;
++		f.phase = 2;
++		f.round_tick = g_host->tick;
++		return;
++	}
++	if (f.phase != 2 || f.round >= kQuestRounds || g_host->tick < f.round_tick)
++		return;
++	// the holder (slot) once a task is active; the patches before round 2
++	const Host::PartyTask* t = party_task("esc_m_trader_task_3");
++	const u32 holder = t ? t->accepted_by : 0; // the round roles: who accepted, and the other player
++	const u32 other = 1 - holder;
++	if (f.round == 2 && f.spawn_round != 2)
++	{
++		if (!t)
++		{
++			g_host->log.line("fixture-quest no-task-after-round-1");
++			f.round = kQuestRounds;
++			return;
++		}
++		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++		const s32 need = t->need > 0 ? t->need : 6;
++		for (s32 i = 0; i < need; ++i)
++		{
++			const u32 k = u32(i) < u32(need + 1) / 2 ? holder : other;
++			// at the actor's own height and level vertex: inside the bunker the
++			// level graph's vertex under a point can be the ground above it (q-1)
++			Fvector at = actors[k]->Position();
++			at.x += 0.3f * float(i % 3) - 0.3f;
++			at.z += 0.4f;
++			at.y += 0.3f;
++			const CSE_ALifeDynamicObject* anchor = ai().alife().objects().object(f.actors[k], true);
++			CSE_Abstract* patch = anchor ? alife->spawn_item("bandit_patch", at, actors[k]->ai_location().level_vertex_id(),
++				anchor->m_tGraphID, u16(-1)) : nullptr;
++			const u16 id = patch ? patch->ID : kNoEngineId;
++			if (id != kNoEngineId)
++				f.patches[k].push_back(id);
++		}
++		f.spawn_round = 2;
++		f.phase_tick = g_host->tick;
++		g_host->log.line("fixture-quest patches need=%d holder_slot=%u holder=%u other=%u", need, holder,
++			u32(f.patches[holder].size()), u32(f.patches[other].size()));
++		return;
++	}
++	if (f.round == 8)
++	{
++		// a stalker spawned beside the players and killed: a dead "giver"
++		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++		if (f.dead_giver == 0xffff)
++		{
++			Fvector at = actors[0]->Position();
++			at.z += 1.5f;
++			const CSE_ALifeDynamicObject* anchor = ai().alife().objects().object(f.actors[0], true);
++			CSE_Abstract* npc = anchor ? alife->spawn_item("sim_default_stalker_0", at,
++				actors[0]->ai_location().level_vertex_id(), anchor->m_tGraphID, u16(-1)) : nullptr;
++			f.dead_giver = npc ? npc->ID : u16(0xfffe);
++			f.dead_since = g_host->tick;
++			return;
++		}
++		CEntityAlive* npc = f.dead_giver < 0xfffe ? smart_cast<CEntityAlive*>(Level().Objects.net_Find(f.dead_giver)) : nullptr;
++		if (npc && npc->g_Alive())
++			npc->KillEntity(npc->ID(), TRUE);
++		if ((!npc || npc->g_Alive() || !delivered(f.dead_giver)) && g_host->tick - f.dead_since < 15 * 50)
++			return;
++		g_host->log.line("fixture-quest dead-giver id=%u dead=%d", u32(f.dead_giver), npc && !npc->g_Alive() ? 1 : 0);
++	}
++	if (f.round == 2 || f.round == 4)
++	{
++		bool all = true;
++		for (u32 k = 0; k < 2; ++k)
++			for (u16 id : f.patches[k])
++				all = all && delivered(id);
++		if (!all && g_host->tick - f.phase_tick < 15 * 50)
++			return;
++	}
++	const u32 round = f.round++;
++	f.round_tick = g_host->tick + 8 * 50;
++	const u16 G = f.giver;
++	xr_vector<TransferStep> steps;
++	switch (round)
++	{
++	case 0: steps.push_back({1, 8, 0, G, 0xffff, 0xffff, 0, 2}); break;
++	case 1:
++	{
++		// both at once (quest_holder 2), or the named slot first and the other 10 ticks later
++		const u32 first = g_host->config.quest_holder;
++		steps.push_back({0, 8, u16(first == 1 ? 10 : 0), G, 0xffff, 0xffff, 0, 1});
++		steps.push_back({1, 8, u16(first == 0 ? 10 : 0), G, 0xffff, 0xffff, 0, 1});
++		break;
++	}
++	case 2:
++	case 4:
++	{
++		const u32 k = round == 2 ? holder : other;
++		u16 offset = 0;
++		for (u16 id : f.patches[k])
++		{
++			steps.push_back({u8(k), 5, offset, id, 0xffff, f.actors[k], 0, 0});
++			offset = u16(offset + 15);
++		}
++		f.round_tick = g_host->tick + 8 * 50 + u64(offset);
++		break;
++	}
++	case 3:
++		// the other player first runs the installed completion and reward locally
++		// (extra 4: nothing it does reaches the server), then turns in too early
++		steps.push_back({u8(other), 8, 0, G, 0xffff, 0xffff, 0, 4});
++		steps.push_back({u8(other), 8, 25, G, 0xffff, 0xffff, 0, 2});
++		break;
++	case 5:
++		steps.push_back({0, 8, 0, G, 0xffff, 0xffff, 8, 2});
++		steps.push_back({1, 8, 0, G, 0xffff, 0xffff, 0, 3});
++		break;
++	case 6:
++		if (g_host->config.quest_variant == 1)
++		{
++			steps.push_back({u8(other), 8, 0, G, 0xffff, 0xffff, 4, 5}); // no request; drop the connection
++			steps.push_back({u8(holder), 8, 50, G, 0xffff, 0xffff, 0, 2});
++		}
++		else
++		{
++			steps.push_back({u8(other), 8, 0, G, 0xffff, 0xffff, 0, 2});
++			steps.push_back({u8(holder), 8, 0, G, 0xffff, 0xffff, 0, 2});
++		}
++		break;
++	case 7: steps.push_back({u8(holder), 8, 0, G, 0xffff, 0xffff, 0, 2}); break;
++	default: steps.push_back({u8(holder), 8, 0, f.dead_giver, 0xffff, 0xffff, 0, 1}); break;
++	}
++	const u64 claim_tick = g_host->tick + 100;
++	std::vector<u8> payload;
++	put_u8(payload, u8(round));
++	put_u8(payload, u8(round));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(claim_tick >> (8 * b)));
++	put_u8(payload, u8(steps.size()));
++	string512 detail = "";
++	for (const TransferStep& st : steps)
++	{
++		put_u8(payload, st.slot);
++		put_u8(payload, st.action);
++		put_u16(payload, st.offset);
++		put_ref(payload, st.item);
++		put_ref(payload, st.from);
++		put_ref(payload, st.to);
++		put_u8(payload, st.flags);
++		put_u8(payload, st.extra);
++		string64 one;
++		xr_sprintf(one, " %u:%u@%u:%u:op%u:f%u", u32(st.slot), u32(st.action), u32(st.offset), u32(st.item), u32(st.extra),
++			u32(st.flags));
++		xr_strcat(detail, one);
++	}
++	broadcast_event(7, payload);
++	g_host->log.line("fixture-quest-round round=%u claim_tick=%I64u holder_slot=%u steps=%u%s", round, claim_tick,
++		holder, u32(steps.size()), detail);
++}
++
+ void pickup_fixtures()
+ {
+ 	const CoopConfig& config = g_host->config;
+@@ -4501,6 +5566,16 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_pickup(*link, *intent, result); // S08-T01
+ 		else if (intent->kind == coop::proto::kActionDrop || intent->kind == coop::proto::kActionTransfer)
+ 			reason = take_transfer(*link, *intent, result); // S08-T02
++		else if (intent->kind == coop::proto::kActionQuest)
++		{
++			reason = take_quest(*link, *intent, result); // S08-T04
++			if (reason == kQuestPending)
++			{
++				g_host->log.line("intent-pending player=%s operation=%I64u kind=8 (turn-in completing)",
++					coop_uuid_hex(e.player).c_str(), intent->operation_id);
++				return; // answered by quest_tick once the effects are applied
++			}
++		}
+ 		else
+ 			reason = take_action(*link, *intent);
+ 		if (reason)
+@@ -5158,6 +6233,8 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		g_host->commit, g_host->persistence->epoch());
+ 	// S08-T02: from here every EntityId is issued under a durable reservation
+ 	g_campaign_identity->set_entity_reserver(reserve_entity_block);
++	install_party_adapter(); // S08-T04
++	rebuild_party_tasks(); // S08-T06
+ 	disable_power_throttling();
+ 	g_host->wall.Start();
+ 	g_host->started = true;
+@@ -5240,6 +6317,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	pickup_fixtures(); // S08-T01
+ 	transfer_fixtures(); // S08-T02
+ 	item_graph_points(); // S08-T03
++	quest_tick(); // S08-T04
++	quest_fixtures(); // S08-T04
+ 	encounter_fixtures();
+ 	encounter_record();
+ 	poll_publications(false); // S07-T08: the worker's results and the joins waiting on them
+@@ -5308,6 +6387,11 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		}
+ 		log_status("final");
+ 		log_pickup_state("final"); // S08-T01
++		for (u16 id : g_host->party_actor_ids) // S08-T04: the party's money as the server holds it
++			if (id != 0xffff)
++				if (CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(id)))
++					g_host->log.line("quest-final actor=%u entity=%I64u money=%u completed=%I64u paid=%I64u", u32(id),
++						entity_of(id), a->get_money(), g_host->quests_completed, g_host->quest_money_paid);
+ 		check_ownership("final"); // S08-T02
+ 		g_host->events.clear();
+ 		g_host->server->shutdown(1000, g_host->events);

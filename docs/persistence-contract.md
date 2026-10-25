@@ -71,7 +71,7 @@ the representation column is what survives, and where.
 | **B. Participant identity** | slot ↔ player ↔ party; slot generation; the participant's actor (u16 and `EntityId`); alive flag; last position | supplemental record `.sup` of `G` | with `G` | restored before the actors spawn, so each saved actor is assigned to its player, not adopted by spawn order |
 | **C. Entity identity** | u16 → `EntityId` for every saved object; `next_entity` | `.sup` of `G`; journal `entity` records for durable entities created after `G` (a respawned actor), tombstones for durable entities destroyed after `G` | with `G` / with the record | restored at load; a journal entity record binds the recreated object to its recorded `EntityId` |
 | **D. Script state** | actor 1's binder `pstor`, task manager state, info portions, story flags, `m_data` | `.scoc` of `G` (unchanged native path) | with `G` | rolls back to `G`; actor 2 has no binder and no `pstor` (L15 remains for actor 2 until the presentation/script split; recorded as L32 at G07) |
-| **E. Critical outcomes** | Stage 7: the synthetic ledger effect, a participant's death, a respawn; Stage 8+: pickup, transfer, trade, quest completion, reward | a **journal record** holding the *resolved* effect (absolute post-state, identities, revision, operation) | at the record's flush, **before** the acknowledgement | records with revision > `R_G` are re-applied through idempotent adapters; nothing acknowledged is lost or applied twice |
+| **E. Critical outcomes** | Stage 7: the synthetic ledger effect, a participant's death, a respawn; Stage 8+: pickup, transfer, trade, reward (a party quest's accept and completion: **E′** below) | a **journal record** holding the *resolved* effect (absolute post-state, identities, revision, operation) | at the record's flush, **before** the acknowledgement | records with revision > `R_G` are re-applied through idempotent adapters; nothing acknowledged is lost or applied twice |
 | **F. Operation outcomes** | accepted operations and their commit revision | the journal record that committed them; the index up to `R_G` in `.sup` | with the record | a retry after restart returns the stored outcome; a never-acknowledged operation is evaluated afresh |
 | **G. Session state** | connections, resume tokens, snapshot baselines, input queues, prediction records | memory | never | fenced by the new epoch; every client rejoins and gets a full resync |
 | **H. Client-local** | camera, UI, interpolation buffers, local sounds | the client | never | discarded with the stale world |
@@ -298,6 +298,32 @@ Nothing a client holds is merged: client saves never enter this path.
   actor states equal the server's after the restart; a delayed or
   duplicated intent produces one mutation; a client that does not reconnect
   cannot play on (no input accepted, no snapshot decoded).
+
+## 8a. Party quest: checkpoint-backed outcomes (E′, S08-T05)
+
+A party quest's accept and completion change state that only the native and
+Lua save captures (the native task, the installed task manager's
+`task_info`, the holder's portable store, the stash, the relation registry):
+there is no adapter that could re-create it from a journal record without
+re-running installed, non-deterministic code. These outcomes are therefore
+**acknowledged only after a checkpoint generation that holds them is
+published**:
+
+1. the server applies the outcome (the accept phrases; or the completion and
+   the adapter's resolved effects: patches released, each player paid,
+   goodwill to both) and remembers the operation's outcome in the index;
+2. it requests a publication; the generation's take holds the outcome and
+   the index (supplemental operations);
+3. when that generation is published, the waiting answers are sent
+   (`answer_quests`); a failed publication answers `StoreFailed`.
+
+A termination before step 3 rolls the outcome back with the world (nothing
+was acknowledged); the client's retry is evaluated afresh, so the quest
+completes once. A termination after step 3 recovers the generation that
+holds it; the retry is answered from the index. The party's task always
+lives on participant 1's actor, whose script state is the one the native
+save holds (actor 2's is not, L32). Failpoints `quest:after-accept`,
+`quest:after-apply`, `quest:before-ack`.
 
 ## 9. Respawn (S07-T07, under this contract)
 

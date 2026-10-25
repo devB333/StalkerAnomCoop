@@ -355,6 +355,12 @@ enum ActionKind : std::uint16_t
     kActionRespawn = 4,      // S07-T07: params: none; the dead player's confirmed respawn (contract §9)
     kActionPickup = 5,       // S08-T01: target: the item; params: none; take an item from the ground into the
                              // player's own actor's inventory (docs/persistence-contract.md §6 `pickup`)
+    kActionDrop = 6,         // S08-T02: target: an item in the player's own actor's inventory; params: none; put
+                             // it on the ground at the actor (contract §6 `transfer`)
+    kActionTransfer = 7,     // S08-T02: target: the item; params: from ref, to ref (u64 id + u32 generation
+                             // each, 24 bytes); one side the player's own actor, the other a container (an
+                             // inventory box or a dead body); expected revision: the client's lifecycle cursor
+                             // (the item must not have changed owner after it; 0: no precondition)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -372,6 +378,10 @@ enum ActionReason : std::uint16_t
     kReasonItemTaken = 9,   // S08-T01: the item already has an owner (another player won it)
     kReasonOutOfReach = 10, // S08-T01: farther than the engine's pickup reach
     kReasonNotTakeable = 11, // S08-T01: not an item, or one the engine would not let an actor take
+    kReasonStale = 12,       // S08-T02: the item changed owner after the expected revision (the client's view)
+    kReasonNotContainer = 13, // S08-T02: the other side is not a container this slice supports (a living actor
+                              // or NPC, a trader, another object)
+    kReasonNotDroppable = 14, // S08-T02: a quest item, or one not in the player's own inventory
 };
 
 struct Input

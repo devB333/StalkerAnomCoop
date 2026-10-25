@@ -40,6 +40,8 @@ enum JournalKind : std::uint8_t
     kRecordEntity = 5,   // a durable entity created after the checkpoint
     kRecordTombstone = 6,
     kRecordPickup = 7,   // S08-T01: an item taken into a participant actor's inventory
+    kRecordTransfer = 8, // S08-T02: an item dropped, or moved between a participant actor and a container
+    kRecordEntityReserve = 9, // S08-T02: EntityIds below `upto` (u64 payload) may be issued; recovery starts above
 };
 
 struct JournalHeader

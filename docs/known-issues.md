@@ -101,7 +101,7 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   (`pred_smoothed`, `view_max_offset`, S06-T03).
 - **Owner:** S11 (S11-T01 latency and rates, S11-T03 performance).
 
-### K4. A client keeps items an NPC held after the server released that NPC
+### K4. A client keeps items an NPC held after the server released that NPC (fixed, S08-T03)
 
 - **Seen** (rsession-1, 2026-10-22): client 1 had 5 items in its replica set
   but not in its level; a bandit (27062) received them and the server
@@ -118,7 +118,13 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   protocol v1.6), NPC takes and drops included. The S08-T01 runs had no NPC
   take near the players, so whether this removes K4 (and what a client does
   with an NPC's items when the NPC goes offline) is untested.
-- **Owner:** S08-T02/T03 (inventory and ownership).
+- **Root cause of rec-3 found and fixed** (S08-T03, patch 0047): a client's
+  entity table kept the previous world's tombstones across a rejoin and
+  refused the new world's entities as recycled, so their despawns were
+  dropped ([S08-T03](validation/S08-T03.md)). Since the fix the in-stream
+  item-graph check (every item's owner on both clients, every 10 s) found no
+  mismatch in six sessions with restarts (inv-7…12).
+- **Owner:** closed by S08-T03 unless the item-graph check sees it again.
 
 ### K5. The other player's lean was not shown
 

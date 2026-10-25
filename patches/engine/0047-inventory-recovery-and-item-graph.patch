@@ -1,0 +1,293 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index b303962..e8241d2 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -338,6 +338,8 @@ struct Link
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+ 	u64 transfer_steps_unlinked = 0;
++	u64 item_graph_matches = 0, item_graph_mismatches = 0, own_inventory_mismatches = 0; // S08-T03
++	bool item_graph_csv_written = false;
+ 	struct PickupRace
+ 	{
+ 		u32 round, kind; // kind: 0 race, 1 far, 2 the other actor, 3 nothing
+@@ -529,6 +531,17 @@ void world_received()
+ 		return world_failed("bad online count");
+ 	xr_vector<u16> ids;
+ 	ids.reserve(online);
++	// S08-T03: a received world is the new baseline: the entity table starts
++	// from its online set. The previous world's tombstones (an entity that
++	// went offline there at the generation the new world names it with)
++	// refused the new world's own entities as recycled, so their later
++	// despawns were refused too and the objects stayed on the client
++	// (inv-2: an NPC's sigaret_for_nps; the S07-T05 rec-3 observation of K4).
++	// Messages of the previous connection cannot arrive any more (a new
++	// connection, a new epoch after a restart).
++	const u32 tombstones_dropped = u32(g_link->table.tombstones());
++	g_link->table = coop::proto::EntityTable(65536);
++	g_link->log.line("entity-table-reset tombstones_dropped=%u", tombstones_dropped);
+ 	for (u32 i = 0; i < online; ++i)
+ 	{
+ 		u16 id = 0;
+@@ -837,6 +850,7 @@ void log_weather_client();
+ void respawn_frame(); // S07-T07
+ void pickup_frame(); // S08-T01
+ void on_transfer_round(const coop::proto::CampaignEvent& event); // S08-T02
++void on_item_graph(const coop::proto::CampaignEvent& event); // S08-T03
+ void run_script8(u32 t);
+ 
+ void world_frame()
+@@ -3022,6 +3036,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 5: on_rejoin(*event); break; // S07-T07
+ 			case 6: on_pickup_round(*event); break; // S08-T01 fixture
+ 			case 7: on_transfer_round(*event); break; // S08-T02 fixture
++			case 8: on_item_graph(*event); break; // S08-T03
+ 			default: break;
+ 			}
+ 		}
+@@ -3856,6 +3871,91 @@ void ownership_intent(u16 action, u16 item, const coop::proto::EntityRef& item_r
+ 	}
+ }
+ 
++// S08-T03: the server's item-graph point (CampaignEvent 8, in the lifecycle
++// order): this replica's owner of every item it holds online, hashed as the
++// server hashes its own (CoopServerHost.cpp item_graph_point), and this
++// client's own actor's inventory against the replica's children of it.
++u64 graph_fnv(u64 h, u64 v)
++{
++	for (int b = 0; b < 8; ++b)
++	{
++		h ^= (v >> (8 * b)) & 0xff;
++		h *= 1099511628211ull;
++	}
++	return h;
++}
++
++void on_item_graph(const coop::proto::CampaignEvent& event)
++{
++	if (event.payload.size() != 20 || !ai().get_alife())
++		return;
++	u64 seq = 0, server_hash = 0;
++	u32 server_items = 0;
++	for (int b = 0; b < 8; ++b)
++		seq |= u64(event.payload[b]) << (8 * b);
++	for (int b = 0; b < 8; ++b)
++		server_hash |= u64(event.payload[8 + b]) << (8 * b);
++	for (int b = 0; b < 4; ++b)
++		server_items |= u32(event.payload[16 + b]) << (8 * b);
++	auto entity_at = [](u16 id) -> u64 {
++		const auto e = id != 0xffff ? g_link->refs.find(id) : g_link->refs.end();
++		return e != g_link->refs.end() ? e->second.id : 0;
++	};
++	xr_vector<std::pair<u64, u64>> items;
++	xr_set<u16> own_children;
++	const u16 own = g_actor ? u16(g_actor->ID()) : u16(0xffff);
++	for (const auto& r : g_link->refs)
++	{
++		if (!campaign::replica_wants_online(r.first))
++			continue;
++		CSE_ALifeDynamicObject* object = ai().alife().objects().object(r.first, true);
++		if (!object || !smart_cast<CSE_ALifeInventoryItem*>(object))
++			continue;
++		items.push_back({r.second.id, entity_at(object->ID_Parent)});
++		if (object->ID_Parent == own)
++			own_children.insert(r.first);
++	}
++	std::sort(items.begin(), items.end());
++	u64 hash = 14695981039346656037ull;
++	for (const auto& i : items)
++		hash = graph_fnv(graph_fnv(hash, i.first), i.second);
++	const bool match = hash == server_hash && u32(items.size()) == server_items;
++	++(match ? g_link->item_graph_matches : g_link->item_graph_mismatches);
++	u32 missing = 0, extra = 0, inventory = 0;
++	if (g_actor)
++	{
++		xr_set<u16> held;
++		for (PIItem item : g_actor->inventory().m_all)
++			if (item)
++				held.insert(u16(item->object().ID()));
++		inventory = u32(held.size());
++		for (u16 id : own_children)
++			missing += held.count(id) ? 0 : 1;
++		for (u16 id : held)
++			extra += own_children.count(id) ? 0 : 1;
++		if (missing || extra)
++			++g_link->own_inventory_mismatches;
++	}
++	g_link->log.line("item-graph seq=%I64u items=%u server_items=%u hash=%016I64x server_hash=%016I64x match=%d "
++		"applied=%I64u own_inventory=%u own_children=%u missing=%u extra=%u", seq, u32(items.size()), server_items, hash,
++		server_hash, match ? 1 : 0, g_link->applied, inventory, u32(own_children.size()), missing, extra);
++	if (!match)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-item-graph-client.csv");
++		const bool fresh = !g_link->item_graph_csv_written;
++		if (FILE* file = fopen(path, fresh ? "w" : "a"))
++		{
++			if (fresh)
++				fprintf(file, "seq,item_entity,owner_entity\n");
++			for (const auto& i : items)
++				fprintf(file, "%I64u,%I64u,%I64u\n", seq, i.first, i.second);
++			fclose(file);
++			g_link->item_graph_csv_written = true;
++		}
++	}
++}
++
+ void on_transfer_round(const coop::proto::CampaignEvent& event)
+ {
+ 	if (g_link->config.script != 8 || event.payload.size() < 11)
+@@ -4190,6 +4290,8 @@ void coop_client_frame()
+ 				"unlinked=%I64u pending=%u", g_link->transfer_rounds, u32(g_link->transfer_steps.size()),
+ 				g_link->drops_requested, g_link->transfers_requested, g_link->ownership_events_ignored,
+ 				g_link->transfer_steps_unlinked, u32(g_link->pickup_pending.size()));
++			g_link->log.line("item-graph-summary matches=%I64u mismatches=%I64u own_inventory_mismatches=%I64u",
++				g_link->item_graph_matches, g_link->item_graph_mismatches, g_link->own_inventory_mismatches);
+ 			log_status("final");
+ 			if (g_link->world == WorldLive)
+ 			{
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 9fab894..59aa7ef 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -312,6 +312,8 @@ struct Host
+ 	bool pickup_recovery_logged = false;
+ 	// S08-T02: drops and transfers
+ 	FILE* transfers_csv = nullptr;
++	FILE* item_graph_csv = nullptr; // S08-T03: every item-graph point's items
++	u64 item_graph_seq = 0, item_graph_last_tick = 0;
+ 	u64 transfers_committed = 0, transfers_duplicate = 0, transfers_refused = 0, transfers_replayed = 0;
+ 	u64 invariant_checks = 0, invariant_failures = 0;
+ 	struct TransferFixture
+@@ -3093,7 +3095,10 @@ void retry_pickups()
+ 	{
+ 		Host::PendingPickup& p = g_host->pickups_pending[i];
+ 		const PickupApply a = apply_pickup(p.record, p.phase, p.revision);
+-		if (a == PickupApply::Deferred && now - p.since_ms < 10000)
++		// S08-T03: a record taken before serving started (recovery) was stamped
++		// on the stopped wall clock: never a negative wait
++		const u32 waited = now >= p.since_ms ? now - p.since_ms : 0;
++		if (a == PickupApply::Deferred && waited < 10000)
+ 		{
+ 			++i;
+ 			continue;
+@@ -3103,7 +3108,7 @@ void retry_pickups()
+ 			++g_host->pickups_apply_failed;
+ 			g_host->log.line("%s-%s-gave-up revision=%I64u item_entity=%I64u result=%s waited_ms=%u",
+ 				p.record.action == coop::proto::kActionPickup ? "pickup" : "transfer", p.phase, p.revision,
+-				p.record.item_entity, pickup_apply_name(a), now - p.since_ms);
++				p.record.item_entity, pickup_apply_name(a), waited);
+ 		}
+ 		g_host->pickups_pending.erase(g_host->pickups_pending.begin() + i);
+ 	}
+@@ -3118,7 +3123,8 @@ void retry_pickups()
+ 		const bool held = object && (c.owner == 0xffff ? !object->H_Parent() :
+ 			object->H_Parent() && object->H_Parent()->ID() == c.owner); // S08-T02: 0xffff: on the ground
+ 		const bool reverted = !se || se->ID_Parent != c.owner;
+-		if (!held && !reverted && now - c.since_ms < 5000)
++		const u32 waited = now >= c.since_ms ? now - c.since_ms : 0; // S08-T03 (as above)
++		if (!held && !reverted && waited < 5000)
+ 		{
+ 			++i;
+ 			continue;
+@@ -3128,7 +3134,7 @@ void retry_pickups()
+ 		else
+ 			++g_host->pickups_unconfirmed;
+ 		g_host->log.line("pickup-%s item=%u item_entity=%I64u owner=%u ms=%u", held ? "confirmed" :
+-			(reverted ? "reverted" : "unconfirmed"), u32(c.item), c.item_entity, u32(c.owner), now - c.since_ms);
++			(reverted ? "reverted" : "unconfirmed"), u32(c.item), c.item_entity, u32(c.owner), waited);
+ 		g_host->pickup_confirm.erase(g_host->pickup_confirm.begin() + i);
+ 	}
+ }
+@@ -3693,6 +3699,71 @@ void put_ref(std::vector<u8>& out, u16 id)
+ 		out.push_back(u8(ref.generation >> (8 * b)));
+ }
+ 
++// S08-T03: the canonical item graph. Every 10 s the server hashes the
++// owner of every published item (item EntityId -> owner EntityId, 0 on the
++// ground), sorted, FNV-1a 64, and sends the hash to every client as a
++// lifecycle event (CampaignEvent 8): lifecycle messages reach a client in
++// order on one channel, so the client compares its own replica at exactly
++// the point of the stream the server hashed. The items go to
++// coop-item-graph.csv for a mismatch's diagnosis.
++u64 fnv1a(u64 h, u64 v)
++{
++	for (int b = 0; b < 8; ++b)
++	{
++		h ^= (v >> (8 * b)) & 0xff;
++		h *= 1099511628211ull;
++	}
++	return h;
++}
++
++void item_graph_point(LPCSTR tag)
++{
++	if (!g_pGameLevel || !ai().get_alife())
++		return;
++	xr_vector<std::pair<u64, u64>> items;
++	for (const auto& p : g_host->published)
++	{
++		if (!p.second.sent)
++			continue;
++		CSE_Abstract* se = Level().Server->ID_to_entity(p.first);
++		if (!se || !smart_cast<CSE_ALifeInventoryItem*>(se))
++			continue;
++		items.push_back({p.second.ref.id, se->ID_Parent != 0xffff ? entity_of(se->ID_Parent) : 0});
++	}
++	std::sort(items.begin(), items.end());
++	u64 hash = 14695981039346656037ull;
++	for (const auto& i : items)
++		hash = fnv1a(fnv1a(hash, i.first), i.second);
++	const u64 seq = ++g_host->item_graph_seq;
++	if (g_host->item_graph_csv)
++	{
++		for (const auto& i : items)
++			fprintf(g_host->item_graph_csv, "%I64u,%I64u,%I64u\n", seq, i.first, i.second);
++		fflush(g_host->item_graph_csv);
++	}
++	std::vector<u8> payload;
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(seq >> (8 * b)));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(hash >> (8 * b)));
++	for (int b = 0; b < 4; ++b)
++		payload.push_back(u8(u32(items.size()) >> (8 * b)));
++	broadcast_event(8, payload);
++	g_host->log.line("item-graph tag=%s seq=%I64u items=%u hash=%016I64x tick=%I64u", tag, seq, u32(items.size()), hash,
++		g_host->tick);
++}
++
++void item_graph_points()
++{
++	u32 in_world = 0;
++	for (PlayerLink& link : g_host->links)
++		in_world += client_in_world(link) ? 1 : 0;
++	if (!in_world || g_host->tick < g_host->item_graph_last_tick + 10 * 50)
++		return;
++	g_host->item_graph_last_tick = g_host->tick;
++	item_graph_point("periodic");
++}
++
+ void transfer_fixtures()
+ {
+ 	const CoopConfig& config = g_host->config;
+@@ -4952,6 +5023,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		if (g_host->transfers_csv)
+ 			fprintf(g_host->transfers_csv,
+ 				"utc_ms,tick,revision,slot,operation,action,item_entity,item,from_entity,to_entity,section,phase,reason\n");
++		string_path graph;
++		FS.update_path(graph, "$logs$", "coop-item-graph.csv");
++		g_host->item_graph_csv = fopen(graph, "w");
++		if (g_host->item_graph_csv)
++			fprintf(g_host->item_graph_csv, "seq,item_entity,owner_entity\n");
+ 		string_path deaths;
+ 		FS.update_path(deaths, "$logs$", "coop-deaths.csv");
+ 		g_host->deaths_csv = fopen(deaths, "w");
+@@ -5163,6 +5239,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	combat_fixtures();
+ 	pickup_fixtures(); // S08-T01
+ 	transfer_fixtures(); // S08-T02
++	item_graph_points(); // S08-T03
+ 	encounter_fixtures();
+ 	encounter_record();
+ 	poll_publications(false); // S07-T08: the worker's results and the joins waiting on them

@@ -193,6 +193,10 @@
     {
       "path": "patches/engine/0046-transfers-and-ownership-invariants.patch",
       "sha256": "71415fd9626033cc453210c6359ef5d85184e7abfe3b85efe40571d2f5223266"
+    },
+    {
+      "path": "patches/engine/0047-inventory-recovery-and-item-graph.patch",
+      "sha256": "ee17d819335a10abb34d8dc5c32dc452e29c6b192d1d0363dd657a029ee31e39"
     }
   ],
   "submodules": [

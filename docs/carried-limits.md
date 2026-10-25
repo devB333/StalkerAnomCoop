@@ -2,7 +2,7 @@
 
 The open limits each accepted gate carried forward, in one place, so they can
 be tracked to closure. Created 2026-10-20 at the user's request when G05 was
-accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, accepted 2026-10-23); it collects the limits recorded in [G01](validation/G01.md),
+accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, accepted 2026-10-23; L37–L43 at G08, accepted 2026-10-25); it collects the limits recorded in [G01](validation/G01.md),
 [G02](validation/G02.md), [G03](validation/G03.md), [G04](validation/G04.md)
 and [G05](validation/G05.md). The gate records stay the source of what was
 accepted; this file is the working list.
@@ -24,7 +24,7 @@ accepted; this file is the working list.
 
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|
-| L01 | Movement is the only player action that reaches the server: no fire, use, jump, lean, inventory, trade or dialogue from a client | G05 | S06-T04 (combat), S06-T07 (jump, lean), S08-T01–T03 (items), S10-T04 (dialogue, trade) | Open. 2026-10-21: fire, reload and activate-slot now reach the server ([S06-T04](validation/S06-T04.md), combat-12/13); use, jump, lean, inventory moves, trade and dialogue remain. 2026-10-24: item pickup reaches the server as a validated durable action from every pickup path, the use key included ([S08-T01](validation/S08-T01.md), pick-12/13/14); 2026-10-24: drops and moves between a player and a box or a body too ([S08-T02](validation/S08-T02.md), tr-13…18); equip moves, use/eat, giving, trade and dialogue remain |
+| L01 | Movement is the only player action that reaches the server: no fire, use, jump, lean, inventory, trade or dialogue from a client | G05 | S06-T04 (combat), S06-T07 (jump, lean), S08-T01–T03 (items), S10-T04 (dialogue, trade) | Open. 2026-10-21: fire, reload and activate-slot now reach the server ([S06-T04](validation/S06-T04.md), combat-12/13); use, jump, lean, inventory moves, trade and dialogue remain. 2026-10-24: item pickup reaches the server as a validated durable action from every pickup path, the use key included ([S08-T01](validation/S08-T01.md), pick-12/13/14); 2026-10-24: drops and moves between a player and a box or a body too ([S08-T02](validation/S08-T02.md), tr-13…18); equip moves, use/eat, giving, trade and dialogue remain 2026-10-25 (G08): the party quest's accept and turn-in too (kind 8); equip and use are L37, the talk window L43. |
 | L02 | No client prediction or reconciliation: a player's own movement waits for the server (input → tick → snapshot → 100 ms render delay); the user found walking choppy | G05 (S05-T03) | S06-T03 | Closed 2026-10-21: [S06-T03](validation/S06-T03.md), runs pred-8, pred-9 and session-8. The own actor is predicted natively and reconciled; it responds in 83–100 ms (250 ms without); wrong predictions converge |
 | L03 | Server movement is native physics but inputs are not validated (rates, speeds, stance changes) | G05 | S06-T01 | Closed 2026-10-20: [S06-T01](validation/S06-T01.md), runs move-8 and session-3. Inputs are sequenced by tick and validated, one is consumed per tick, and forged streams, teleports and positions are refused. The stamina-exhaustion and pitch-clamp limits are listed in the report |
 | L04 | NPCs and items do not move on clients after spawning; only the two participant actors have snapshots; snapshot rates/baselines provisional | G04, G05 | S06-T02 | Closed 2026-10-21: [S06-T02](validation/S06-T02.md), runs snap-11 and snap-12 (5 % loss, 40 ms lag). Creatures and moving physics objects are sent as deltas against acknowledged baselines and presented within p95 0.11–0.14 m; objects rest where the server has them; 11–14 KB/s per client. NPC animation state, ownership changes and deaths are not replicated (report limits) |
@@ -43,7 +43,7 @@ accepted; this file is the working list.
 
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|
-| L10 | Quest coverage: one fetch task from one giver on one level; no storyline, timed, failed, cancelled, multi-stage or simulation-NPC tasks; dialogue window not shown | G02, G03 | S08-T04–T06, S10-T04/T05 | Open |
+| L10 | Quest coverage: one fetch task from one giver on one level; no storyline, timed, failed, cancelled, multi-stage or simulation-NPC tasks; dialogue window not shown | G02, G03 | S08-T04–T06, S10-T04/T05 | Open 2026-10-25 (G08): a second quest, Sidorovich's fetch, shared by both players through its installed functions ([S08-T04](validation/S08-T04.md)); storyline, timed, failed, cancelled and multi-stage tasks remain (S10-T04/T05). |
 | L11 | Installed scripts outside a participant context still decide for actor 0 (NPC condlists, meet/talk, disguise, warfare; 167 lines in the S03-T05 audit); `has_alife_info`, `alife():actor()` and the story object are not participant-aware; party vs personal info portions undecided (R04, R09) | G03 | S08, S10-T04/T05 | Open |
 | L12 | Player-bound monster abilities (phantom, psy dog aura, controller, snork, pseudogigant, scanning) are explicit no-ops or guarded (B21) | G02, G03 | S10-T02 | Open |
 | L13 | AI lighting: NPCs outside every participant's view keep their last lighting; dynamic lights do not count (as on the DX11 client) | G03 (S03-T06) | S10-T02 | Open |
@@ -58,7 +58,7 @@ accepted; this file is the working list.
 | L33 | Captured script contexts and presentation outboxes are not persisted; a restart drops what was queued (presentation only) | G07 | S10-T05 | Open |
 | L34 | A checkpoint take serializes the world on the simulation thread (45–65 ms with 26k objects, up to 129 ms seen); compression, the file write and every store step run on a worker since S07-T08. A client sees a pause of about 100 ms (its interpolation buffer) at a take, 168 ms in the slow case, down from 183–367 ms | G07 (S07-T02, revised by S07-T08 2026-10-23) | A new task (incremental or copy-on-write serialization) only if play tests still show a hitch | Open |
 | L35 | Durability is tested against process termination only: power loss and devices that misreport flush completion are not tested and not claimed (contract §5, §12); retention keeps one previous generation | G07 (S07-T02/T03) | S11 (R08: record as a product limit; no engineering task) | Open |
-| L36 | Inventory, quest and reward effects have no journal records or adapters: a restart rolls them back to the last generation; only the synthetic ledger, deaths and respawns are durable | G07 | S08-T01–T06 (records and adapters with their crash tests) | Open. 2026-10-24: pickups are durable `pickup` records with an idempotent absolute-post-state adapter, crash-tested at every failpoint ([S08-T01](validation/S08-T01.md), pick-4…7, pick-14); drops and transfers too ([S08-T02](validation/S08-T02.md), tr-14…17); consumption (a used item comes back with its record after a restart), equip state, trade, quest and reward effects remain |
+| L36 | Inventory, quest and reward effects have no journal records or adapters: a restart rolls them back to the last generation; only the synthetic ledger, deaths and respawns are durable | G07 | S08-T01–T06 (records and adapters with their crash tests) | Open. 2026-10-24: pickups are durable `pickup` records with an idempotent absolute-post-state adapter, crash-tested at every failpoint ([S08-T01](validation/S08-T01.md), pick-4…7, pick-14); drops and transfers too ([S08-T02](validation/S08-T02.md), tr-14…17); consumption (a used item comes back with its record after a restart), equip state, trade, quest and reward effects remain 2026-10-25 (G08): the party quest's accept and completion commit with a published generation (contract §8a; [S08-T06](validation/S08-T06.md)); consumption (L39), equip state (L37), trade and the quests not adapted remain. |
 
 ## Network and security
 
@@ -80,11 +80,26 @@ accepted; this file is the working list.
 | L24 | Rare client access violation at exit (capture-10 `0xC0000005` after teardown; 2 of ~40 S05-T03 client runs; none in S05-T04) | G02, G05 | S11-T04 | Open |
 | L25 | Client ALife scheduler stalls after load on a replica (S05-T02); not needed by a replica, cause open | G05 | S06-T02 (check while client presentation changes) | Closed 2026-10-21: [S06-T02](validation/S06-T02.md), not reproduced: seen only in S05-T02 world-2; in every later client run (S05-T03 to S06-T02, including snap-1…12) the replica's ALife shedule count rises steadily. The replica runs no offline simulation; the world-2 cause is unknown |
 
+## Inventory and quests (G08)
+
+Added 2026-10-25 when the user accepted G08 "as long as the limits will be
+solved": each row's owner is the task that solves it.
+
+| ID | Limit | From | Owner | Status |
+|---|---|---|---|---|
+| L37 | Equip (slot, belt, ruck moves) and use/eat do nothing on a client: those engine events stay refused on a replica; activate-slot is the only equip action | G08 ([S08-T02](validation/S08-T02.md)) | S08-T07 | Open |
+| L38 | A container created after the last checkpoint (a script's stash, a body of an NPC that died since) is not durable: after a restart its committed contents lie on the ground where it was (`transfer-replay-owner-gone`) | G08 ([S08-T02](validation/S08-T02.md)) | S08-T08 | Open |
+| L39 | Consumption after a pickup is not durable: a used item comes back with its pickup record after a restart | G08 ([S08-T01](validation/S08-T01.md)) | S08-T07 | Open |
+| L40 | Ammunition stacks, nested containers (a backpack in a box) and weapon addons move whole; no split or merge | G08 ([S08-T02](validation/S08-T02.md)) | S08-T08 | Open |
+| L41 | The party quest's presentation: the partner's PDA does not list the task; the bonus stash's map spot is not replicated; news sent while a player is away is not replayed | G08 ([S08-T04](validation/S08-T04.md)) | S08-T09 | Open |
+| L42 | A party task whose anchor (participant 1's actor) dies and respawns is undefined and untested | G08 ([S08-T05](validation/S08-T05.md)) | S08-T09 | Open |
+| L43 | The talk window does not reach the server: players cannot yet accept or turn in the party quest by talking to the giver (the fixture sends the intents) | G08 ([S08-T04](validation/S08-T04.md)) | S10-T04 (first child) | Open |
+
 ## Baseline waivers (G01)
 
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|
-| L26 | Completed-quest/reward verification on the unmodified client waived for Stage 2 entry (the quest attempt failed) | G01 | S08-T06, S11-T04 | Open |
+| L26 | Completed-quest/reward verification on the unmodified client waived for Stage 2 entry (the quest attempt failed) | G01 | S08-T06, S11-T04 | Open 2026-10-25 (G08): a quest completion with rewards verified on the co-op server and both clients ([S08-T04](validation/S08-T04.md), q-2, qn-2); the unmodified-client comparison remains (S11-T04). |
 | L27 | Original-client comparison (copied original installation) not run | G01 | S11-T04 | Open |
 | L28 | Actor-relative presentation (blowout waves, ambient loops, siren position, cover-dependent psychic factor) is computed for participant 1's actor (`db.actor` outside a context) and shown to both players | S06-T08 (after G06) | S10-T05; the presentation split before S08 | Open |
 | L29 | The emission's gameplay (cover check, kills, death camera) runs single-player-style on actor 0 and its death camera is broadcast | S06-T08 (after G06) | S10-T05 | Open |

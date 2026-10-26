@@ -1,35 +1,36 @@
-# Session handoff — S08-T07 completed; next S08-T08 (containers, stacks)
+# Session handoff — S08-T08 completed; next S08-T09 (party quest presentation, anchor death)
 
 ## State (2026-10-26)
 
 - **S08-T07 Completed** ([report](../../validation/S08-T07.md), patch 0049):
-  equip (kind 9) and use (kind 10) are validated durable server actions from
-  every client path; inventory layouts replicate (CampaignEvent 9); a used
-  item stays used through every restart window. **L37 and L39 closed.**
+  equip and use are durable server actions; L37, L39 closed.
+- **S08-T08 Completed** ([report](../../validation/S08-T08.md), patch 0050):
+  post-checkpoint containers are recorded and re-created; the server's own
+  inventory changes are journaled; ammunition merges durably on the server;
+  L38, L40 closed. Two S08-T07 use-record defects fixed in 0050.
 - G08 was accepted on the condition that L37–L43 are solved; Stage 8 stays
-  In Progress until S08-T08 and S08-T09 are done. Every gameplay decision
-  taken on the way is listed for the user's approval in
+  In Progress until S08-T09 is done (L43 belongs to S10-T04). Every gameplay
+  decision is listed for the user's approval in
   [Stage 8 closing decisions](../../stage8-closing-decisions.md).
-- Engine patches 0001–0049, protocol v1.6 `proto-build-43` (st-12, st-13),
-  final builds campaign-276 / client-175. Runs: eq-1…eq-13, eqr-1 (eq-3 unused).
+- Engine patches 0001–0050, protocol v1.6 `proto-build-44` (st-14, st-15),
+  final builds campaign-282 / client-181. Runs: ct-1…ct-12, ctr-1.
 - Open from earlier: the user's K1/K5 hands-on retest.
 
 ## Next
 
-S08-T08 (L38, L40). Drafts are in the session scratchpad only (lost with
-the session): the design is in the S08-T07 report's limits and in plan.md
-S08-T08 — container `entity` records before the first committed transfer
-touching a box or body after each publication (recovery re-creates it);
-server-made changes to participant inventories observed per tick and
-journaled (`pickup`/`transfer`/`tombstone`, combat consumables excluded);
-ammunition merges in boxes on the server (`stack` record, CampaignEvent 10),
-the client's local merge disabled; layout amounts u16.
+S08-T09 (L41, L42): party task presentation on both clients (CampaignEvent
+11, a client keeps a logic-free copy and evaluates no task), the scripts'
+map spots to both players, news missed while away replayed on rejoin, the
+party task surviving participant 1's death (participant 1's live actor runs
+the turn-in; the task's script data stays in the original body's store);
+fixture `--quest-variant 2` (anchor killed, auto respawn); tool
+`tools/compare-coop-party.py`.
 
 ## Run names
 
-- Next: `campaign-277`, `client-176`, `proto-build-44`, `st-14`, patch
-  check 56; session names `ct-1…`.
+- Next: `campaign-283`, `client-182`, `proto-build-45`, `st-16`, patch
+  check 57; session names `pq-1…`.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S08-T08](../done/snapshot-before-S08-T08.md).
+Previous snapshot: [before S08-T09](../done/snapshot-before-S08-T09.md).

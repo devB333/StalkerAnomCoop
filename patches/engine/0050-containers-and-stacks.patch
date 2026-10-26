@@ -1,0 +1,1710 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index a36cf92..0a60c28 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -47,6 +47,7 @@
+ #include "Inventory.h"
+ #include "inventory_item.h" // S08-T02
+ #include "eatable_item.h" // S08-T07
++#include "WeaponAmmo.h" // S08-T08
+ #include "Weapon.h"
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+@@ -349,8 +350,29 @@ struct Link
+ 	struct LayoutItem
+ 	{
+ 		u64 entity;
+-		u8 place, slot, uses;
++		u8 place, slot;
++		u16 uses; // S08-T08: an eatable's uses or an ammunition box's rounds; 0xffff none
+ 	};
++	u64 amounts_received = 0, amounts_applied = 0, amounts_unknown = 0; // S08-T08
++	struct ReparentRetry
++	{
++		coop::proto::Reparent r;
++		u32 since_ms;
++	};
++	xr_vector<ReparentRetry> reparent_retry; // S08-T08: into a container not on this level yet
++	struct AmountPending
++	{
++		u16 amount;
++		u32 since_ms;
++	};
++	xr_map<u64, AmountPending> amounts_pending; // S08-T08: items not on this level yet
++	u64 reparents_retried = 0;
++	// S08-T08: an item-graph point that arrived while Reparents waited for their objects:
++	// compared once they are applied (at most 5 s later)
++	bool graph_deferred = false;
++	coop::proto::CampaignEvent graph_point;
++	u32 graph_deferred_ms = 0;
++	u64 graph_points_deferred = 0;
+ 	struct ActorLayout
+ 	{
+ 		u32 serial = 0, building_serial = 0xffffffff;
+@@ -813,7 +835,7 @@ void apply_despawn(const coop::proto::Despawn& d)
+ 	}
+ }
+ 
+-void apply_reparent(const coop::proto::Reparent& r); // S08-T01
++void apply_reparent(const coop::proto::Reparent& r, bool retry = false); // S08-T01
+ 
+ void apply_lifecycle(const coop::proto::Message& m)
+ {
+@@ -881,6 +903,8 @@ void on_item_graph(const coop::proto::CampaignEvent& event); // S08-T03
+ void run_script8(u32 t);
+ void layout_frame(); // S08-T07
+ void on_layout(const coop::proto::CampaignEvent& event); // S08-T07
++void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
++void amounts_frame(); // S08-T08
+ 
+ void world_frame()
+ {
+@@ -928,6 +952,22 @@ void world_frame()
+ 		if (Device.Paused())
+ 			Device.Pause(FALSE, TRUE, TRUE, "coop-world-live");
+ 		campaign::report_replica("live");
++		{
++			// S08-T08: the installed scripts merge ammunition stacks after a move
++			// into a box (item_weapon.ammo_aggregation via the inventory UI's
++			// callback); on a replica that would change counts locally and try to
++			// release items: the server merges and sends the counts
++			LPCSTR chunk = "if item_weapon then item_weapon.ammo_aggregation = function() return true end "
++				"item_weapon.ammo_aggregation_full = function() return true end end";
++			lua_State* L = ai().script_engine().lua();
++			if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_no_local_merge") == 0)
++			{
++				if (lua_pcall(L, 0, 0, 0) != 0)
++					lua_pop(L, 1);
++			}
++			else if (L)
++				lua_pop(L, 1);
++		}
+ 		// S06-T08: lightning is the server's from now on
+ 		if (g_pGamePersistent && g_pGamePersistent->Environment().eff_Thunderbolt)
+ 			g_pGamePersistent->Environment().eff_Thunderbolt->remote_driven = true;
+@@ -969,6 +1009,7 @@ void world_frame()
+ 		respawn_frame(); // S07-T07
+ 		pickup_frame(); // S08-T01
+ 		layout_frame(); // S08-T07
++		amounts_frame(); // S08-T08
+ 		sample_input();
+ 		log_actors();
+ 		log_entities();
+@@ -1517,7 +1558,6 @@ void on_pickup_round(const coop::proto::CampaignEvent& event);
+ bool pickup_operation(u64 operation);
+ void pickup_result(const coop::proto::ActionResult& result);
+ void pickup_frame();
+-void apply_reparent(const coop::proto::Reparent& r);
+ 
+ void run_script()
+ {
+@@ -3074,6 +3114,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 7: on_transfer_round(*event); break; // S08-T02 fixture
+ 			case 8: on_item_graph(*event); break; // S08-T03
+ 			case 9: on_layout(*event); break; // S08-T07
++			case 10: on_amounts(*event); break; // S08-T08
+ 			default: break;
+ 			}
+ 		}
+@@ -3641,11 +3682,14 @@ void run_script7(u32 t)
+ // owner gives the item up (GE_OWNERSHIP_REJECT) and the new one takes it
+ // (GE_OWNERSHIP_TAKE); the level then shows it as the server does (in the
+ // inventory, or on the ground where snapshots place it).
+-void apply_reparent(const coop::proto::Reparent& r)
++void apply_reparent(const coop::proto::Reparent& r, bool retry)
+ {
+-	if (r.commit_id <= g_link->applied)
+-		return;
+-	g_link->applied = r.commit_id;
++	if (!retry)
++	{
++		if (r.commit_id <= g_link->applied)
++			return;
++		g_link->applied = r.commit_id;
++	}
+ 	const auto it = g_link->by_entity.find(r.entity.id);
+ 	if (it == g_link->by_entity.end() || !(g_link->refs[it->second] == r.entity))
+ 	{
+@@ -3681,8 +3725,13 @@ void apply_reparent(const coop::proto::Reparent& r)
+ 	if (!Level().Objects.net_Find(id) || (parent != 0xffff && !Level().Objects.net_Find(parent)) ||
+ 		(from != 0xffff && !Level().Objects.net_Find(from)))
+ 	{
+-		++g_link->reparents_failed;
+-		g_link->log.line("reparent-offline id=%u from=%u parent=%u", u32(id), u32(from), u32(parent));
++		// S08-T08: a container the server just created (a stash) or an item may
++		// not be on this level yet: tried again every frame for 10 s
++		if (!retry)
++		{
++			g_link->reparent_retry.push_back({r, g_link->wall.GetElapsed_ms()});
++			g_link->log.line("reparent-offline id=%u from=%u parent=%u (retrying)", u32(id), u32(from), u32(parent));
++		}
+ 		return;
+ 	}
+ 	campaign::ReplicaPermit permit;
+@@ -3951,6 +4000,14 @@ void on_item_graph(const coop::proto::CampaignEvent& event)
+ {
+ 	if ((event.payload.size() != 20 && event.payload.size() != 32) || !ai().get_alife())
+ 		return;
++	if (!g_link->reparent_retry.empty() && !g_link->graph_deferred)
++	{
++		g_link->graph_deferred = true;
++		g_link->graph_point = event;
++		g_link->graph_deferred_ms = g_link->wall.GetElapsed_ms();
++		++g_link->graph_points_deferred;
++		return;
++	}
+ 	u64 seq = 0, server_hash = 0;
+ 	u32 server_items = 0;
+ 	for (int b = 0; b < 8; ++b)
+@@ -4094,7 +4151,7 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 	for (int i = 0; i < 4; ++i)
+ 		serial |= u32(b[8 + i]) << (8 * i);
+ 	const u8 part = b[12], parts = b[13], count = b[14];
+-	if (!parts || part >= parts || parts > 16 || b.size() != 15 + size_t(count) * 11)
++	if (!parts || part >= parts || parts > 16 || b.size() != 15 + size_t(count) * 12)
+ 		return;
+ 	Link::ActorLayout& l = g_link->layouts[actor];
+ 	if (l.building_serial != serial || part == 0)
+@@ -4105,14 +4162,14 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 	}
+ 	for (u32 k = 0; k < count; ++k)
+ 	{
+-		const u8* e = b.data() + 15 + k * 11;
++		const u8* e = b.data() + 15 + k * 12;
+ 		Link::LayoutItem item;
+ 		item.entity = 0;
+ 		for (int i = 0; i < 8; ++i)
+ 			item.entity |= u64(e[i]) << (8 * i);
+ 		item.place = e[8];
+ 		item.slot = e[9];
+-		item.uses = e[10];
++		item.uses = u16(e[10] | (e[11] << 8));
+ 		l.building.push_back(item);
+ 	}
+ 	l.parts_seen |= 1u << part;
+@@ -4126,6 +4183,87 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 	layout_csv("received", actor, serial, u32(l.target.size()), 0, 0);
+ }
+ 
++// S08-T08: CampaignEvent 10: items' amounts (an ammunition box's rounds)
++// the server changed outside an actor's layout (a merge in a box). Payload:
++// u8 count, count x (u64 entity, u16 amount).
++void on_amounts(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.empty() || b.size() != 1 + size_t(b[0]) * 10)
++		return;
++	++g_link->amounts_received;
++	for (u32 k = 0; k < b[0]; ++k)
++	{
++		const u8* e = b.data() + 1 + k * 10;
++		u64 entity = 0;
++		for (int i = 0; i < 8; ++i)
++			entity |= u64(e[i]) << (8 * i);
++		const u16 amount = u16(e[8] | (e[9] << 8));
++		g_link->amounts_pending[entity] = {amount, g_link->wall.GetElapsed_ms()};
++	}
++	amounts_frame();
++}
++
++// Pending amounts and Reparents whose objects reach this level later.
++void amounts_frame()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	for (auto it = g_link->amounts_pending.begin(); it != g_link->amounts_pending.end();)
++	{
++		const auto id = g_link->by_entity.find(it->first);
++		CWeaponAmmo* ammo = id != g_link->by_entity.end() ? smart_cast<CWeaponAmmo*>(Level().Objects.net_Find(id->second))
++														: nullptr;
++		if (ammo)
++		{
++			ammo->m_boxCurr = it->second.amount;
++			++g_link->amounts_applied;
++			g_link->log.line("amount-applied entity=%I64u id=%u amount=%u waited_ms=%u", it->first, u32(id->second),
++				u32(it->second.amount), now - it->second.since_ms);
++			it = g_link->amounts_pending.erase(it);
++		}
++		else if (now - it->second.since_ms > 10000)
++		{
++			++g_link->amounts_unknown;
++			g_link->log.line("amount-unknown entity=%I64u", it->first);
++			it = g_link->amounts_pending.erase(it);
++		}
++		else
++			++it;
++	}
++	if (g_link->graph_deferred &&
++		(g_link->reparent_retry.empty() || now - g_link->graph_deferred_ms > 5000))
++	{
++		const coop::proto::CampaignEvent point = g_link->graph_point;
++		const u32 waited = now - g_link->graph_deferred_ms;
++		g_link->graph_deferred = false;
++		g_link->log.line("item-graph-deferred waited_ms=%u pending=%u", waited, u32(g_link->reparent_retry.size()));
++		on_item_graph(point);
++	}
++	for (size_t i = 0; i < g_link->reparent_retry.size();)
++	{
++		const Link::ReparentRetry rr = g_link->reparent_retry[i];
++		const auto item = g_link->by_entity.find(rr.r.entity.id);
++		const auto parent = rr.r.parent.none() ? g_link->by_entity.end() : g_link->by_entity.find(rr.r.parent.id);
++		const bool ready = item != g_link->by_entity.end() && Level().Objects.net_Find(item->second) &&
++			(rr.r.parent.none() || (parent != g_link->by_entity.end() && Level().Objects.net_Find(parent->second)));
++		if (ready)
++		{
++			g_link->reparent_retry.erase(g_link->reparent_retry.begin() + i);
++			++g_link->reparents_retried;
++			apply_reparent(rr.r, true);
++			continue;
++		}
++		if (now - rr.since_ms > 10000)
++		{
++			++g_link->reparents_failed;
++			g_link->log.line("reparent-gave-up entity=%I64u parent_entity=%I64u", rr.r.entity.id, rr.r.parent.id);
++			g_link->reparent_retry.erase(g_link->reparent_retry.begin() + i);
++			continue;
++		}
++		++i;
++	}
++}
++
+ void refresh_inventory_ui()
+ {
+ 	LPCSTR chunk = "if ui_inventory and ui_inventory.GUI and ui_inventory.GUI:IsShown() then "
+@@ -4166,10 +4304,16 @@ u32 apply_layout(u64 actor_entity, Link::ActorLayout& l, u32& moves)
+ 				++unresolved;
+ 				continue;
+ 			}
+-			if (CEatableItem* eatable = e.uses != 0xff ? smart_cast<CEatableItem*>(item) : nullptr)
++			if (CEatableItem* eatable = e.uses != 0xffff ? smart_cast<CEatableItem*>(item) : nullptr)
+ 				if (eatable->GetRemainingUses() != e.uses)
+ 				{
+-					eatable->SetRemainingUses(e.uses);
++					eatable->SetRemainingUses(u8(e.uses));
++					++moves;
++				}
++			if (CWeaponAmmo* ammo = e.uses != 0xffff ? smart_cast<CWeaponAmmo*>(item) : nullptr)
++				if (ammo->m_boxCurr != e.uses)
++				{
++					ammo->m_boxCurr = e.uses; // S08-T08: the server's count (reloads, merges)
+ 					++moves;
+ 				}
+ 			if (item->CurrPlace() == e.place && (e.place != 1 || item->CurrSlot() == e.slot))
+@@ -4252,7 +4396,8 @@ u64 replica_layout_hash(u32& items)
+ 				continue;
+ 			const u64 place = item->CurrPlace(), slot = place == 1 ? item->CurrSlot() : 0;
+ 			const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
+-			const u64 uses = eatable ? eatable->GetRemainingUses() : 0xff;
++			const CWeaponAmmo* ammo = smart_cast<const CWeaponAmmo*>(item);
++			const u64 uses = eatable ? eatable->GetRemainingUses() : ammo ? ammo->m_boxCurr : 0xffff;
+ 			entries.push_back({r.id, (place << 16) | (slot << 8) | uses});
+ 		}
+ 		std::sort(entries.begin(), entries.end());
+@@ -4783,10 +4928,12 @@ void coop_client_frame()
+ 			g_link->log.line("item-graph-summary matches=%I64u mismatches=%I64u own_inventory_mismatches=%I64u",
+ 				g_link->item_graph_matches, g_link->item_graph_mismatches, g_link->own_inventory_mismatches);
+ 			g_link->log.line("inventory-summary equips=%I64u uses=%I64u ignored=%I64u local_eats_blocked=%I64u "
+-				"presented=%I64u layouts=%I64u/%I64u/%I64u moves=%I64u layout_points=%I64u/%I64u", // S08-T07
++				"presented=%I64u layouts=%I64u/%I64u/%I64u moves=%I64u layout_points=%I64u/%I64u "
++				"amounts=%I64u/%I64u/%I64u", // S08-T07, S08-T08
+ 				g_link->equips_requested, g_link->uses_requested, g_link->inventory_events_ignored,
+ 				g_link->local_eats_blocked, g_link->uses_presented, g_link->layouts_received, g_link->layouts_applied,
+-				g_link->layout_unresolved, g_link->layout_moves, g_link->layout_matches, g_link->layout_mismatches);
++				g_link->layout_unresolved, g_link->layout_moves, g_link->layout_matches, g_link->layout_mismatches,
++				g_link->amounts_received, g_link->amounts_applied, g_link->amounts_unknown);
+ 			log_status("final");
+ 			if (g_link->world == WorldLive)
+ 			{
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index d1c3ed3..3d74b52 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -139,6 +139,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.pickup_rounds = ini.line_exist("coop", "pickup_rounds") ? ini.r_u32("coop", "pickup_rounds") : 8;
+ 		out.transfer_race = ini.line_exist("coop", "transfer_race") ? ini.r_u32("coop", "transfer_race") : 0;
+ 		out.use_race = ini.line_exist("coop", "use_race") ? ini.r_u32("coop", "use_race") : 0; // S08-T07
++		out.stack_race = ini.line_exist("coop", "stack_race") ? ini.r_u32("coop", "stack_race") : 0; // S08-T08
+ 		out.quest_party = ini.line_exist("coop", "quest_party") ? ini.r_u32("coop", "quest_party") : 0;
+ 		out.quest_holder = ini.line_exist("coop", "quest_holder") ? ini.r_u32("coop", "quest_holder") : 2;
+ 		out.quest_variant = ini.line_exist("coop", "quest_variant") ? ini.r_u32("coop", "quest_variant") : 0;
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index e41ce25..c0ded83 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -35,6 +35,8 @@
+ //                 until the box, corpse and items appear; 0 off)
+ //                 use_race (S08-T07 fixture: seconds after both attach until
+ //                 the equip and use items appear; 0 off)
++//                 stack_race (S08-T08 fixture: seconds after both attach
++//                 until the box, body and stacks appear; 0 off)
+ //                 checkpoint_seconds (S07-T02: seconds between periodic
+ //                 checkpoint generations; 0 off; joins and a clean stop
+ //                 always publish one),
+@@ -90,6 +92,7 @@ struct CoopConfig
+ 	u32 pickup_rounds; // S08-T01 fixture: rounds, one every 8 s (default 8)
+ 	u32 transfer_race; // S08-T02 fixture: seconds after both attach until the transfer rounds start (0 off)
+ 	u32 use_race; // S08-T07 fixture: seconds after both attach until the equip/use rounds start (0 off)
++	u32 stack_race; // S08-T08 fixture: seconds after both attach until the container/stack rounds start (0 off)
+ 	u32 quest_party; // S08-T04 fixture: seconds after both attach until the party quest rounds start (0 off)
+ 	u32 quest_holder; // S08-T04 fixture: the slot whose accept comes first in round 1 (the other's 10 ticks later)
+ 	u32 quest_variant; // S08-T05 fixture: round 6: 0 both turn in at once, 1 the other disconnects first
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+index 06e0dc6..326c570 100644
+--- a/src/xrGame/CoopPersistence.cpp
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -304,6 +304,101 @@ bool decode_use(const std::vector<u8>& payload, UseRecord& out)
+ 	return at == payload.size();
+ }
+ 
++// S08-T08
++std::vector<u8> encode_container(const ContainerRecord& r)
++{
++	std::vector<u8> out;
++	put<u64>(out, r.entity);
++	put<u8>(out, r.kind);
++	put_text(out, r.section);
++	for (float f : r.position)
++		put<float>(out, f);
++	const size_t n = _min(r.state.size(), size_t(0xffff));
++	put<u16>(out, u16(n));
++	out.insert(out.end(), r.state.begin(), r.state.begin() + n);
++	return out;
++}
++
++bool decode_container(const std::vector<u8>& payload, ContainerRecord& out)
++{
++	size_t at = 0;
++	u16 n = 0;
++	if (!(get(payload, at, out.entity) && get(payload, at, out.kind) && get_text(payload, at, out.section) &&
++			get(payload, at, out.position[0]) && get(payload, at, out.position[1]) &&
++			get(payload, at, out.position[2]) && get(payload, at, n)) ||
++		at + n != payload.size() || !out.entity || (out.kind != 1 && out.kind != 2) || out.section.empty())
++		return false;
++	out.state.assign(payload.begin() + at, payload.end());
++	return true;
++}
++
++std::vector<u8> encode_tombstone(const TombstoneRecord& r)
++{
++	std::vector<u8> out;
++	put<u64>(out, r.entity);
++	put<u64>(out, r.owner_entity);
++	put_text(out, r.section);
++	return out;
++}
++
++bool decode_tombstone(const std::vector<u8>& payload, TombstoneRecord& out)
++{
++	size_t at = 0;
++	return get(payload, at, out.entity) && get(payload, at, out.owner_entity) && get_text(payload, at, out.section) &&
++		at == payload.size() && out.entity;
++}
++
++std::vector<u8> encode_stack(const StackRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.container_entity);
++	put_text(out, r.section);
++	put<u8>(out, u8(_min(r.counts.size(), size_t(255))));
++	for (size_t i = 0; i < r.counts.size() && i < 255; ++i)
++	{
++		put<u64>(out, r.counts[i].first);
++		put<u16>(out, r.counts[i].second);
++	}
++	put<u8>(out, u8(_min(r.released.size(), size_t(255))));
++	for (size_t i = 0; i < r.released.size() && i < 255; ++i)
++		put<u64>(out, r.released[i]);
++	return out;
++}
++
++bool decode_stack(const std::vector<u8>& payload, StackRecord& out)
++{
++	size_t at = 0;
++	u8 counts = 0, released = 0;
++	if (!(get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++			get(payload, at, out.operation) && get(payload, at, out.container_entity) &&
++			get_text(payload, at, out.section) && get(payload, at, counts)))
++		return false;
++	out.counts.clear();
++	out.released.clear();
++	for (u8 i = 0; i < counts; ++i)
++	{
++		u64 e = 0;
++		u16 c = 0;
++		if (!get(payload, at, e) || !get(payload, at, c))
++			return false;
++		out.counts.push_back({e, c});
++	}
++	if (!get(payload, at, released))
++		return false;
++	for (u8 i = 0; i < released; ++i)
++	{
++		u64 e = 0;
++		if (!get(payload, at, e))
++			return false;
++		out.released.push_back(e);
++	}
++	return at == payload.size() && out.container_entity;
++}
++
+ CoopPersistence::CoopPersistence(const std::string& directory, const coop::proto::Uuid128& campaign,
+ 	const coop::proto::Uuid128& party, CoopEventLog* log)
+ 	: m_store(directory, campaign), m_campaign(campaign), m_party(party), m_log(log)
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+index 7237111..d5e5537 100644
+--- a/src/xrGame/CoopPersistence.h
++++ b/src/xrGame/CoopPersistence.h
+@@ -178,6 +178,48 @@ struct UseRecord
+ std::vector<u8> encode_use(const UseRecord& r);
+ bool decode_use(const std::vector<u8>& payload, UseRecord& out);
+ 
++// S08-T08: a container's definition (contract §6 `entity`): an inventory box
++// or a body (a dead creature) that a committed transfer touches and that the
++// latest published generation may not hold (created after it: a stash a
++// script spawned, a body killed since). Recovery re-creates it under its
++// EntityId before the transfers that name it are replayed.
++struct ContainerRecord
++{
++	u64 entity;
++	u8 kind; // 1 inventory box, 2 body
++	xr_string section;
++	float position[3];
++	std::vector<u8> state; // CSE_Abstract::Spawn_Write(.., FALSE); a body's health 0
++};
++std::vector<u8> encode_container(const ContainerRecord& r);
++bool decode_container(const std::vector<u8>& payload, ContainerRecord& out);
++
++// S08-T08: an item released from a participant actor's inventory by the
++// server's own gameplay (contract §6 `tombstone`): replay releases it.
++struct TombstoneRecord
++{
++	u64 entity;
++	u64 owner_entity; // where it was released from
++	xr_string section;
++};
++std::vector<u8> encode_tombstone(const TombstoneRecord& r);
++bool decode_tombstone(const std::vector<u8>& payload, TombstoneRecord& out);
++
++// S08-T08: ammunition stacks after a merge (contract §6 `stack`): every stack
++// of the section in the container with its count, and the stacks released.
++struct StackRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 container_entity;
++	xr_string section;
++	std::vector<std::pair<u64, u16>> counts;
++	std::vector<u64> released;
++};
++std::vector<u8> encode_stack(const StackRecord& r);
++bool decode_stack(const std::vector<u8>& payload, StackRecord& out);
++
+ // Reason codes of ActionResult for the critical operations (S07-T03).
+ const u16 kActionReasonStoreFailed = 5;
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index ba28df6..1ed5a75 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -57,6 +57,7 @@
+ #include "GameTask.h" // S08-T04: the party quest
+ #include "GametaskManager.h"
+ #include "eatable_item.h" // S08-T07: use
++#include "WeaponAmmo.h" // S08-T08: stacks
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -401,6 +402,7 @@ struct Host
+ 		u8 kind = 0; // journal kind: equip or use
+ 		EquipRecord equip = {};
+ 		UseRecord use = {};
++		StackRecord stack = {}; // S08-T08
+ 		u64 revision = 0;
+ 		u32 since_ms = 0;
+ 		LPCSTR phase = "";
+@@ -424,6 +426,44 @@ struct Host
+ 	xr_map<u64, InventoryExpect> inventory_expected;
+ 	u64 layouts_sent = 0;
+ 	bool item_adapter = false;
++	// S08-T08: containers, server-made inventory changes, stacks
++	xr_set<u64> containers_recorded; // container entities journaled since the last publication
++	xr_map<u64, xr_set<u64>> container_expected; // tracked container -> the items the records put in it
++	u64 containers_committed = 0, containers_recreated = 0;
++	xr_map<u16, xr_set<u16>> observed_children; // participant actor -> its children at the last observation
++	xr_map<u16, std::pair<u64, bool>> observed_entities; // child -> (EntityId, observed kind)
++	xr_map<u16, xr_string> observed_sections;
++	bool observer_ready = false;
++	u64 observed_taken = 0, observed_moved = 0, observed_released = 0, observed_unrecorded = 0;
++	struct PendingStack
++	{
++		u16 item = 0xffff, container = 0xffff;
++		u8 slot = 0;
++		coop::proto::Uuid128 player;
++		u64 operation = 0;
++		u32 since_ms = 0;
++		bool ran = false; // the scripts' merge ran; its result is read a few ticks later
++		u64 ran_tick = 0;
++		xr_map<u16, u16> before;
++		shared_str section;
++	};
++	xr_vector<PendingStack> stacks_pending;
++	xr_map<u64, u16> stack_expected; // merged stack -> its count
++	xr_map<u16, u64> stack_entities; // a merge's stacks: id -> EntityId (named after a release)
++	u64 stacks_committed = 0;
++	u64 s08t08_replayed = 0;
++	struct StackFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u32 round = 0;
++		u64 round_tick = 0;
++		u16 box = 0xffff, body = 0xffff, box_ammo = 0xffff, body_item = 0xffff, stash = 0xffff;
++		u16 actors[2] = {0xffff, 0xffff};
++		u8 slots[2] = {0, 0};
++		xr_vector<u16> items[2];
++	} stack_fixture;
+ 	u64 booster_memory_missing = 0;
+ 	struct UseFollowup
+ 	{
+@@ -1187,6 +1227,7 @@ void poll_publications(bool final_stop)
+ 		if (r.ok)
+ 		{
+ 			++g_host->checkpoints;
++			g_host->containers_recorded.clear(); // S08-T08: the generation holds them
+ 			g_host->last_published = r.participants; // S07-T07: the respawn fallback point
+ 		}
+ 		else
+@@ -3098,6 +3139,11 @@ u16 recreate_pickup_item(const PickupRecord& r, u16 owner)
+ 	return created ? created->ID : kNoEngineId;
+ }
+ 
++void expect_container_item(u64 container, u64 item, bool in); // S08-T08
++void sync_ammo_state(CSE_Abstract* se);
++bool ensure_container_record(u16 id, LPCSTR why);
++void queue_stack_merge(PlayerLink& link, u64 operation, u16 item, u16 container);
++
+ enum class PickupApply
+ {
+ 	Applied,
+@@ -3106,6 +3152,8 @@ enum class PickupApply
+ 	Failed,
+ };
+ 
++PickupApply apply_stack(const StackRecord& r, u64 revision, bool final); // S08-T08
++
+ LPCSTR pickup_apply_name(PickupApply a)
+ {
+ 	switch (a)
+@@ -3165,6 +3213,7 @@ PickupApply apply_pickup(const PickupRecord& r, LPCSTR phase, u64 revision)
+ 		g_host->log.line("%s-%s-noop revision=%I64u item=%u item_entity=%I64u owner=%u reason=already-owned", what,
+ 			phase, revision, u32(item), r.item_entity, u32(owner));
+ 		pickup_csv("noop", revision, r, item, 0);
++		expect_container_item(ground ? 0 : r.owner_entity, r.item_entity, true); // S08-T08
+ 		g_host->pickup_expected[r.item_entity] = ground ? 0 : r.owner_entity;
+ 		return PickupApply::NoOp;
+ 	}
+@@ -3189,6 +3238,7 @@ PickupApply apply_pickup(const PickupRecord& r, LPCSTR phase, u64 revision)
+ 		if (created == kNoEngineId)
+ 			return PickupApply::Failed;
+ 		g_host->pickup_expected[r.item_entity] = ground ? 0 : r.owner_entity;
++		expect_container_item(ground ? 0 : r.owner_entity, r.item_entity, true); // S08-T08
+ 		++g_host->pickups_recreated;
+ 		g_host->pickup_confirm.push_back({created, owner, r.item_entity, host_ms()});
+ 		return PickupApply::Applied;
+@@ -3212,6 +3262,7 @@ PickupApply apply_pickup(const PickupRecord& r, LPCSTR phase, u64 revision)
+ 	g_host->pickup_expected[r.item_entity] = ground ? 0 : r.owner_entity;
+ 	g_host->pickup_confirm.push_back({item, owner, r.item_entity, host_ms()});
+ 	g_host->inventory_expected.erase(r.item_entity); // S08-T07: moved: its place is the new owner's
++	expect_container_item(ground ? 0 : r.owner_entity, r.item_entity, true); // S08-T08
+ 	return PickupApply::Applied;
+ }
+ 
+@@ -3356,6 +3407,7 @@ u16 take_pickup(PlayerLink& link, const coop::proto::ActionIntent& intent, coop:
+ 	record.position[0] = object->Position().x;
+ 	record.position[1] = object->Position().y;
+ 	record.position[2] = object->Position().z;
++	sync_ammo_state(se); // S08-T08
+ 	{
+ 		NET_Packet packet;
+ 		se->Spawn_Write(packet, FALSE); // writes its own M_SPAWN header and section
+@@ -3548,11 +3600,15 @@ u16 take_transfer(PlayerLink& link, const coop::proto::ActionIntent& intent, coo
+ 	record.position[0] = at.x;
+ 	record.position[1] = at.y;
+ 	record.position[2] = at.z;
++	sync_ammo_state(se); // S08-T08
+ 	{
+ 		NET_Packet packet;
+ 		se->Spawn_Write(packet, FALSE);
+ 		record.state.assign(packet.B.data, packet.B.data + packet.B.count);
+ 	}
++	// S08-T08: the container's definition first (once per container per generation)
++	if (!drop && !ensure_container_record(from == actor->ID() ? to : from, "transfer"))
++		return kActionReasonStoreFailed;
+ 	const u64 revision = ++g_host->commit;
+ 	// 4. Durable commit, before anything is applied or acknowledged.
+ 	if (!coop::store::failpoint("transfer:before-append"))
+@@ -3574,6 +3630,8 @@ u16 take_transfer(PlayerLink& link, const coop::proto::ActionIntent& intent, coo
+ 	pickup_csv("commit", revision, record, id, 0);
+ 	// 5. Apply.
+ 	apply_or_defer(record, "apply", revision);
++	if (!drop && from == actor->ID())
++		queue_stack_merge(link, intent.operation_id, id, to); // S08-T08: ammunition into a box
+ 	coop::store::failpoint("transfer:after-apply");
+ 	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
+ 	stored.reason = 0;
+@@ -4073,7 +4131,9 @@ void retry_inventory()
+ 	for (size_t i = 0; i < g_host->inventory_pending.size();)
+ 	{
+ 		Host::PendingInventory& p = g_host->inventory_pending[i];
++		const u32 age = now >= p.since_ms ? now - p.since_ms : 0;
+ 		const PickupApply a = p.kind == coop::store::kRecordEquip ? apply_equip(p.equip, p.phase, p.revision) :
++			p.kind == coop::store::kRecordStack ? apply_stack(p.stack, p.revision, age >= 10000) : // S08-T08
+ 			apply_use(p.use, p.phase, p.revision, true);
+ 		const u32 waited = now >= p.since_ms ? now - p.since_ms : 0;
+ 		if (a == PickupApply::Deferred && waited < 10000)
+@@ -4163,6 +4223,10 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 	xr_map<u16, u8> uses_before;
+ 	xr_set<u16> children_before;
+ 	inventory_state(u16(actor->ID()), uses_before, children_before);
++	// S08-T08: the EntityIds now: a child the use releases is no longer known after it
++	xr_map<u16, u64> entities_before;
++	for (u16 child : children_before)
++		entities_before[child] = entity_of(child);
+ 	const float health_before = actor->conditions().GetHealth();
+ 	// 3. Apply: the engine on the server's actor, inside the player's context
+ 	// (the installed scripts' db.actor is this actor), as Actor_Events'
+@@ -4187,12 +4251,14 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 				section.c_str());
+ 			return coop::proto::kReasonUseRefused;
+ 		}
+-		if (!actor->inventory().Eat(item))
+-		{
+-			g_host->log.line("use-engine-refused slot=%u item=%u section=%s", u32(link.ref.slot), u32(id),
+-				section.c_str());
+-			return coop::proto::kReasonNotUsable;
+-		}
++		// CInventory::Eat's own checks are the ones above (the item an eatable in
++		// this actor's inventory); past them it always applies the use
++		// (UseBy, the handlers) and returns false only when the used-up item
++		// cannot be deleted (the deployable backpack): applied all the same
++		const bool eaten = actor->inventory().Eat(item);
++		if (!eaten)
++			g_host->log.line("use-applied-undeletable slot=%u item=%u section=%s uses=%u", u32(link.ref.slot), u32(id),
++				section.c_str(), u32(eatable->GetRemainingUses()));
+ 	}
+ 	coop::store::failpoint("use:after-apply");
+ 	// 4. Resolve: what the use left (absolute post-state).
+@@ -4221,7 +4287,7 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 			// gone from the actor: released (removed), or moved elsewhere by the
+ 			// installed scripts (a container's transfer_item, a drop)
+ 			UseEffect e;
+-			e.item_entity = entity_of(child);
++			e.item_entity = entities_before[child];
+ 			e.uses = 0;
+ 			CSE_Abstract* moved = Level().Server->ID_to_entity(child);
+ 			if (moved)
+@@ -4308,12 +4374,14 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 
+ // CampaignEvent 9: one participant actor's inventory layout, as the server
+ // holds it. Payload: u64 actor entity, u32 serial, u8 part, u8 parts, u8
+-// count, then count x (u64 item entity, u8 place, u8 slot, u8 uses; 0xff: not
+-// an eatable item). The items sorted by entity; at most 80 per part.
++// count, then count x (u64 item entity, u8 place, u8 slot, u16 amount: an
++// eatable's remaining uses, an ammunition box's rounds (S08-T08), else
++// 0xffff). The items sorted by entity; at most 80 per part.
+ struct LayoutEntry
+ {
+ 	u64 entity;
+-	u8 place, slot, uses;
++	u8 place, slot;
++	u16 uses;
+ 	bool operator<(const LayoutEntry& o) const { return entity < o.entity; }
+ };
+ 
+@@ -4333,7 +4401,8 @@ void actor_layout(CActor* actor, xr_vector<LayoutEntry>& out)
+ 		e.place = u8(item->CurrPlace());
+ 		e.slot = item->CurrPlace() == kPlaceSlot ? u8(item->CurrSlot()) : 0;
+ 		const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
+-		e.uses = eatable ? eatable->GetRemainingUses() : 0xff;
++		const CWeaponAmmo* ammo = smart_cast<const CWeaponAmmo*>(item);
++		e.uses = eatable ? eatable->GetRemainingUses() : ammo ? ammo->m_boxCurr : 0xffff;
+ 		out.push_back(e);
+ 	}
+ 	std::sort(out.begin(), out.end());
+@@ -4369,7 +4438,7 @@ void send_layout(CActor* actor, const xr_vector<LayoutEntry>& entries, u32 seria
+ 				payload.push_back(u8(entries[i].entity >> (8 * b)));
+ 			put_u8(payload, entries[i].place);
+ 			put_u8(payload, entries[i].slot);
+-			put_u8(payload, entries[i].uses);
++			put_u16(payload, entries[i].uses);
+ 		}
+ 		if (only)
+ 			queue_event(*only, 9, payload);
+@@ -4622,6 +4691,649 @@ int item_fx_suppressed()
+ 		luabind::object_cast<int>(P["fx"]) : -1;
+ }
+ 
++// ------------------------------------------------------------ S08-T08
++// Durable containers, server-made inventory changes and ammunition stacks
++// (docs/persistence-contract.md §6 `entity`, `tombstone`, `stack`).
++//
++// Containers: before the first committed transfer that touches an inventory
++// box or a body after each publication, the container's definition is
++// journaled (`entity`); recovery re-creates a container the recovered world
++// does not hold (created after the checkpoint: a stash a script spawned, a
++// body of an NPC spawned since), so the transfers that name it put their
++// items back into it, not on the ground.
++//
++// Server-made changes: whatever the server's own gameplay does to a
++// participant actor's inventory between two of the host's ticks (the
++// installed scripts' deferred work, such as the backpack stash moving the
++// ruck into a new box; an NPC taking from a player; a script creating or
++// releasing an item) is observed by comparing the actor's children with the
++// previous tick and journaled as a server-origin record: `pickup` (the item
++// ends in the actor), `transfer` (it went to a container or the ground) or
++// `tombstone` (released). The host's own work in its tick (client actions,
++// their adapters, the quest's effects, the kit, the fixtures) is journaled by
++// itself; the observation is taken again at the end of every tick so it is
++// not seen twice. Combat consumables (ammunition boxes, grenades, bolts) are
++// not observed: they roll back with the weapons and the fight (D7).
++//
++// Stacks: an ammunition box moved into an inventory box is merged with the
++// box's stacks of the same section the way the installed scripts do it
++// (item_weapon.ammo_aggregation, which the client's inventory UI runs after
++// a move into a box), on the server once the level holds the item in the box;
++// the counts and the released stacks are journaled (`stack`) and sent to the
++// clients (CampaignEvent 10). No installed path splits a stack.
++
++u8 container_kind(u16 id)
++{
++	CSE_Abstract* se = id != kNoEngineId && id != 0xffff ? Level().Server->ID_to_entity(id) : nullptr;
++	if (!se)
++		return 0;
++	if (smart_cast<CSE_ALifeInventoryBox*>(se))
++		return 1;
++	if (CSE_ALifeCreatureAbstract* creature = smart_cast<CSE_ALifeCreatureAbstract*>(se))
++		return creature->g_Alive() ? 0 : 2; // a body: an NPC's or a participant's corpse
++	return 0;
++}
++
++void sync_ammo_state(CSE_Abstract* se)
++{
++	// the level object holds the current count; the server entity's copy may lag
++	if (CSE_ALifeItemAmmo* ammo = smart_cast<CSE_ALifeItemAmmo*>(se))
++		if (CWeaponAmmo* object = smart_cast<CWeaponAmmo*>(Level().Objects.net_Find(se->ID)))
++			ammo->a_elapsed = object->m_boxCurr;
++}
++
++// False: the store failed (closed from now on).
++bool ensure_container_record(u16 id, LPCSTR why)
++{
++	const u8 kind = container_kind(id);
++	if (!kind)
++		return true;
++	const u64 entity = entity_of(id);
++	if (!entity || g_host->containers_recorded.count(entity))
++		return true;
++	CSE_Abstract* se = Level().Server->ID_to_entity(id);
++	ContainerRecord record;
++	record.entity = entity;
++	record.kind = kind;
++	record.section = se->s_name.c_str();
++	record.position[0] = se->o_Position.x;
++	record.position[1] = se->o_Position.y;
++	record.position[2] = se->o_Position.z;
++	{
++		NET_Packet packet;
++		se->Spawn_Write(packet, FALSE);
++		record.state.assign(packet.B.data, packet.B.data + packet.B.count);
++	}
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence || persistence->failed())
++		return false;
++	const u64 revision = ++g_host->commit;
++	if (!persistence->commit(coop::store::kRecordEntity, g_host->tick, revision, encode_container(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("container-store-failed revision=%I64u entity=%I64u reason=%s", revision, entity,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return false;
++	}
++	g_host->containers_recorded.insert(entity);
++	++g_host->containers_committed;
++	g_host->container_expected[entity]; // tracked from here on
++	g_host->log.line("container-committed revision=%I64u entity=%I64u id=%u kind=%s section=%s why=%s "
++		"pos=%.2f,%.2f,%.2f state_bytes=%u", revision, entity, u32(id), kind == 1 ? "box" : "body",
++		record.section.c_str(), why, record.position[0], record.position[1], record.position[2],
++		u32(record.state.size()));
++	return true;
++}
++
++// Re-creates a container the recovered world does not hold, on the ground at
++// its recorded position under its EntityId (a body from its definition, dead).
++u16 recreate_container(const ContainerRecord& r)
++{
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (!alife || r.state.size() < 16 || r.state.size() > sizeof(NET_Packet().B.data))
++		return kNoEngineId;
++	Fvector at;
++	at.set(r.position[0], r.position[1], r.position[2]);
++	const CLevelGraph& level_graph = ai().level_graph();
++	if (!_valid(at) || !level_graph.valid_vertex_position(at))
++		return kNoEngineId;
++	const u32 vertex = level_graph.vertex_id(at);
++	if (!level_graph.valid_vertex_id(vertex))
++		return kNoEngineId;
++	NET_Packet in;
++	in.B.count = u32(r.state.size());
++	memcpy(in.B.data, r.state.data(), r.state.size());
++	u16 type = 0;
++	in.r_begin(type);
++	string256 section;
++	in.r_stringZ(section);
++	if (type != M_SPAWN || xr_strcmp(section, r.section.c_str()))
++		return kNoEngineId;
++	CSE_Abstract* entity = F_entity_Create(section);
++	CSE_ALifeDynamicObject* dynamic = entity ? smart_cast<CSE_ALifeDynamicObject*>(entity) : nullptr;
++	if (!dynamic)
++	{
++		if (entity)
++			F_entity_Destroy(entity);
++		return kNoEngineId;
++	}
++	entity->Spawn_Read(in);
++	entity->s_name = section;
++	entity->s_RP = 0xff;
++	entity->m_campaign_entity = r.entity;
++	entity->ID = alife->server().PerformIDgen(0xffff, entity);
++	entity->ID_Parent = 0xffff;
++	entity->ID_Phantom = 0xffff;
++	entity->o_Position = at;
++	dynamic->m_tNodeID = vertex;
++	dynamic->m_tGraphID = ai().cross_table().vertex(vertex).game_vertex_id();
++	dynamic->m_tSpawnID = u16(-1);
++	if (CSE_ALifeCreatureAbstract* creature = smart_cast<CSE_ALifeCreatureAbstract*>(entity))
++		creature->set_health(0.f); // a body
++	NET_Packet out;
++	entity->Spawn_Write(out, FALSE);
++	const u16 id = entity->ID;
++	alife->server().FreeID(id, 0);
++	F_entity_Destroy(entity);
++	g_campaign_identity->expect_entity(id, EntityId{r.entity});
++	ClientID client;
++	client.set(0xffff);
++	u16 dummy;
++	out.r_begin(dummy);
++	CSE_Abstract* created = alife->server().Process_spawn(out, client);
++	return created ? created->ID : kNoEngineId;
++}
++
++void apply_container(const ContainerRecord& r, u64 revision)
++{
++	g_host->containers_recorded.insert(r.entity);
++	g_host->container_expected[r.entity];
++	const u16 id = engine_id_of_entity(r.entity);
++	if (id != kNoEngineId)
++	{
++		g_host->log.line("container-replay-noop revision=%I64u entity=%I64u id=%u reason=present", revision, r.entity,
++			u32(id));
++		return;
++	}
++	const u16 created = recreate_container(r);
++	++g_host->containers_recreated;
++	g_host->log.line("container-replay-recreated revision=%I64u entity=%I64u id=%u section=%s kind=%s ok=%d", revision,
++		r.entity, u32(created), r.section.c_str(), r.kind == 1 ? "box" : "body", created != kNoEngineId ? 1 : 0);
++}
++
++// A tracked container's contents as the records say (item entity set).
++void expect_container_item(u64 container, u64 item, bool in)
++{
++	for (auto& c : g_host->container_expected)
++		if (c.first != container)
++			c.second.erase(item);
++	if (!container || !g_host->container_expected.count(container))
++		return;
++	if (in)
++		g_host->container_expected[container].insert(item);
++	else
++		g_host->container_expected[container].erase(item);
++}
++
++void apply_tombstone(const TombstoneRecord& r, u64 revision)
++{
++	g_host->consumed_entities.insert(r.entity);
++	g_host->pickup_expected.erase(r.entity);
++	g_host->inventory_expected.erase(r.entity);
++	expect_container_item(0, r.entity, false);
++	release_entity(r.entity, "tombstone", revision);
++}
++
++bool observed_kind(CSE_Abstract* se)
++{
++	// combat consumables roll back with the fight: not observed
++	return se && smart_cast<CSE_ALifeInventoryItem*>(se) && !smart_cast<CSE_ALifeItemAmmo*>(se) &&
++		!smart_cast<CSE_ALifeItemGrenade*>(se) && !smart_cast<CSE_ALifeItemBolt*>(se);
++}
++
++void observer_resync()
++{
++	g_host->observed_children.clear();
++	for (PlayerLink& link : g_host->links)
++		if (link.bound)
++			if (CActor* actor = participant_actor(link.ref))
++				if (CSE_Abstract* se = Level().Server->ID_to_entity(u16(actor->ID())))
++				{
++					xr_set<u16>& children = g_host->observed_children[u16(actor->ID())];
++					for (u16 child : se->children)
++						children.insert(child);
++				}
++	// what the next comparison needs to name an item released meanwhile
++	g_host->observed_entities.clear();
++	g_host->observed_sections.clear();
++	for (const auto& a : g_host->observed_children)
++		for (u16 item : a.second)
++		{
++			CSE_Abstract* se = Level().Server->ID_to_entity(item);
++			g_host->observed_entities[item] = {entity_of(item), observed_kind(se)};
++			if (se)
++				g_host->observed_sections[item] = se->s_name.c_str();
++		}
++}
++
++bool server_commit(u8 kind, const std::vector<u8>& payload, u64& revision, LPCSTR what)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence || persistence->failed())
++	{
++		++g_host->observed_unrecorded;
++		return false;
++	}
++	revision = ++g_host->commit;
++	if (!persistence->commit(kind, g_host->tick, revision, payload))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("observed-store-failed revision=%I64u what=%s reason=%s", revision, what,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return false;
++	}
++	return true;
++}
++
++// The server's own changes to the participant actors' inventories since the
++// previous tick (the engine frame between them), journaled as server-origin
++// records (slot as the actor's, operation 0).
++void observe_inventories()
++{
++	if (!g_host->observer_ready)
++	{
++		observer_resync();
++		g_host->observer_ready = true;
++		return;
++	}
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		CSE_Abstract* actor_se = actor ? Level().Server->ID_to_entity(u16(actor->ID())) : nullptr;
++		if (!actor_se)
++			continue;
++		const u16 actor_id = u16(actor->ID());
++		const auto prev_it = g_host->observed_children.find(actor_id);
++		if (prev_it == g_host->observed_children.end())
++			continue; // a new actor: from the next tick
++		const xr_set<u16>& prev = prev_it->second;
++		const u64 actor_entity = entity_of(actor_id);
++		xr_set<u16> now;
++		for (u16 child : actor_se->children)
++			now.insert(child);
++		for (u16 item : now)
++		{
++			if (prev.count(item))
++				continue;
++			CSE_Abstract* se = Level().Server->ID_to_entity(item);
++			if (!observed_kind(se))
++				continue;
++			sync_ammo_state(se);
++			PickupRecord r;
++			r.action = coop::proto::kActionPickup;
++			r.slot = link.ref.slot;
++			r.player = link.player;
++			r.operation = 0;
++			r.owner_entity = actor_entity;
++			r.item_entity = entity_of(item);
++			r.item_id = item;
++			r.section = se->s_name.c_str();
++			r.position[0] = se->o_Position.x;
++			r.position[1] = se->o_Position.y;
++			r.position[2] = se->o_Position.z;
++			NET_Packet packet;
++			se->Spawn_Write(packet, FALSE);
++			r.state.assign(packet.B.data, packet.B.data + packet.B.count);
++			u64 revision = 0;
++			if (!r.item_entity || !server_commit(coop::store::kRecordPickup, encode_pickup(r), revision, "take"))
++				continue;
++			++g_host->observed_taken;
++			expect_container_item(0, r.item_entity, false);
++			g_host->log.line("observed-take revision=%I64u slot=%u item=%u item_entity=%I64u section=%s",
++				revision, u32(link.ref.slot), u32(item), r.item_entity, r.section.c_str());
++		}
++		for (u16 item : prev)
++		{
++			if (now.count(item) || g_host->use_consumed.count(item))
++				continue; // a used-up item's release is its use record's
++			const u64 item_entity = entity_of(item); // still known while the id is current
++			CSE_Abstract* se = Level().Server->ID_to_entity(item);
++			if (se && !observed_kind(se))
++				continue;
++			if (!se)
++			{
++				// released: the identity map may already have dropped it
++				const auto known = g_host->observed_entities.find(item);
++				const u64 gone = known != g_host->observed_entities.end() ? known->second.first : 0;
++				if (!gone || !known->second.second)
++					continue; // not an observed kind, or never seen
++				TombstoneRecord t;
++				t.entity = gone;
++				t.owner_entity = actor_entity;
++				t.section = g_host->observed_sections[item].c_str();
++				u64 revision = 0;
++				if (!server_commit(coop::store::kRecordTombstone, encode_tombstone(t), revision, "release"))
++					continue;
++				++g_host->observed_released;
++				g_host->pickup_expected.erase(gone);
++				g_host->inventory_expected.erase(gone);
++				g_host->log.line("observed-release revision=%I64u slot=%u item_entity=%I64u section=%s", revision,
++					u32(link.ref.slot), gone, t.section.c_str());
++				continue;
++			}
++			const u16 to = se->ID_Parent;
++			if (to != 0xffff && !ensure_container_record(to, "observed"))
++				continue;
++			sync_ammo_state(se);
++			PickupRecord r;
++			r.action = to == 0xffff ? coop::proto::kActionDrop : coop::proto::kActionTransfer;
++			r.slot = link.ref.slot;
++			r.player = link.player;
++			r.operation = 0;
++			r.from_entity = actor_entity;
++			r.owner_entity = to == 0xffff ? 0 : entity_of(to);
++			r.item_entity = item_entity;
++			r.item_id = item;
++			r.section = se->s_name.c_str();
++			r.position[0] = se->o_Position.x;
++			r.position[1] = se->o_Position.y;
++			r.position[2] = se->o_Position.z;
++			NET_Packet packet;
++			se->Spawn_Write(packet, FALSE);
++			r.state.assign(packet.B.data, packet.B.data + packet.B.count);
++			u64 revision = 0;
++			if (!item_entity || (to != 0xffff && !r.owner_entity) ||
++				!server_commit(coop::store::kRecordTransfer, encode_transfer(r), revision, "move"))
++				continue;
++			++g_host->observed_moved;
++			g_host->pickup_expected[item_entity] = r.owner_entity;
++			g_host->inventory_expected.erase(item_entity);
++			expect_container_item(r.owner_entity, item_entity, true);
++			g_host->log.line("observed-move revision=%I64u slot=%u item=%u item_entity=%I64u to=%u to_entity=%I64u "
++				"section=%s", revision, u32(link.ref.slot), u32(item), item_entity, u32(to), r.owner_entity,
++				r.section.c_str());
++		}
++	}
++}
++
++// ---- stacks
++void queue_stack_merge(PlayerLink& link, u64 operation, u16 item, u16 container)
++{
++	if (container_kind(container) != 1 || !smart_cast<CSE_ALifeItemAmmo*>(Level().Server->ID_to_entity(item)))
++		return;
++	Host::PendingStack p;
++	p.item = item;
++	p.container = container;
++	p.slot = link.ref.slot;
++	p.player = link.player;
++	p.operation = operation;
++	p.since_ms = host_ms();
++	g_host->stacks_pending.push_back(p);
++}
++
++void broadcast_amounts(const xr_vector<std::pair<u64, u16>>& amounts)
++{
++	std::vector<u8> payload;
++	put_u8(payload, u8(amounts.size() < 80 ? amounts.size() : 80));
++	for (size_t i = 0; i < amounts.size() && i < 80; ++i)
++	{
++		for (int b = 0; b < 8; ++b)
++			payload.push_back(u8(amounts[i].first >> (8 * b)));
++		put_u16(payload, amounts[i].second);
++	}
++	broadcast_event(10, payload);
++}
++
++// The stacks of `section` in a box: item -> count (level objects).
++void box_stacks(u16 box, LPCSTR section, xr_map<u16, u16>& out)
++{
++	out.clear();
++	CSE_Abstract* se = Level().Server->ID_to_entity(box);
++	if (!se)
++		return;
++	for (u16 child : se->children)
++		if (CWeaponAmmo* ammo = smart_cast<CWeaponAmmo*>(Level().Objects.net_Find(child)))
++			if (!xr_strcmp(ammo->cNameSect().c_str(), section))
++				out[child] = ammo->m_boxCurr;
++}
++
++void finish_stack(Host::PendingStack& p)
++{
++	xr_map<u16, u16> after;
++	box_stacks(p.container, p.section.c_str(), after);
++	StackRecord record;
++	record.slot = p.slot;
++	record.player = p.player;
++	record.operation = p.operation;
++	record.container_entity = entity_of(p.container);
++	record.section = p.section.c_str();
++	xr_vector<std::pair<u64, u16>> amounts;
++	for (const auto& a : after)
++	{
++		record.counts.push_back({entity_of(a.first), a.second});
++		amounts.push_back({entity_of(a.first), a.second});
++		if (CSE_ALifeItemAmmo* se = smart_cast<CSE_ALifeItemAmmo*>(Level().Server->ID_to_entity(a.first)))
++			se->a_elapsed = a.second;
++	}
++	for (const auto& b : p.before)
++		if (!after.count(b.first))
++		{
++			const auto known = g_host->stack_entities.find(b.first);
++			if (known != g_host->stack_entities.end() && known->second)
++				record.released.push_back(known->second);
++		}
++	string256 counts = "";
++	for (const auto& c : record.counts)
++	{
++		string32 one;
++		xr_sprintf(one, "%s%I64u:%u", counts[0] ? "," : "", c.first, u32(c.second));
++		xr_strcat(counts, one);
++	}
++	if (record.released.empty() && p.before == after)
++	{
++		g_host->log.line("stack-merge-none container=%u section=%s stacks=%u counts=%s", u32(p.container),
++			p.section.c_str(), u32(p.before.size()), counts);
++		return;
++	}
++	u64 revision = 0;
++	if (!server_commit(coop::store::kRecordStack, encode_stack(record), revision, "stack"))
++		return;
++	++g_host->stacks_committed;
++	for (u64 e : record.released)
++	{
++		g_host->consumed_entities.insert(e);
++		g_host->pickup_expected.erase(e);
++		expect_container_item(0, e, false);
++	}
++	for (const auto& c : record.counts)
++		g_host->stack_expected[c.first] = c.second;
++	broadcast_amounts(amounts);
++	g_host->log.line("stack-committed revision=%I64u slot=%u container_entity=%I64u section=%s before=%u after=%u "
++		"released=%u counts=%s", revision, u32(p.slot), record.container_entity, p.section.c_str(),
++		u32(p.before.size()), u32(after.size()), u32(record.released.size()), counts);
++}
++
++void retry_stacks()
++{
++	const u32 now = host_ms();
++	for (size_t i = 0; i < g_host->stacks_pending.size();)
++	{
++		Host::PendingStack& p = g_host->stacks_pending[i];
++		if (p.ran)
++		{
++			// the installed merge sets counts and releases stacks through the
++			// engine's events, some a frame later: read the result 10 ticks on
++			if (g_host->tick < p.ran_tick + 10)
++			{
++				++i;
++				continue;
++			}
++			Host::PendingStack done = p;
++			g_host->stacks_pending.erase(g_host->stacks_pending.begin() + i);
++			finish_stack(done);
++			continue;
++		}
++		CObject* item = Level().Objects.net_Find(p.item);
++		CObject* box = Level().Objects.net_Find(p.container);
++		const bool held = item && box && item->H_Parent() == box;
++		if (!held && now - p.since_ms < 5000 && Level().Server->ID_to_entity(p.item))
++		{
++			++i;
++			continue;
++		}
++		if (!held)
++		{
++			g_host->stacks_pending.erase(g_host->stacks_pending.begin() + i);
++			continue;
++		}
++		p.section = item->cNameSect();
++		box_stacks(p.container, p.section.c_str(), p.before);
++		if (p.before.size() < 2)
++		{
++			g_host->stacks_pending.erase(g_host->stacks_pending.begin() + i);
++			continue; // nothing to merge with
++		}
++		for (const auto& b : p.before)
++			g_host->stack_entities[b.first] = entity_of(b.first); // to name a released stack later
++		// the installed scripts' merge (item_weapon.ammo_aggregation(obj, box)), in the mover's context
++		ActionContext context;
++		ParticipantRef ref;
++		for (PlayerLink& l : g_host->links)
++			if (l.bound && l.ref.slot == p.slot)
++				ref = l.ref;
++		bool ran = false;
++		if (participant_context(ref, context))
++		{
++			campaign::ScriptContextScope scope(context, Scope::Self, "stack-merge");
++			luabind::functor<bool> merge;
++			if (scope.entered() && ai().script_engine().functor("item_weapon.ammo_aggregation", merge))
++			{
++				merge(smart_cast<CGameObject*>(item)->lua_game_object(), smart_cast<CGameObject*>(box)->lua_game_object());
++				ran = true;
++			}
++		}
++		g_host->log.line("stack-merge-ran container=%u section=%s stacks=%u ran=%d", u32(p.container), p.section.c_str(),
++			u32(p.before.size()), ran ? 1 : 0);
++		if (!ran)
++		{
++			g_host->stacks_pending.erase(g_host->stacks_pending.begin() + i);
++			continue;
++		}
++		p.ran = true;
++		p.ran_tick = g_host->tick;
++		++i;
++	}
++}
++
++// The stack adapter: the released stacks released, the counts set. A
++// stack a deferred transfer re-creates is not there yet at replay: the
++// record waits for it (retried with the equip and use records).
++PickupApply apply_stack(const StackRecord& r, u64 revision, bool final)
++{
++	for (const auto& c : r.counts)
++	{
++		if (g_host->consumed_entities.count(c.first))
++			continue;
++		const u16 id = engine_id_of_entity(c.first);
++		if ((id == kNoEngineId || !Level().Objects.net_Find(id)) && !final)
++			return PickupApply::Deferred;
++	}
++	u32 set = 0, released = 0;
++	for (u64 e : r.released)
++	{
++		g_host->consumed_entities.insert(e);
++		g_host->pickup_expected.erase(e);
++		expect_container_item(0, e, false);
++		release_entity(e, "stack-merged", revision);
++		++released;
++	}
++	for (const auto& c : r.counts)
++	{
++		g_host->stack_expected[c.first] = c.second;
++		const u16 id = engine_id_of_entity(c.first);
++		if (id == kNoEngineId)
++			continue;
++		if (CSE_ALifeItemAmmo* se = smart_cast<CSE_ALifeItemAmmo*>(Level().Server->ID_to_entity(id)))
++			se->a_elapsed = c.second;
++		if (CWeaponAmmo* object = smart_cast<CWeaponAmmo*>(Level().Objects.net_Find(id)))
++			object->m_boxCurr = c.second;
++		++set;
++	}
++	g_host->log.line("stack-replay revision=%I64u container_entity=%I64u section=%s counts=%u set=%u released=%u",
++		revision, r.container_entity, r.section.c_str(), u32(r.counts.size()), set, released);
++	return PickupApply::Applied;
++}
++
++void apply_stack_or_defer(const StackRecord& r, u64 revision)
++{
++	if (apply_stack(r, revision, false) != PickupApply::Deferred)
++		return;
++	g_host->log.line("stack-replay-deferred revision=%I64u container_entity=%I64u", revision, r.container_entity);
++	Host::PendingInventory p;
++	p.kind = coop::store::kRecordStack;
++	p.stack = r;
++	p.revision = revision;
++	p.since_ms = host_ms();
++	p.phase = "replay";
++	g_host->inventory_pending.push_back(p);
++}
++
++// Every tracked container against what the records say: it exists, and each
++// item a record put in it is in it (never on the ground); each merged
++// stack's count.
++void log_container_state(LPCSTR tag)
++{
++	u32 ok_count = 0, bad = 0;
++	for (const auto& c : g_host->container_expected)
++	{
++		const u16 id = engine_id_of_entity(c.first);
++		CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
++		u32 held = 0, elsewhere = 0, missing = 0;
++		string512 wrong = "";
++		for (u64 item : c.second)
++		{
++			const u16 iid = engine_id_of_entity(item);
++			CSE_Abstract* ise = iid != kNoEngineId ? Level().Server->ID_to_entity(iid) : nullptr;
++			if (!ise)
++				++missing;
++			else if (se && ise->ID_Parent == id)
++				++held;
++			else
++			{
++				++elsewhere;
++				string32 one;
++				xr_sprintf(one, "%s%I64u@%u", wrong[0] ? "," : "", item, u32(ise->ID_Parent));
++				if (xr_strlen(wrong) + xr_strlen(one) < sizeof(wrong) - 1)
++					xr_strcat(wrong, one);
++			}
++		}
++		const bool ok = se && !elsewhere && !missing;
++		++(ok ? ok_count : bad);
++		g_host->log.line("container-state tag=%s entity=%I64u id=%u present=%d section=%s expected=%u held=%u "
++			"elsewhere=%u missing=%u ok=%d wrong=%s", tag, c.first, u32(id), se ? 1 : 0, se ? se->s_name.c_str() : "-",
++			u32(c.second.size()), held, elsewhere, missing, ok ? 1 : 0, wrong[0] ? wrong : "-");
++	}
++	u32 stacks_ok = 0, stacks_bad = 0;
++	for (const auto& s : g_host->stack_expected)
++	{
++		const u16 id = engine_id_of_entity(s.first);
++		CWeaponAmmo* object = id != kNoEngineId ? smart_cast<CWeaponAmmo*>(Level().Objects.net_Find(id)) : nullptr;
++		const bool ok = object && object->m_boxCurr == s.second;
++		++(ok ? stacks_ok : stacks_bad);
++		g_host->log.line("stack-state tag=%s entity=%I64u count=%d expected=%u ok=%d", tag, s.first,
++			object ? int(object->m_boxCurr) : -1, u32(s.second), ok ? 1 : 0);
++	}
++	g_host->log.line("container-state-summary tag=%s containers=%u ok=%u bad=%u stacks_ok=%u stacks_bad=%u "
++		"committed=%I64u recreated=%I64u observed=%I64u/%I64u/%I64u unrecorded=%I64u stacks=%I64u", tag,
++		u32(g_host->container_expected.size()), ok_count, bad, stacks_ok, stacks_bad, g_host->containers_committed,
++		g_host->containers_recreated, g_host->observed_taken, g_host->observed_moved, g_host->observed_released,
++		g_host->observed_unrecorded, g_host->stacks_committed);
++}
++
+ // The ownership graph's invariants over every ALife object (S08-T02): each
+ // parent exists and lists the child exactly once, each listed child names
+ // its parent, no EntityId is held by two objects, and every online object's
+@@ -6120,6 +6832,215 @@ void use_fixtures()
+ 		detail);
+ }
+ 
++// ------------------------------------------------------------ S08-T08
++// The container and stack fixture (profile stack_race, client script 8: the
++// transfer driver's steps). Once both players are in the world: an inventory
++// box between them and a stalker beside it, killed at once (both created
++// after the last checkpoint); 5 rounds of 9x18 in the box, 6 in participant
++// 1's inventory, 4 in participant 2's (box size 16); bread, kolbasa, the
++// deployable backpack (itm_actor_backpack) and a backpack in slot 13 for
++// participant 1; vodka and a second backpack in the ruck for participant 2;
++// an army medkit in the body.
++//   0 put          p1 bread -> box; p2 vodka -> body              (the containers' records first)
++//   1 take         p1 the medkit from the body; p2 the bread from the box
++//   2 merge        p1 its 6 rounds -> box (merged with the box's 5: one stack of 11)
++//   3 merge        p2 its 4 rounds -> box (one stack of 15)
++//   4 backpack     p2 its backpack -> box
++//   5 stash        p1 uses the deployable backpack: the installed script puts the ruck into a new
++//                  stash box (server-made moves, observed and journaled) and releases the backpack
++//   6 from stash   p2 takes one item from the stash
++const u32 kStackRounds = 7;
++
++void stack_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.stack_race || !ai().get_alife())
++		return;
++	Host::StackFixture& f = g_host->stack_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-stack both-attached tick=%I64u", g_host->tick);
++	}
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (f.phase == 0)
++	{
++		if (attached < 2 || g_host->tick < f.both_since + u64(config.stack_race) * 50)
++			return;
++		const u32 a0 = slots[0] == 0 ? 0 : 1;
++		f.actors[0] = u16(actors[a0]->ID());
++		f.actors[1] = u16(actors[1 - a0]->ID());
++		f.slots[0] = slots[a0];
++		f.slots[1] = slots[1 - a0];
++		Fvector mid;
++		mid.add(actors[0]->Position(), actors[1]->Position()).mul(0.5f);
++		Fvector side;
++		side.sub(actors[1]->Position(), actors[0]->Position());
++		side.y = 0.f;
++		if (side.square_magnitude() < 0.01f)
++			side.set(1.f, 0.f, 0.f);
++		side.normalize();
++		const Fvector normal = Fvector().set(-side.z, 0.f, side.x);
++		f.box = spawn_at(alife, "inventory_box", mid, f.actors[0]);
++		f.body = spawn_at(alife, "sim_default_stalker_0", Fvector().mad(mid, normal, -1.2f), f.actors[0]);
++		LPCSTR p1[] = {"bread", "kolbasa", "ammo_9x18_fmj", "itm_actor_backpack", "equ_small_pack"};
++		LPCSTR p2[] = {"vodka", "ammo_9x18_fmj", "equ_small_military_pack"};
++		for (LPCSTR s : p1)
++			f.items[0].push_back(give_to(alife, s, f.actors[0]));
++		for (LPCSTR s : p2)
++			f.items[1].push_back(give_to(alife, s, f.actors[1]));
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		g_host->log.line("fixture-stack spawned box=%u body=%u p1=%u,%u,%u,%u,%u p2=%u,%u,%u", u32(f.box), u32(f.body),
++			u32(f.items[0][0]), u32(f.items[0][1]), u32(f.items[0][2]), u32(f.items[0][3]), u32(f.items[0][4]),
++			u32(f.items[1][0]), u32(f.items[1][1]), u32(f.items[1][2]));
++		return;
++	}
++	if (f.phase == 1)
++	{
++		// the box's and the body's items once they are online; the body killed
++		const bool online = Level().Objects.net_Find(f.box) && Level().Objects.net_Find(f.body);
++		if (!online && g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		CEntityAlive* npc = smart_cast<CEntityAlive*>(Level().Objects.net_Find(f.body));
++		if (npc && npc->g_Alive())
++		{
++			npc->KillEntity(npc->ID(), TRUE);
++			return;
++		}
++		f.box_ammo = online ? give_to(alife, "ammo_9x18_fmj", f.box) : kNoEngineId;
++		f.body_item = npc ? give_to(alife, "medkit_army", f.body) : kNoEngineId;
++		f.phase = 2;
++		f.phase_tick = g_host->tick;
++		g_host->log.line("fixture-stack contents box_ammo=%u body_item=%u body_dead=%d", u32(f.box_ammo),
++			u32(f.body_item), npc && !npc->g_Alive() ? 1 : 0);
++		return;
++	}
++	if (f.phase == 2)
++	{
++		bool all = delivered(f.box) && delivered(f.body) && delivered(f.box_ammo) && delivered(f.body_item);
++		for (u32 k = 0; k < 2; ++k)
++			for (u16 id : f.items[k])
++				all = all && delivered(id);
++		const bool levels = Level().Objects.net_Find(f.box_ammo) && Level().Objects.net_Find(f.items[0][2]) &&
++			Level().Objects.net_Find(f.items[1][1]) && Level().Objects.net_Find(f.items[0][4]);
++		if ((!all || !levels) && g_host->tick - f.phase_tick < 15 * 50)
++			return;
++		// partial stacks (the level objects hold the count; clients are told)
++		const u16 counts[3][2] = {{f.box_ammo, 5}, {f.items[0][2], 6}, {f.items[1][1], 4}};
++		xr_vector<std::pair<u64, u16>> amounts;
++		for (const auto& c : counts)
++			if (CWeaponAmmo* ammo = smart_cast<CWeaponAmmo*>(Level().Objects.net_Find(c[0])))
++			{
++				ammo->m_boxCurr = c[1];
++				if (CSE_ALifeItemAmmo* se = smart_cast<CSE_ALifeItemAmmo*>(Level().Server->ID_to_entity(c[0])))
++					se->a_elapsed = c[1];
++				amounts.push_back({entity_of(c[0]), c[1]});
++			}
++		broadcast_amounts(amounts);
++		// participant 1's backpack into slot 13 (the stash's precondition)
++		CActor* p1 = smart_cast<CActor*>(Level().Objects.net_Find(f.actors[0]));
++		CInventoryItem* pack = smart_cast<CInventoryItem*>(Level().Objects.net_Find(f.items[0][4]));
++		const bool packed = p1 && pack && p1->inventory().Slot(BACKPACK_SLOT, pack, true, true);
++		g_host->log.line("fixture-stack delivered all=%d stacks=%u backpack_in_slot=%d waited_ticks=%I64u", all ? 1 : 0,
++			u32(amounts.size()), packed ? 1 : 0, g_host->tick - f.phase_tick);
++		f.phase = 3;
++		f.round_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.round >= kStackRounds || g_host->tick < f.round_tick || attached < 2)
++		return;
++	const u32 round = f.round++;
++	f.round_tick = g_host->tick + 8 * 50;
++	const u16 A0 = f.actors[0], A1 = f.actors[1], B = f.box, C = f.body;
++	const u8 s0 = f.slots[0], s1 = f.slots[1];
++	auto item = [&](u32 k, u32 i) { return i < f.items[k].size() ? f.items[k][i] : kNoEngineId; };
++	const u8 kMove = coop::proto::kActionTransfer, kUse = coop::proto::kActionUse;
++	xr_vector<TransferStep> steps;
++	switch (round)
++	{
++	case 0:
++		steps.push_back({s0, kMove, 0, item(0, 0), A0, B, 0, 0});
++		steps.push_back({s1, kMove, 0, item(1, 0), A1, C, 0, 0});
++		break;
++	case 1:
++		steps.push_back({s0, kMove, 0, f.body_item, C, A0, 0, 0});
++		steps.push_back({s1, kMove, 0, item(0, 0), B, A1, 0, 0});
++		break;
++	case 2:
++		steps.push_back({s0, kMove, 0, item(0, 2), A0, B, 0, 0});
++		break;
++	case 3:
++		steps.push_back({s1, kMove, 0, item(1, 1), A1, B, 0, 0});
++		break;
++	case 4:
++		steps.push_back({s1, kMove, 0, item(1, 2), A1, B, 0, 0});
++		break;
++	case 5:
++		steps.push_back({s0, kUse, 0, item(0, 3), A0, 0xffff, 0, 0});
++		break;
++	default:
++	{
++		// the stash the script made: the newest inventory box beside participant 1 holding items
++		u16 stash = kNoEngineId, take = kNoEngineId;
++		for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		{
++			CObject* o = Level().Objects.o_get_by_iterator(i);
++			CSE_Abstract* se = o ? Level().Server->ID_to_entity(u16(o->ID())) : nullptr;
++			if (se && !xr_strcmp(se->s_name.c_str(), "inv_backpack") && !se->children.empty() &&
++				(stash == kNoEngineId || o->ID() > stash))
++			{
++				stash = u16(o->ID());
++				take = se->children.front();
++			}
++		}
++		f.stash = stash;
++		g_host->log.line("fixture-stack stash=%u take=%u", u32(stash), u32(take));
++		if (stash != kNoEngineId)
++			steps.push_back({s1, kMove, 0, take, stash, A1, 0, 0});
++		break;
++	}
++	}
++	const u64 claim_tick = g_host->tick + 100;
++	std::vector<u8> payload;
++	put_u8(payload, u8(round));
++	put_u8(payload, u8(round));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(claim_tick >> (8 * b)));
++	put_u8(payload, u8(steps.size()));
++	string512 detail = "";
++	for (const TransferStep& st : steps)
++	{
++		put_u8(payload, st.slot);
++		put_u8(payload, st.action);
++		put_u16(payload, st.offset);
++		put_ref(payload, st.item);
++		put_ref(payload, st.from);
++		put_ref(payload, st.to);
++		put_u8(payload, st.flags);
++		put_u8(payload, st.extra);
++		string64 one;
++		xr_sprintf(one, " %u:%u@%u:%u:%u>%u:%u/%u", u32(st.slot), u32(st.action), u32(st.offset), u32(st.item),
++			u32(st.from), u32(st.to), u32(st.flags), u32(st.extra));
++		xr_strcat(detail, one);
++	}
++	broadcast_event(7, payload);
++	g_host->log.line("fixture-stack-round round=%u claim_tick=%I64u steps=%u%s", round, claim_tick, u32(steps.size()),
++		detail);
++}
++
+ // ------------------------------------------------------------ S08-T04
+ // The party quest fixture (profile quest_party): once both players are in
+ // the world, both actors are placed beside Sidorovich (section m_trader; as
+@@ -7520,7 +8441,18 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		}
+ 	// S08-T07: the items the replayed use records release: a pickup or a
+ 	// transfer of one before its use is not re-applied (it would re-create
+-	// the item only for the use to release it again)
++	// the item only for the use to release it again). S08-T08: so do the
++	// tombstones of server-made releases and the stacks a merge released.
++	for (const coop::store::JournalRecord& record : g_host->persistence->replay())
++	{
++		TombstoneRecord t;
++		StackRecord st;
++		if (record.kind == coop::store::kRecordTombstone && decode_tombstone(record.payload, t))
++			g_host->consumed_entities.insert(t.entity);
++		if (record.kind == coop::store::kRecordStack && decode_stack(record.payload, st))
++			for (u64 e : st.released)
++				g_host->consumed_entities.insert(e);
++	}
+ 	for (const coop::store::JournalRecord& record : g_host->persistence->replay())
+ 		if (record.kind == coop::store::kRecordUse)
+ 		{
+@@ -7539,6 +8471,29 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 	{
+ 		if (record.kind == coop::store::kRecordEpoch)
+ 			continue;
++		if (record.kind == coop::store::kRecordEntity || record.kind == coop::store::kRecordTombstone ||
++			record.kind == coop::store::kRecordStack)
++		{
++			// S08-T08: a container's definition, a server-made release, a merge
++			ContainerRecord c;
++			TombstoneRecord t;
++			StackRecord st;
++			bool ok = false;
++			if (record.kind == coop::store::kRecordEntity && (ok = decode_container(record.payload, c)))
++				apply_container(c, record.revision);
++			else if (record.kind == coop::store::kRecordTombstone && (ok = decode_tombstone(record.payload, t)))
++				apply_tombstone(t, record.revision);
++			else if (record.kind == coop::store::kRecordStack && (ok = decode_stack(record.payload, st)))
++				apply_stack_or_defer(st, record.revision);
++			if (!ok)
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			++g_host->s08t08_replayed;
++			continue;
++		}
+ 		if (record.kind == coop::store::kRecordEquip || record.kind == coop::store::kRecordUse)
+ 		{
+ 			// S08-T07: an equip or a use by its adapter (absolute post-state);
+@@ -7681,6 +8636,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	if (!g_host || !g_host->started)
+ 		return;
+ 	g_host->tick = tick;
++	observe_inventories(); // S08-T08: the engine frame's changes to the participants' inventories
+ 	g_host->events.clear();
+ 	g_host->server->update(g_host->events);
+ 	for (const coop::session::SessionEvent& e : g_host->events)
+@@ -7735,12 +8691,14 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	track_lifecycle();
+ 	retry_pickups(); // S08-T01
+ 	retry_inventory(); // S08-T07
++	retry_stacks(); // S08-T08
+ 	if (!g_host->pickup_recovery_logged && g_host->pickups_pending.empty() && g_host->pickup_confirm.empty() &&
+ 		g_host->inventory_pending.empty())
+ 	{
+ 		g_host->pickup_recovery_logged = true;
+ 		log_pickup_state("recovered");
+ 		log_inventory_state("recovered"); // S08-T07
++		log_container_state("recovered"); // S08-T08
+ 		check_ownership("recovered"); // S08-T02
+ 	}
+ 	churn();
+@@ -7749,6 +8707,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	pickup_fixtures(); // S08-T01
+ 	transfer_fixtures(); // S08-T02
+ 	use_fixtures(); // S08-T07
++	stack_fixtures(); // S08-T08
+ 	send_layouts(false); // S08-T07
+ 	item_graph_points(); // S08-T03
+ 	quest_tick(); // S08-T04
+@@ -7801,6 +8760,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 			g_host->log.line("serve-time-elapsed seconds=%u", g_host->config.serve_seconds);
+ 		}
+ 	}
++	observer_resync(); // S08-T08: the host's own changes this tick are journaled already
+ }
+ 
+ extern "C" bool __cdecl xrCoopServer_ShouldStop() { return !g_host || !g_host->started || g_host->stop_requested; }
+@@ -7822,6 +8782,7 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		log_status("final");
+ 		log_pickup_state("final"); // S08-T01
+ 		log_inventory_state("final"); // S08-T07
++		log_container_state("final"); // S08-T08
+ 		for (u16 id : g_host->party_actor_ids) // S08-T04: the party's money as the server holds it
+ 			if (id != 0xffff)
+ 				if (CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(id)))

@@ -45,6 +45,7 @@ enum JournalKind : std::uint8_t
     kRecordEquip = 10,   // S08-T07: an item's place (slot, belt, ruck) in a participant actor's inventory
     kRecordUse = 11,     // S08-T07: an item used: its post-state, the items the use created or removed, the
                          // actor's condition after it
+    kRecordStack = 12,   // S08-T08: ammunition stacks in a container after a merge (counts, released stacks)
 };
 
 struct JournalHeader

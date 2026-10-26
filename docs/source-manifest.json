@@ -205,6 +205,10 @@
     {
       "path": "patches/engine/0049-equip-use-consumption.patch",
       "sha256": "b0cfb488d58b21a1c786817102aba4deade77238e6821c3c85384e2da01b3baf"
+    },
+    {
+      "path": "patches/engine/0050-containers-and-stacks.patch",
+      "sha256": "b1a69d75ccde3a16fcd1c56bfca5d37f242d03889d0649aa3907a03db8f64305"
     }
   ],
   "submodules": [

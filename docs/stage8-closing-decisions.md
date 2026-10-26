@@ -6,6 +6,9 @@ Every gameplay decision taken while solving them is listed here, with the
 task that took it and where it is implemented, so the user can approve or
 change each one when Stage 8 closes. None of them is final until approved.
 
+**Status (2026-10-26): S08-T07…T09 Completed; waiting for the user's approval** together with the
+[G08 condition review](validation/G08.md#condition-review--ready-for-the-users-confirmation-2026-10-26).
+
 ## S08-T07 — equip, use and consumption
 
 | # | Decision | Why | Alternative |
@@ -32,3 +35,15 @@ change each one when Stage 8 closes. None of them is final until approved.
 | T08-6 | A backpack (slot-13 item) moves into a box as **one item** (in this engine items hold no items); a deployed backpack stash is an ordinary box | engine semantics | — |
 | T08-7 | The contents of a body that **no player touched** are not made durable: after a restart the body of an NPC that died after the checkpoint may hold different loot (the installed death scripts roll it again) | only what a player committed is promised | snapshot every body's contents at death |
 | T08-8 | The deployable backpack (`itm_actor_backpack`) is not deleted by the engine after use (it cannot be deleted); the installed stash script then moves it into the stash with the rest of the ruck — kept as in single player | installed behaviour | — |
+
+## S08-T09 — party quest presentation and robustness
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T09-1 | Both players' PDAs list the party task as a **copy presented by the server**, with the pooled count in its title ("Mobbing the Mob (4/10)"), its map location and its final state; the usual "new task" / "task complete" news line plays on both | the partner saw only news lines (L41) | a separate party panel |
+| T09-2 | A co-op client **evaluates no task logic** at all (no local completion, rewards or stage changes); the server completes and fails tasks | a client's checkpoint copy could otherwise complete a task locally and run its rewards' scripts | — |
+| T09-3 | Every **map spot the installed scripts make** on the server (stashes, task targets, a deployed backpack) appears on **both** players' maps, including for a player who joins later | a shared map suits a party; the quest's bonus stash is one stash for both (S08-T04) | spots only for the player whose script made them |
+| T09-4 | **News missed while away** (the newest 20 addressed to that player) are shown when the player rejoins; camera, sound and particle effects of that time are not replayed | the completion news was lost for a disconnected contributor (L41) | none |
+| T09-5 | When **participant 1 (the party's anchor) dies**, the party task stays active; it **cannot be turned in until participant 1 has respawned**, then participant 1's new body carries it on (it runs the turn-in, it owns the native task); the task's script data stays in the original body's saved store | L42; the original body's store is the one the checkpoints save (the respawned body has no Lua binder, L32) | let participant 2 take the task over |
+| T09-6 | A **respawned player keeps the story knowledge** (info portions) of their previous body | continuity of the player; the info portions live in the ALife registry and are saved with every checkpoint | the new body starts with none |
+| T09-7 | A finished party task is told to both players even if one was loading or away at that moment (the newest 16 finished tasks are kept for that) | pq-1: the anchor rejoining after its respawn kept the task "in progress" | — |

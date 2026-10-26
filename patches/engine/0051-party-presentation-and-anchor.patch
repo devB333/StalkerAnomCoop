@@ -1,0 +1,865 @@
+diff --git a/src/xrGame/CampaignIdentityFixture.cpp b/src/xrGame/CampaignIdentityFixture.cpp
+index c88c542..68d7c90 100644
+--- a/src/xrGame/CampaignIdentityFixture.cpp
++++ b/src/xrGame/CampaignIdentityFixture.cpp
+@@ -564,7 +564,17 @@ extern "C" bool __cdecl xrCampaignLevel_IdentityCheck()
+ 	// The saved actor under a participant reference (fixture identities; the
+ 	// authenticated binding is S04-T04, the second actor S03-T03).
+ 	bool actor_bound = false;
+-	if (g_actor)
++	ParticipantRef body_holder;
++	if (g_actor && !g_actor->g_Alive() && registry.participant_of_engine_id(g_actor->ID(), body_holder) != Refusal::None &&
++		registry.find_player(player_id(1), body_holder) != Refusal::None)
++	{
++		// S08-T09: the saved actor is a former participant body: participant 1
++		// respawned before this checkpoint (S07-T07) and holds its new actor;
++		// the old body stays a corpse and is nobody's
++		actor_bound = true;
++		Msg("S03-T01 actor id=%u is a former participant body (dead, unbound)", u32(g_actor->ID()));
++	}
++	else if (g_actor)
+ 	{
+ 		const ServerAuthority* authority = registry.authority();
+ 		ParticipantRef ref;
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 0b64ab8..5cb86cf 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -499,6 +499,9 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::ParticlesMove: return "particles-move";
+ 	case Presentation::ParticlesStop: return "particles-stop";
+ 	case Presentation::ParticlesStopDeferred: return "particles-stop-deferred";
++	case Presentation::MapSpotAdd: return "map-spot-add";
++	case Presentation::MapSpotHint: return "map-spot-hint";
++	case Presentation::MapSpotRemove: return "map-spot-remove";
+ 	default: return "?";
+ 	}
+ }
+@@ -577,6 +580,51 @@ Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const Prese
+ 	return Refusal::None;
+ }
+ 
++static xr_vector<MapSpotState> s_map_spots; // S08-T09
++static xr_vector<xr_string> s_map_spot_types;
++
++void note_map_spot(Presentation kind, u16 object, LPCSTR spot, LPCSTR detail, u32 flags)
++{
++	for (size_t i = 0; i < s_map_spots.size(); ++i)
++		if (s_map_spots[i].object == object && s_map_spot_types[i] == spot)
++		{
++			if (kind == Presentation::MapSpotRemove)
++			{
++				s_map_spots.erase(s_map_spots.begin() + i);
++				s_map_spot_types.erase(s_map_spot_types.begin() + i);
++			}
++			else
++			{
++				s_map_spots[i].detail = detail;
++				if (kind == Presentation::MapSpotAdd)
++					s_map_spots[i].flags = flags;
++			}
++			return;
++		}
++	if (kind != Presentation::MapSpotAdd)
++		return;
++	MapSpotState m;
++	m.object = object;
++	m.detail = detail;
++	m.flags = flags;
++	s_map_spots.push_back(m);
++	s_map_spot_types.push_back(spot);
++}
++
++void map_spots(xr_vector<MapSpotState>& out) { out = s_map_spots; }
++
++Refusal present_broadcast(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args)
++{
++	if (!server_role())
++		return Refusal::WrongRole;
++	++s_stats.present_broadcast;
++	ParticipantRef nobody;
++	nobody.slot = kBroadcastSlot;
++	nobody.generation = 0;
++	record_presentation(kBroadcastSlot, nobody, kind, object, detail, args);
++	return Refusal::None;
++}
++
+ Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LPCSTR detail)
+ {
+ 	if (!server_role())
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index fb027ae..22d977c 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -221,6 +221,12 @@ enum class Presentation : u8
+ 	ParticlesMove, // handle; position; flags 1: a bare transform move (xform_move_to)
+ 	ParticlesStop, // handle
+ 	ParticlesStopDeferred, // handle
++	// S08-T09: the scripts' map spots (level.map_add_object_spot[_ser],
++	// map_change_spot_hint, map_remove_object_spot) on the campaign server:
++	// object: the spot's object; detail: "<spot type>|<hint>"; flags bit 0: serializable
++	MapSpotAdd,
++	MapSpotHint,
++	MapSpotRemove,
+ 	Count,
+ };
+ 
+@@ -266,6 +272,18 @@ Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LP
+ // live client. Counted as broadcast, not dropped.
+ Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args);
+ const u8 kBroadcastSlot = 7;
++// S08-T09: to every player (the broadcast outbox), whatever the context.
++Refusal present_broadcast(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args);
++// S08-T09: the scripts' map spots as they stand on the server (added, hint
++// changed, removed through level.map_*), for a client entering the world.
++struct MapSpotState
++{
++	u16 object;
++	xr_string detail; // "<spot type>|<hint>"
++	u32 flags;
++};
++void note_map_spot(Presentation kind, u16 object, LPCSTR spot, LPCSTR detail, u32 flags);
++void map_spots(xr_vector<MapSpotState>& out);
+ // A copy of the slot's outbox, oldest first.
+ u32 presentation_outbox(u8 slot, xr_vector<PresentationRecord>& out);
+ // The serial of the newest record (0: none yet).
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 0a60c28..5c25d85 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -48,6 +48,12 @@
+ #include "inventory_item.h" // S08-T02
+ #include "eatable_item.h" // S08-T07
+ #include "WeaponAmmo.h" // S08-T08
++#include "GameTask.h" // S08-T09
++#include "GametaskManager.h"
++#include "string_table.h"
++#include "map_manager.h"
++#include "map_location.h"
++#include "UIGameCustom.h"
+ #include "Weapon.h"
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+@@ -367,6 +373,7 @@ struct Link
+ 	};
+ 	xr_map<u64, AmountPending> amounts_pending; // S08-T08: items not on this level yet
+ 	u64 reparents_retried = 0;
++	u64 party_tasks_presented = 0, map_spots = 0; // S08-T09
+ 	// S08-T08: an item-graph point that arrived while Reparents waited for their objects:
+ 	// compared once they are applied (at most 5 s later)
+ 	bool graph_deferred = false;
+@@ -904,6 +911,7 @@ void run_script8(u32 t);
+ void layout_frame(); // S08-T07
+ void on_layout(const coop::proto::CampaignEvent& event); // S08-T07
+ void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
++void on_party_tasks(const coop::proto::CampaignEvent& event); // S08-T09
+ void amounts_frame(); // S08-T08
+ 
+ void world_frame()
+@@ -2747,6 +2755,44 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		_give_news(detail, "", "ui_inGame2_Mesta_evakuatsii", 0, 6000, 0);
+ 		g_link->log.line("news-shown serial=%u text=\"%s\"", serial, detail);
+ 		break;
++	case campaign::Presentation::MapSpotAdd:
++	case campaign::Presentation::MapSpotHint:
++	case campaign::Presentation::MapSpotRemove:
++	{
++		// S08-T09: the server's map spot ("<spot type>|<hint>") on this player's map
++		string256 spot;
++		xr_strcpy(spot, detail);
++		char* bar = strchr(spot, '|');
++		LPCSTR hint = "";
++		if (bar)
++		{
++			*bar = 0;
++			hint = bar + 1;
++		}
++		if (!spot[0])
++		{
++			applied = "refused";
++			break;
++		}
++		if (kind == campaign::Presentation::MapSpotRemove)
++			Level().MapManager().RemoveMapLocation(spot, object);
++		else if (kind == campaign::Presentation::MapSpotHint)
++		{
++			if (CMapLocation* ml = Level().MapManager().GetMapLocation(spot, object))
++				ml->SetHint(hint);
++		}
++		else if (CMapLocation* ml = Level().MapManager().AddMapLocation(spot, object))
++		{
++			if (hint[0])
++				ml->SetHint(hint);
++			if (flags & 1)
++				ml->SetSerializable(true);
++		}
++		++g_link->map_spots;
++		g_link->log.line("map-spot kind=%s object=%u spot=%s hint=\"%s\" serial=%u", campaign::presentation_name(kind),
++			u32(object), spot, hint, serial);
++		break;
++	}
+ 	case campaign::Presentation::CameraEffector:
+ 	{
+ 		CAnimatorCamEffectorScriptCB* e = xr_new<CAnimatorCamEffectorScriptCB>("");
+@@ -3115,6 +3161,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 8: on_item_graph(*event); break; // S08-T03
+ 			case 9: on_layout(*event); break; // S08-T07
+ 			case 10: on_amounts(*event); break; // S08-T08
++			case 11: on_party_tasks(*event); break; // S08-T09
+ 			default: break;
+ 			}
+ 		}
+@@ -4183,6 +4230,78 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 	layout_csv("received", actor, serial, u32(l.target.size()), 0, 0);
+ }
+ 
++// S08-T09: CampaignEvent 11: the party's tasks. Payload: u8 count, then per
++// task: id, u8 state (0 failed, 1 in progress, 2 completed), s16 count, s16
++// need, title, description, icon, map location (strings: u8 length + bytes),
++// u16 map object, u32 priority. The client keeps a presentation copy in its
++// own task manager (it evaluates no task): the PDA lists it with the pooled
++// count, its map location and its final state.
++void on_party_tasks(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	const u8 n = r.get<u8>();
++	for (u8 i = 0; i < n && r.ok; ++i)
++	{
++		string256 id, title, description, icon, location;
++		r.str(id, sizeof(id));
++		const u8 state = r.get<u8>();
++		const s16 count = r.get<s16>();
++		const s16 need = r.get<s16>();
++		r.str(title, sizeof(title));
++		r.str(description, sizeof(description));
++		r.str(icon, sizeof(icon));
++		r.str(location, sizeof(location));
++		const u16 object = r.get<u16>();
++		const u32 priority = r.get<u32>();
++		if (!r.ok || !id[0])
++			break;
++		CGameTaskManager& tasks = Level().GameTaskManager();
++		string512 shown;
++		if (need > 0)
++			xr_sprintf(shown, "%s (%d/%d)", *CStringTable().translate(title), _max<int>(count, 0), int(need));
++		else
++			xr_strcpy(shown, *CStringTable().translate(title));
++		CGameTask* t = tasks.HasGameTask(shared_str(id), false);
++		const char* what = "updated";
++		if (!t)
++		{
++			if (state != 1)
++				continue; // finished before this client knew it: its checkpoint holds it
++			t = xr_new<CGameTask>();
++			t->m_ID = id;
++			t->m_Title = shown;
++			t->m_Description = description;
++			t->SetIconName_script(icon);
++			t->SetMapLocation_script(location);
++			t->SetMapObjectID_script(object);
++			t->m_priority = priority;
++			if (!tasks.GiveGameTaskToActor(t, 0, false, 0))
++			{
++				xr_delete(t);
++				continue;
++			}
++			what = "given";
++		}
++		else
++		{
++			t->m_Title = shown;
++			if (description[0])
++				t->m_Description = description;
++			const ETaskState want = state == 2 ? eTaskStateCompleted : state == 0 ? eTaskStateFail : eTaskStateInProgress;
++			if (t->GetTaskState() != want && want != eTaskStateInProgress)
++			{
++				tasks.SetTaskState(t, want);
++				what = "finished";
++			}
++		}
++		if (CurrentGameUI())
++			CurrentGameUI()->UpdatePda();
++		++g_link->party_tasks_presented;
++		g_link->log.line("party-task %s id=%s state=%u count=%d need=%d title=\"%s\" local_state=%d", what, id, u32(state),
++			int(count), int(need), shown, int(t->GetTaskState()));
++	}
++}
++
+ // S08-T08: CampaignEvent 10: items' amounts (an ammunition box's rounds)
+ // the server changed outside an actor's layout (a merge in a box). Payload:
+ // u8 count, count x (u64 entity, u16 amount).
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 1ed5a75..686b19f 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -58,6 +58,7 @@
+ #include "GametaskManager.h"
+ #include "eatable_item.h" // S08-T07: use
+ #include "WeaponAmmo.h" // S08-T08: stacks
++#include "alife_registry_wrappers.h" // S08-T09: info portions
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -137,6 +138,8 @@ struct PlayerLink
+ 	bool kit_pending = false; // G07 decision 3: the faction kit once the respawned actor is online
+ 	u32 waiting_generation = 0; // S07-T08: the generation this join waits for
+ 	bool layouts_sent = false; // S08-T07: every participant actor's inventory layout sent since it entered the world
++	bool party_sent = false; // S08-T09: the party's tasks sent since it entered the world
++	u16 respawn_old_actor = 0xffff; // S08-T09: the body a respawned actor continues
+ };
+ 
+ enum WorldState : u8
+@@ -359,6 +362,17 @@ struct Host
+ 	};
+ 	xr_vector<QuestAnswer> quest_answers;
+ 	bool party_adapter = false;
++	// S08-T09: the party's tasks as presented to the players
++	struct PartyFinished
++	{
++		xr_string id;
++		u8 state = 2;
++		u64 instance = 0;
++		s32 count = -1, need = -1;
++	};
++	xr_vector<PartyFinished> party_finished;
++	u64 party_hash = 0;
++	u64 news_replayed = 0;
+ 	u16 party_actor_ids[2] = {0xffff, 0xffff};
+ 	u64 quests_accepted = 0, quests_completed = 0, quest_money_paid = 0, quest_items_taken = 0;
+ 	struct QuestFixture
+@@ -374,6 +388,9 @@ struct Host
+ 		u32 spawn_round = 0xffffffff;
+ 		u16 dead_giver = 0xffff; // S08-T05: a stalker killed for round 8
+ 		u64 dead_since = 0;
++		bool anchor_killed = false, stash_made = false; // S08-T09 (quest_variant 2)
++		u64 anchor_since = 0;
++		u64 anchor_back_tick = 0;
+ 	} quest_fixture;
+ 	u64 item_graph_seq = 0, item_graph_last_tick = 0;
+ 	u64 transfers_committed = 0, transfers_duplicate = 0, transfers_refused = 0, transfers_replayed = 0;
+@@ -704,6 +721,7 @@ void give_faction_kit(PlayerLink& link, CActor* actor)
+ 		u32(link.ref.slot), u32(actor->ID()), community.id().c_str(), section, items, ammo_boxes, trader->m_dwMoney, given);
+ }
+ 
++void on_participant_respawned(PlayerLink& link, u16 old_id, CActor* actor); // S08-T09
+ // A participant who joins with no actor gets a genuine campaign actor from
+ // the actor section (the S03-T03 path), assigned to it before it exists.
+ void give_actor(PlayerLink& link)
+@@ -715,6 +733,9 @@ void give_actor(PlayerLink& link)
+ 		{
+ 			g_host->log.line("actor-online slot=%u id=%u", u32(link.ref.slot), u32(actor->ID()));
+ 			link.pending_actor = kNoEngineId;
++			if (link.respawn_old_actor != kNoEngineId && link.respawn_old_actor != u16(actor->ID()))
++				on_participant_respawned(link, link.respawn_old_actor, actor); // S08-T09
++			link.respawn_old_actor = kNoEngineId;
+ 			if (link.kit_pending)
+ 			{
+ 				link.kit_pending = false;
+@@ -2007,9 +2028,41 @@ void send_presentation()
+ 			continue;
+ 		if (!link.presentation_started)
+ 		{
++			// S08-T09: a rejoin gets the news recorded for this player while it
++			// was away (the newest 20); effects and sounds of that time are not replayed
++			const u32 previous = link.presentation_cursor;
++			if (previous)
++			{
++				campaign::presentation_outbox(link.ref.slot, records);
++				xr_vector<const campaign::PresentationRecord*> missed;
++				for (const campaign::PresentationRecord& r : records)
++					if (r.serial > previous && r.kind == campaign::Presentation::News)
++						missed.push_back(&r);
++				const size_t from = missed.size() > 20 ? missed.size() - 20 : 0;
++				for (size_t i = from; i < missed.size(); ++i)
++				{
++					const campaign::PresentationRecord& r = *missed[i];
++					std::vector<u8> p;
++					put_u8(p, u8(r.kind));
++					put_u16(p, r.object);
++					put_u32(p, r.handle);
++					put_f32(p, r.position.x);
++					put_f32(p, r.position.y);
++					put_f32(p, r.position.z);
++					put_f32(p, r.value);
++					put_u32(p, r.flags);
++					put_u32(p, r.serial);
++					put_str(p, r.detail);
++					queue_event(link, kEventPresentation, p);
++					++g_host->news_replayed;
++					g_host->log.line("present-backlog slot=%u serial=%u kind=news detail=%s", u32(link.ref.slot), r.serial,
++						r.detail);
++				}
++			}
+ 			link.presentation_started = true;
+ 			link.presentation_cursor = link.presentation_cursor_all = campaign::presentation_serial();
+-			g_host->log.line("present-start slot=%u serial=%u", u32(link.ref.slot), campaign::presentation_serial());
++			g_host->log.line("present-start slot=%u serial=%u previous=%u", u32(link.ref.slot),
++				campaign::presentation_serial(), previous);
+ 		}
+ 		for (int source = 0; source < 2; ++source)
+ 		{
+@@ -2785,6 +2838,8 @@ bool respawn_point(PlayerLink& link, u16 dead_id, Fvector& position, u32& vertex
+ 
+ // The adapter: spawn the recorded new actor and bind it to the slot, unless
+ // the slot already holds it (idempotent).
++u16 engine_id_of_entity(u64 entity); // S08-T09
++
+ bool apply_respawn(const RespawnRecord& r, LPCSTR phase, u64 revision)
+ {
+ 	PlayerLink* link = nullptr;
+@@ -2855,6 +2910,7 @@ bool apply_respawn(const RespawnRecord& r, LPCSTR phase, u64 revision)
+ 	const Refusal bound = g_campaign_identity->bind_actor(g_campaign_identity->authority(), link->ref, key);
+ 	link->pending_actor = id;
+ 	link->have_alive_position = false;
++	link->respawn_old_actor = engine_id_of_entity(r.old_entity); // S08-T09
+ 	link->kit_pending = existing == kNoEngineId; // G07 decision 3: the faction kit once it is online
+ 	g_host->log.line("respawn-%s revision=%I64u slot=%u old_entity=%I64u new_entity=%I64u id=%u existing=%d "
+ 		"pos=%.2f,%.2f,%.2f vertex=%u bind=%s",
+@@ -5703,25 +5759,36 @@ void rebuild_party_tasks()
+ 		if (party_task(id) || !Level().GameTaskManager().HasGameTask(shared_str(id), true) || !anchor)
+ 			continue;
+ 		int instance = 0;
++		CActor* store = anchor;
+ 		luabind::functor<luabind::object> load_var;
+ 		if (ai().script_engine().functor("_G.load_var", load_var))
+ 		{
+-			luabind::object v = load_var(anchor->lua_game_object(), (xr_string(id) + "_coop_instance").c_str());
++			// S08-T09 (L42): a task accepted before participant 1 respawned keeps
++			// its script data in the original body's store (the script host)
++			CActor* host = campaign::script_host_actor();
++			if (host && host != anchor)
++			{
++				luabind::object f = load_var(host->lua_game_object(), (xr_string(id) + "_fetch").c_str());
++				if (f.type() == LUA_TSTRING)
++					store = host;
++			}
++			luabind::object v = load_var(store->lua_game_object(), (xr_string(id) + "_coop_instance").c_str());
+ 			if (v.type() == LUA_TNUMBER)
+ 				instance = luabind::object_cast<int>(v);
+ 		}
+ 		Host::PartyTask t;
+ 		t.id = id;
+ 		t.holder_slot = 0;
+-		t.holder = u16(anchor->ID());
++		t.holder = u16(store->ID());
+ 		t.instance = instance > 0 ? u64(instance) : ++g_host->quest_instances;
+ 		g_host->quest_instances = _max(g_host->quest_instances, t.instance);
+ 		t.accepted_tick = g_host->tick;
+ 		g_host->party_tasks.push_back(t);
+ 		luabind::functor<void> set_task;
+ 		if (ai().script_engine().functor("campaign_party_set_task", set_task))
+-			set_task(id, int(anchor->ID()));
+-		g_host->log.line("quest-rebuilt task=%s instance=%I64u holder=%u", id, t.instance, u32(t.holder));
++			set_task(id, int(store->ID()));
++		g_host->log.line("quest-rebuilt task=%s instance=%I64u holder=%u anchor=%u", id, t.instance, u32(t.holder),
++			u32(anchor->ID()));
+ 	}
+ }
+ 
+@@ -6013,9 +6080,19 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 				u32(p.waiters.size()));
+ 			return kQuestPending;
+ 		}
+-	CActor* holder = smart_cast<CActor*>(Level().Objects.net_Find(t->holder));
++	// S08-T09 (L42): the turn-in runs in participant 1's live actor, whichever
++	// body that is now (the task's native owner is the participant); while
++	// participant 1 is dead it waits (refused NotActive) for the respawn. The
++	// task's script data stays in its holder's store (t->holder).
++	CActor* holder = nullptr;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot == 0)
++			holder = participant_actor(l.ref);
+ 	if (!holder || !holder->g_Alive())
+-		return coop::proto::kReasonQuestNotActive; // the holder's task went with its actor (S08-T05: defined)
++	{
++		g_host->log.line("quest-turnin-anchor-dead slot=%u task=%s", u32(link.ref.slot), task);
++		return coop::proto::kReasonQuestNotActive;
++	}
+ 	s32 stage = -1;
+ 	{
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
+@@ -6189,7 +6266,17 @@ void quest_tick()
+ 			if (ai().script_engine().functor("campaign_party_set_task", set_task))
+ 				set_task(p.task.c_str(), -1);
+ 			if (t)
++			{
++				Host::PartyFinished f; // S08-T09: its final state to both players
++				f.id = t->id;
++				f.instance = t->instance;
++				f.count = t->count;
++				f.need = t->need;
++				g_host->party_finished.push_back(f);
++				if (g_host->party_finished.size() > 16) // a client whose world predates it still learns it
++					g_host->party_finished.erase(g_host->party_finished.begin());
+ 				g_host->party_tasks.erase(g_host->party_tasks.begin() + (t - g_host->party_tasks.data()));
++			}
+ 			party_news("Party task complete: Mobbing the Mob");
+ 			coop::store::failpoint("quest:after-apply");
+ 		}
+@@ -6242,6 +6329,144 @@ void quest_tick()
+ 		}
+ }
+ 
++// ------------------------------------------------------------ S08-T09
++// The party's tasks as both players see them (CampaignEvent 11): every party
++// task's id, state (0 failed, 1 in progress, 2 completed), the pooled count
++// and the need, its title, description, icon and map location as the
++// server's native task holds them. Sent when any of it changes and to a
++// client entering the world; a finished task once more with its final state.
++// A client keeps a presentation copy in its own task manager (no logic: a
++// co-op client evaluates no task, S08-T09).
++void put_party_task(std::vector<u8>& p, LPCSTR id, u8 state, s32 count, s32 need)
++{
++	CGameTask* t = Level().GameTaskManager().HasGameTask(shared_str(id), false);
++	put_str(p, id);
++	put_u8(p, state);
++	put_u16(p, u16(s16(_max(-1, _min(count, 30000)))));
++	put_u16(p, u16(s16(_max(-1, _min(need, 30000)))));
++	put_str(p, t ? t->m_Title.c_str() : "");
++	put_str(p, t ? t->m_Description.c_str() : "");
++	put_str(p, t ? t->GetIconName_script() : "");
++	put_str(p, t ? t->GetMapLocation_script() : "");
++	put_u16(p, t ? t->GetMapObjectID_script() : u16(0xffff));
++	put_u32(p, t ? t->m_priority : 0);
++}
++
++void send_party_tasks()
++{
++	if (!g_host->party_adapter || !g_pGameLevel)
++		return;
++	std::vector<u8> payload;
++	u8 n = 0;
++	payload.push_back(0);
++	u64 hash = 14695981039346656037ull;
++	for (const Host::PartyTask& t : g_host->party_tasks)
++	{
++		CGameTask* gt = Level().GameTaskManager().HasGameTask(shared_str(t.id.c_str()), false);
++		const u8 state = gt && gt->GetTaskState() == eTaskStateCompleted ? 2 :
++			gt && gt->GetTaskState() == eTaskStateFail ? 0 : 1;
++		put_party_task(payload, t.id.c_str(), state, t.count, t.need);
++		++n;
++		hash = fnv1a(fnv1a(fnv1a(hash, t.instance), u64(state) | (u64(u32(t.count)) << 8)), u64(u32(t.need)));
++		if (gt)
++			for (const char* c = gt->m_Title.c_str(); c && *c; ++c)
++				hash = fnv1a(hash, u64(u8(*c)));
++	}
++	for (const Host::PartyFinished& f : g_host->party_finished)
++	{
++		put_party_task(payload, f.id.c_str(), f.state, f.count, f.need);
++		++n;
++		hash = fnv1a(fnv1a(hash, f.instance), 0x100 | f.state);
++	}
++	payload[0] = n;
++	const bool changed = hash != g_host->party_hash;
++	if (changed && n)
++	{
++		g_host->party_hash = hash;
++		broadcast_event(11, payload);
++		g_host->log.line("party-tasks-sent tasks=%u finished=%u hash=%016I64x", u32(n),
++			u32(g_host->party_finished.size()), hash);
++	}
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!client_in_world(link))
++		{
++			link.party_sent = false;
++			continue;
++		}
++		if (link.party_sent)
++			continue;
++		link.party_sent = true;
++		if (n && !changed) // (a change was just broadcast to it)
++		{
++			queue_event(link, 11, payload);
++			g_host->log.line("party-tasks-joined to=%u tasks=%u", u32(link.ref.slot), u32(n));
++		}
++		// the scripts' current map spots (a spot added while this client loaded
++		// its world is not in its checkpoint)
++		xr_vector<campaign::MapSpotState> spots;
++		campaign::map_spots(spots);
++		for (const campaign::MapSpotState& m : spots)
++		{
++			std::vector<u8> p;
++			put_u8(p, u8(campaign::Presentation::MapSpotAdd));
++			put_u16(p, m.object);
++			put_u32(p, 0);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_u32(p, m.flags);
++			put_u32(p, 0);
++			put_str(p, m.detail.c_str());
++			queue_event(link, kEventPresentation, p);
++		}
++		if (!spots.empty())
++			g_host->log.line("map-spots-joined to=%u spots=%u", u32(link.ref.slot), u32(spots.size()));
++	}
++}
++
++// S08-T09 (L42): a participant's respawned actor continues the player: the
++// old body's info portions (story knowledge, kept in the ALife registry and
++// so in every checkpoint) are copied to the new actor. A party task stays
++// as it was: its native owner is the participant (the new actor from now
++// on) and its script data stays in the original body's store, which the
++// installed actor binder saves with the checkpoint; participant 1's live
++// actor runs its turn-in.
++void on_participant_respawned(PlayerLink& link, u16 old_id, CActor* actor)
++{
++	CInventoryOwner* old_owner = smart_cast<CInventoryOwner*>(Level().Objects.net_Find(old_id));
++	u32 infos = 0;
++	if (old_owner && old_owner->m_known_info_registry && actor->m_known_info_registry)
++	{
++		KNOWN_INFO_VECTOR& to = actor->m_known_info_registry->registry().objects();
++		for (const INFO_DATA& info : old_owner->m_known_info_registry->registry().objects())
++		{
++			bool have = false;
++			for (const INFO_DATA& t : to)
++				have = have || t == info;
++			if (!have)
++			{
++				to.push_back(info);
++				++infos;
++			}
++		}
++	}
++	u32 tasks = 0;
++	for (const Host::PartyTask& t : g_host->party_tasks)
++	{
++		CGameTask* gt = Level().GameTaskManager().HasGameTask(shared_str(t.id.c_str()), true);
++		CActor* owner = gt ? campaign::task_owner_actor(gt) : nullptr;
++		++tasks;
++		g_host->log.line("quest-anchor-respawned task=%s instance=%I64u slot=%u old=%u new=%u store=%u native_owner=%d",
++			t.id.c_str(), t.instance, u32(link.ref.slot), u32(old_id), u32(actor->ID()), u32(t.holder),
++			owner ? int(owner->ID()) : -1);
++	}
++	sync_party_actors();
++	g_host->log.line("respawn-continuity slot=%u old=%u new=%u infos=%u party_tasks=%u", u32(link.ref.slot),
++		u32(old_id), u32(actor->ID()), infos, link.ref.slot == 0 ? tasks : 0u);
++}
++
+ // S08-T05: a published generation releases the quest answers that waited for it.
+ void answer_quests(u32 generation, bool ok)
+ {
+@@ -7166,7 +7391,9 @@ void quest_fixtures()
+ 		const s32 need = t->need > 0 ? t->need : 6;
+ 		for (s32 i = 0; i < need; ++i)
+ 		{
+-			const u32 k = u32(i) < u32(need + 1) / 2 ? holder : other;
++			// S08-T09 (quest_variant 2): every patch beside the other player, so the
++			// party's count does not depend on the anchor who dies
++			const u32 k = g_host->config.quest_variant == 2 ? other : (u32(i) < u32(need + 1) / 2 ? holder : other);
+ 			// at the actor's own height and level vertex: inside the bunker the
+ 			// level graph's vertex under a point can be the ground above it (q-1)
+ 			Fvector at = actors[k]->Position();
+@@ -7208,6 +7435,56 @@ void quest_fixtures()
+ 			return;
+ 		g_host->log.line("fixture-quest dead-giver id=%u dead=%d", u32(f.dead_giver), npc && !npc->g_Alive() ? 1 : 0);
+ 	}
++	if (g_host->config.quest_variant == 2 && f.round == 6)
++	{
++		// S08-T09: participant 1 (the party's anchor) is killed; its client
++		// respawns it (auto_respawn); the turn-in waits for the new actor
++		if (!f.anchor_killed)
++		{
++			if (CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(f.actors[0])))
++				if (a->g_Alive())
++					a->KillEntity(a->ID(), TRUE);
++			f.anchor_killed = true;
++			f.anchor_since = g_host->tick;
++			g_host->log.line("fixture-quest anchor-killed actor=%u", u32(f.actors[0]));
++			return;
++		}
++		CActor* now = actors[0];
++		const bool respawned = now && now->g_Alive() && u16(now->ID()) != f.actors[0];
++		if (!respawned && g_host->tick - f.anchor_since < 90 * 50)
++			return;
++		if (respawned && !f.anchor_back_tick)
++		{
++			f.anchor_back_tick = g_host->tick;
++			g_host->log.line("fixture-quest anchor-respawned=1 actor=%u waited_ticks=%I64u", u32(now->ID()),
++				g_host->tick - f.anchor_since);
++		}
++		// 20 s with the respawned anchor before the turn-in (a restart can fall there)
++		if (respawned && g_host->tick < f.anchor_back_tick + 20 * 50)
++			return;
++		if (!respawned)
++			g_host->log.line("fixture-quest anchor-respawned=0 waited_ticks=%I64u", g_host->tick - f.anchor_since);
++	}
++	if (g_host->config.quest_variant == 2 && f.round == 7 && !f.stash_made && g_host->quests_completed)
++	{
++		// S08-T09: a stash for the party (the quest's own bonus stash is a 50 % roll):
++		// made by the installed treasure manager in the anchor's context; its map
++		// spot goes to both players
++		f.stash_made = true;
++		for (PlayerLink& l : g_host->links)
++			if (l.bound && l.ref.slot == 0)
++				if (CActor* anchor = participant_actor(l.ref))
++				{
++					campaign::ScriptContextScope scope(anchor, "fixture-party-stash");
++					luabind::functor<void> make;
++					if (scope.entered() && ai().script_engine().functor("treasure_manager.create_random_stash", make))
++					{
++						make(luabind::object(), luabind::object(ai().script_engine().lua(), "coop party stash"),
++							luabind::object(), true);
++						g_host->log.line("fixture-quest party-stash made=1");
++					}
++				}
++	}
+ 	if (f.round == 2 || f.round == 4)
+ 	{
+ 		bool all = true;
+@@ -8711,6 +8988,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	send_layouts(false); // S08-T07
+ 	item_graph_points(); // S08-T03
+ 	quest_tick(); // S08-T04
++	send_party_tasks(); // S08-T09
+ 	quest_fixtures(); // S08-T04
+ 	encounter_fixtures();
+ 	encounter_record();
+diff --git a/src/xrGame/GameTask.cpp b/src/xrGame/GameTask.cpp
+index 2ed64c5..34312f0 100644
+--- a/src/xrGame/GameTask.cpp
++++ b/src/xrGame/GameTask.cpp
+@@ -1,6 +1,7 @@
+ #include "pch_script.h"
+ #include "CampaignActorAccess.h"
+ #include "CampaignScriptContext.h"
++#include "CoopReplica.h"
+ #include "GameTask.h"
+ #include "ui/xrUIXmlParser.h"
+ #include "encyclopedia_article.h"
+@@ -50,15 +51,20 @@ void CGameTask::SetTaskState(ETaskState state)
+ 		RemoveMapLocations(false);
+ 		m_FinishTime = Level().GetGameTime();
+ 
+-		if (m_task_state == eTaskStateFail)
++		// S08-T09: on a co-op client a task is presentation of the server's: its
++		// infos and functions are the server's to run
++		if (!campaign::replica_active())
+ 		{
+-			SendInfo(m_infos_on_fail);
+-			CallAllFuncs(m_lua_functions_on_fail);
+-		}
+-		else
+-		{
+-			SendInfo(m_infos_on_complete);
+-			CallAllFuncs(m_lua_functions_on_complete);
++			if (m_task_state == eTaskStateFail)
++			{
++				SendInfo(m_infos_on_fail);
++				CallAllFuncs(m_lua_functions_on_fail);
++			}
++			else
++			{
++				SendInfo(m_infos_on_complete);
++				CallAllFuncs(m_lua_functions_on_complete);
++			}
+ 		}
+ 	}
+ 	ChangeStateCallback();
+@@ -141,6 +147,17 @@ void CGameTask::ChangeMapLocation(LPCSTR new_map_location, u16 new_map_object_id
+ 
+ void CGameTask::ChangeStateCallback()
+ {
++	// S08-T09: on a co-op client the news line only (the installed callback's
++	// presentation, bind_stalker_ext.actor_on_task_callback); the task's
++	// script logic (task_manager.task_callback: rewards, stages) is the server's
++	if (campaign::replica_active())
++	{
++		luabind::functor<void> news;
++		CActor* viewer = smart_cast<CActor*>(Level().CurrentViewEntity());
++		if (viewer && GetTaskState() != eTaskStateFail && ai().script_engine().functor("news_manager.send_task", news))
++			news(viewer->lua_game_object(), GetTaskState() == eTaskStateCompleted ? "complete" : "new", this);
++		return;
++	}
+ 	// S03-T05: an owned task's state callback goes to the handler the
+ 	// installed actor binder registered (on the single-player script actor,
+ 	// the only actor with a Lua binder on the server), inside the owner's
+diff --git a/src/xrGame/GametaskManager.cpp b/src/xrGame/GametaskManager.cpp
+index a2a3745..ac075c0 100644
+--- a/src/xrGame/GametaskManager.cpp
++++ b/src/xrGame/GametaskManager.cpp
+@@ -4,6 +4,7 @@
+ #include "ui/xrUIXmlParser.h"
+ #include "GameTask.h"
+ #include "CampaignScriptContext.h"
++#include "CoopReplica.h"
+ #include "Level.h"
+ #include "map_manager.h"
+ #include "map_location.h"
+@@ -185,6 +186,10 @@ void CGameTaskManager::UpdateTasks()
+ 
+ 		Tasks::const_iterator I = tasks.begin();
+ 		Tasks::const_iterator E = tasks.end();
++		// S08-T09: a co-op client evaluates no task: the server completes or
++		// fails them and the client presents its state
++		if (campaign::replica_active())
++			I = E;
+ 		for (; I != E; ++I)
+ 		{
+ 			CGameTask* const t = (*I).game_task;
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index d7dcbad..f42b53f 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -46,6 +46,8 @@
+ #include "ui\UIPdaWnd.h"
+ #include "ui\UITaskWnd.h"
+ #include "ui\UIMapWnd.h"
++#include "CampaignScriptContext.h" // S08-T09
++#include "CampaignActorAccess.h"
+ #include "raypick.h"
+ #include "../xrcdb/xr_collide_defs.h"
+ #include "../xrEngine/Rain.h"
+@@ -435,6 +437,20 @@ Fvector vertex_position(u32 level_vertex_id)
+ 	return (ai().level_graph().vertex_position(level_vertex_id));
+ }
+ 
++// S08-T09: on the campaign server a script's map spot is also every
++// player's (the shared world map): a presentation record to all.
++static void present_map_spot(campaign::Presentation kind, u16 id, LPCSTR spot_type, LPCSTR text, u32 flags)
++{
++	if (campaign::process_role() != campaign::Role::Server)
++		return;
++	string128 detail;
++	xr_sprintf(detail, "%s|%s", spot_type ? spot_type : "", text ? text : "");
++	campaign::PresentationArgs args;
++	args.flags = flags;
++	campaign::present_broadcast(kind, id, detail, args);
++	campaign::note_map_spot(kind, id, spot_type ? spot_type : "", detail, flags);
++}
++
+ void map_add_object_spot(u16 id, LPCSTR spot_type, LPCSTR text)
+ {
+ 	CMapLocation* ml = Level().MapManager().AddMapLocation(spot_type, id);
+@@ -442,6 +458,7 @@ void map_add_object_spot(u16 id, LPCSTR spot_type, LPCSTR text)
+ 	{
+ 		ml->SetHint(text);
+ 	}
++	present_map_spot(campaign::Presentation::MapSpotAdd, id, spot_type, text, 0);
+ }
+ 
+ void map_add_object_spot_ser(u16 id, LPCSTR spot_type, LPCSTR text)
+@@ -451,6 +468,7 @@ void map_add_object_spot_ser(u16 id, LPCSTR spot_type, LPCSTR text)
+ 		ml->SetHint(text);
+ 
+ 	ml->SetSerializable(true);
++	present_map_spot(campaign::Presentation::MapSpotAdd, id, spot_type, text, 1);
+ }
+ 
+ void map_change_spot_hint(u16 id, LPCSTR spot_type, LPCSTR text)
+@@ -458,11 +476,13 @@ void map_change_spot_hint(u16 id, LPCSTR spot_type, LPCSTR text)
+ 	CMapLocation* ml = Level().MapManager().GetMapLocation(spot_type, id);
+ 	if (!ml) return;
+ 	ml->SetHint(text);
++	present_map_spot(campaign::Presentation::MapSpotHint, id, spot_type, text, 0);
+ }
+ 
+ void map_remove_object_spot(u16 id, LPCSTR spot_type)
+ {
+ 	Level().MapManager().RemoveMapLocation(spot_type, id);
++	present_map_spot(campaign::Presentation::MapSpotRemove, id, spot_type, "", 0);
+ }
+ 
+ // demonized: remove all map object spots by id

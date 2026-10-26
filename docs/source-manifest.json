@@ -209,6 +209,10 @@
     {
       "path": "patches/engine/0050-containers-and-stacks.patch",
       "sha256": "b1a69d75ccde3a16fcd1c56bfca5d37f242d03889d0649aa3907a03db8f64305"
+    },
+    {
+      "path": "patches/engine/0051-party-presentation-and-anchor.patch",
+      "sha256": "270a387d7b2c8cf4fc47c13ad73ea1a623e08c903422d20b96527846a3b43429"
     }
   ],
   "submodules": [

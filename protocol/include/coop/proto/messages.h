@@ -363,6 +363,11 @@ enum ActionKind : std::uint16_t
                              // (the item must not have changed owner after it; 0: no precondition)
     kActionQuest = 8,        // S08-T04: target: the task giver; params: u8 op (1 accept, 2 turn in), u8 length,
                              // the task id; a party task: one instance for both players (plan.md S08-T04)
+    kActionEquip = 9,        // S08-T07: target: an item in the player's own actor's inventory; params: u8 place
+                             // (1 slot, 2 belt, 3 ruck), u8 slot (place 1: 1..LAST_SLOT, else 0), u8 flags (bit 0:
+                             // do not activate); the engine's slot rules decide (contract §6 `equip`)
+    kActionUse = 10,         // S08-T07: target: an eatable item in the player's own actor's inventory; params:
+                             // none; used by the engine on the server's actor (contract §6 `use`)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -389,6 +394,11 @@ enum ActionReason : std::uint16_t
     kReasonQuestNotOffered = 17,  // S08-T04: the giver does not offer it now
     kReasonQuestNotActive = 18,   // S08-T04: the party does not have this task
     kReasonQuestNotFinished = 19, // S08-T04: its objective is not met (both players' contributions counted)
+    kReasonPlaceRefused = 20,     // S08-T07: the engine's slot/belt/ruck rules refuse that place (occupied slot,
+                                  // wrong slot for the item, belt full, already there)
+    kReasonNotUsable = 21,        // S08-T07: not an eatable item, or none of it left
+    kReasonUseRefused = 22,       // S08-T07: the installed scripts refused the use (actor_on_item_before_use: a
+                                  // stronger booster active, a required tool missing, anabiotic in combat)
 };
 
 struct Input

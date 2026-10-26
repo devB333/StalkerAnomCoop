@@ -1,0 +1,2718 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index e5196ba..a36cf92 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -46,6 +46,7 @@
+ #include "ai/monsters/basemonster/base_monster.h" // S06-T05
+ #include "Inventory.h"
+ #include "inventory_item.h" // S08-T02
++#include "eatable_item.h" // S08-T07
+ #include "Weapon.h"
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+@@ -314,6 +315,7 @@ struct Link
+ 		xr_vector<u8> params;
+ 		u64 expected = 0;
+ 		u32 step = 0xffffffff; // the transfer driver's step
++		xr_string fx; // S08-T07: a use's item section (its presentation once accepted)
+ 	};
+ 	xr_deque<PickupPending> pickup_pending;
+ 	// S08-T02: the transfer driver (profile script 8)
+@@ -341,6 +343,29 @@ struct Link
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+ 	u64 transfer_steps_unlinked = 0;
+ 	u64 item_graph_matches = 0, item_graph_mismatches = 0, own_inventory_mismatches = 0; // S08-T03
++	// S08-T07: equip and use
++	u64 equips_requested = 0, uses_requested = 0, inventory_events_ignored = 0, local_eats_blocked = 0;
++	u64 uses_presented = 0;
++	struct LayoutItem
++	{
++		u64 entity;
++		u8 place, slot, uses;
++	};
++	struct ActorLayout
++	{
++		u32 serial = 0, building_serial = 0xffffffff;
++		u32 parts_seen = 0;
++		xr_vector<LayoutItem> building, target;
++		bool settled = true;
++		u32 since_ms = 0;
++	};
++	xr_map<u64, ActorLayout> layouts; // per actor entity
++	u64 layouts_received = 0, layouts_applied = 0, layout_moves = 0, layout_unresolved = 0;
++	FILE* layout_csv = nullptr;
++	bool layout_point_open = false;
++	u64 layout_point_seq = 0, layout_point_hash = 0;
++	u32 layout_point_items = 0, layout_point_ms = 0;
++	u64 layout_matches = 0, layout_mismatches = 0;
+ 	bool item_graph_csv_written = false;
+ 	struct PickupRace
+ 	{
+@@ -854,6 +879,8 @@ void pickup_frame(); // S08-T01
+ void on_transfer_round(const coop::proto::CampaignEvent& event); // S08-T02
+ void on_item_graph(const coop::proto::CampaignEvent& event); // S08-T03
+ void run_script8(u32 t);
++void layout_frame(); // S08-T07
++void on_layout(const coop::proto::CampaignEvent& event); // S08-T07
+ 
+ void world_frame()
+ {
+@@ -941,6 +968,7 @@ void world_frame()
+ 		run_script();
+ 		respawn_frame(); // S07-T07
+ 		pickup_frame(); // S08-T01
++		layout_frame(); // S08-T07
+ 		sample_input();
+ 		log_actors();
+ 		log_entities();
+@@ -1870,7 +1898,7 @@ void send_teleport_intent()
+ {
+ 	coop::proto::ActionIntent intent;
+ 	intent.operation_id = g_link->teleport_operation = 0x6001;
+-	intent.kind = 9; // no kind is defined; a client asking to be moved
++	intent.kind = 1004; // no kind is defined; a client asking to be moved (9 is the S08-T07 equip)
+ 	const auto ref = g_link->refs.find(g_actor->ID());
+ 	if (ref != g_link->refs.end())
+ 		intent.target = ref->second;
+@@ -3045,6 +3073,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 6: on_pickup_round(*event); break; // S08-T01 fixture
+ 			case 7: on_transfer_round(*event); break; // S08-T02 fixture
+ 			case 8: on_item_graph(*event); break; // S08-T03
++			case 9: on_layout(*event); break; // S08-T07
+ 			default: break;
+ 			}
+ 		}
+@@ -3384,7 +3413,9 @@ u64 request_ownership(u16 action, const coop::proto::EntityRef& target, const xr
+ 	g_link->pickup_pending.push_back(p);
+ 	pickup_send(g_link->pickup_pending.back(), "sent");
+ 	g_link->log.line("%s-request why=%s operation=%I64x target=%I64u/%u round=%d kind=%d expected=%I64u",
+-		action == coop::proto::kActionPickup ? "pickup" : (action == coop::proto::kActionDrop ? "drop" : "transfer"),
++		action == coop::proto::kActionPickup ? "pickup" : action == coop::proto::kActionDrop ? "drop" :
++		action == coop::proto::kActionEquip ? "equip" : action == coop::proto::kActionUse ? "use" :
++		action == coop::proto::kActionQuest ? "quest" : "transfer",
+ 		why, p.operation, target.id, target.generation, int(round), int(kind), expected);
+ 	return p.operation;
+ }
+@@ -3432,7 +3463,22 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 			}
+ 			g_link->log.line("pickup-result operation=%I64x outcome=%u reason=%u commit=%I64u round=%d", p.operation,
+ 				u32(result.outcome), u32(result.reason), result.commit_id, int(p.round));
+-			if (p.player && !accepted)
++			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
++			{
++				// S08-T07: the use's first-person presentation, as single player plays it
++				luabind::functor<void> fx;
++				if (ai().script_engine().functor("actor_effects.play_item_fx", fx))
++				{
++					fx(p.fx.c_str());
++					++g_link->uses_presented;
++				}
++			}
++			if (p.player && !accepted && (p.action == coop::proto::kActionUse || p.action == coop::proto::kActionEquip))
++				pickup_message(result.reason == coop::proto::kReasonUseRefused ? "You can't use that now." :
++					result.reason == coop::proto::kReasonPlaceRefused ? "It doesn't fit there." :
++					result.reason == coop::proto::kReasonNotUsable ? "You can't use that." :
++					result.reason == coop::proto::kReasonItemGone ? "It's gone." : "You can't do that now.");
++			else if (p.player && !accepted)
+ 				pickup_message(result.reason == coop::proto::kReasonItemTaken ? "Someone else took it." :
+ 					result.reason == coop::proto::kReasonOutOfReach ? "Too far away." :
+ 					result.reason == coop::proto::kReasonStale ? "It was moved in the meantime." :
+@@ -3656,6 +3702,14 @@ void apply_reparent(const coop::proto::Reparent& r)
+ 	else
+ 		object->o_Position.set(r.transform.x, r.transform.y, r.transform.z);
+ 	const bool ok = object->ID_Parent == parent;
++	// S08-T07: an item arriving in an actor takes the place its layout gives it
++	if (parent != 0xffff)
++		for (auto& l : g_link->layouts)
++			if (l.first == r.parent.id && l.second.settled)
++			{
++				l.second.settled = false;
++				l.second.since_ms = g_link->wall.GetElapsed_ms();
++			}
+ 	if (ok)
+ 		++g_link->reparents_applied;
+ 	else
+@@ -3895,7 +3949,7 @@ u64 graph_fnv(u64 h, u64 v)
+ 
+ void on_item_graph(const coop::proto::CampaignEvent& event)
+ {
+-	if (event.payload.size() != 20 || !ai().get_alife())
++	if ((event.payload.size() != 20 && event.payload.size() != 32) || !ai().get_alife())
+ 		return;
+ 	u64 seq = 0, server_hash = 0;
+ 	u32 server_items = 0;
+@@ -3929,6 +3983,19 @@ void on_item_graph(const coop::proto::CampaignEvent& event)
+ 		hash = graph_fnv(graph_fnv(hash, i.first), i.second);
+ 	const bool match = hash == server_hash && u32(items.size()) == server_items;
+ 	++(match ? g_link->item_graph_matches : g_link->item_graph_mismatches);
++	if (event.payload.size() == 32)
++	{
++		// S08-T07: the layouts at this point (checked by layout_point_frame)
++		g_link->layout_point_open = true;
++		g_link->layout_point_seq = seq;
++		g_link->layout_point_hash = 0;
++		g_link->layout_point_items = 0;
++		for (int b = 0; b < 8; ++b)
++			g_link->layout_point_hash |= u64(event.payload[20 + b]) << (8 * b);
++		for (int b = 0; b < 4; ++b)
++			g_link->layout_point_items |= u32(event.payload[28 + b]) << (8 * b);
++		g_link->layout_point_ms = g_link->wall.GetElapsed_ms();
++	}
+ 	u32 missing = 0, extra = 0, inventory = 0;
+ 	if (g_actor)
+ 	{
+@@ -3964,6 +4031,269 @@ void on_item_graph(const coop::proto::CampaignEvent& event)
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S08-T07
++// Equip and use. The client's own inventory paths end in the engine's
++// GEG_PLAYER_ITEM2SLOT / 2BELT / 2RUCK and GEG_PLAYER_ITEM_EAT events
++// (db.actor:move_to_slot/belt/ruck, the engine UI, the quick-use key) or in
++// CInventory::Eat (db.actor:eat, the installed inventory UI's Use): on a
++// replica they become intents (kinds 9 and 10) and nothing changes locally.
++// The server's answer is the actors' inventory layouts (CampaignEvent 9),
++// which the replica applies; an accepted use plays its first-person
++// presentation (actor_effects.play_item_fx) here, where single player plays it.
++
++void inventory_intent(u16 action, u16 item, const coop::proto::EntityRef& item_ref, const xr_vector<u8>& params)
++{
++	Link::TransferStepRun* st = awaiting_step(action, item);
++	const u64 operation = request_ownership(action, item_ref, params, 0, st ? st->round : 0xffffffff, 0, !st,
++		st ? "driver" : "player");
++	if (action == coop::proto::kActionUse)
++	{
++		++g_link->uses_requested;
++		if (CObject* object = Level().Objects.net_Find(item))
++			g_link->pickup_pending.back().fx = object->cNameSect().c_str();
++	}
++	else
++		++g_link->equips_requested;
++	if (st)
++	{
++		st->linked = true;
++		st->operation = operation;
++		Link::PickupPending& p = g_link->pickup_pending.back();
++		p.step = st->step;
++		pickup_csv_line("linked", st->round, 0, operation, item_ref, 0, 0, 0, action, st->step);
++	}
++}
++
++// The layouts: per actor entity, the newest complete one; applied until the
++// replica matches it (an item's Reparent may still be on its way).
++void layout_csv(LPCSTR event, u64 actor, u32 serial, u32 items, u32 moves, u32 unresolved)
++{
++	if (!g_link->layout_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-layout-client.csv");
++		g_link->layout_csv = fopen(path, "w");
++		if (!g_link->layout_csv)
++			return;
++		fprintf(g_link->layout_csv, "utc_ms,event,actor_entity,serial,items,moves,unresolved\n");
++	}
++	fprintf(g_link->layout_csv, "%I64u,%s,%I64u,%u,%u,%u,%u\n", utc_now_ms(), event, actor, serial, items, moves,
++		unresolved);
++	fflush(g_link->layout_csv);
++}
++
++void on_layout(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.size() < 15)
++		return;
++	u64 actor = 0;
++	u32 serial = 0;
++	for (int i = 0; i < 8; ++i)
++		actor |= u64(b[i]) << (8 * i);
++	for (int i = 0; i < 4; ++i)
++		serial |= u32(b[8 + i]) << (8 * i);
++	const u8 part = b[12], parts = b[13], count = b[14];
++	if (!parts || part >= parts || parts > 16 || b.size() != 15 + size_t(count) * 11)
++		return;
++	Link::ActorLayout& l = g_link->layouts[actor];
++	if (l.building_serial != serial || part == 0)
++	{
++		l.building_serial = serial;
++		l.building.clear();
++		l.parts_seen = 0;
++	}
++	for (u32 k = 0; k < count; ++k)
++	{
++		const u8* e = b.data() + 15 + k * 11;
++		Link::LayoutItem item;
++		item.entity = 0;
++		for (int i = 0; i < 8; ++i)
++			item.entity |= u64(e[i]) << (8 * i);
++		item.place = e[8];
++		item.slot = e[9];
++		item.uses = e[10];
++		l.building.push_back(item);
++	}
++	l.parts_seen |= 1u << part;
++	if (l.parts_seen != (1u << parts) - 1)
++		return;
++	l.target = l.building;
++	l.serial = serial;
++	l.settled = false;
++	l.since_ms = g_link->wall.GetElapsed_ms();
++	++g_link->layouts_received;
++	layout_csv("received", actor, serial, u32(l.target.size()), 0, 0);
++}
++
++void refresh_inventory_ui()
++{
++	LPCSTR chunk = "if ui_inventory and ui_inventory.GUI and ui_inventory.GUI:IsShown() then "
++		"pcall(function() ui_inventory.GUI:UpdateItems() end) end";
++	lua_State* L = ai().script_engine().lua();
++	if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_inventory_refresh") == 0)
++	{
++		if (lua_pcall(L, 0, 0, 0) != 0)
++			lua_pop(L, 1);
++	}
++	else if (L)
++		lua_pop(L, 1);
++}
++
++// Applies one actor's target layout to the replica; the number of items not
++// resolvable yet (not in this actor's inventory here).
++u32 apply_layout(u64 actor_entity, Link::ActorLayout& l, u32& moves)
++{
++	const auto a = g_link->by_entity.find(actor_entity);
++	CActor* actor = a != g_link->by_entity.end() ? smart_cast<CActor*>(Level().Objects.net_Find(a->second)) : nullptr;
++	if (!actor)
++		return u32(l.target.size());
++	CInventory& inventory = actor->inventory();
++	u32 unresolved = 0;
++	// out of the slots and the belt first, so a slot is free when its item arrives
++	for (u8 pass = 0; pass < 3; ++pass)
++	{
++		const u8 place = pass == 0 ? 3 : (pass == 1 ? 2 : 1);
++		for (const Link::LayoutItem& e : l.target)
++		{
++			if (e.place != place)
++				continue;
++			const auto it = g_link->by_entity.find(e.entity);
++			CObject* object = it != g_link->by_entity.end() ? Level().Objects.net_Find(it->second) : nullptr;
++			CInventoryItem* item = object ? smart_cast<CInventoryItem*>(object) : nullptr;
++			if (!item || object->H_Parent() != actor || item->m_pInventory != &inventory)
++			{
++				++unresolved;
++				continue;
++			}
++			if (CEatableItem* eatable = e.uses != 0xff ? smart_cast<CEatableItem*>(item) : nullptr)
++				if (eatable->GetRemainingUses() != e.uses)
++				{
++					eatable->SetRemainingUses(e.uses);
++					++moves;
++				}
++			if (item->CurrPlace() == e.place && (e.place != 1 || item->CurrSlot() == e.slot))
++				continue;
++			bool ok;
++			if (e.place == 3)
++				ok = inventory.Ruck(item, true);
++			else if (e.place == 2)
++				ok = inventory.Belt(item, true);
++			else
++			{
++				if (PIItem occupant = inventory.ItemFromSlot(e.slot))
++					if (occupant != item)
++						inventory.Ruck(occupant, true);
++				ok = inventory.Slot(e.slot, item, true, true);
++			}
++			++moves;
++			if (!ok)
++				++unresolved;
++		}
++	}
++	return unresolved;
++}
++
++void layout_point_frame();
++
++void layout_frame()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	bool changed = false;
++	for (auto& x : g_link->layouts)
++	{
++		Link::ActorLayout& l = x.second;
++		if (l.settled)
++			continue;
++		u32 moves = 0;
++		const u32 unresolved = apply_layout(x.first, l, moves);
++		g_link->layout_moves += moves;
++		changed = changed || moves;
++		if (!unresolved || now - l.since_ms > 5000)
++		{
++			l.settled = true;
++			if (unresolved)
++				++g_link->layout_unresolved;
++			else
++				++g_link->layouts_applied;
++			layout_csv(unresolved ? "unresolved" : "applied", x.first, l.serial, u32(l.target.size()), moves,
++				unresolved);
++		}
++	}
++	if (changed)
++		refresh_inventory_ui();
++	layout_point_frame();
++}
++
++// The replica's layouts hashed as the server hashes them at an item-graph
++// point (CoopServerHost.cpp participants_layout_hash): per participant slot,
++// the actor's entity, then its items sorted by entity (place, slot, uses).
++u64 replica_layout_hash(u32& items)
++{
++	u64 h = 14695981039346656037ull;
++	items = 0;
++	CActor* by_slot[2] = {nullptr, nullptr};
++	if (g_actor && g_link->local_slot < 2)
++		by_slot[g_link->local_slot] = g_actor;
++	if (g_link->local_slot < 2)
++		by_slot[1 - g_link->local_slot] = other_actor();
++	for (CActor* actor : by_slot)
++	{
++		if (!actor)
++			continue;
++		coop::proto::EntityRef actor_ref;
++		if (!ref_of(u16(actor->ID()), actor_ref))
++			continue;
++		xr_vector<std::pair<u64, u64>> entries;
++		for (PIItem item : actor->inventory().m_all)
++		{
++			coop::proto::EntityRef r;
++			if (!item || item->GetDropManual() || !ref_of(u16(item->object().ID()), r))
++				continue;
++			const u64 place = item->CurrPlace(), slot = place == 1 ? item->CurrSlot() : 0;
++			const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
++			const u64 uses = eatable ? eatable->GetRemainingUses() : 0xff;
++			entries.push_back({r.id, (place << 16) | (slot << 8) | uses});
++		}
++		std::sort(entries.begin(), entries.end());
++		items += u32(entries.size());
++		h = graph_fnv(h, actor_ref.id);
++		for (const auto& e : entries)
++			h = graph_fnv(graph_fnv(h, e.first), e.second);
++	}
++	return h;
++}
++
++// An item-graph point's layout check: the replica must reach the server's
++// layout hash within 2 s (its last layout applied a frame or two later).
++void layout_point_frame()
++{
++	if (!g_link->layout_point_open)
++		return;
++	u32 items = 0;
++	const u64 hash = replica_layout_hash(items);
++	const u32 waited = g_link->wall.GetElapsed_ms() - g_link->layout_point_ms;
++	const bool match = hash == g_link->layout_point_hash && items == g_link->layout_point_items;
++	if (!match && waited < 2000)
++		return;
++	g_link->layout_point_open = false;
++	++(match ? g_link->layout_matches : g_link->layout_mismatches);
++	g_link->log.line("layout-point seq=%I64u match=%d items=%u server_items=%u hash=%016I64x server_hash=%016I64x "
++		"waited_ms=%u", g_link->layout_point_seq, match ? 1 : 0, items, g_link->layout_point_items, hash,
++		g_link->layout_point_hash, waited);
++	if (!match && g_actor)
++		for (PIItem item : g_actor->inventory().m_all)
++		{
++			coop::proto::EntityRef r;
++			if (!item || !ref_of(u16(item->object().ID()), r))
++				continue;
++			const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
++			g_link->log.line("layout-own item=%u entity=%I64u section=%s place=%u slot=%u uses=%d drop=%d",
++				u32(item->object().ID()), r.id, item->object().cNameSect().c_str(), u32(item->CurrPlace()),
++				u32(item->CurrSlot()), eatable ? int(eatable->GetRemainingUses()) : -1, item->GetDropManual() ? 1 : 0);
++		}
++}
++
+ void on_transfer_round(const coop::proto::CampaignEvent& event)
+ {
+ 	if (g_link->config.script != 8 || event.payload.size() < 11)
+@@ -4107,6 +4437,61 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 		pickup_csv_line("linked", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
+ 		break;
+ 	}
++	case coop::proto::kActionEquip:
++	case coop::proto::kActionUse:
++	{
++		// S08-T07: flags bit 3: the intent itself (the refusal cases); else the
++		// engine's own path, as the installed inventory UI takes it
++		const bool equip = st.action == coop::proto::kActionEquip;
++		if (st.flags & 8)
++		{
++			xr_vector<u8> params;
++			if (equip)
++			{
++				params.push_back(st.extra);
++				params.push_back(u8(st.flags >> 4));
++				params.push_back(0);
++			}
++			st.operation = request_ownership(st.action, st.item, params, 0, st.round, 0, false, "driver");
++			Link::PickupPending& p = g_link->pickup_pending.back();
++			p.step = st.step;
++			if (object)
++				p.fx = object->cNameSect().c_str();
++			++(equip ? g_link->equips_requested : g_link->uses_requested);
++			st.linked = true;
++			pickup_csv_line("linked", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
++			break;
++		}
++		if (!object)
++			break;
++		if (!equip && st.extra == 1)
++		{
++			// the quick-use key's path: CInventory::ClientEat sends GEG_PLAYER_ITEM_EAT
++			if (CInventoryItem* item = smart_cast<CInventoryItem*>(object))
++				g_actor->inventory().ClientEat(item);
++			break;
++		}
++		string512 chunk;
++		if (equip)
++			xr_sprintf(chunk,
++				"local o = level.object_by_id(%u)\n"
++				"if o then if %u == 1 then db.actor:move_to_slot(o, %u) elseif %u == 2 then db.actor:move_to_belt(o) "
++				"else db.actor:move_to_ruck(o) end end\n", u32(item), u32(st.extra), u32(st.flags >> 4), u32(st.extra));
++		else
++			xr_sprintf(chunk,
++				"local o = level.object_by_id(%u)\n"
++				"if o and CInventory__eat(o) ~= false then db.actor:eat(o) end\n", u32(item));
++		lua_State* L = ai().script_engine().lua();
++		const bool ran = L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_inventory_step") == 0 &&
++			lua_pcall(L, 0, 0, 0) == 0;
++		if (!ran && L)
++		{
++			g_link->log.line("inventory-step-lua-failed round=%u step=%u error=%s", st.round, st.step,
++				lua_tostring(L, -1));
++			lua_pop(L, 1);
++		}
++		break;
++	}
+ 	case coop::proto::kActionActivateSlot:
+ 	{
+ 		xr_vector<u8> slot;
+@@ -4249,6 +4634,56 @@ void coop_client_ownership_event(u16 type, u16 destination, NET_Packet& P)
+ 	ownership_intent(coop::proto::kActionDrop, item, item_ref, xr_vector<u8>());
+ }
+ 
++// S08-T07 (the equip and use section above)
++void coop_client_inventory_event(u16 type, u16 destination, NET_Packet& P)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || !g_actor || P.r_elapsed() < 2)
++		return;
++	if (destination != g_actor->ID())
++	{
++		++g_link->inventory_events_ignored; // not this player's own actor
++		return;
++	}
++	const u16 item = P.r_u16();
++	coop::proto::EntityRef item_ref;
++	if (!ref_of(item, item_ref))
++	{
++		++g_link->inventory_events_ignored;
++		g_link->log.line("inventory-event-unknown type=%u item=%u", u32(type), u32(item));
++		return;
++	}
++	if (type == GEG_PLAYER_ITEM_EAT)
++	{
++		inventory_intent(coop::proto::kActionUse, item, item_ref, xr_vector<u8>());
++		return;
++	}
++	xr_vector<u8> params;
++	u8 slot = 0, flags = 0;
++	if (type == GEG_PLAYER_ITEM2SLOT)
++	{
++		if (P.r_elapsed() >= 2)
++			slot = u8(P.r_u16());
++		if (P.r_elapsed() >= 1)
++			flags = P.r_u8() == 1 ? 1 : 0;
++	}
++	params.push_back(type == GEG_PLAYER_ITEM2SLOT ? 1 : type == GEG_PLAYER_ITEM2BELT ? 2 : 3);
++	params.push_back(slot);
++	params.push_back(flags);
++	inventory_intent(coop::proto::kActionEquip, item, item_ref, params);
++}
++
++bool coop_client_eat(CInventoryOwner* owner, CInventoryItem* item)
++{
++	if (!g_link || !g_link->active || !campaign::replica_active() || campaign::replica_permitted())
++		return false;
++	++g_link->local_eats_blocked;
++	coop::proto::EntityRef item_ref;
++	if (g_link->world == WorldLive && g_actor && item && owner == smart_cast<CInventoryOwner*>(g_actor) &&
++		ref_of(u16(item->object().ID()), item_ref))
++		inventory_intent(coop::proto::kActionUse, u16(item->object().ID()), item_ref, xr_vector<u8>());
++	return true; // nothing is used locally on a replica
++}
++
+ void coop_client_app_start()
+ {
+ 	string_path path;
+@@ -4347,6 +4782,11 @@ void coop_client_frame()
+ 				g_link->transfer_steps_unlinked, u32(g_link->pickup_pending.size()));
+ 			g_link->log.line("item-graph-summary matches=%I64u mismatches=%I64u own_inventory_mismatches=%I64u",
+ 				g_link->item_graph_matches, g_link->item_graph_mismatches, g_link->own_inventory_mismatches);
++			g_link->log.line("inventory-summary equips=%I64u uses=%I64u ignored=%I64u local_eats_blocked=%I64u "
++				"presented=%I64u layouts=%I64u/%I64u/%I64u moves=%I64u layout_points=%I64u/%I64u", // S08-T07
++				g_link->equips_requested, g_link->uses_requested, g_link->inventory_events_ignored,
++				g_link->local_eats_blocked, g_link->uses_presented, g_link->layouts_received, g_link->layouts_applied,
++				g_link->layout_unresolved, g_link->layout_moves, g_link->layout_matches, g_link->layout_mismatches);
+ 			log_status("final");
+ 			if (g_link->world == WorldLive)
+ 			{
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 57c85f3..4a006b3 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -14,6 +14,9 @@
+ 
+ class NET_Packet;
+ 
++class CInventoryOwner; // S08-T07
++class CInventoryItem;
++
+ namespace campaign
+ {
+ // Called from CGamePersistent::OnAppStart / OnFrame / OnAppEnd on the client.
+@@ -35,6 +38,12 @@ bool coop_client_pickup(u16 who, u16 what);
+ // becomes the drop or transfer intent. P is read from after the event's
+ // destination.
+ void coop_client_ownership_event(u16 type, u16 destination, NET_Packet& P);
++// S08-T07: a co-op client's slot, belt and ruck moves and its eating events
++// (GEG_PLAYER_ITEM2SLOT/2BELT/2RUCK, GEG_PLAYER_ITEM_EAT) become its intents.
++void coop_client_inventory_event(u16 type, u16 destination, NET_Packet& P);
++// S08-T07: CInventory::Eat on a co-op client: true when nothing may be used
++// locally (the replica); for the player's own actor the use becomes its intent.
++bool coop_client_eat(CInventoryOwner* owner, CInventoryItem* item);
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 2d98005..d1c3ed3 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -138,6 +138,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.pickup_race = ini.line_exist("coop", "pickup_race") ? ini.r_u32("coop", "pickup_race") : 0;
+ 		out.pickup_rounds = ini.line_exist("coop", "pickup_rounds") ? ini.r_u32("coop", "pickup_rounds") : 8;
+ 		out.transfer_race = ini.line_exist("coop", "transfer_race") ? ini.r_u32("coop", "transfer_race") : 0;
++		out.use_race = ini.line_exist("coop", "use_race") ? ini.r_u32("coop", "use_race") : 0; // S08-T07
+ 		out.quest_party = ini.line_exist("coop", "quest_party") ? ini.r_u32("coop", "quest_party") : 0;
+ 		out.quest_holder = ini.line_exist("coop", "quest_holder") ? ini.r_u32("coop", "quest_holder") : 2;
+ 		out.quest_variant = ini.line_exist("coop", "quest_variant") ? ini.r_u32("coop", "quest_variant") : 0;
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 206dd47..e41ce25 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -33,6 +33,8 @@
+ //                 many rounds, one every 8 s; default 8)
+ //                 transfer_race (S08-T02 fixture: seconds after both attach
+ //                 until the box, corpse and items appear; 0 off)
++//                 use_race (S08-T07 fixture: seconds after both attach until
++//                 the equip and use items appear; 0 off)
+ //                 checkpoint_seconds (S07-T02: seconds between periodic
+ //                 checkpoint generations; 0 off; joins and a clean stop
+ //                 always publish one),
+@@ -87,6 +89,7 @@ struct CoopConfig
+ 	u32 pickup_race; // S08-T01 fixture: seconds after both attach until the first pickup round (0 off)
+ 	u32 pickup_rounds; // S08-T01 fixture: rounds, one every 8 s (default 8)
+ 	u32 transfer_race; // S08-T02 fixture: seconds after both attach until the transfer rounds start (0 off)
++	u32 use_race; // S08-T07 fixture: seconds after both attach until the equip/use rounds start (0 off)
+ 	u32 quest_party; // S08-T04 fixture: seconds after both attach until the party quest rounds start (0 off)
+ 	u32 quest_holder; // S08-T04 fixture: the slot whose accept comes first in round 1 (the other's 10 ticks later)
+ 	u32 quest_variant; // S08-T05 fixture: round 6: 0 both turn in at once, 1 the other disconnects first
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+index 47ecadf..06e0dc6 100644
+--- a/src/xrGame/CoopPersistence.cpp
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -169,6 +169,141 @@ bool decode_transfer(const std::vector<u8>& payload, PickupRecord& out)
+ 		(out.from_entity || out.owner_entity) && out.from_entity != out.owner_entity;
+ }
+ 
++// S08-T07
++std::vector<u8> encode_equip(const EquipRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.actor_entity);
++	put<u64>(out, r.item_entity);
++	put<u8>(out, r.place);
++	put<u8>(out, r.inv_slot);
++	put<u8>(out, r.flags);
++	return out;
++}
++
++bool decode_equip(const std::vector<u8>& payload, EquipRecord& out)
++{
++	size_t at = 0;
++	return get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++		get(payload, at, out.operation) && get(payload, at, out.actor_entity) && get(payload, at, out.item_entity) &&
++		get(payload, at, out.place) && get(payload, at, out.inv_slot) && get(payload, at, out.flags) &&
++		at == payload.size() && out.actor_entity && out.item_entity && out.place >= 1 && out.place <= 3;
++}
++
++namespace
++{
++void put_text(std::vector<u8>& out, const xr_string& text)
++{
++	const u8 length = u8(_min(text.size(), size_t(255)));
++	put<u8>(out, length);
++	out.insert(out.end(), text.begin(), text.begin() + length);
++}
++
++bool get_text(const std::vector<u8>& payload, size_t& at, xr_string& out)
++{
++	u8 length = 0;
++	if (!get(payload, at, length) || at + length > payload.size())
++		return false;
++	out.assign(reinterpret_cast<const char*>(payload.data() + at), length);
++	at += length;
++	return true;
++}
++} // namespace
++
++std::vector<u8> encode_use(const UseRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.actor_entity);
++	put<u64>(out, r.item_entity);
++	put_text(out, r.section);
++	put<u8>(out, r.uses_after);
++	put<u8>(out, r.consumed);
++	put<u64>(out, r.game_time);
++	put<float>(out, r.health);
++	put<float>(out, r.power);
++	put<float>(out, r.radiation);
++	put<float>(out, r.psy_health);
++	put<float>(out, r.satiety);
++	const u8 count = u8(_min(r.effects.size(), size_t(255)));
++	put<u8>(out, count);
++	for (u8 i = 0; i < count; ++i)
++	{
++		const UseEffect& e = r.effects[i];
++		put<u8>(out, e.op);
++		put<u64>(out, e.item_entity);
++		if (e.op == 2)
++			put<u8>(out, e.uses);
++		else if (e.op == 4)
++		{
++			put<u64>(out, e.owner_entity);
++			for (float f : e.position)
++				put<float>(out, f);
++		}
++		else if (e.op == 3)
++		{
++			put_text(out, e.section);
++			const size_t n = _min(e.state.size(), size_t(0xffff));
++			put<u16>(out, u16(n));
++			out.insert(out.end(), e.state.begin(), e.state.begin() + n);
++		}
++	}
++	return out;
++}
++
++bool decode_use(const std::vector<u8>& payload, UseRecord& out)
++{
++	size_t at = 0;
++	u8 count = 0;
++	if (!(get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++			get(payload, at, out.operation) && get(payload, at, out.actor_entity) &&
++			get(payload, at, out.item_entity) && get_text(payload, at, out.section) &&
++			get(payload, at, out.uses_after) && get(payload, at, out.consumed) && get(payload, at, out.game_time) &&
++			get(payload, at, out.health) && get(payload, at, out.power) && get(payload, at, out.radiation) &&
++			get(payload, at, out.psy_health) && get(payload, at, out.satiety) && get(payload, at, count)) ||
++		!out.actor_entity || !out.item_entity || out.section.empty() || out.consumed > 1)
++		return false;
++	out.effects.clear();
++	for (u8 i = 0; i < count; ++i)
++	{
++		UseEffect e;
++		e.uses = 0;
++		if (!get(payload, at, e.op) || !get(payload, at, e.item_entity) || !e.item_entity)
++			return false;
++		if (e.op == 2)
++		{
++			if (!get(payload, at, e.uses))
++				return false;
++		}
++		else if (e.op == 4)
++		{
++			if (!get(payload, at, e.owner_entity) || !get(payload, at, e.position[0]) ||
++				!get(payload, at, e.position[1]) || !get(payload, at, e.position[2]))
++				return false;
++		}
++		else if (e.op == 3)
++		{
++			u16 n = 0;
++			if (!get_text(payload, at, e.section) || e.section.empty() || !get(payload, at, n) ||
++				at + n > payload.size())
++				return false;
++			e.state.assign(payload.begin() + at, payload.begin() + at + n);
++			at += n;
++		}
++		else if (e.op != 1)
++			return false;
++		out.effects.push_back(e);
++	}
++	return at == payload.size();
++}
++
+ CoopPersistence::CoopPersistence(const std::string& directory, const coop::proto::Uuid128& campaign,
+ 	const coop::proto::Uuid128& party, CoopEventLog* log)
+ 	: m_store(directory, campaign), m_campaign(campaign), m_party(party), m_log(log)
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+index fb403f7..7237111 100644
+--- a/src/xrGame/CoopPersistence.h
++++ b/src/xrGame/CoopPersistence.h
+@@ -128,6 +128,56 @@ bool decode_pickup(const std::vector<u8>& payload, PickupRecord& out);
+ std::vector<u8> encode_transfer(const PickupRecord& r); // S08-T02: action, from, then the pickup layout
+ bool decode_transfer(const std::vector<u8>& payload, PickupRecord& out);
+ 
++// S08-T07: the equip record (contract §6 `equip`): an item's place in its
++// participant actor's inventory, as absolute post-state (the engine's
++// CInventory::Slot/Belt/Ruck at replay).
++struct EquipRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 actor_entity;
++	u64 item_entity;
++	u8 place; // 1 slot, 2 belt, 3 ruck
++	u8 inv_slot; // place 1: the inventory slot
++	u8 flags; // bit 0: do not activate
++};
++std::vector<u8> encode_equip(const EquipRecord& r);
++bool decode_equip(const std::vector<u8>& payload, EquipRecord& out);
++
++// S08-T07: the use record (contract §6 `use`): what one use of an item left,
++// resolved after the engine applied it on the server's actor: the item's
++// remaining uses or its removal, every other item of the actor's inventory
++// the use (its installed scripts) created, removed or spent a use of, and
++// the actor's condition after it. Absolute post-state throughout, so a
++// replay is idempotent.
++struct UseEffect
++{
++	u8 op; // 1 removed (released), 2 remaining uses, 3 created (definition: section + state), 4 moved out of the actor
++	u64 item_entity;
++	u8 uses; // op 2
++	xr_string section; // op 3
++	std::vector<u8> state; // op 3: CSE_Abstract::Spawn_Write(.., FALSE)
++	u64 owner_entity = 0; // op 4: where it went (0: the ground)
++	float position[3] = {0.f, 0.f, 0.f}; // op 4: where it lay
++};
++struct UseRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 actor_entity;
++	u64 item_entity;
++	xr_string section;
++	u8 uses_after; // the item's remaining uses after the use
++	u8 consumed; // 1: used up and released by the engine
++	u64 game_time; // the game time of the use (ms)
++	float health, power, radiation, psy_health, satiety; // the actor after the use
++	std::vector<UseEffect> effects;
++};
++std::vector<u8> encode_use(const UseRecord& r);
++bool decode_use(const std::vector<u8>& payload, UseRecord& out);
++
+ // Reason codes of ActionResult for the critical operations (S07-T03).
+ const u16 kActionReasonStoreFailed = 5;
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index dd70a83..ba28df6 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -56,6 +56,7 @@
+ #include "xrServer_svclient_validation.h"
+ #include "GameTask.h" // S08-T04: the party quest
+ #include "GametaskManager.h"
++#include "eatable_item.h" // S08-T07: use
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -134,6 +135,7 @@ struct PlayerLink
+ 	bool have_entry = false;
+ 	bool kit_pending = false; // G07 decision 3: the faction kit once the respawned actor is online
+ 	u32 waiting_generation = 0; // S07-T08: the generation this join waits for
++	bool layouts_sent = false; // S08-T07: every participant actor's inventory layout sent since it entered the world
+ };
+ 
+ enum WorldState : u8
+@@ -388,6 +390,62 @@ struct Host
+ 		u8 slots[2] = {0, 0};
+ 		bool killed = false;
+ 	} transfer_fixture;
++	// S08-T07: equip and use
++	FILE* inventory_csv = nullptr;
++	u64 equips_committed = 0, equips_duplicate = 0, equips_refused = 0, equips_replayed = 0, equips_apply_failed = 0;
++	u64 uses_committed = 0, uses_duplicate = 0, uses_refused = 0, uses_replayed = 0, uses_apply_failed = 0;
++	xr_set<u16> use_consumed; // used up by an accepted use, not released yet: no other action may take it
++	xr_set<u64> consumed_entities; // items the replayed use records release (a pickup or transfer of one is a no-op)
++	struct PendingInventory
++	{
++		u8 kind = 0; // journal kind: equip or use
++		EquipRecord equip = {};
++		UseRecord use = {};
++		u64 revision = 0;
++		u32 since_ms = 0;
++		LPCSTR phase = "";
++	};
++	xr_vector<PendingInventory> inventory_pending;
++	struct Layout
++	{
++		u64 hash = 0;
++		u32 serial = 0;
++		u64 sent_tick = 0;
++	};
++	xr_map<u16, Layout> layouts; // per participant actor
++	struct InventoryExpect // per the equip and use records this incarnation applied
++	{
++		u64 owner = 0;
++		u8 place = 0, slot = 0;
++		int uses = -1;
++		bool gone = false;
++		xr_string section;
++	};
++	xr_map<u64, InventoryExpect> inventory_expected;
++	u64 layouts_sent = 0;
++	bool item_adapter = false;
++	u64 booster_memory_missing = 0;
++	struct UseFollowup
++	{
++		u16 actor;
++		u64 revision;
++		float health;
++		u32 due_ms;
++	};
++	xr_vector<UseFollowup> use_followups;
++	struct UseFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0; // 0 waiting, 1 items given, 2 rounds
++		u64 phase_tick = 0;
++		u32 round = 0;
++		u64 round_tick = 0;
++		u16 box = 0xffff;
++		u16 ground = 0xffff; // bread on the ground at participant 1's feet (rounds 10, 11)
++		u16 actors[2] = {0xffff, 0xffff};
++		u8 slots[2] = {0, 0};
++		xr_vector<u16> items[2]; // per participant index
++	} use_fixture;
+ 	struct PickupFixture
+ 	{
+ 		u64 both_since = 0;
+@@ -3068,6 +3126,14 @@ PickupApply apply_pickup(const PickupRecord& r, LPCSTR phase, u64 revision)
+ 	// S08-T02: the same adapter for a drop (owner 0: the ground at the
+ 	// record's position) and a transfer (owner: a container or an actor)
+ 	LPCSTR what = r.action == coop::proto::kActionPickup ? "pickup" : "transfer";
++	if (xr_strcmp(phase, "apply") && g_host->consumed_entities.count(r.item_entity))
++	{
++		// S08-T07: a later use record releases this item: nothing to re-create or move
++		g_host->log.line("%s-%s-noop revision=%I64u item_entity=%I64u reason=consumed-later", what, phase, revision,
++			r.item_entity);
++		pickup_csv("noop", revision, r, kNoEngineId, 4);
++		return PickupApply::NoOp;
++	}
+ 	bool ground = r.owner_entity == 0;
+ 	u16 owner = ground ? 0xffff : engine_id_of_entity(r.owner_entity);
+ 	CSE_Abstract* owner_se = owner != kNoEngineId && !ground ? Level().Server->ID_to_entity(owner) : nullptr;
+@@ -3145,6 +3211,7 @@ PickupApply apply_pickup(const PickupRecord& r, LPCSTR phase, u64 revision)
+ 		return PickupApply::Failed;
+ 	g_host->pickup_expected[r.item_entity] = ground ? 0 : r.owner_entity;
+ 	g_host->pickup_confirm.push_back({item, owner, r.item_entity, host_ms()});
++	g_host->inventory_expected.erase(r.item_entity); // S08-T07: moved: its place is the new owner's
+ 	return PickupApply::Applied;
+ }
+ 
+@@ -3252,7 +3319,7 @@ u16 take_pickup(PlayerLink& link, const coop::proto::ActionIntent& intent, coop:
+ 	const u16 id = engine_id_of(intent.target);
+ 	CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
+ 	CObject* object = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
+-	if (!se || !object || object->getDestroy())
++	if (!se || !object || object->getDestroy() || g_host->use_consumed.count(id)) // S08-T07: a used-up item
+ 		return coop::proto::kReasonItemGone;
+ 	CInventoryItem* item = smart_cast<CInventoryItem*>(object);
+ 	if (!smart_cast<CSE_ALifeInventoryItem*>(se) || !item)
+@@ -3406,7 +3473,7 @@ u16 take_transfer(PlayerLink& link, const coop::proto::ActionIntent& intent, coo
+ 	const u16 id = engine_id_of(intent.target);
+ 	CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
+ 	CObject* object = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
+-	if (!se || !object || object->getDestroy())
++	if (!se || !object || object->getDestroy() || g_host->use_consumed.count(id)) // S08-T07: a used-up item
+ 		return coop::proto::kReasonItemGone;
+ 	CInventoryItem* item = smart_cast<CInventoryItem*>(object);
+ 	if (!smart_cast<CSE_ALifeInventoryItem*>(se) || !item)
+@@ -3518,124 +3585,1198 @@ u16 take_transfer(PlayerLink& link, const coop::proto::ActionIntent& intent, coo
+ 	return 0;
+ }
+ 
+-// The ownership graph's invariants over every ALife object (S08-T02): each
+-// parent exists and lists the child exactly once, each listed child names
+-// its parent, no EntityId is held by two objects, and every online object's
+-// level parent equals its server parent. Logged at recovery, at every
+-// checkpoint and at the end; a failure is counted, never repaired.
+-void check_ownership(LPCSTR tag)
++// ------------------------------------------------------------ S08-T07
++// Equip and use as server actions (docs/persistence-contract.md §6 `equip`
++// and `use`). A client's slot, belt and ruck moves and its eating/using of an
++// item (medkits, food, drugs) reach the server as intents (kinds 9 and 10);
++// the server validates them on its own state and the engine applies them to
++// the player's actor on the server (CInventory::Slot/Belt/Ruck, the installed
++// `CInventory__eat` check and CInventory::Eat inside the player's script
++// context). An equip is committed before it is applied (it is deterministic);
++// a use is applied first, because only the engine and the installed scripts
++// know what it does, then its resolved post-state is committed before the
++// player is answered: a termination in between loses an unacknowledged use
++// with everything it did (the checkpoint's state comes back whole). Both
++// records are absolute post-state, so a replay is idempotent.
++//
++// Clients learn each participant actor's inventory layout (every item's
++// place, slot and remaining uses) from CampaignEvent 9, sent whenever the
++// server's layout changes and when a client enters the world.
++
++const u8 kPlaceSlot = 1, kPlaceBelt = 2, kPlaceRuck = 3;
++u64 fnv1a(u64 h, u64 v); // S08-T03
++void apply_equip_or_defer(const EquipRecord& r, LPCSTR phase, u64 revision);
++bool select_booster_memory(u16 actor);
++void booster_diag(LPCSTR tag);
++
++// The installed inventory UI's slot table (ui_inventory.script,
++// UIInventory.slot_cell): a pistol fits slot 2, 1 or 3, a rifle 3 or 2,
++// every other item only its own base slot. CInventory::CanPutInSlot checks
++// only that the slot is free; the UI decides which slots an item fits.
++bool slot_fits(u16 base, u16 slot)
++{
++	if (base == slot)
++		return true;
++	if (base == INV_SLOT_2)
++		return slot == KNIFE_SLOT || slot == INV_SLOT_3;
++	if (base == INV_SLOT_3)
++		return slot == INV_SLOT_2;
++	return false;
++}
++
++LPCSTR place_name(u8 place)
+ {
+-	if (!ai().get_alife())
++	switch (place)
++	{
++	case kPlaceSlot: return "slot";
++	case kPlaceBelt: return "belt";
++	case kPlaceRuck: return "ruck";
++	default: return "none";
++	}
++}
++
++void inventory_csv(LPCSTR kind, LPCSTR phase, u64 revision, u8 slot, u64 operation, u64 item_entity, u16 item,
++	u64 actor_entity, u32 place, u32 inv_slot, u32 uses, u32 consumed, LPCSTR section, u32 reason)
++{
++	if (!g_host->inventory_csv)
+ 		return;
+-	++g_host->invariant_checks;
+-	u32 objects = 0, parented = 0, missing_parent = 0, not_listed = 0, listed_twice = 0, wrong_child = 0,
+-		level_mismatch = 0, duplicate_entity = 0, dangling_child = 0, two_parents = 0;
+-	xr_map<u64, u16> by_entity;
+-	xr_map<u16, u16> listed_by; // child -> the first parent that lists it
+-	for (const auto& o : ai().alife().objects().objects())
++	fprintf(g_host->inventory_csv, "%I64u,%I64u,%I64u,%u,%I64u,%s,%I64u,%u,%I64u,%u,%u,%u,%u,%s,%s,%u\n",
++		coop::store::utc_now_ms(), g_host->tick, revision, u32(slot), operation, kind, item_entity, u32(item),
++		actor_entity, place, inv_slot, uses, consumed, section ? section : "-", phase, reason);
++	fflush(g_host->inventory_csv);
++}
++
++// The common front of both actions: the player's own live actor and an item
++// of its own inventory the server holds online. 0 or a refusal reason.
++u16 own_inventory_item(PlayerLink& link, const coop::proto::ActionIntent& intent, CActor*& actor,
++	coop::proto::EntityRef& actor_ref, u16& id, CInventoryItem*& item)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	actor = context_actor(context, Scope::Self, &why);
++	if (!actor || !actor->g_Alive() || !entity_ref_of(actor->ID(), actor_ref))
++		return coop::proto::kReasonNoActor;
++	id = engine_id_of(intent.target);
++	CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
++	CObject* object = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
++	if (!se || !object || object->getDestroy() || g_host->use_consumed.count(id))
++		return coop::proto::kReasonItemGone; // a used-up item is gone already (its release follows)
++	item = smart_cast<CInventoryItem*>(object);
++	if (!item || !smart_cast<CSE_ALifeInventoryItem*>(se))
++		return coop::proto::kReasonNotUsable;
++	for (const Host::PickupConfirm& c : g_host->pickup_confirm)
++		if (c.item == id)
++			return coop::proto::kReasonItemTaken; // moving this tick, the level not yet caught up
++	if (se->ID_Parent != actor->ID() || object->H_Parent() != actor || item->m_pInventory != &actor->inventory())
++		return coop::proto::kReasonNotDroppable; // not in the player's own inventory
++	return 0;
++}
++
++u16 take_equip(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
+ 	{
+-		const CSE_ALifeDynamicObject* e = o.second;
+-		++objects;
+-		EngineEntityKey key;
+-		EntityId entity;
+-		if (g_campaign_identity->current_key(o.first, key) &&
+-			g_campaign_identity->resolve(key, entity) == Refusal::None && entity.value)
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		++g_host->equips_duplicate;
++		g_host->log.line("equip-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (intent.params.size() != 3)
++		return coop::proto::kReasonMalformed;
++	const u8 place = intent.params[0], inv_slot = intent.params[1], flags = intent.params[2];
++	if (place < kPlaceSlot || place > kPlaceRuck || (place == kPlaceSlot) != (inv_slot != 0) ||
++		(place == kPlaceSlot && (inv_slot < KNIFE_SLOT || inv_slot > LAST_SLOT)) || (flags & ~1))
++		return coop::proto::kReasonMalformed;
++	CActor* actor = nullptr;
++	coop::proto::EntityRef actor_ref;
++	u16 id = kNoEngineId;
++	CInventoryItem* item = nullptr;
++	if (const u16 reason = own_inventory_item(link, intent, actor, actor_ref, id, item))
++		return reason;
++	CInventory& inventory = actor->inventory();
++	bool can = false;
++	if (place == kPlaceSlot)
++		can = slot_fits(item->BaseSlot(), inv_slot) && inventory.CanPutInSlot(item, inv_slot);
++	else if (place == kPlaceBelt)
++		can = inventory.CanPutInBelt(item);
++	else
++		can = inventory.CanPutInRuck(item);
++	if (!can)
++	{
++		g_host->log.line("equip-place-refused slot=%u item=%u section=%s place=%s inv_slot=%u now=%s/%u base=%u",
++			u32(link.ref.slot), u32(id), item->object().cNameSect().c_str(), place_name(place), u32(inv_slot),
++			place_name(u8(item->CurrPlace())), u32(item->CurrSlot()), u32(item->BaseSlot()));
++		return coop::proto::kReasonPlaceRefused;
++	}
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	// 3. Resolve: the item's place as absolute post-state.
++	EquipRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.actor_entity = actor_ref.id;
++	record.item_entity = intent.target.id;
++	record.place = place;
++	record.inv_slot = inv_slot;
++	record.flags = flags;
++	const u64 revision = ++g_host->commit;
++	// 4. Durable commit, before anything is applied or acknowledged.
++	if (!coop::store::failpoint("equip:before-append"))
++		persistence->fail_closed("failpoint equip:before-append");
++	if (!persistence->commit(coop::store::kRecordEquip, g_host->tick, revision, encode_equip(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("equip-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("equip:after-flush");
++	++g_host->equips_committed;
++	g_host->log.line("equip-committed revision=%I64u slot=%u operation=%I64u item=%u item_entity=%I64u "
++		"actor_entity=%I64u section=%s place=%s inv_slot=%u flags=%u from=%s/%u", revision, u32(record.slot),
++		record.operation, u32(id), record.item_entity, record.actor_entity, item->object().cNameSect().c_str(),
++		place_name(place), u32(inv_slot), u32(flags), place_name(u8(item->CurrPlace())), u32(item->CurrSlot()));
++	inventory_csv("equip", "commit", revision, record.slot, record.operation, record.item_entity, id,
++		record.actor_entity, place, inv_slot, 0, 0, item->object().cNameSect().c_str(), 0);
++	// 5. Apply.
++	apply_equip_or_defer(record, "apply", revision);
++	coop::store::failpoint("equip:after-apply");
++	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++	stored.reason = 0;
++	stored.revision = revision;
++	persistence->remember(link.player, intent.operation_id, stored);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.commit_id = revision;
++	result.revision = revision;
++	return 0;
++}
++
++void expect_place(const EquipRecord& r, LPCSTR section)
++{
++	Host::InventoryExpect& e = g_host->inventory_expected[r.item_entity];
++	e.owner = r.actor_entity;
++	e.place = r.place;
++	e.slot = r.place == kPlaceSlot ? r.inv_slot : 0;
++	e.section = section;
++}
++
++void expect_use(const UseRecord& r)
++{
++	Host::InventoryExpect& e = g_host->inventory_expected[r.item_entity];
++	e.owner = r.actor_entity;
++	e.section = r.section;
++	e.gone = r.consumed != 0;
++	e.uses = r.consumed ? -1 : int(r.uses_after);
++	for (const UseEffect& x : r.effects)
++	{
++		Host::InventoryExpect& o = g_host->inventory_expected[x.item_entity];
++		o.owner = x.op == 4 ? x.owner_entity : r.actor_entity;
++		o.gone = x.op == 1;
++		if (x.op == 4)
++			o.place = 0; // somewhere else now: its owner is what counts
++		if (x.op == 2)
++			o.uses = x.uses;
++		if (x.op == 3)
++			o.section = x.section;
++	}
++}
++
++// The adapter (absolute post-state, idempotent): the recorded item is in the
++// recorded place of the recorded actor's inventory.
++PickupApply apply_equip(const EquipRecord& r, LPCSTR phase, u64 revision)
++{
++	const u16 actor_id = engine_id_of_entity(r.actor_entity);
++	CActor* actor = actor_id != kNoEngineId ? smart_cast<CActor*>(Level().Objects.net_Find(actor_id)) : nullptr;
++	const u16 id = engine_id_of_entity(r.item_entity);
++	CObject* object = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
++	CInventoryItem* item = object ? smart_cast<CInventoryItem*>(object) : nullptr;
++	LPCSTR why = nullptr;
++	if (actor_id == kNoEngineId)
++		why = "actor-gone"; // respawned since: its old inventory is a corpse's
++	else if (id == kNoEngineId || g_host->consumed_entities.count(r.item_entity))
++		why = "item-gone"; // used up or released after the record
++	if (why)
++	{
++		g_host->log.line("equip-%s-noop revision=%I64u item_entity=%I64u reason=%s", phase, revision, r.item_entity, why);
++		inventory_csv("equip", "noop", revision, r.slot, r.operation, r.item_entity, id, r.actor_entity, r.place,
++			r.inv_slot, 0, 0, "-", 0);
++		return PickupApply::NoOp;
++	}
++	CSE_Abstract* se = Level().Server->ID_to_entity(id);
++	if (!actor || !item || !is_object_valid_on_svclient(actor_id) || !is_object_valid_on_svclient(id))
++		return PickupApply::Deferred;
++	if (!se || se->ID_Parent != actor_id)
++	{
++		g_host->log.line("equip-%s-noop revision=%I64u item_entity=%I64u reason=not-owned parent=%u", phase, revision,
++			r.item_entity, se ? u32(se->ID_Parent) : 0xffffu);
++		return PickupApply::NoOp; // moved out of the actor after the record (a later record says where)
++	}
++	if (object->H_Parent() != actor)
++		return PickupApply::Deferred; // the level not yet caught up with the server's parent
++	CInventory& inventory = actor->inventory();
++	if (item->CurrPlace() == r.place && (r.place != kPlaceSlot || item->CurrSlot() == r.inv_slot))
++	{
++		g_host->log.line("equip-%s-noop revision=%I64u item=%u item_entity=%I64u reason=already-there", phase, revision,
++			u32(id), r.item_entity);
++		expect_place(r, object->cNameSect().c_str());
++		return PickupApply::NoOp;
++	}
++	bool ok = false;
++	if (r.place == kPlaceSlot)
++	{
++		// at replay the slot may still hold the item a later record moves out:
++		// the record's own item wins, the other goes to the ruck
++		if (xr_strcmp(phase, "apply"))
++			if (PIItem occupant = inventory.ItemFromSlot(r.inv_slot))
++				if (occupant != item)
++					inventory.Ruck(occupant);
++		ok = inventory.Slot(r.inv_slot, item, (r.flags & 1) != 0);
++	}
++	else if (r.place == kPlaceBelt)
++		ok = inventory.Belt(item);
++	else
++		ok = inventory.Ruck(item);
++	ok = ok && item->CurrPlace() == r.place && (r.place != kPlaceSlot || item->CurrSlot() == r.inv_slot);
++	expect_place(r, object->cNameSect().c_str());
++	g_host->log.line("equip-%s revision=%I64u slot=%u operation=%I64u item=%u item_entity=%I64u place=%s inv_slot=%u "
++		"ok=%d", phase, revision, u32(r.slot), r.operation, u32(id), r.item_entity, place_name(r.place),
++		u32(r.inv_slot), ok ? 1 : 0);
++	inventory_csv("equip", ok ? phase : "apply-failed", revision, r.slot, r.operation, r.item_entity, id,
++		r.actor_entity, r.place, r.inv_slot, 0, 0, object->cNameSect().c_str(), ok ? 0 : 3);
++	return ok ? PickupApply::Applied : PickupApply::Failed;
++}
++
++void release_entity(u64 entity, LPCSTR why, u64 revision)
++{
++	const u16 id = engine_id_of_entity(entity);
++	CSE_ALifeDynamicObject* se = id != kNoEngineId ? ai().alife().objects().object(id, true) : nullptr;
++	if (!se)
++		return;
++	if (!se->m_bOnline)
++	{
++		CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++		alife->release(se, true);
++	}
++	else
++	{
++		// the script's alife_release of an online object (CALifeSimulator__release)
++		NET_Packet packet;
++		packet.w_begin(M_EVENT);
++		packet.w_u32(Level().timeServer());
++		packet.w_u16(GE_DESTROY);
++		packet.w_u16(id);
++		Level().Send(packet, net_flags(TRUE, TRUE));
++	}
++	g_host->log.line("use-release revision=%I64u entity=%I64u id=%u why=%s online=%d", revision, entity, u32(id), why,
++		se->m_bOnline ? 1 : 0);
++}
++
++// The engine's SetRemainingUses on the level object (the server entity does
++// not hold an eatable's uses; its level object's save does).
++bool set_uses(u16 id, u8 uses)
++{
++	CEatableItem* eatable = id != kNoEngineId ? smart_cast<CEatableItem*>(Level().Objects.net_Find(id)) : nullptr;
++	if (!eatable)
++		return false;
++	eatable->SetRemainingUses(uses);
++	return eatable->GetRemainingUses() == uses;
++}
++
++// The use adapter. Live, the engine has applied the use already. At replay:
++// the used item's remaining uses, or its release; the other items the use
++// created (re-created from their definitions under their EntityIds),
++// released or spent; then the actor's condition and the item's boosters
++// (restarted from their full time).
++PickupApply apply_use(const UseRecord& r, LPCSTR phase, u64 revision, bool conditions)
++{
++	const u16 actor_id = engine_id_of_entity(r.actor_entity);
++	CActor* actor = actor_id != kNoEngineId ? smart_cast<CActor*>(Level().Objects.net_Find(actor_id)) : nullptr;
++	if (actor_id != kNoEngineId && (!actor || !is_object_valid_on_svclient(actor_id)))
++		return PickupApply::Deferred;
++	// created items first: a later effect of the same record may name them
++	for (const UseEffect& e : r.effects)
++	{
++		if (e.op != 3 || g_host->consumed_entities.count(e.item_entity))
++			continue;
++		if (actor_id == kNoEngineId)
++			continue; // the actor is gone: its inventory is a corpse's (a later record would say otherwise)
++		PickupRecord created;
++		created.action = coop::proto::kActionPickup;
++		created.slot = r.slot;
++		created.player = r.player;
++		created.operation = r.operation;
++		created.owner_entity = r.actor_entity;
++		created.item_entity = e.item_entity;
++		created.item_id = kNoEngineId;
++		created.section = e.section;
++		created.position[0] = created.position[1] = created.position[2] = 0.f;
++		created.state = e.state;
++		const PickupApply a = apply_pickup(created, "use-created", revision);
++		if (a == PickupApply::Deferred)
++			return a;
++	}
++	if (r.consumed)
++	{
++		g_host->consumed_entities.insert(r.item_entity);
++		g_host->pickup_expected.erase(r.item_entity);
++		release_entity(r.item_entity, "used-up", revision);
++	}
++	else
++	{
++		const u16 id = engine_id_of_entity(r.item_entity);
++		if (id != kNoEngineId && !g_host->consumed_entities.count(r.item_entity))
+ 		{
+-			const auto seen = by_entity.find(entity.value);
+-			if (seen != by_entity.end())
+-			{
+-				++duplicate_entity;
+-				g_host->log.line("ownership-bad tag=%s what=duplicate-entity entity=%I64u ids=%u,%u", tag,
+-					entity.value, u32(seen->second), u32(o.first));
+-			}
+-			else
+-				by_entity[entity.value] = o.first;
++			if (!Level().Objects.net_Find(id))
++				return PickupApply::Deferred;
++			set_uses(id, r.uses_after);
+ 		}
+-		for (u16 child : e->children)
++	}
++	for (const UseEffect& e : r.effects)
++	{
++		if (e.op == 1)
+ 		{
+-			// ALife holds every campaign object; the server's table only the online ones
+-			const CSE_Abstract* c = ai().alife().objects().object(child, true);
+-			if (!c)
+-				c = Level().Server->ID_to_entity(child);
+-			if (!c)
+-			{
+-				// an id with no entity: in the loaded save as it was (counted,
+-				// not an ownership violation: nothing can be held by it)
+-				++dangling_child;
+-				continue;
+-			}
+-			const auto first = listed_by.find(child);
+-			if (first != listed_by.end() && first->second != o.first)
+-			{
+-				++two_parents;
+-				g_host->log.line("ownership-bad tag=%s what=two-parents child=%u parents=%u,%u", tag, u32(child),
+-					u32(first->second), u32(o.first));
+-			}
+-			else
+-				listed_by[child] = o.first;
+-			if (c->ID_Parent != o.first)
++			g_host->consumed_entities.insert(e.item_entity);
++			release_entity(e.item_entity, "use-removed", revision);
++		}
++		else if (e.op == 2)
++		{
++			const u16 id = engine_id_of_entity(e.item_entity);
++			if (id != kNoEngineId && !g_host->consumed_entities.count(e.item_entity))
+ 			{
+-				++wrong_child;
+-				g_host->log.line("ownership-bad tag=%s what=wrong-child parent=%u child=%u child_parent=%u", tag,
+-					u32(o.first), u32(child), u32(c->ID_Parent));
++				if (!Level().Objects.net_Find(id))
++					return PickupApply::Deferred;
++				set_uses(id, e.uses);
+ 			}
+ 		}
+-		if (e->ID_Parent == 0xffff)
+-			continue;
+-		++parented;
+-		const CSE_Abstract* parent = ai().alife().objects().object(e->ID_Parent, true);
+-		if (!parent)
+-			parent = Level().Server->ID_to_entity(e->ID_Parent);
+-		if (!parent)
++		else if (e.op == 4 && !g_host->consumed_entities.count(e.item_entity))
+ 		{
+-			++missing_parent;
+-			g_host->log.line("ownership-bad tag=%s what=missing-parent id=%u parent=%u", tag, u32(o.first),
+-				u32(e->ID_Parent));
+-			continue;
++			// moved out of the actor by the use's scripts: the transfer adapter
++			// (absolute post-state: the item ends in the recorded owner, or on the
++			// ground at the recorded position; an owner not in the recovered world
++			// keeps it on the ground there)
++			const u16 id = engine_id_of_entity(e.item_entity);
++			CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
++			if (!se)
++				continue; // not in the recovered world: nothing to move
++			PickupRecord moved;
++			moved.action = coop::proto::kActionTransfer;
++			moved.slot = r.slot;
++			moved.player = r.player;
++			moved.operation = r.operation;
++			moved.from_entity = r.actor_entity;
++			moved.owner_entity = e.owner_entity;
++			moved.item_entity = e.item_entity;
++			moved.item_id = id;
++			moved.section = se->s_name.c_str();
++			moved.position[0] = e.position[0];
++			moved.position[1] = e.position[1];
++			moved.position[2] = e.position[2];
++			NET_Packet packet;
++			se->Spawn_Write(packet, FALSE);
++			moved.state.assign(packet.B.data, packet.B.data + packet.B.count);
++			if (apply_pickup(moved, "use-moved", revision) == PickupApply::Deferred)
++				return PickupApply::Deferred;
+ 		}
+-		const u32 listed = u32(std::count(parent->children.begin(), parent->children.end(), o.first));
+-		if (listed == 0)
+-			++not_listed;
+-		if (listed > 1)
+-			++listed_twice;
+-		if (listed != 1)
+-			g_host->log.line("ownership-bad tag=%s what=listed id=%u parent=%u times=%u", tag, u32(o.first),
+-				u32(e->ID_Parent), listed);
+-		if (e->m_bOnline)
+-			if (CObject* object = Level().Objects.net_Find(o.first))
+-			{
+-				const u16 level_parent = object->H_Parent() ? u16(object->H_Parent()->ID()) : 0xffff;
+-				// a change applied this tick reaches the level when it processes the event
+-				bool in_flight = false;
+-				for (const Host::PickupConfirm& c : g_host->pickup_confirm)
+-					in_flight = in_flight || c.item == o.first;
+-				if (level_parent != e->ID_Parent && !in_flight)
++	}
++	if (conditions && actor && actor->g_Alive())
++	{
++		CActorCondition& c = actor->conditions();
++		c.SetHealth(r.health);
++		c.SetPower(r.power);
++		c.SetRadiation(r.radiation);
++		c.SetPsyHealth(r.psy_health);
++		c.SetSatiety(r.satiety);
++		u32 boosters = 0;
++		if (pSettings->section_exist(r.section.c_str()))
++			for (u8 i = 0; i < u8(eBoostMaxCount); ++i)
++				if (pSettings->line_exist(r.section.c_str(), ef_boosters_section_names[i]))
+ 				{
+-					++level_mismatch;
+-					g_host->log.line("ownership-bad tag=%s what=level-parent id=%u parent=%u level_parent=%u", tag,
+-						u32(o.first), u32(e->ID_Parent), u32(level_parent));
++					SBooster B;
++					B.Load(shared_str(r.section.c_str()), EBoostParams(i));
++					c.ApplyBooster(B, shared_str(r.section.c_str()));
++					++boosters;
+ 				}
+-			}
++		g_host->log.line("use-%s-conditions revision=%I64u actor=%u health=%.3f power=%.3f radiation=%.3f psy=%.3f "
++			"satiety=%.3f boosters=%u", phase, revision, u32(actor_id), r.health, r.power, r.radiation, r.psy_health,
++			r.satiety, boosters);
++	}
++	expect_use(r);
++	g_host->log.line("use-%s revision=%I64u slot=%u operation=%I64u item_entity=%I64u section=%s uses_after=%u "
++		"consumed=%u effects=%u actor=%d", phase, revision, u32(r.slot), r.operation, r.item_entity, r.section.c_str(),
++		u32(r.uses_after), u32(r.consumed), u32(r.effects.size()), actor_id != kNoEngineId ? int(actor_id) : -1);
++	inventory_csv("use", phase, revision, r.slot, r.operation, r.item_entity, engine_id_of_entity(r.item_entity),
++		r.actor_entity, 0, 0, r.uses_after, r.consumed, r.section.c_str(), 0);
++	return PickupApply::Applied;
++}
++
++void apply_equip_or_defer(const EquipRecord& r, LPCSTR phase, u64 revision)
++{
++	const PickupApply a = apply_equip(r, phase, revision);
++	if (a == PickupApply::Deferred)
++	{
++		g_host->log.line("equip-%s-deferred revision=%I64u item_entity=%I64u", phase, revision, r.item_entity);
++		Host::PendingInventory p;
++		p.kind = coop::store::kRecordEquip;
++		p.equip = r;
++		p.revision = revision;
++		p.since_ms = host_ms();
++		p.phase = phase;
++		g_host->inventory_pending.push_back(p);
+ 	}
+-	const u32 bad =
+-		missing_parent + not_listed + listed_twice + wrong_child + level_mismatch + duplicate_entity + two_parents;
+-	if (bad)
+-		++g_host->invariant_failures;
+-	g_host->log.line("ownership-invariants tag=%s ok=%d objects=%u parented=%u missing_parent=%u not_listed=%u "
+-		"listed_twice=%u wrong_child=%u two_parents=%u level_mismatch=%u duplicate_entity=%u dangling_child=%u", tag,
+-		bad ? 0 : 1, objects, parented, missing_parent, not_listed, listed_twice, wrong_child, two_parents,
+-		level_mismatch, duplicate_entity, dangling_child);
++	else if (a == PickupApply::Failed)
++		++g_host->equips_apply_failed;
+ }
+ 
+-// Where every item a pickup named is now (the comparison's server view).
+-void log_pickup_state(LPCSTR tag)
++void apply_use_or_defer(const UseRecord& r, LPCSTR phase, u64 revision)
+ {
+-	u32 held = 0, wrong = 0, missing = 0;
+-	for (const auto& e : g_host->pickup_expected)
++	const PickupApply a = apply_use(r, phase, revision, true);
++	if (a == PickupApply::Deferred)
+ 	{
+-		const u16 item = engine_id_of_entity(e.first);
+-		const CSE_Abstract* se = item != kNoEngineId ? Level().Server->ID_to_entity(item) : nullptr;
+-		const u16 parent = se ? se->ID_Parent : 0xffff;
++		g_host->log.line("use-%s-deferred revision=%I64u item_entity=%I64u", phase, revision, r.item_entity);
++		Host::PendingInventory p;
++		p.kind = coop::store::kRecordUse;
++		p.use = r;
++		p.revision = revision;
++		p.since_ms = host_ms();
++		p.phase = phase;
++		g_host->inventory_pending.push_back(p);
++	}
++}
++
++// Records whose objects were not in the level yet; retried every tick, in
++// record order, after the pickups' (a pickup re-creates an item an equip names).
++void retry_inventory()
++{
++	const u32 now = host_ms();
++	for (size_t i = 0; i < g_host->inventory_pending.size();)
++	{
++		Host::PendingInventory& p = g_host->inventory_pending[i];
++		const PickupApply a = p.kind == coop::store::kRecordEquip ? apply_equip(p.equip, p.phase, p.revision) :
++			apply_use(p.use, p.phase, p.revision, true);
++		const u32 waited = now >= p.since_ms ? now - p.since_ms : 0;
++		if (a == PickupApply::Deferred && waited < 10000)
++		{
++			++i;
++			continue;
++		}
++		if (a == PickupApply::Deferred || a == PickupApply::Failed)
++		{
++			++(p.kind == coop::store::kRecordEquip ? g_host->equips_apply_failed : g_host->uses_apply_failed);
++			g_host->log.line("%s-%s-gave-up revision=%I64u result=%s waited_ms=%u",
++				p.kind == coop::store::kRecordEquip ? "equip" : "use", p.phase, p.revision, pickup_apply_name(a), waited);
++		}
++		g_host->inventory_pending.erase(g_host->inventory_pending.begin() + i);
++	}
++	// the user's health 5 s after a use (a medkit heals through its booster over time)
++	for (size_t i = 0; i < g_host->use_followups.size();)
++	{
++		const Host::UseFollowup& f = g_host->use_followups[i];
++		if (now < f.due_ms)
++		{
++			++i;
++			continue;
++		}
++		CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(f.actor));
++		g_host->log.line("use-followup revision=%I64u actor=%u health_at_use=%.3f health_now=%.3f", f.revision,
++			u32(f.actor), f.health, a ? a->conditions().GetHealth() : -1.f);
++		g_host->use_followups.erase(g_host->use_followups.begin() + i);
++	}
++	// a used-up item's release: the engine drops it on its next inventory
++	// update and destroys it; forget it once it is gone
++	for (auto it = g_host->use_consumed.begin(); it != g_host->use_consumed.end();)
++		if (!Level().Server->ID_to_entity(*it))
++			it = g_host->use_consumed.erase(it);
++		else
++			++it;
++}
++
++// The actor's inventory as (item -> uses) and the set of its children.
++void inventory_state(u16 actor_id, xr_map<u16, u8>& uses, xr_set<u16>& children)
++{
++	CSE_Abstract* se = Level().Server->ID_to_entity(actor_id);
++	if (!se)
++		return;
++	for (u16 child : se->children)
++	{
++		children.insert(child);
++		if (CEatableItem* e = smart_cast<CEatableItem*>(Level().Objects.net_Find(child)))
++			uses[child] = e->GetRemainingUses();
++	}
++}
++
++u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		++g_host->uses_duplicate;
++		g_host->log.line("use-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	CActor* actor = nullptr;
++	coop::proto::EntityRef actor_ref;
++	u16 id = kNoEngineId;
++	CInventoryItem* item = nullptr;
++	if (const u16 reason = own_inventory_item(link, intent, actor, actor_ref, id, item))
++		return reason;
++	CEatableItem* eatable = smart_cast<CEatableItem*>(item);
++	if (!eatable || !eatable->Useful() || item->GetDropManual())
++		return coop::proto::kReasonNotUsable;
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	const shared_str section = item->object().cNameSect();
++	xr_map<u16, u8> uses_before;
++	xr_set<u16> children_before;
++	inventory_state(u16(actor->ID()), uses_before, children_before);
++	const float health_before = actor->conditions().GetHealth();
++	// 3. Apply: the engine on the server's actor, inside the player's context
++	// (the installed scripts' db.actor is this actor), as Actor_Events'
++	// GEG_PLAYER_ITEM_EAT does: the scripts' before-use check, then Eat
++	// (UseBy: the influences and boosters, a use spent; the actor_on_item_use
++	// handlers; a used-up item dropped and destroyed on the next update).
++	{
++		campaign::ScriptContextScope scope(actor, "item-use");
++		if (!scope.entered())
++		{
++			g_host->log.line("use-no-context slot=%u refusal=%s", u32(link.ref.slot), refusal_name(scope.refusal()));
++			return coop::proto::kReasonNoActor;
++		}
++		const bool booster_memory = select_booster_memory(u16(actor->ID()));
++		if (!booster_memory && !g_host->booster_memory_missing++)
++			booster_diag("first-use");
++		::luabind::functor<bool> before;
++		if (ai().script_engine().functor("_G.CInventory__eat", before) &&
++			!before(smart_cast<CGameObject*>(&item->object())->lua_game_object()))
++		{
++			g_host->log.line("use-script-refused slot=%u item=%u section=%s", u32(link.ref.slot), u32(id),
++				section.c_str());
++			return coop::proto::kReasonUseRefused;
++		}
++		if (!actor->inventory().Eat(item))
++		{
++			g_host->log.line("use-engine-refused slot=%u item=%u section=%s", u32(link.ref.slot), u32(id),
++				section.c_str());
++			return coop::proto::kReasonNotUsable;
++		}
++	}
++	coop::store::failpoint("use:after-apply");
++	// 4. Resolve: what the use left (absolute post-state).
++	UseRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.actor_entity = actor_ref.id;
++	record.item_entity = intent.target.id;
++	record.section = section.c_str();
++	record.uses_after = eatable->GetRemainingUses();
++	record.consumed = item->GetDropManual() ? 1 : 0;
++	record.game_time = Level().GetGameTime();
++	CActorCondition& c = actor->conditions();
++	record.health = c.GetHealth();
++	record.power = c.GetPower();
++	record.radiation = c.GetRadiation();
++	record.psy_health = c.GetPsyHealth();
++	record.satiety = c.GetSatiety();
++	xr_map<u16, u8> uses_after;
++	xr_set<u16> children_after;
++	inventory_state(u16(actor->ID()), uses_after, children_after);
++	for (u16 child : children_before)
++		if (child != id && !children_after.count(child))
++		{
++			// gone from the actor: released (removed), or moved elsewhere by the
++			// installed scripts (a container's transfer_item, a drop)
++			UseEffect e;
++			e.item_entity = entity_of(child);
++			e.uses = 0;
++			CSE_Abstract* moved = Level().Server->ID_to_entity(child);
++			if (moved)
++			{
++				e.op = 4;
++				e.owner_entity = moved->ID_Parent != 0xffff ? entity_of(moved->ID_Parent) : 0;
++				e.position[0] = moved->o_Position.x;
++				e.position[1] = moved->o_Position.y;
++				e.position[2] = moved->o_Position.z;
++			}
++			else
++				e.op = 1;
++			if (e.item_entity)
++				record.effects.push_back(e);
++		}
++	for (const auto& u : uses_after)
++	{
++		const auto b = uses_before.find(u.first);
++		if (u.first != id && b != uses_before.end() && b->second != u.second)
++		{
++			UseEffect e;
++			e.op = 2;
++			e.item_entity = entity_of(u.first);
++			e.uses = u.second;
++			if (e.item_entity)
++				record.effects.push_back(e);
++		}
++	}
++	for (u16 child : children_after)
++		if (!children_before.count(child))
++			if (CSE_Abstract* created = Level().Server->ID_to_entity(child))
++			{
++				UseEffect e;
++				e.op = 3;
++				e.item_entity = entity_of(child);
++				e.uses = 0;
++				e.section = created->s_name.c_str();
++				NET_Packet packet;
++				created->Spawn_Write(packet, FALSE);
++				e.state.assign(packet.B.data, packet.B.data + packet.B.count);
++				if (e.item_entity)
++					record.effects.push_back(e);
++			}
++	const u64 revision = ++g_host->commit;
++	// 5. Durable commit, before the player is answered.
++	if (!coop::store::failpoint("use:before-append"))
++		persistence->fail_closed("failpoint use:before-append");
++	if (!persistence->commit(coop::store::kRecordUse, g_host->tick, revision, encode_use(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("use-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("use:after-flush");
++	++g_host->uses_committed;
++	g_host->use_followups.push_back({u16(actor->ID()), revision, record.health, host_ms() + 5000});
++	expect_use(record);
++	if (record.consumed)
++	{
++		g_host->use_consumed.insert(id);
++		g_host->pickup_expected.erase(record.item_entity); // gone: no owner to hold it
++	}
++	g_host->log.line("use-committed revision=%I64u slot=%u operation=%I64u item=%u item_entity=%I64u actor_entity=%I64u "
++		"section=%s uses_after=%u consumed=%u effects=%u health=%.3f->%.3f satiety=%.3f radiation=%.3f", revision,
++		u32(record.slot), record.operation, u32(id), record.item_entity, record.actor_entity, record.section.c_str(),
++		u32(record.uses_after), u32(record.consumed), u32(record.effects.size()), health_before, record.health,
++		record.satiety, record.radiation);
++	for (const UseEffect& e : record.effects)
++		g_host->log.line("use-effect revision=%I64u op=%u entity=%I64u uses=%u section=%s", revision, u32(e.op),
++			e.item_entity, u32(e.uses), e.section.empty() ? "-" : e.section.c_str());
++	inventory_csv("use", "commit", revision, record.slot, record.operation, record.item_entity, id,
++		record.actor_entity, 0, 0, record.uses_after, record.consumed, record.section.c_str(), 0);
++	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++	stored.reason = 0;
++	stored.revision = revision;
++	persistence->remember(link.player, intent.operation_id, stored);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.commit_id = revision;
++	result.revision = revision;
++	return 0;
++}
++
++// CampaignEvent 9: one participant actor's inventory layout, as the server
++// holds it. Payload: u64 actor entity, u32 serial, u8 part, u8 parts, u8
++// count, then count x (u64 item entity, u8 place, u8 slot, u8 uses; 0xff: not
++// an eatable item). The items sorted by entity; at most 80 per part.
++struct LayoutEntry
++{
++	u64 entity;
++	u8 place, slot, uses;
++	bool operator<(const LayoutEntry& o) const { return entity < o.entity; }
++};
++
++void actor_layout(CActor* actor, xr_vector<LayoutEntry>& out)
++{
++	out.clear();
++	for (PIItem item : actor->inventory().m_all)
++	{
++		if (!item)
++			continue;
++		const u16 id = u16(item->object().ID());
++		const auto p = g_host->published.find(id);
++		if (p == g_host->published.end() || !p->second.sent || g_host->use_consumed.count(id) || item->GetDropManual())
++			continue; // a client does not know it yet, or it is being released
++		LayoutEntry e;
++		e.entity = p->second.ref.id;
++		e.place = u8(item->CurrPlace());
++		e.slot = item->CurrPlace() == kPlaceSlot ? u8(item->CurrSlot()) : 0;
++		const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
++		e.uses = eatable ? eatable->GetRemainingUses() : 0xff;
++		out.push_back(e);
++	}
++	std::sort(out.begin(), out.end());
++}
++
++u64 layout_hash(const xr_vector<LayoutEntry>& entries, u64 h = 14695981039346656037ull)
++{
++	for (const LayoutEntry& e : entries)
++		h = fnv1a(fnv1a(h, e.entity), (u64(e.place) << 16) | (u64(e.slot) << 8) | e.uses);
++	return h;
++}
++
++void send_layout(CActor* actor, const xr_vector<LayoutEntry>& entries, u32 serial, PlayerLink* only)
++{
++	coop::proto::EntityRef ref;
++	if (!entity_ref_of(actor->ID(), ref))
++		return;
++	const u32 per = 80;
++	const u32 parts = _max(1u, u32((entries.size() + per - 1) / per));
++	for (u32 part = 0; part < parts; ++part)
++	{
++		std::vector<u8> payload;
++		for (int b = 0; b < 8; ++b)
++			payload.push_back(u8(ref.id >> (8 * b)));
++		put_u32(payload, serial);
++		put_u8(payload, u8(part));
++		put_u8(payload, u8(parts));
++		const u32 first = part * per, last = _min(u32(entries.size()), first + per);
++		put_u8(payload, u8(last - first));
++		for (u32 i = first; i < last; ++i)
++		{
++			for (int b = 0; b < 8; ++b)
++				payload.push_back(u8(entries[i].entity >> (8 * b)));
++			put_u8(payload, entries[i].place);
++			put_u8(payload, entries[i].slot);
++			put_u8(payload, entries[i].uses);
++		}
++		if (only)
++			queue_event(*only, 9, payload);
++		else
++			broadcast_event(9, payload);
++	}
++	++g_host->layouts_sent;
++}
++
++// Every tick: a participant actor's changed layout goes to every client in
++// the world (at most every 5 ticks per actor, or at once when `now`); a
++// client that has just entered the world gets every actor's layout.
++void send_layouts(bool now)
++{
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (!actor)
++			continue;
++		xr_vector<LayoutEntry> entries;
++		actor_layout(actor, entries);
++		const u64 hash = layout_hash(entries);
++		Host::Layout& l = g_host->layouts[u16(actor->ID())];
++		if (hash != l.hash && (now || g_host->tick >= l.sent_tick + 5))
++		{
++			l.hash = hash;
++			l.sent_tick = g_host->tick;
++			++l.serial;
++			send_layout(actor, entries, l.serial, nullptr);
++			g_host->log.line("layout-sent actor=%u slot=%u serial=%u items=%u hash=%016I64x", u32(actor->ID()),
++				u32(link.ref.slot), l.serial, u32(entries.size()), hash);
++		}
++	}
++	for (PlayerLink& link : g_host->links)
++	{
++		const bool in_world = client_in_world(link);
++		if (!in_world)
++		{
++			link.layouts_sent = false;
++			continue;
++		}
++		if (link.layouts_sent)
++			continue;
++		link.layouts_sent = true;
++		for (PlayerLink& other : g_host->links)
++			if (other.bound)
++				if (CActor* actor = participant_actor(other.ref))
++				{
++					xr_vector<LayoutEntry> entries;
++					actor_layout(actor, entries);
++					Host::Layout& l = g_host->layouts[u16(actor->ID())];
++					send_layout(actor, entries, l.serial, &link);
++					g_host->log.line("layout-joined to=%u actor=%u serial=%u items=%u", u32(link.ref.slot),
++						u32(actor->ID()), l.serial, u32(entries.size()));
++				}
++	}
++}
++
++// The participant actors' layouts hashed together for the item-graph point
++// (in slot order; the client hashes its replica the same way).
++u64 participants_layout_hash(u32& items)
++{
++	u64 h = 14695981039346656037ull;
++	items = 0;
++	for (u8 slot = 0; slot < 2; ++slot)
++		for (PlayerLink& link : g_host->links)
++			if (link.bound && link.ref.slot == slot)
++				if (CActor* actor = participant_actor(link.ref))
++				{
++					xr_vector<LayoutEntry> entries;
++					actor_layout(actor, entries);
++					items += u32(entries.size());
++					coop::proto::EntityRef ref;
++					entity_ref_of(actor->ID(), ref);
++					h = layout_hash(entries, fnv1a(h, ref.id));
++				}
++	return h;
++}
++
++// Server-side Lua for item use (installed once, like the party adapter):
++//  - actor_effects.play_item_fx (the use's first-person animation, sounds,
++//    camera effect and the weapon lowered for its duration) is presentation
++//    of the player who used the item: it runs on that player's client when
++//    the use is accepted, not on the server, whose timeline would run from
++//    participant 1's actor update (and lower participant 1's weapon);
++//  - itms_manager's booster memory (the "a stronger booster is still active"
++//    refusal, a local table of the script) is kept per actor instead of one
++//    for the whole server: before each use the script's upvalue is pointed
++//    at the user's own table (select_booster_memory; the Lua C API, since
++//    the release engine does not open Lua's debug library).
++LPCSTR const item_source =
++	"local P = rawget(_G, '__campaign_items')\n"
++	"if type(P) == 'table' and P.installed then return end\n"
++	"P = { installed = true, fx = 0, fx_wrapped = 0, booster_wrapped = 0 }\n"
++	"rawset(_G, '__campaign_items', P)\n"
++	"if actor_effects and actor_effects.play_item_fx then\n"
++	"  actor_effects.play_item_fx = function(name) P.fx = P.fx + 1 end\n"
++	"  P.fx_wrapped = 1\n"
++	"end\n"
++	"P.boosters = {}\n"
++	;
++
++// The index of itms_manager.actor_on_item_before_use's upvalue `old_booster`
++// (0: not found); the function is left on the stack top when found. The
++// installed script fixes (aaaa_script_fixes_mp.script) wrap that function and
++// keep the original as aaaa_script_fixes_mp.itms_manager_actor_on_item_before_use.
++int booster_function(lua_State* L)
++{
++	const char* places[][2] = {{"itms_manager", "actor_on_item_before_use"},
++		{"aaaa_script_fixes_mp", "itms_manager_actor_on_item_before_use"}};
++	for (const auto& place : places)
++	{
++		lua_getglobal(L, place[0]);
++		if (!lua_istable(L, -1))
++		{
++			lua_pop(L, 1);
++			continue;
++		}
++		lua_getfield(L, -1, place[1]);
++		lua_remove(L, -2);
++		if (!lua_isfunction(L, -1))
++		{
++			lua_pop(L, 1);
++			continue;
++		}
++		for (int n = 1; n < 64; ++n)
++		{
++			const char* name = lua_getupvalue(L, -1, n);
++			if (!name)
++				break;
++			lua_pop(L, 1);
++			if (!xr_strcmp(name, "old_booster"))
++				return n;
++		}
++		lua_pop(L, 1);
++	}
++	return 0;
++}
++
++// What the booster lookup sees (diagnostics).
++void booster_diag(LPCSTR tag)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	const int top = lua_gettop(L);
++	string512 names = "";
++	lua_getglobal(L, "itms_manager");
++	const int module_type = lua_type(L, -1);
++	int field_type = -1;
++	if (lua_istable(L, -1))
++	{
++		lua_getfield(L, -1, "actor_on_item_before_use");
++		field_type = lua_type(L, -1);
++		if (lua_isfunction(L, -1))
++			for (int n = 1; n < 32; ++n)
++			{
++				const char* name = lua_getupvalue(L, -1, n);
++				if (!name)
++					break;
++				lua_pop(L, 1);
++				string64 one;
++				xr_sprintf(one, "%s%d:%s", names[0] ? "," : "", n, name[0] ? name : "?");
++				xr_strcat(names, one);
++			}
++	}
++	lua_settop(L, top);
++	g_host->log.line("booster-diag tag=%s module=%s field=%s upvalues=%s", tag, lua_typename(L, module_type),
++		field_type >= 0 ? lua_typename(L, field_type) : "-", names[0] ? names : "-");
++}
++
++int booster_upvalue(lua_State* L)
++{
++	const int n = booster_function(L);
++	if (n)
++		lua_pop(L, 1);
++	return n;
++}
++
++// Points the script's booster memory at this actor's own table.
++bool select_booster_memory(u16 actor)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L || !g_host->item_adapter)
++		return false;
++	const int n = booster_function(L);
++	if (!n)
++		return false;
++	lua_getglobal(L, "__campaign_items");
++	if (!lua_istable(L, -1))
++	{
++		lua_pop(L, 2);
++		return false;
++	}
++	lua_getfield(L, -1, "boosters");
++	lua_remove(L, -2);
++	if (!lua_istable(L, -1))
++	{
++		lua_pop(L, 2);
++		return false;
++	}
++	lua_rawgeti(L, -1, actor);
++	if (!lua_istable(L, -1))
++	{
++		lua_pop(L, 1);
++		lua_newtable(L);
++		lua_pushvalue(L, -1);
++		lua_rawseti(L, -3, actor);
++	}
++	lua_remove(L, -2); // the boosters table: [function, actor's table]
++	const bool ok = lua_setupvalue(L, -2, n) != nullptr; // pops the table
++	lua_pop(L, 1);
++	return ok;
++}
++
++void install_item_adapter()
++{
++	if (g_host->item_adapter)
++		return;
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	if (luaL_loadbuffer(L, item_source, xr_strlen(item_source), "campaign_items") != 0 || lua_pcall(L, 0, 0, 0) != 0)
++	{
++		g_host->log.line("item-adapter-failed error=%s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		return;
++	}
++	g_host->item_adapter = true;
++	luabind::object P = luabind::get_globals(L)["__campaign_items"];
++	auto num = [&](LPCSTR k) {
++		return P.type() == LUA_TTABLE && luabind::object(P[k]).type() == LUA_TNUMBER ?
++			luabind::object_cast<int>(P[k]) : -1;
++	};
++	const int booster = booster_upvalue(L);
++	g_host->log.line("item-adapter installed fx_wrapped=%d booster_wrapped=%d", num("fx_wrapped"), booster > 0 ? 1 : 0);
++	if (!booster)
++		booster_diag("install");
++}
++
++int item_fx_suppressed()
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L || !g_host->item_adapter)
++		return -1;
++	luabind::object P = luabind::get_globals(L)["__campaign_items"];
++	return P.type() == LUA_TTABLE && luabind::object(P["fx"]).type() == LUA_TNUMBER ?
++		luabind::object_cast<int>(P["fx"]) : -1;
++}
++
++// The ownership graph's invariants over every ALife object (S08-T02): each
++// parent exists and lists the child exactly once, each listed child names
++// its parent, no EntityId is held by two objects, and every online object's
++// level parent equals its server parent. Logged at recovery, at every
++// checkpoint and at the end; a failure is counted, never repaired.
++void check_ownership(LPCSTR tag)
++{
++	if (!ai().get_alife())
++		return;
++	++g_host->invariant_checks;
++	u32 objects = 0, parented = 0, missing_parent = 0, not_listed = 0, listed_twice = 0, wrong_child = 0,
++		level_mismatch = 0, duplicate_entity = 0, dangling_child = 0, two_parents = 0;
++	xr_map<u64, u16> by_entity;
++	xr_map<u16, u16> listed_by; // child -> the first parent that lists it
++	for (const auto& o : ai().alife().objects().objects())
++	{
++		const CSE_ALifeDynamicObject* e = o.second;
++		++objects;
++		EngineEntityKey key;
++		EntityId entity;
++		if (g_campaign_identity->current_key(o.first, key) &&
++			g_campaign_identity->resolve(key, entity) == Refusal::None && entity.value)
++		{
++			const auto seen = by_entity.find(entity.value);
++			if (seen != by_entity.end())
++			{
++				++duplicate_entity;
++				g_host->log.line("ownership-bad tag=%s what=duplicate-entity entity=%I64u ids=%u,%u", tag,
++					entity.value, u32(seen->second), u32(o.first));
++			}
++			else
++				by_entity[entity.value] = o.first;
++		}
++		for (u16 child : e->children)
++		{
++			// ALife holds every campaign object; the server's table only the online ones
++			const CSE_Abstract* c = ai().alife().objects().object(child, true);
++			if (!c)
++				c = Level().Server->ID_to_entity(child);
++			if (!c)
++			{
++				// an id with no entity: in the loaded save as it was (counted,
++				// not an ownership violation: nothing can be held by it)
++				++dangling_child;
++				continue;
++			}
++			const auto first = listed_by.find(child);
++			if (first != listed_by.end() && first->second != o.first)
++			{
++				++two_parents;
++				g_host->log.line("ownership-bad tag=%s what=two-parents child=%u parents=%u,%u", tag, u32(child),
++					u32(first->second), u32(o.first));
++			}
++			else
++				listed_by[child] = o.first;
++			if (c->ID_Parent != o.first)
++			{
++				++wrong_child;
++				g_host->log.line("ownership-bad tag=%s what=wrong-child parent=%u child=%u child_parent=%u", tag,
++					u32(o.first), u32(child), u32(c->ID_Parent));
++			}
++		}
++		if (e->ID_Parent == 0xffff)
++			continue;
++		++parented;
++		const CSE_Abstract* parent = ai().alife().objects().object(e->ID_Parent, true);
++		if (!parent)
++			parent = Level().Server->ID_to_entity(e->ID_Parent);
++		if (!parent)
++		{
++			++missing_parent;
++			g_host->log.line("ownership-bad tag=%s what=missing-parent id=%u parent=%u", tag, u32(o.first),
++				u32(e->ID_Parent));
++			continue;
++		}
++		const u32 listed = u32(std::count(parent->children.begin(), parent->children.end(), o.first));
++		if (listed == 0)
++			++not_listed;
++		if (listed > 1)
++			++listed_twice;
++		if (listed != 1)
++			g_host->log.line("ownership-bad tag=%s what=listed id=%u parent=%u times=%u", tag, u32(o.first),
++				u32(e->ID_Parent), listed);
++		if (e->m_bOnline)
++			if (CObject* object = Level().Objects.net_Find(o.first))
++			{
++				const u16 level_parent = object->H_Parent() ? u16(object->H_Parent()->ID()) : 0xffff;
++				// a change applied this tick reaches the level when it processes the event
++				bool in_flight = false;
++				for (const Host::PickupConfirm& c : g_host->pickup_confirm)
++					in_flight = in_flight || c.item == o.first;
++				if (level_parent != e->ID_Parent && !in_flight)
++				{
++					++level_mismatch;
++					g_host->log.line("ownership-bad tag=%s what=level-parent id=%u parent=%u level_parent=%u", tag,
++						u32(o.first), u32(e->ID_Parent), u32(level_parent));
++				}
++			}
++	}
++	const u32 bad =
++		missing_parent + not_listed + listed_twice + wrong_child + level_mismatch + duplicate_entity + two_parents;
++	if (bad)
++		++g_host->invariant_failures;
++	g_host->log.line("ownership-invariants tag=%s ok=%d objects=%u parented=%u missing_parent=%u not_listed=%u "
++		"listed_twice=%u wrong_child=%u two_parents=%u level_mismatch=%u duplicate_entity=%u dangling_child=%u", tag,
++		bad ? 0 : 1, objects, parented, missing_parent, not_listed, listed_twice, wrong_child, two_parents,
++		level_mismatch, duplicate_entity, dangling_child);
++}
++
++// Where every item a pickup named is now (the comparison's server view).
++// S08-T07: every item an equip or use record of this incarnation named,
++// against what the records say: released, or held by the actor in the
++// recorded place with the recorded remaining uses.
++void log_inventory_state(LPCSTR tag)
++{
++	u32 ok_count = 0, bad = 0;
++	for (const auto& x : g_host->inventory_expected)
++	{
++		const Host::InventoryExpect& e = x.second;
++		const u16 id = engine_id_of_entity(x.first);
++		CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
++		CObject* object = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
++		CInventoryItem* item = object ? smart_cast<CInventoryItem*>(object) : nullptr;
++		const CEatableItem* eatable = item ? smart_cast<const CEatableItem*>(item) : nullptr;
++		const u64 parent_entity = se && se->ID_Parent != 0xffff ? entity_of(se->ID_Parent) : 0;
++		const u32 place = item ? u32(item->CurrPlace()) : 0, slot = item && place == kPlaceSlot ? u32(item->CurrSlot()) : 0;
++		const int uses = eatable ? int(eatable->GetRemainingUses()) : -1;
++		bool ok;
++		if (e.gone)
++			ok = !se;
++		else
++			ok = se && item && parent_entity == e.owner && (!e.place || (place == e.place && slot == e.slot)) &&
++				(e.uses < 0 || uses == e.uses);
++		++(ok ? ok_count : bad);
++		g_host->log.line("inventory-state tag=%s item_entity=%I64u item=%u section=%s present=%d parent_entity=%I64u "
++			"owner=%I64u place=%u/%u slot=%u/%u uses=%d/%d gone=%d ok=%d", tag, x.first, u32(id), e.section.c_str(),
++			se ? 1 : 0, parent_entity, e.owner, place, u32(e.place), slot, u32(e.slot), uses, e.uses, e.gone ? 1 : 0,
++			ok ? 1 : 0);
++	}
++	g_host->log.line("inventory-state-summary tag=%s items=%u ok=%u bad=%u equips=%I64u/%I64u/%I64u/%I64u/%I64u "
++		"uses=%I64u/%I64u/%I64u/%I64u/%I64u layouts=%I64u fx_suppressed=%d", tag,
++		u32(g_host->inventory_expected.size()), ok_count, bad, g_host->equips_committed, g_host->equips_duplicate,
++		g_host->equips_refused, g_host->equips_replayed, g_host->equips_apply_failed, g_host->uses_committed,
++		g_host->uses_duplicate, g_host->uses_refused, g_host->uses_replayed, g_host->uses_apply_failed,
++		g_host->layouts_sent, item_fx_suppressed());
++}
++
++void log_pickup_state(LPCSTR tag)
++{
++	u32 held = 0, wrong = 0, missing = 0;
++	for (const auto& e : g_host->pickup_expected)
++	{
++		const u16 item = engine_id_of_entity(e.first);
++		const CSE_Abstract* se = item != kNoEngineId ? Level().Server->ID_to_entity(item) : nullptr;
++		const u16 parent = se ? se->ID_Parent : 0xffff;
+ 		const u64 parent_entity = parent != 0xffff ? entity_of(parent) : 0;
+ 		const bool ok = parent_entity == e.second;
+ 		if (!se)
+@@ -4556,9 +5697,18 @@ void item_graph_point(LPCSTR tag)
+ 		payload.push_back(u8(hash >> (8 * b)));
+ 	for (int b = 0; b < 4; ++b)
+ 		payload.push_back(u8(u32(items.size()) >> (8 * b)));
++	// S08-T07: the participant actors' inventory layouts at the same point
++	// (every changed layout is sent first, so it precedes the point)
++	send_layouts(true);
++	u32 layout_items = 0;
++	const u64 layout = participants_layout_hash(layout_items);
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(layout >> (8 * b)));
++	for (int b = 0; b < 4; ++b)
++		payload.push_back(u8(layout_items >> (8 * b)));
+ 	broadcast_event(8, payload);
+-	g_host->log.line("item-graph tag=%s seq=%I64u items=%u hash=%016I64x tick=%I64u", tag, seq, u32(items.size()), hash,
+-		g_host->tick);
++	g_host->log.line("item-graph tag=%s seq=%I64u items=%u hash=%016I64x layout=%016I64x layout_items=%u tick=%I64u",
++		tag, seq, u32(items.size()), hash, layout, layout_items, g_host->tick);
+ }
+ 
+ void item_graph_points()
+@@ -4762,6 +5912,214 @@ void transfer_fixtures()
+ 		u32(steps.size()), detail);
+ }
+ 
++// ------------------------------------------------------------ S08-T07
++// The equip and use fixture (profile use_race, client script 8: the transfer
++// driver's steps, CampaignEvent 7). Once both players are in the world each
++// actor gets a medkit (two uses), bread, a detector, a pistol, a second
++// medkit, a tin of conserva and an artefact, and is set to half health and
++// low satiety; an inventory box appears between them. Equip steps (action
++// 9) carry the place in `extra` and the inventory slot in flags bits 4-7;
++// flags bit 3 sends the intent directly instead of through the engine's
++// inventory path (the refusal cases, and a use the client's own scripts would
++// refuse before asking). Use steps (action 10) go through the installed UI's
++// path (`CInventory__eat`, then `db.actor:eat`), or with extra 1 through the
++// engine's GEG_PLAYER_ITEM_EAT event (CInventory::ClientEat, the quick-use
++// key). A medkit's booster lasts 33.4 s, and the installed scripts refuse a
++// second one meanwhile (itms_manager), so a medkit's second use comes 40 s
++// after its first.
++//   0 equip          p1 the detector to slot 9; p2 the pistol to slot 1 (the knife goes to the ruck first)
++//   1 unequip        both to the ruck
++//   2 refusals       p1 the detector to slot 2 (20); p2 p1's bread (14); p1 uses the detector (21);
++//                    p2 an undefined place (2); p2 its artefact to the belt (20 without belt slots)
++//   3 eat            p1 its medkit (2 -> 1 uses); p2 its bread (used up), at the same tick
++//   4 boosters       p2 its medkit (Accepted: p1's medkit booster is p1's); p1 its second medkit (22:
++//                    its own booster is still active)
++//   5 use vs move    p1 uses its conserva and moves it to the box at the same tick (use first);
++//                    p2 moves its conserva to the box and uses it at the same tick (move first): one outcome each
++//   6 quick-use key  p1 its bread through the GEG_PLAYER_ITEM_EAT event
++//   7 equip again    p2 the pistol to slot 3; p1 the detector to slot 9
++//   8 last use       p1 its medkit's second use (used up)
++//   9 disconnect     p2 its medkit's second use, then drops its connection at once
++//  10 pickup         p1 picks up the bread that has lain at its feet since the set-up (a pickup record)
++//  11 eat it         p1 eats that bread: after a restart neither the pickup's record nor anything else
++//                    may bring it back (L39)
++const u32 kUseRounds = 12;
++
++void use_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.use_race || !ai().get_alife())
++		return;
++	Host::UseFixture& f = g_host->use_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-use both-attached tick=%I64u", g_host->tick);
++	}
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (f.phase == 0)
++	{
++		if (attached < 2 || g_host->tick < f.both_since + u64(config.use_race) * 50)
++			return;
++		const u32 a0 = slots[0] == 0 ? 0 : 1;
++		f.actors[0] = u16(actors[a0]->ID());
++		f.actors[1] = u16(actors[1 - a0]->ID());
++		f.slots[0] = slots[a0];
++		f.slots[1] = slots[1 - a0];
++		Fvector mid;
++		mid.add(actors[0]->Position(), actors[1]->Position()).mul(0.5f);
++		f.box = spawn_at(alife, "inventory_box", mid, f.actors[0]);
++		Fvector toward;
++		toward.sub(actors[1]->Position(), actors[0]->Position());
++		toward.y = 0.f;
++		if (toward.square_magnitude() < 0.01f)
++			toward.set(1.f, 0.f, 0.f);
++		toward.normalize();
++		f.ground = spawn_at(alife, "bread", Fvector().mad(actors[0]->Position(), toward, 0.6f), f.actors[0]);
++		LPCSTR sections[] = {"medkit", "bread", "detector_simple", "wpn_pm", "medkit", "conserva", "af_medusa"};
++		for (u32 k = 0; k < 2; ++k)
++		{
++			for (LPCSTR section : sections)
++				f.items[k].push_back(give_to(alife, section, f.actors[k]));
++			CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(f.actors[k]));
++			if (a)
++			{
++				a->conditions().SetHealth(0.5f);
++				a->conditions().SetSatiety(0.3f);
++			}
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		string256 given = "";
++		for (u32 k = 0; k < 2; ++k)
++			for (u16 id : f.items[k])
++			{
++				string16 one;
++				xr_sprintf(one, "%s%u", given[0] ? "," : "", u32(id));
++				xr_strcat(given, one);
++			}
++		CActor* p0 = smart_cast<CActor*>(Level().Objects.net_Find(f.actors[0]));
++		CActor* p1 = smart_cast<CActor*>(Level().Objects.net_Find(f.actors[1]));
++		g_host->log.line("fixture-use spawned box=%u ground=%u items=%s actors=%u,%u belt_width=%u,%u", u32(f.box),
++			u32(f.ground), given,
++			u32(f.actors[0]), u32(f.actors[1]), p0 ? u32(p0->inventory().BeltWidth()) : 0u,
++			p1 ? u32(p1->inventory().BeltWidth()) : 0u);
++		return;
++	}
++	if (f.phase == 1)
++	{
++		bool all = delivered(f.box) && delivered(f.ground);
++		for (u32 k = 0; k < 2; ++k)
++			for (u16 id : f.items[k])
++				all = all && delivered(id);
++		if (!all && g_host->tick - f.phase_tick < 15 * 50)
++			return;
++		g_host->log.line("fixture-use delivered all=%d waited_ticks=%I64u", all ? 1 : 0, g_host->tick - f.phase_tick);
++		f.phase = 2;
++		f.round_tick = g_host->tick + 2 * 50; // the layouts reach the clients first
++		return;
++	}
++	if (f.round >= kUseRounds || g_host->tick < f.round_tick || attached < 2)
++		return;
++	const u32 round = f.round++;
++	f.round_tick = g_host->tick + 8 * 50;
++	const u16 A0 = f.actors[0], A1 = f.actors[1], B = f.box;
++	const u8 s0 = f.slots[0], s1 = f.slots[1];
++	auto item = [&](u32 k, u32 i) { return i < f.items[k].size() ? f.items[k][i] : kNoEngineId; };
++	const u8 kEquip = coop::proto::kActionEquip, kUse = coop::proto::kActionUse, kMove = coop::proto::kActionTransfer;
++	const u8 kDirect = 8;
++	xr_vector<TransferStep> steps;
++	switch (round)
++	{
++	case 0:
++		steps.push_back({s0, kEquip, 0, item(0, 2), A0, 0xffff, u8(DETECTOR_SLOT << 4), kPlaceSlot});
++		steps.push_back({s1, kEquip, 0, item(1, 3), A1, 0xffff, u8(KNIFE_SLOT << 4), kPlaceSlot});
++		break;
++	case 1:
++		steps.push_back({s0, kEquip, 0, item(0, 2), A0, 0xffff, 0, kPlaceRuck});
++		steps.push_back({s1, kEquip, 0, item(1, 3), A1, 0xffff, 0, kPlaceRuck});
++		break;
++	case 2:
++		steps.push_back({s0, kEquip, 0, item(0, 2), A0, 0xffff, u8((INV_SLOT_2 << 4) | kDirect), kPlaceSlot});
++		steps.push_back({s1, kEquip, 0, item(0, 1), A0, 0xffff, kDirect, kPlaceRuck});
++		steps.push_back({s0, kUse, 0, item(0, 2), A0, 0xffff, kDirect, 0});
++		steps.push_back({s1, kEquip, 0, item(1, 1), A1, 0xffff, kDirect, 7});
++		steps.push_back({s1, kEquip, 0, item(1, 6), A1, 0xffff, kDirect, kPlaceBelt});
++		break;
++	case 3:
++		steps.push_back({s0, kUse, 0, item(0, 0), A0, 0xffff, 0, 0});
++		steps.push_back({s1, kUse, 0, item(1, 1), A1, 0xffff, 0, 0});
++		break;
++	case 4:
++		steps.push_back({s1, kUse, 0, item(1, 0), A1, 0xffff, 0, 0});
++		steps.push_back({s0, kUse, 0, item(0, 4), A0, 0xffff, kDirect, 0});
++		break;
++	case 5:
++		steps.push_back({s0, kUse, 0, item(0, 5), A0, 0xffff, 0, 0});
++		steps.push_back({s0, kMove, 0, item(0, 5), A0, B, 0, 0});
++		steps.push_back({s1, kMove, 0, item(1, 5), A1, B, 0, 0});
++		steps.push_back({s1, kUse, 0, item(1, 5), A1, 0xffff, 0, 0});
++		break;
++	case 6:
++		steps.push_back({s0, kUse, 0, item(0, 1), A0, 0xffff, 0, 1});
++		break;
++	case 7:
++		steps.push_back({s1, kEquip, 0, item(1, 3), A1, 0xffff, u8(INV_SLOT_3 << 4), kPlaceSlot});
++		steps.push_back({s0, kEquip, 0, item(0, 2), A0, 0xffff, u8(DETECTOR_SLOT << 4), kPlaceSlot});
++		break;
++	case 8:
++		steps.push_back({s0, kUse, 0, item(0, 0), A0, 0xffff, 0, 0});
++		break;
++	case 9:
++		steps.push_back({s1, kUse, 0, item(1, 0), A1, 0xffff, 4, 0});
++		break;
++	case 10:
++		steps.push_back({s0, u8(coop::proto::kActionPickup), 0, f.ground, 0xffff, A0, 0, 0});
++		break;
++	default:
++		steps.push_back({s0, kUse, 0, f.ground, A0, 0xffff, 0, 0});
++		break;
++	}
++	const u64 claim_tick = g_host->tick + 100;
++	std::vector<u8> payload;
++	put_u8(payload, u8(round));
++	put_u8(payload, u8(round));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(claim_tick >> (8 * b)));
++	put_u8(payload, u8(steps.size()));
++	string512 detail = "";
++	for (const TransferStep& st : steps)
++	{
++		put_u8(payload, st.slot);
++		put_u8(payload, st.action);
++		put_u16(payload, st.offset);
++		put_ref(payload, st.item);
++		put_ref(payload, st.from);
++		put_ref(payload, st.to);
++		put_u8(payload, st.flags);
++		put_u8(payload, st.extra);
++		string64 one;
++		xr_sprintf(one, " %u:%u@%u:%u:%u>%u:%u/%u", u32(st.slot), u32(st.action), u32(st.offset), u32(st.item),
++			u32(st.from), u32(st.to), u32(st.flags), u32(st.extra));
++		xr_strcat(detail, one);
++	}
++	broadcast_event(7, payload);
++	g_host->log.line("fixture-use-round round=%u claim_tick=%I64u steps=%u%s", round, claim_tick, u32(steps.size()),
++		detail);
++}
++
+ // ------------------------------------------------------------ S08-T04
+ // The party quest fixture (profile quest_party): once both players are in
+ // the world, both actors are placed beside Sidorovich (section m_trader; as
+@@ -5566,6 +6924,10 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_pickup(*link, *intent, result); // S08-T01
+ 		else if (intent->kind == coop::proto::kActionDrop || intent->kind == coop::proto::kActionTransfer)
+ 			reason = take_transfer(*link, *intent, result); // S08-T02
++		else if (intent->kind == coop::proto::kActionEquip)
++			reason = take_equip(*link, *intent, result); // S08-T07
++		else if (intent->kind == coop::proto::kActionUse)
++			reason = take_use(*link, *intent, result); // S08-T07
+ 		else if (intent->kind == coop::proto::kActionQuest)
+ 		{
+ 			reason = take_quest(*link, *intent, result); // S08-T04
+@@ -5627,6 +6989,22 @@ void on_message(const coop::session::SessionEvent& e)
+ 			else if (!reason)
+ 				coop::store::failpoint("transfer:after-ack");
+ 		}
++		if (intent->kind == coop::proto::kActionEquip || intent->kind == coop::proto::kActionUse)
++		{
++			// S08-T07
++			const bool equip = intent->kind == coop::proto::kActionEquip;
++			if (reason && result.outcome != coop::proto::ActionOutcome::Duplicate)
++			{
++				++(equip ? g_host->equips_refused : g_host->uses_refused);
++				inventory_csv(equip ? "equip" : "use", "refused", 0, link->ref.slot, intent->operation_id,
++					intent->target.id, engine_id_of(intent->target), 0, intent->params.size() > 0 ? intent->params[0] : 0,
++					intent->params.size() > 1 ? intent->params[1] : 0, 0, 0, "-", reason);
++				g_host->log.line("%s-refused slot=%u operation=%I64u target=%I64u/%u reason=%u", equip ? "equip" : "use",
++					u32(link->ref.slot), intent->operation_id, intent->target.id, intent->target.generation, u32(reason));
++			}
++			else if (!reason)
++				coop::store::failpoint(equip ? "equip:after-ack" : "use:after-ack");
++		}
+ 		if (intent->kind == coop::proto::kActionRespawn && !reason)
+ 		{
+ 			// S07-T07: the player's entity changed: the client rejoins for a
+@@ -6092,6 +7470,12 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		g_host->pickups_csv = fopen(pickups, "w");
+ 		if (g_host->pickups_csv)
+ 			fprintf(g_host->pickups_csv, "utc_ms,tick,revision,slot,operation,item_entity,item,owner_entity,section,phase,reason\n");
++		string_path inventory; // S08-T07
++		FS.update_path(inventory, "$logs$", "coop-inventory.csv");
++		g_host->inventory_csv = fopen(inventory, "w");
++		if (g_host->inventory_csv)
++			fprintf(g_host->inventory_csv, "utc_ms,tick,revision,slot,operation,kind,item_entity,item,actor_entity,place,"
++				"inv_slot,uses,consumed,section,phase,reason\n");
+ 		string_path transfers;
+ 		FS.update_path(transfers, "$logs$", "coop-transfers.csv");
+ 		g_host->transfers_csv = fopen(transfers, "w");
+@@ -6134,10 +7518,53 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 			p.name = sp.name.c_str();
+ 			g_host->last_published.push_back(p);
+ 		}
++	// S08-T07: the items the replayed use records release: a pickup or a
++	// transfer of one before its use is not re-applied (it would re-create
++	// the item only for the use to release it again)
++	for (const coop::store::JournalRecord& record : g_host->persistence->replay())
++		if (record.kind == coop::store::kRecordUse)
++		{
++			UseRecord use;
++			if (!decode_use(record.payload, use))
++				continue;
++			if (use.consumed)
++				g_host->consumed_entities.insert(use.item_entity);
++			for (const UseEffect& e : use.effects)
++				if (e.op == 1)
++					g_host->consumed_entities.insert(e.item_entity);
++		}
++	if (!g_host->consumed_entities.empty())
++		g_host->log.line("recovery-consumed items=%u", u32(g_host->consumed_entities.size()));
+ 	for (const coop::store::JournalRecord& record : g_host->persistence->replay())
+ 	{
+ 		if (record.kind == coop::store::kRecordEpoch)
+ 			continue;
++		if (record.kind == coop::store::kRecordEquip || record.kind == coop::store::kRecordUse)
++		{
++			// S08-T07: an equip or a use by its adapter (absolute post-state);
++			// one whose objects are not in the level yet is retried once serving
++			// starts; an undecodable record stops the start
++			EquipRecord equip;
++			UseRecord use;
++			const bool is_equip = record.kind == coop::store::kRecordEquip;
++			if (is_equip ? !decode_equip(record.payload, equip) : !decode_use(record.payload, use))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			if (is_equip)
++				apply_equip_or_defer(equip, "replay", record.revision);
++			else
++				apply_use_or_defer(use, "replay", record.revision);
++			if (CoopPersistence* p = g_host->persistence)
++			{
++				StoredOutcome s = {1, 0, record.revision};
++				p->remember(is_equip ? equip.player : use.player, is_equip ? equip.operation : use.operation, s);
++			}
++			++(is_equip ? g_host->equips_replayed : g_host->uses_replayed);
++			continue;
++		}
+ 		if (record.kind == coop::store::kRecordLedger)
+ 		{
+ 			LedgerRecord ledger;
+@@ -6228,12 +7655,14 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 			if (CActor* actor = participant_actor(link.ref))
+ 				g_host->log.line("ledger-state slot=%u actor=%u money=%u alive=%d", u32(link.ref.slot), u32(actor->ID()),
+ 					actor->get_money(), actor->g_Alive() ? 1 : 0);
+-	g_host->log.line("recovery-replayed records=%I64u deaths=%I64u pickups=%I64u transfers=%I64u commit=%I64u epoch=%I64u",
+-		g_host->ledger_replayed, g_host->deaths_replayed, g_host->pickups_replayed, g_host->transfers_replayed,
+-		g_host->commit, g_host->persistence->epoch());
++	g_host->log.line("recovery-replayed records=%I64u deaths=%I64u pickups=%I64u transfers=%I64u equips=%I64u uses=%I64u "
++		"commit=%I64u epoch=%I64u", g_host->ledger_replayed, g_host->deaths_replayed, g_host->pickups_replayed,
++		g_host->transfers_replayed, g_host->equips_replayed, g_host->uses_replayed, g_host->commit,
++		g_host->persistence->epoch());
+ 	// S08-T02: from here every EntityId is issued under a durable reservation
+ 	g_campaign_identity->set_entity_reserver(reserve_entity_block);
+ 	install_party_adapter(); // S08-T04
++	install_item_adapter(); // S08-T07
+ 	rebuild_party_tasks(); // S08-T06
+ 	disable_power_throttling();
+ 	g_host->wall.Start();
+@@ -6305,10 +7734,13 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	// S05-T02: lifecycle, the server-controlled change fixture, world streams.
+ 	track_lifecycle();
+ 	retry_pickups(); // S08-T01
+-	if (!g_host->pickup_recovery_logged && g_host->pickups_pending.empty() && g_host->pickup_confirm.empty())
++	retry_inventory(); // S08-T07
++	if (!g_host->pickup_recovery_logged && g_host->pickups_pending.empty() && g_host->pickup_confirm.empty() &&
++		g_host->inventory_pending.empty())
+ 	{
+ 		g_host->pickup_recovery_logged = true;
+ 		log_pickup_state("recovered");
++		log_inventory_state("recovered"); // S08-T07
+ 		check_ownership("recovered"); // S08-T02
+ 	}
+ 	churn();
+@@ -6316,6 +7748,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	combat_fixtures();
+ 	pickup_fixtures(); // S08-T01
+ 	transfer_fixtures(); // S08-T02
++	use_fixtures(); // S08-T07
++	send_layouts(false); // S08-T07
+ 	item_graph_points(); // S08-T03
+ 	quest_tick(); // S08-T04
+ 	quest_fixtures(); // S08-T04
+@@ -6387,6 +7821,7 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		}
+ 		log_status("final");
+ 		log_pickup_state("final"); // S08-T01
++		log_inventory_state("final"); // S08-T07
+ 		for (u16 id : g_host->party_actor_ids) // S08-T04: the party's money as the server holds it
+ 			if (id != 0xffff)
+ 				if (CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(id)))
+diff --git a/src/xrGame/Inventory.cpp b/src/xrGame/Inventory.cpp
+index 7eb7c21..85fc628 100644
+--- a/src/xrGame/Inventory.cpp
++++ b/src/xrGame/Inventory.cpp
+@@ -27,6 +27,9 @@
+ #include "static_cast_checked.hpp"
+ #include "player_hud.h"
+ #include "PDA.h"
++#include "CampaignActorAccess.h" // S08-T07
++#include "CampaignScriptContext.h"
++#include "CoopClientLink.h"
+ 
+ using namespace InventoryUtilities;
+ //Alundaio
+@@ -1109,6 +1112,11 @@ bool CInventory::Eat(PIItem pIItem)
+ 	CEatableItem* pItemToEat = smart_cast<CEatableItem*>(pIItem);
+ 	if (!pItemToEat) return false;
+ 
++	// S08-T07: on a co-op client nothing is used locally; the player's own use
++	// becomes its intent to the server (CoopClientLink.cpp)
++	if (campaign::coop_client_eat(m_pOwner, pIItem))
++		return false;
++
+ 	CEntityAlive* entity_alive = smart_cast<CEntityAlive*>(m_pOwner);
+ 	if (!entity_alive) return false;
+ 
+@@ -1138,12 +1146,26 @@ bool CInventory::Eat(PIItem pIItem)
+ 	if (owner_actor)
+ 	{
+ 		if (IsGameTypeSingle())
+-			owner_actor->callback(GameObject::eUseObject)((smart_cast<CGameObject*>(pIItem))->lua_game_object());
++		{
++			// S08-T07: on the campaign server, inside the user's script context,
++			// the installed actor binder's handlers (registered on the script
++			// host actor, participant 1's) receive the use; db.actor is the user
++			CActor* receiver = owner_actor;
++			campaign::ScriptContext context;
++			if (campaign::process_role() == campaign::Role::Server &&
++				campaign::current_script_context(context) == campaign::Refusal::None)
++				if (CActor* host = campaign::script_host_actor())
++					receiver = host;
++			receiver->callback(GameObject::eUseObject)((smart_cast<CGameObject*>(pIItem))->lua_game_object());
++		}
+ 
+-		if (pItemToEat->IsUsingCondition() && pItemToEat->GetRemainingUses() < 1 && pItemToEat->CanDelete())
+-			CurrentGameUI()->GetActorMenu().RefreshCurrentItemCell();
++		if (CurrentGameUI()) // S08-T07: the headless server's inert UI may have no actor menu
++		{
++			if (pItemToEat->IsUsingCondition() && pItemToEat->GetRemainingUses() < 1 && pItemToEat->CanDelete())
++				CurrentGameUI()->GetActorMenu().RefreshCurrentItemCell();
+ 
+-		CurrentGameUI()->GetActorMenu().SetCurrentItem(NULL);
++			CurrentGameUI()->GetActorMenu().SetCurrentItem(NULL);
++		}
+ 	}
+ 
+ 	if (pItemToEat->Empty())
+diff --git a/src/xrGame/xrServer_process_event.cpp b/src/xrGame/xrServer_process_event.cpp
+index 8e17071..f3fa4e0 100644
+--- a/src/xrGame/xrServer_process_event.cpp
++++ b/src/xrGame/xrServer_process_event.cpp
+@@ -49,6 +49,15 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
+ 			campaign::coop_client_ownership_event(type, destination, P);
+ 			P.r_seek(at);
+ 		}
++		// S08-T07: its slot, belt and ruck moves and its eating likewise
++		if (bridge && campaign::replica_active() && !campaign::replica_permitted() &&
++			(type == GEG_PLAYER_ITEM2SLOT || type == GEG_PLAYER_ITEM2BELT || type == GEG_PLAYER_ITEM2RUCK ||
++				type == GEG_PLAYER_ITEM_EAT))
++		{
++			const u32 at = P.r_tell();
++			campaign::coop_client_inventory_event(type, destination, P);
++			P.r_seek(at);
++		}
+ 		// S05-T02: outcomes on a co-op client come from the server only.
+ 		if (campaign::replica_refuse_event(type, bridge))
+ 			return;

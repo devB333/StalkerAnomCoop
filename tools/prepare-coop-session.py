@@ -8,6 +8,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--ledger c1,c2] [--checkpoint-seconds 30] [--failpoint commit:after-apply:3[:fail]]
            [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
            [--transfer c1,c2 [--transfer-start 20]] [--quest c1,c2 [--quest-start 20]]
+           [--use c1,c2 [--use-start 20]] [--stack c1,c2 [--stack-start 20]]
            [--protocol-build proto-build-42] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
@@ -108,6 +109,16 @@ def main():
                              "and transfers through the clients' own inventory events (fixture transfer_race)")
     parser.add_argument("--transfer-start", type=int, default=20,
                         help="with --transfer: seconds after both players are in the world until the set-up")
+    parser.add_argument("--use", default="",
+                        help="comma-separated client names running the S08-T07 equip and use rounds "
+                             "(profile script = 8, the transfer driver's steps; fixture use_race)")
+    parser.add_argument("--use-start", type=int, default=20,
+                        help="with --use: seconds after both players are in the world until the items appear")
+    parser.add_argument("--stack", default="",
+                        help="comma-separated client names running the S08-T08 container and stack rounds "
+                             "(profile script = 8, the transfer driver's steps; fixture stack_race)")
+    parser.add_argument("--stack-start", type=int, default=20,
+                        help="with --stack: seconds after both players are in the world until the objects appear")
     parser.add_argument("--quest", default="",
                         help="comma-separated client names running the S08-T04 party quest rounds (profile script = 8, "
                              "the transfer driver's steps); the server places both actors beside Sidorovich "
@@ -172,7 +183,9 @@ def main():
     pickup = {n for n in args.pickup.split(",") if n}
     transfer = {n for n in args.transfer.split(",") if n}
     quest = {n for n in args.quest.split(",") if n}
-    if (inject | script | movement | weather | ledger | pickup | transfer | quest) - set(names[1:]):
+    use = {n for n in args.use.split(",") if n}
+    stack = {n for n in args.stack.split(",") if n}
+    if (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack) - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
         raise SystemExit("a client runs one driver: --script or --movement")
@@ -253,6 +266,8 @@ def main():
                       f"checkpoint_seconds = {args.checkpoint_seconds}",
                       f"pickup_race = {args.pickup_start if pickup else 0}", f"pickup_rounds = {args.pickup_rounds}",
                       f"transfer_race = {args.transfer_start if transfer else 0}",
+                      f"use_race = {args.use_start if use else 0}",
+                      f"stack_race = {args.stack_start if stack else 0}",
                       f"quest_party = {args.quest_start if quest else 0}", f"quest_holder = {args.quest_holder}",
                       f"quest_variant = {args.quest_variant}"]
             if args.failpoint:
@@ -265,7 +280,7 @@ def main():
                 point = ":".join(parts[:2])
                 restart_lines = list(lines)
                 if args.restart_no_fixture:
-                    fixtures = ("pickup_race", "transfer_race", "quest_party")
+                    fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -274,13 +289,13 @@ def main():
                 profiles["server-restart"] = restart
             elif args.restart_no_fixture:
                 # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
-                fixtures = ("pickup_race", "transfer_race", "quest_party")
+                fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")
                 profiles["server-restart"] = restart
         else:
-            program = (8 if name in transfer | quest else 7 if name in pickup else 6 if name in ledger
+            program = (8 if name in transfer | quest | use | stack else 7 if name in pickup else 6 if name in ledger
                        else 5 if name in weather
                        else 4 if name in encounter
                        else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
@@ -343,6 +358,8 @@ def main():
         "pickup_rounds": args.pickup_rounds if pickup else 0,
         "transfer": sorted(transfer),
         "quest": sorted(quest),
+        "use": sorted(use),
+        "stack": sorted(stack),
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

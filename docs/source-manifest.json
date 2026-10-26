@@ -201,6 +201,10 @@
     {
       "path": "patches/engine/0048-party-quest.patch",
       "sha256": "e8d9ec045f7125c247361ca5597d161c30070b49d44b52f144d42a21d64672e4"
+    },
+    {
+      "path": "patches/engine/0049-equip-use-consumption.patch",
+      "sha256": "b0cfb488d58b21a1c786817102aba4deade77238e6821c3c85384e2da01b3baf"
     }
   ],
   "submodules": [

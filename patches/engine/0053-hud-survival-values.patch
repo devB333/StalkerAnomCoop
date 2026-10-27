@@ -1,0 +1,108 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 29f8a61..c4c9432 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -4417,7 +4417,7 @@ void amounts_frame()
+ void on_needs(const coop::proto::CampaignEvent& event)
+ {
+ 	PayloadReader r(event.payload);
+-	float v[3];
++	float v[6];
+ 	for (float& x : v)
+ 		x = r.get<float>();
+ 	lua_State* L = ai().script_engine().lua();
+@@ -4458,8 +4458,18 @@ void on_needs(const coop::proto::CampaignEvent& event)
+ 	}
+ 	if (v[2] >= 0.f)
+ 		g_actor->conditions().SetPsyBar(v[2]);
++	// the engine's own hunger, stamina and radiation of this player's actor,
++	// as the server holds them (the HUD's bars and indicators read these)
++	CActorCondition& c = g_actor->conditions();
++	if (v[3] >= 0.f && _valid(v[3]))
++		c.SetSatiety(v[3]);
++	if (v[4] >= 0.f && _valid(v[4]))
++		c.SetPower(v[4]);
++	if (v[5] >= 0.f && _valid(v[5]))
++		c.SetRadiation(v[5]);
+ 	++g_link->needs_received;
+-	g_link->log.line("needs-applied thirst=%.1f sleep=%.1f psy=%.4f set=%u", v[0], v[1], v[2], set);
++	g_link->log.line("needs-applied thirst=%.1f sleep=%.1f psy=%.4f satiety=%.4f power=%.4f radiation=%.4f set=%u",
++		v[0], v[1], v[2], v[3], v[4], v[5], set);
+ }
+ 
+ void refresh_inventory_ui()
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 13c1deb..32a9179 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -145,7 +145,7 @@ struct PlayerLink
+ 	bool fire_block_reported = true;
+ 	u16 respawn_old_actor = 0xffff; // S08-T09: the body a respawned actor continues
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+-	float needs_last[3] = {-1.f, -1.f, -1.f};
++	float needs_last[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+ };
+ 
+ enum WorldState : u8
+@@ -5074,8 +5074,11 @@ void install_needs_adapter()
+ 
+ // Every tick: each live participant's survival update, in its context; its
+ // values to its client (CampaignEvent 12: f32 thirst, sleep, psy health;
+-// -1 when that module is off), when they change or every 10 s, and at once
+-// to a client entering the world.
++// -1 when that module is off; then, user 2026-10-27, the engine's own
++// hunger (satiety), stamina (power) and radiation of the player's actor,
++// which the server owns and the client's HUD showed from its own copy),
++// checked 5 times a second, sent when they change or every 10 s, and at
++// once to a client entering the world.
+ void drive_needs()
+ {
+ 	if (!g_host->needs_adapter)
+@@ -5111,8 +5114,9 @@ void drive_needs()
+ 			lua_settop(L, top);
+ 		}
+ 	}
+-	if (g_host->tick % 50)
++	if (g_host->tick % 10)
+ 		return;
++	const float step[6] = {1.f, 1.f, 0.005f, 0.005f, 0.01f, 0.005f};
+ 	for (PlayerLink& link : g_host->links)
+ 	{
+ 		if (!client_in_world(link))
+@@ -5120,23 +5124,31 @@ void drive_needs()
+ 			link.needs_sent_ms = 0;
+ 			continue;
+ 		}
+-		float v[3];
++		CActor* actor = participant_actor(link.ref);
++		float v[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+ 		needs_values(link.ref.slot, v);
++		if (actor)
++		{
++			v[3] = actor->conditions().GetSatiety();
++			v[4] = actor->conditions().GetPower();
++			v[5] = actor->conditions().GetRadiation();
++		}
+ 		const u32 now = host_ms();
+ 		bool changed = !link.needs_sent_ms || now - link.needs_sent_ms >= 10000;
+-		for (int i = 0; i < 3; ++i)
+-			changed = changed || _abs(v[i] - link.needs_last[i]) > (i == 2 ? 0.005f : 1.f);
++		for (int i = 0; i < 6; ++i)
++			changed = changed || _abs(v[i] - link.needs_last[i]) > step[i];
+ 		if (!changed)
+ 			continue;
+ 		std::vector<u8> payload;
+-		for (int i = 0; i < 3; ++i)
++		for (int i = 0; i < 6; ++i)
+ 		{
+ 			put_f32(payload, v[i]);
+ 			link.needs_last[i] = v[i];
+ 		}
+ 		queue_event(link, 12, payload);
+ 		link.needs_sent_ms = now ? now : 1;
+-		g_host->log.line("needs slot=%u thirst=%.1f sleep=%.1f psy=%.4f", u32(link.ref.slot), v[0], v[1], v[2]);
++		g_host->log.line("needs slot=%u thirst=%.1f sleep=%.1f psy=%.4f satiety=%.4f power=%.4f radiation=%.4f",
++			u32(link.ref.slot), v[0], v[1], v[2], v[3], v[4], v[5]);
+ 	}
+ }
+ 

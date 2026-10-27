@@ -217,6 +217,10 @@
     {
       "path": "patches/engine/0052-use-fire-block-and-player-needs.patch",
       "sha256": "31328c85c8431566a2749ddfb8b7d1f7a16ea2d5cdc4a232d3f046e6eefbbb6b"
+    },
+    {
+      "path": "patches/engine/0053-hud-survival-values.patch",
+      "sha256": "099a72547803b2d00c18c946f5a0d9bb2bce98c763eb516b5bc10aa495342f35"
     }
   ],
   "submodules": [

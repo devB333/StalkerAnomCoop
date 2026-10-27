@@ -51,6 +51,9 @@ Checks:
                       (use-needs: both players' values around the use; per-player survival values)
   needs_clients       each client applied its own player's survival values (needs-applied), the last
                       within two update steps of the server's last value for that player
+  hud_values          each client shows its own player's hunger and radiation as the server holds them
+                      (the last needs-applied within 0.02 of the server's last for that player), and
+                      after each meal its client shows the raised hunger within 3 s
   fire_block          round 12: the server ignored the held fire key from the use until the conserva's
                       animation raised the weapon (use-fire-block, its window 9.68 s), and pressed it
                       after the window (the first fire-press after the use, not before the window ends)
@@ -284,6 +287,33 @@ def main():
         "pass": bool(last_server) and bool(client_needs) and all(v["applied"] > 0 for v in client_needs.values()) and
         len(lasts) == len(servers) and all(abs(a - b) <= 60 for a, b in zip(lasts, servers, strict=True)),
         "clients": client_needs, "server_last": last_server}
+    # the engine's hunger, stamina and radiation on each client's HUD (S08-T09 review)
+    srv = {}  # slot -> [(ms, satiety, radiation)]
+    for x in server_logs[-1] if server_logs else []:
+        if re.search(r" needs slot=", x) and " satiety=" in x:
+            srv.setdefault(field(x, "slot", int), []).append(
+                (int(x.split(" ", 1)[0]), field(x, "satiety", float), field(x, "radiation", float)))
+    meals = [(int(x.split(" ", 1)[0]), field(x, "slot", int), field(x, "satiety", float))
+             for x in (server_logs[-1] if server_logs else []) if " use-committed " in x and
+             (field(x, "section") or "") in ("bread", "conserva", "kolbasa")]
+    hud = {}
+    for c in clients:
+        log = lines(logs / c / f"coop-{c}.log")
+        welcomed = [field(x, "slot", int) for x in log if " welcomed slot=" in x]
+        slot = welcomed[-1] if welcomed else None
+        applied = [(int(x.split(" ", 1)[0]), field(x, "satiety", float), field(x, "radiation", float))
+                   for x in log if " needs-applied " in x and " satiety=" in x]
+        last_ok = bool(applied) and slot in srv and abs(applied[-1][1] - srv[slot][-1][1]) <= 0.02 and \
+            abs(applied[-1][2] - srv[slot][-1][2]) <= 0.02
+        meal_ok = []
+        for ms, mslot, sat in meals:
+            if mslot == slot:
+                meal_ok.append(any(ms <= a[0] <= ms + 3000 and a[1] >= sat - 0.02 for a in applied))
+        hud[c] = {"slot": slot, "applied": len(applied), "last": applied[-1] if applied else None,
+                  "server_last": srv.get(slot, [None])[-1], "last_ok": last_ok, "meals_shown": meal_ok}
+    report["checks"]["hud_values"] = {
+        "pass": bool(hud) and all(v["last_ok"] and v["meals_shown"] and all(v["meals_shown"]) for v in hud.values()),
+        "clients": hud}
     held = [b for b in blocks if b["blocked_ticks"]]  # the window round 12 held the key through
     report["checks"]["fire_block"] = {
         "pass": bool(held) and all(b["first_press_after_ms"] and b["first_press_after_ms"] >= b["window_ms"] - 40

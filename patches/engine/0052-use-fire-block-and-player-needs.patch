@@ -1,0 +1,783 @@
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index 8487267..b047298 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -709,6 +709,9 @@ void CActor::Hit(SHit* pHDS)
+ 				else
+ 				{
+ 					::luabind::functor<bool> funct;
++					// S08-T09: on the campaign server the installed pre-hit
++					// handlers (armour, psy damage) run for the actor that is hit
++					campaign::ScriptContextScope scope(static_cast<const CObject*>(this), "actor-before-hit");
+ 					if (ai().script_engine().functor("_G.CActor__BeforeHitCallback", funct))
+ 					{
+ 						if (!funct(this->lua_game_object(), &tLuaHit, HDS.boneID))
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 5cb86cf..332b055 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -66,10 +66,57 @@ bool push_compat_table(lua_State* L)
+ 
+ // After every push and pop: the layer reads the depth to decide what db.actor
+ // is, and gives a participant actor without a Lua binder its db.storage entry.
++static ContextSwitchHook s_switch_hook = nullptr; // S08-T09
++} // namespace
++
++void set_context_switch_hook(ContextSwitchHook hook) { s_switch_hook = hook; }
++
++int script_module_upvalue(lua_State* L, LPCSTR module, LPCSTR name)
++{
++	lua_getglobal(L, module);
++	if (!lua_istable(L, -1))
++	{
++		lua_pop(L, 1);
++		return 0;
++	}
++	lua_pushnil(L);
++	while (lua_next(L, -2))
++	{
++		if (lua_isfunction(L, -1) && !lua_iscfunction(L, -1))
++			for (int n = 1; n < 64; ++n)
++			{
++				const char* upvalue = lua_getupvalue(L, -1, n);
++				if (!upvalue)
++					break;
++				lua_pop(L, 1);
++				if (!xr_strcmp(upvalue, name))
++				{
++					lua_remove(L, -2); // the key
++					lua_remove(L, -2); // the module
++					return n;
++				}
++			}
++		lua_pop(L, 1);
++	}
++	lua_pop(L, 1);
++	return 0;
++}
++
++namespace
++{
++static void notify_switch()
++{
++	if (!s_switch_hook || !s_stack)
++		return;
++	ScriptContext context;
++	s_switch_hook(s_stack->current(context) == Refusal::None ? context.action.actor.slot : u8(0xff));
++}
++
+ void sync_lua(bool entered)
+ {
+ 	if (!server_role() || !s_stack)
+ 		return;
++	notify_switch(); // S08-T09
+ 	lua_State* L = script_state();
+ 	if (!L || !push_compat_table(L))
+ 		return;
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 22d977c..eb63769 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -284,6 +284,16 @@ struct MapSpotState
+ };
+ void note_map_spot(Presentation kind, u16 object, LPCSTR spot, LPCSTR detail, u32 flags);
+ void map_spots(xr_vector<MapSpotState>& out);
++
++// S08-T09 (user, 2026-10-27): per-player script state. Called after every
++// context entry and exit on the campaign server with the innermost
++// context's participant slot (0xff: no context).
++typedef void (*ContextSwitchHook)(u8 slot);
++void set_context_switch_hook(ContextSwitchHook hook);
++// The index of upvalue `name` of a Lua function in the script module's table
++// (0: none); when found that function is left on the stack top. Works
++// without Lua's debug library (the release engine does not open it).
++int script_module_upvalue(lua_State* L, LPCSTR module, LPCSTR name);
+ // A copy of the slot's outbox, oldest first.
+ u32 presentation_outbox(u8 slot, xr_vector<PresentationRecord>& out);
+ // The serial of the newest record (0: none yet).
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 5c25d85..29f8a61 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -49,6 +49,7 @@
+ #include "eatable_item.h" // S08-T07
+ #include "WeaponAmmo.h" // S08-T08
+ #include "GameTask.h" // S08-T09
++#include "ActorCondition.h"
+ #include "GametaskManager.h"
+ #include "string_table.h"
+ #include "map_manager.h"
+@@ -374,6 +375,8 @@ struct Link
+ 	xr_map<u64, AmountPending> amounts_pending; // S08-T08: items not on this level yet
+ 	u64 reparents_retried = 0;
+ 	u64 party_tasks_presented = 0, map_spots = 0; // S08-T09
++	u32 hold_fire_until_ms = 0; // S08-T09: the driver holds the fire key until then
++	u64 needs_received = 0; // S08-T09
+ 	// S08-T08: an item-graph point that arrived while Reparents waited for their objects:
+ 	// compared once they are applied (at most 5 s later)
+ 	bool graph_deferred = false;
+@@ -912,6 +915,7 @@ void layout_frame(); // S08-T07
+ void on_layout(const coop::proto::CampaignEvent& event); // S08-T07
+ void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
+ void on_party_tasks(const coop::proto::CampaignEvent& event); // S08-T09
++void on_needs(const coop::proto::CampaignEvent& event); // S08-T09
+ void amounts_frame(); // S08-T08
+ 
+ void world_frame()
+@@ -966,7 +970,15 @@ void world_frame()
+ 			// callback); on a replica that would change counts locally and try to
+ 			// release items: the server merges and sends the counts
+ 			LPCSTR chunk = "if item_weapon then item_weapon.ammo_aggregation = function() return true end "
+-				"item_weapon.ammo_aggregation_full = function() return true end end";
++				"item_weapon.ammo_aggregation_full = function() return true end end "
++				// S08-T09: thirst, sleep and psy health are the server's (CampaignEvent 12)
++				"for _, m in ipairs({'actor_status_thirst', 'actor_status_sleep', 'arszi_psy'}) do "
++				"local mod = _G[m] if mod and mod.actor_on_update and axr_main and axr_main.callback_unset then "
++				"axr_main.callback_unset('actor_on_update', mod.actor_on_update) end end "
++				// S08-T09: the use animations' settings (the installed first-update
++				// handler that reads them does not run on a replica's actor)
++				"if actor_effects and actor_effects.init_main_settings then pcall(actor_effects.init_main_settings) end "
++				"__coop_animations = actor_effects and actor_effects.is_animations_on and actor_effects.is_animations_on()";
+ 			lua_State* L = ai().script_engine().lua();
+ 			if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_no_local_merge") == 0)
+ 			{
+@@ -1839,6 +1851,8 @@ void sample_input()
+ 		g_link->script_fire_down = false;
+ 		actor->IR_OnKeyboardRelease(kWPN_FIRE);
+ 	}
++	if (g_link->wall.GetElapsed_ms() < g_link->hold_fire_until_ms)
++		fire = true; // S08-T09: the driver's held key
+ 	if (fire)
+ 		in.buttons |= coop::proto::kButtonFire;
+ 	g_link->fire_sent = fire;
+@@ -3162,6 +3176,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 9: on_layout(*event); break; // S08-T07
+ 			case 10: on_amounts(*event); break; // S08-T08
+ 			case 11: on_party_tasks(*event); break; // S08-T09
++			case 12: on_needs(*event); break; // S08-T09
+ 			default: break;
+ 			}
+ 		}
+@@ -4148,7 +4163,19 @@ void on_item_graph(const coop::proto::CampaignEvent& event)
+ void inventory_intent(u16 action, u16 item, const coop::proto::EntityRef& item_ref, const xr_vector<u8>& params)
+ {
+ 	Link::TransferStepRun* st = awaiting_step(action, item);
+-	const u64 operation = request_ownership(action, item_ref, params, 0, st ? st->round : 0xffffffff, 0, !st,
++	xr_vector<u8> sent = params;
++	if (action == coop::proto::kActionUse && sent.empty())
++	{
++		// the flag: this client plays the use's animation (Anomaly's option);
++		// the server then keeps the trigger blocked while it plays
++		bool animated = true;
++		luabind::functor<bool> on;
++		if (ai().script_engine().functor("actor_effects.is_animations_on", on))
++			animated = on();
++		sent.assign(1, u8(animated ? 1 : 0));
++		g_link->log.line("use-animated item=%u animated=%d", u32(item), animated ? 1 : 0);
++	}
++	const u64 operation = request_ownership(action, item_ref, sent, 0, st ? st->round : 0xffffffff, 0, !st,
+ 		st ? "driver" : "player");
+ 	if (action == coop::proto::kActionUse)
+ 	{
+@@ -4383,6 +4410,58 @@ void amounts_frame()
+ 	}
+ }
+ 
++// S08-T09: CampaignEvent 12: this player's survival values as the server
++// holds them (f32 thirst, sleep, psy health; -1: that module is off). The
++// installed scripts' HUD indicators read their own variables: the client
++// sets them (and the psy bar) and runs no survival update of its own.
++void on_needs(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	float v[3];
++	for (float& x : v)
++		x = r.get<float>();
++	lua_State* L = ai().script_engine().lua();
++	if (!r.ok || !L || !g_actor)
++		return;
++	const struct
++	{
++		LPCSTR module, name, field;
++	} target[3] = {{"actor_status_thirst", "last_drink", nullptr}, {"actor_status_sleep", "last_sleep", nullptr},
++		{"arszi_psy", "psy_table", "actor_psy_health"}};
++	u32 set = 0;
++	for (int i = 0; i < 3; ++i)
++	{
++		if (v[i] < 0.f || !_valid(v[i]))
++			continue;
++		const int top = lua_gettop(L);
++		const int at = campaign::script_module_upvalue(L, target[i].module, target[i].name);
++		if (at)
++		{
++			if (target[i].field)
++			{
++				lua_getupvalue(L, -1, at);
++				if (lua_istable(L, -1))
++				{
++					lua_pushnumber(L, v[i]);
++					lua_setfield(L, -2, target[i].field);
++					++set;
++				}
++			}
++			else
++			{
++				lua_pushnumber(L, v[i]);
++				lua_setupvalue(L, -2, at);
++				++set;
++			}
++		}
++		lua_settop(L, top);
++	}
++	if (v[2] >= 0.f)
++		g_actor->conditions().SetPsyBar(v[2]);
++	++g_link->needs_received;
++	g_link->log.line("needs-applied thirst=%.1f sleep=%.1f psy=%.4f set=%u", v[0], v[1], v[2], set);
++}
++
+ void refresh_inventory_ui()
+ {
+ 	LPCSTR chunk = "if ui_inventory and ui_inventory.GUI and ui_inventory.GUI:IsShown() then "
+@@ -4756,6 +4835,13 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 		}
+ 		break;
+ 	}
++	case 201:
++		// S08-T09: the driver holds the fire key for `extra` seconds (the
++		// player's own key path: sample_input)
++		g_link->hold_fire_until_ms = now + u32(st.extra) * 1000;
++		st.linked = st.done = true;
++		g_link->log.line("hold-fire round=%u seconds=%u", st.round, u32(st.extra));
++		break;
+ 	case coop::proto::kActionActivateSlot:
+ 	{
+ 		xr_vector<u8> slot;
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 686b19f..13c1deb 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -139,7 +139,13 @@ struct PlayerLink
+ 	u32 waiting_generation = 0; // S07-T08: the generation this join waits for
+ 	bool layouts_sent = false; // S08-T07: every participant actor's inventory layout sent since it entered the world
+ 	bool party_sent = false; // S08-T09: the party's tasks sent since it entered the world
++	// S08-T09 (user, 2026-10-27): no firing while a use's animation keeps the weapon down
++	u64 fire_block_until = 0;
++	u64 fire_blocked_ticks = 0;
++	bool fire_block_reported = true;
+ 	u16 respawn_old_actor = 0xffff; // S08-T09: the body a respawned actor continues
++	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
++	float needs_last[3] = {-1.f, -1.f, -1.f};
+ };
+ 
+ enum WorldState : u8
+@@ -443,6 +449,9 @@ struct Host
+ 	xr_map<u64, InventoryExpect> inventory_expected;
+ 	u64 layouts_sent = 0;
+ 	bool item_adapter = false;
++	bool needs_adapter = false; // S08-T09: per-player survival values
++	u8 needs_current = 0;
++	u64 needs_swaps = 0, needs_errors = 0;
+ 	// S08-T08: containers, server-made inventory changes, stacks
+ 	xr_set<u64> containers_recorded; // container entities journaled since the last publication
+ 	xr_map<u64, xr_set<u64>> container_expected; // tracked container -> the items the records put in it
+@@ -1632,7 +1641,19 @@ void apply_inputs()
+ 		// server presses and releases the native key on the player's own
+ 		// actor, so the weapon decides whether, when and how it fires (state,
+ 		// cadence, ammo, ballistics) and the hits are the server's.
+-		const bool fire = (in.buttons & coop::proto::kButtonFire) != 0;
++		bool fire = (in.buttons & coop::proto::kButtonFire) != 0;
++		if (fire && g_host->tick < link.fire_block_until)
++		{
++			// a use's animation keeps the weapon down (single player blocks the
++			// trigger the same way): the held key counts once the window ends
++			fire = false;
++			++link.fire_blocked_ticks;
++		}
++		if (!link.fire_block_reported && g_host->tick >= link.fire_block_until)
++		{
++			link.fire_block_reported = true;
++			g_host->log.line("use-fire-block-end slot=%u blocked_ticks=%I64u", u32(link.ref.slot), link.fire_blocked_ticks);
++		}
+ 		if (fire != link.fire_down)
+ 		{
+ 			if (fire)
+@@ -4242,6 +4263,49 @@ void inventory_state(u16 actor_id, xr_map<u16, u8>& uses, xr_set<u16>& children)
+ 	}
+ }
+ 
++// How long a use's animation keeps the weapon down: the installed timeline
++// (configs/plugins/actor_effects.ltx, actor_effects.play_item_fx), keys in
++// ms: the key that raises the weapon again (actor_effects.use_weapon(1)),
++// else the timeline's last key; 0 when the item has no timeline or the
++// timeline does not lower the weapon.
++u32 use_fx_window_ms(LPCSTR section)
++{
++	static CInifile* timelines = nullptr;
++	if (!timelines)
++	{
++		string_path path;
++		FS.update_path(path, "$game_config$", "plugins\\actor_effects.ltx");
++		timelines = xr_new<CInifile>(path, TRUE, TRUE, FALSE);
++	}
++	if (!section || !timelines->section_exist(section))
++	{
++		g_host->log.line("use-fx-window section=%s file_sections=%u found=0", section ? section : "-",
++			u32(timelines->sections().size()));
++		return 0;
++	}
++	u32 last = 0, raise = 0;
++	bool lowers = false;
++	const u32 n = timelines->line_count(section);
++	for (u32 i = 0; i < n; ++i)
++	{
++		LPCSTR key = nullptr, value = nullptr;
++		if (!timelines->r_line(section, int(i), &key, &value) || !key || !value)
++			continue;
++		char* end = nullptr;
++		const unsigned long ms = strtoul(key, &end, 10);
++		if (end == key)
++			continue;
++		last = _max(last, u32(ms));
++		if (strstr(value, "use_weapon(0)"))
++			lowers = true;
++		if (strstr(value, "use_weapon(1)"))
++			raise = _max(raise, u32(ms));
++	}
++	return lowers ? (raise ? raise : last) : 0;
++}
++
++void needs_values(u8 slot, float out[3]); // S08-T09
++
+ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+ {
+ 	CoopPersistence* persistence = g_host->persistence;
+@@ -4258,9 +4322,11 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
+ 		return stored.reason;
+ 	}
+-	// 2. Prepare / validate.
+-	if (!intent.params.empty())
++	// 2. Prepare / validate. Params: none, or u8 flags (bit 0: the client
++	// plays the use's animation; none: as if it did).
++	if (intent.params.size() > 1 || (intent.params.size() == 1 && (intent.params[0] & ~1)))
+ 		return coop::proto::kReasonMalformed;
++	const bool animated = intent.params.empty() || (intent.params[0] & 1);
+ 	CActor* actor = nullptr;
+ 	coop::proto::EntityRef actor_ref;
+ 	u16 id = kNoEngineId;
+@@ -4284,6 +4350,9 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 	for (u16 child : children_before)
+ 		entities_before[child] = entity_of(child);
+ 	const float health_before = actor->conditions().GetHealth();
++	float needs_before[2][3]; // S08-T09: both players' survival values around the use
++	needs_values(0, needs_before[0]);
++	needs_values(1, needs_before[1]);
+ 	// 3. Apply: the engine on the server's actor, inside the player's context
+ 	// (the installed scripts' db.actor is this actor), as Actor_Events'
+ 	// GEG_PLAYER_ITEM_EAT does: the scripts' before-use check, then Eat
+@@ -4416,12 +4485,35 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ 	for (const UseEffect& e : record.effects)
+ 		g_host->log.line("use-effect revision=%I64u op=%u entity=%I64u uses=%u section=%s", revision, u32(e.op),
+ 			e.item_entity, u32(e.uses), e.section.empty() ? "-" : e.section.c_str());
++	{
++		float after[2][3];
++		needs_values(0, after[0]);
++		needs_values(1, after[1]);
++		g_host->log.line("use-needs revision=%I64u slot=%u section=%s thirst0=%.1f->%.1f thirst1=%.1f->%.1f "
++			"sleep0=%.1f->%.1f sleep1=%.1f->%.1f", revision, u32(record.slot), record.section.c_str(),
++			needs_before[0][0], after[0][0], needs_before[1][0], after[1][0], needs_before[0][1], after[0][1],
++			needs_before[1][1], after[1][1]);
++	}
+ 	inventory_csv("use", "commit", revision, record.slot, record.operation, record.item_entity, id,
+ 		record.actor_entity, 0, 0, record.uses_after, record.consumed, record.section.c_str(), 0);
+ 	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
+ 	stored.reason = 0;
+ 	stored.revision = revision;
+ 	persistence->remember(link.player, intent.operation_id, stored);
++	// the weapon stays down while the use's animation plays on the user's
++	// client (decision T07-5 as revised by the user): the trigger is ignored
++	const u32 window = animated ? use_fx_window_ms(section.c_str()) : 0;
++	if (!window)
++		g_host->log.line("use-fire-block-none slot=%u section=%s animated=%d params=%u", u32(link.ref.slot),
++			section.c_str(), animated ? 1 : 0, u32(intent.params.size()));
++	if (window)
++	{
++		link.fire_block_until = g_host->tick + (window + 19) / 20;
++		link.fire_blocked_ticks = 0;
++		link.fire_block_reported = false;
++		g_host->log.line("use-fire-block slot=%u section=%s ms=%u until_tick=%I64u", u32(link.ref.slot),
++			section.c_str(), window, link.fire_block_until);
++	}
+ 	result.outcome = coop::proto::ActionOutcome::Accepted;
+ 	result.commit_id = revision;
+ 	result.revision = revision;
+@@ -4737,6 +4829,317 @@ void install_item_adapter()
+ 		booster_diag("install");
+ }
+ 
++// ------------------------------------------------------------ S08-T09
++// Per-player survival values (user, 2026-10-27, decision T07-8 revised):
++// thirst (actor_status_thirst), sleep (actor_status_sleep) and psy health
++// (arszi_psy) keep their state in script-local variables for "the actor".
++// The server keeps one copy per participant slot (__campaign_needs.slots)
++// and swaps it into the scripts' variables whenever native code enters a
++// participant's script context (and back to participant 1's when it
++// leaves). The scripts' own per-frame update is unregistered; the server
++// runs it every tick for every participant inside its context. The copies
++// of participants other than 1 are saved with the checkpoint
++// (m_data.coop_needs; participant 1's through the scripts' own save) and
++// each player's values go to its client (CampaignEvent 12) for its HUD.
++struct NeedsSpec
++{
++	LPCSTR module;
++	LPCSTR names[3];
++};
++const NeedsSpec kNeeds[] = {
++	{"actor_status_thirst", {"last_drink", "last_drink_chk", "pwr_chk"}},
++	{"actor_status_sleep", {"last_sleep", "last_sleep_chk", "pwr_chk"}},
++	{"arszi_psy", {"psy_table", "arszi_previous_time", "arszi_wait_seconds_ingame"}},
++};
++
++LPCSTR const needs_source =
++	"local P = rawget(_G, '__campaign_needs')\n"
++	"if type(P) == 'table' and P.installed then return end\n"
++	"P = { installed = true, slots = {}, current = 0 }\n"
++	"rawset(_G, '__campaign_needs', P)\n"
++	"local defaults = {\n"
++	"  actor_status_thirst = function() return { last_drink = 0 } end,\n"
++	"  actor_status_sleep = function() return { last_sleep = 0 } end,\n"
++	"  arszi_psy = function() return { psy_table = { actor_psy_health = 1 } } end,\n"
++	"}\n"
++	"function P.module_table(slot, module)\n"
++	"  P.slots[slot] = P.slots[slot] or {}\n"
++	"  local s = P.slots[slot]\n"
++	"  if not s[module] then s[module] = defaults[module] and defaults[module]() or {} end\n"
++	"  return s[module]\n"
++	"end\n"
++	"local transient = { pwr_chk = true, arszi_previous_time = true, arszi_wait_seconds_ingame = true }\n"
++	"local function out_value(v)\n"
++	"  if type(v) == 'userdata' and utils_data and utils_data.CTime_to_table then return { __ctime = utils_data.CTime_to_table(v) } end\n"
++	"  return v\n"
++	"end\n"
++	"local function in_value(v)\n"
++	"  if type(v) == 'table' and v.__ctime and utils_data and utils_data.CTime_from_table then return utils_data.CTime_from_table(v.__ctime) end\n"
++	"  return v\n"
++	"end\n"
++	"function P.save(m_data)\n"
++	"  local out = {}\n"
++	"  for slot, mods in pairs(P.slots) do\n"
++	"    if slot ~= P.current then\n"
++	"      out[slot] = {}\n"
++	"      for m, t in pairs(mods) do\n"
++	"        out[slot][m] = {}\n"
++	"        for k, v in pairs(t) do if not transient[k] then out[slot][m][k] = out_value(v) end end\n"
++	"      end\n"
++	"    end\n"
++	"  end\n"
++	"  m_data.coop_needs = out\n"
++	"end\n"
++	"local st = alife_storage_manager and alife_storage_manager.get_state and alife_storage_manager.get_state()\n"
++	"P.restored = 0\n"
++	"if st and type(st.coop_needs) == 'table' then\n"
++	"  for slot, mods in pairs(st.coop_needs) do\n"
++	"    if slot ~= 0 then\n"
++	"      P.slots[slot] = {}\n"
++	"      for m, t in pairs(mods) do\n"
++	"        P.slots[slot][m] = {}\n"
++	"        for k, v in pairs(t) do P.slots[slot][m][k] = in_value(v) end\n"
++	"      end\n"
++	"      P.restored = P.restored + 1\n"
++	"    end\n"
++	"  end\n"
++	"end\n"
++	"if RegisterScriptCallback then RegisterScriptCallback('save_state', P.save) end\n"
++	"P.unregistered = 0\n"
++	"for _, m in ipairs({ 'actor_status_thirst', 'actor_status_sleep', 'arszi_psy' }) do\n"
++	"  local mod = rawget(_G, m) or _G[m]\n"
++	"  if mod and mod.actor_on_update and axr_main and axr_main.callback_unset then\n"
++	"    axr_main.callback_unset('actor_on_update', mod.actor_on_update)\n"
++	"    P.unregistered = P.unregistered + 1\n"
++	"  end\n"
++	"end\n";
++
++// Pushes __campaign_needs.module_table(slot, module) (nil when missing).
++bool push_needs_table(lua_State* L, u8 slot, LPCSTR module)
++{
++	lua_getglobal(L, "__campaign_needs");
++	if (!lua_istable(L, -1))
++	{
++		lua_pop(L, 1);
++		return false;
++	}
++	lua_getfield(L, -1, "module_table");
++	lua_remove(L, -2);
++	lua_pushnumber(L, slot);
++	lua_pushstring(L, module);
++	if (lua_pcall(L, 2, 1, 0) != 0 || !lua_istable(L, -1))
++	{
++		lua_pop(L, 1);
++		return false;
++	}
++	return true;
++}
++
++// The scripts' variables: participant `from`'s values out, `to`'s in.
++void needs_swap(u8 from, u8 to)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	const int top = lua_gettop(L);
++	for (const NeedsSpec& spec : kNeeds)
++		for (LPCSTR name : spec.names)
++		{
++			const int at = campaign::script_module_upvalue(L, spec.module, name); // the function on top
++			if (!at)
++				continue;
++			const int fn = lua_gettop(L);
++			if (push_needs_table(L, from, spec.module))
++			{
++				lua_getupvalue(L, fn, at);
++				lua_setfield(L, -2, name);
++				lua_pop(L, 1);
++			}
++			if (push_needs_table(L, to, spec.module))
++			{
++				lua_getfield(L, -1, name);
++				lua_remove(L, -2);
++				lua_setupvalue(L, fn, at);
++			}
++			lua_settop(L, fn - 1);
++		}
++	lua_settop(L, top);
++	lua_getglobal(L, "__campaign_needs");
++	if (lua_istable(L, -1))
++	{
++		lua_pushnumber(L, to);
++		lua_setfield(L, -2, "current");
++	}
++	lua_pop(L, 1);
++}
++
++void needs_switch(u8 slot)
++{
++	if (!g_host || !g_host->needs_adapter)
++		return;
++	const u8 to = slot == 0xff ? 0 : slot;
++	if (to == g_host->needs_current)
++		return;
++	needs_swap(g_host->needs_current, to);
++	g_host->needs_current = to;
++	++g_host->needs_swaps;
++}
++
++// A number the scripts hold in an upvalue (or a field of a table upvalue).
++float needs_number(lua_State* L, LPCSTR module, LPCSTR name, LPCSTR field)
++{
++	float value = -1.f;
++	const int top = lua_gettop(L);
++	const int at = campaign::script_module_upvalue(L, module, name);
++	if (at)
++	{
++		lua_getupvalue(L, -1, at);
++		if (field && lua_istable(L, -1))
++			lua_getfield(L, -1, field);
++		if (lua_isnumber(L, -1))
++			value = float(lua_tonumber(L, -1));
++	}
++	lua_settop(L, top);
++	return value;
++}
++
++bool needs_feature_on(lua_State* L, LPCSTR module)
++{
++	const int top = lua_gettop(L);
++	const int at = campaign::script_module_upvalue(L, module, "feature_state");
++	bool on = true; // a module without the switch (arszi_psy) is always on
++	if (at)
++	{
++		lua_getupvalue(L, -1, at);
++		on = lua_toboolean(L, -1) != 0;
++	}
++	lua_settop(L, top);
++	return on;
++}
++
++// One participant's values (thirst, sleep, psy health): its copy swapped in, read, swapped back.
++void needs_values(u8 slot, float out[3])
++{
++	out[0] = out[1] = out[2] = -1.f;
++	lua_State* L = ai().script_engine().lua();
++	if (!L || !g_host->needs_adapter)
++		return;
++	const u8 was = g_host->needs_current;
++	needs_switch(slot);
++	out[0] = needs_number(L, "actor_status_thirst", "last_drink", nullptr);
++	out[1] = needs_number(L, "actor_status_sleep", "last_sleep", nullptr);
++	out[2] = needs_number(L, "arszi_psy", "psy_table", "actor_psy_health");
++	needs_switch(was);
++}
++
++void install_needs_adapter()
++{
++	if (g_host->needs_adapter)
++		return;
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	if (luaL_loadbuffer(L, needs_source, xr_strlen(needs_source), "campaign_needs") != 0 || lua_pcall(L, 0, 0, 0) != 0)
++	{
++		g_host->log.line("needs-adapter-failed error=%s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		return;
++	}
++	g_host->needs_adapter = true;
++	g_host->needs_current = 0;
++	campaign::set_context_switch_hook(needs_switch);
++	luabind::object P = luabind::get_globals(L)["__campaign_needs"];
++	auto num = [&](LPCSTR k) {
++		return P.type() == LUA_TTABLE && luabind::object(P[k]).type() == LUA_TNUMBER ?
++			luabind::object_cast<int>(P[k]) : -1;
++	};
++	u32 found = 0;
++	for (const NeedsSpec& spec : kNeeds)
++		for (LPCSTR name : spec.names)
++		{
++			const int top = lua_gettop(L);
++			found += campaign::script_module_upvalue(L, spec.module, name) ? 1 : 0;
++			lua_settop(L, top);
++		}
++	g_host->log.line("needs-adapter installed variables=%u unregistered=%d restored_slots=%d thirst_on=%d sleep_on=%d",
++		found, num("unregistered"), num("restored"), needs_feature_on(L, "actor_status_thirst") ? 1 : 0,
++		needs_feature_on(L, "actor_status_sleep") ? 1 : 0);
++	for (u8 slot = 0; slot < 2; ++slot)
++	{
++		float v[3];
++		needs_values(slot, v);
++		g_host->log.line("needs-restored slot=%u thirst=%.1f sleep=%.1f psy=%.4f", u32(slot), v[0], v[1], v[2]);
++	}
++}
++
++// Every tick: each live participant's survival update, in its context; its
++// values to its client (CampaignEvent 12: f32 thirst, sleep, psy health;
++// -1 when that module is off), when they change or every 10 s, and at once
++// to a client entering the world.
++void drive_needs()
++{
++	if (!g_host->needs_adapter)
++		return;
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (!actor || !actor->g_Alive())
++			continue;
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "needs-update");
++		if (!scope.entered())
++			continue;
++		for (const NeedsSpec& spec : kNeeds)
++		{
++			if (!needs_feature_on(L, spec.module))
++				continue;
++			const int top = lua_gettop(L);
++			lua_getglobal(L, spec.module);
++			if (lua_istable(L, -1))
++			{
++				lua_getfield(L, -1, "actor_on_update");
++				if (lua_isfunction(L, -1) && lua_pcall(L, 0, 0, 0) != 0)
++				{
++					if (!g_host->needs_errors++)
++						g_host->log.line("needs-update-failed module=%s error=%s", spec.module, lua_tostring(L, -1));
++				}
++			}
++			lua_settop(L, top);
++		}
++	}
++	if (g_host->tick % 50)
++		return;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!client_in_world(link))
++		{
++			link.needs_sent_ms = 0;
++			continue;
++		}
++		float v[3];
++		needs_values(link.ref.slot, v);
++		const u32 now = host_ms();
++		bool changed = !link.needs_sent_ms || now - link.needs_sent_ms >= 10000;
++		for (int i = 0; i < 3; ++i)
++			changed = changed || _abs(v[i] - link.needs_last[i]) > (i == 2 ? 0.005f : 1.f);
++		if (!changed)
++			continue;
++		std::vector<u8> payload;
++		for (int i = 0; i < 3; ++i)
++		{
++			put_f32(payload, v[i]);
++			link.needs_last[i] = v[i];
++		}
++		queue_event(link, 12, payload);
++		link.needs_sent_ms = now ? now : 1;
++		g_host->log.line("needs slot=%u thirst=%.1f sleep=%.1f psy=%.4f", u32(link.ref.slot), v[0], v[1], v[2]);
++	}
++}
++
+ int item_fx_suppressed()
+ {
+ 	lua_State* L = ai().script_engine().lua();
+@@ -6880,7 +7283,9 @@ void transfer_fixtures()
+ //  10 pickup         p1 picks up the bread that has lain at its feet since the set-up (a pickup record)
+ //  11 eat it         p1 eats that bread: after a restart neither the pickup's record nor anything else
+ //                    may bring it back (L39)
+-const u32 kUseRounds = 12;
++//  12 fire block     p1 eats a conserva and holds the fire key from 0.5 s to 11.5 s after: the server ignores
++//                    it until the conserva's animation raises the weapon (9.68 s), then presses it
++const u32 kUseRounds = 13;
+ 
+ void use_fixtures()
+ {
+@@ -6925,7 +7330,7 @@ void use_fixtures()
+ 			toward.set(1.f, 0.f, 0.f);
+ 		toward.normalize();
+ 		f.ground = spawn_at(alife, "bread", Fvector().mad(actors[0]->Position(), toward, 0.6f), f.actors[0]);
+-		LPCSTR sections[] = {"medkit", "bread", "detector_simple", "wpn_pm", "medkit", "conserva", "af_medusa"};
++		LPCSTR sections[] = {"medkit", "bread", "detector_simple", "wpn_pm", "medkit", "conserva", "af_medusa", "conserva"};
+ 		for (u32 k = 0; k < 2; ++k)
+ 		{
+ 			for (LPCSTR section : sections)
+@@ -7025,9 +7430,14 @@ void use_fixtures()
+ 	case 10:
+ 		steps.push_back({s0, u8(coop::proto::kActionPickup), 0, f.ground, 0xffff, A0, 0, 0});
+ 		break;
+-	default:
++	case 12:
++		steps.push_back({s0, kUse, 0, item(0, 7), A0, 0xffff, 0, 0});
++		steps.push_back({s0, 201, 25, item(0, 7), A0, 0xffff, 0, 11}); // the client holds fire for 11 s
++		break;
++	case 11:
+ 		steps.push_back({s0, kUse, 0, f.ground, A0, 0xffff, 0, 0});
+ 		break;
++	default: break;
+ 	}
+ 	const u64 claim_tick = g_host->tick + 100;
+ 	std::vector<u8> payload;
+@@ -8895,6 +9305,7 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 	g_campaign_identity->set_entity_reserver(reserve_entity_block);
+ 	install_party_adapter(); // S08-T04
+ 	install_item_adapter(); // S08-T07
++	install_needs_adapter(); // S08-T09
+ 	rebuild_party_tasks(); // S08-T06
+ 	disable_power_throttling();
+ 	g_host->wall.Start();
+@@ -8989,6 +9400,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	item_graph_points(); // S08-T03
+ 	quest_tick(); // S08-T04
+ 	send_party_tasks(); // S08-T09
++	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
+ 	quest_fixtures(); // S08-T04
+ 	encounter_fixtures();
+ 	encounter_record();

@@ -213,6 +213,10 @@
     {
       "path": "patches/engine/0051-party-presentation-and-anchor.patch",
       "sha256": "270a387d7b2c8cf4fc47c13ad73ea1a623e08c903422d20b96527846a3b43429"
+    },
+    {
+      "path": "patches/engine/0052-use-fire-block-and-player-needs.patch",
+      "sha256": "31328c85c8431566a2749ddfb8b7d1f7a16ea2d5cdc4a232d3f046e6eefbbb6b"
     }
   ],
   "submodules": [

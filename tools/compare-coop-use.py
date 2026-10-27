@@ -24,6 +24,7 @@ The fixture's rounds (CoopServerHost.cpp use_fixtures) and what each step must g
   9 disconnect   Accepted (the request survives the dropped connection)
  10 pickup       Accepted (p1 picks up the bread at its feet: a pickup record)
  11 eat it       Accepted (that bread used up: after a restart it must not come back, L39)
+ 12 fire block   Accepted (p1 eats a conserva while its client holds the fire key from 0.5 s to 11.5 s)
 
 Checks:
   rounds              every round's results as above. With --expect-restart the restarted server
@@ -46,6 +47,13 @@ Checks:
   adapter             the server's item adapter is installed (fx and booster memory wrapped)
   no_pending          no client ended with an unanswered request
   disconnect          round 9's client dropped its connection after the request and got it Accepted
+  needs_separate      every use that changed its user's thirst or sleep left the other player's untouched
+                      (use-needs: both players' values around the use; per-player survival values)
+  needs_clients       each client applied its own player's survival values (needs-applied), the last
+                      within two update steps of the server's last value for that player
+  fire_block          round 12: the server ignored the held fire key from the use until the conserva's
+                      animation raised the weapon (use-fire-block, its window 9.68 s), and pressed it
+                      after the window (the first fire-press after the use, not before the window ends)
 With --expect-restart also:
   restart_recovered   the restarted server recovered and replayed its records without failure, and
                       its inventory-state at recovery was all ok
@@ -89,6 +97,7 @@ EXPECT = {
     9: {0: A},
     10: {0: A},
     11: {0: A},
+    12: {0: A},
 }
 
 
@@ -231,6 +240,55 @@ def main():
     r9 = results.get((final_era, 9, 0))
     report["checks"]["disconnect"] = {"pass": sum(disconnect.values()) >= 1 and bool(r9) and r9["outcome"] == 1,
                                       "disconnects": disconnect, "result": r9}
+
+    blocks = []
+    for log in server_logs:
+        for i, x in enumerate(log):
+            if " use-fire-block " in x and " section=conserva " in x:
+                until = field(x, "until_tick", int)
+                ms = int(x.split(" ", 1)[0])
+                ends = [y for y in log[i:] if " use-fire-block-end " in y and f"slot={field(x, 'slot')}" in y]
+                presses = [y for y in log[i:] if " fire-press " in y and f"slot={field(x, 'slot')}" in y]
+                first_ms = int(presses[0].split(" ", 1)[0]) if presses else None
+                blocks.append({"window_ms": field(x, "ms", int), "until_tick": until,
+                               "blocked_ticks": field(ends[0], "blocked_ticks", int) if ends else None,
+                               "first_press_after_ms": first_ms - ms if first_ms else None})
+    changes = []
+    for x in every:
+        if " use-needs " in x:
+            slot = field(x, "slot", int)
+            vals = {}
+            for k in ("thirst0", "thirst1", "sleep0", "sleep1"):
+                m = re.search(r"\b" + k + r"=(-?[\d.]+)->(-?[\d.]+)", x)
+                vals[k] = (float(m.group(1)), float(m.group(2))) if m else None
+            own = [vals[f"{k}{slot}"] for k in ("thirst", "sleep")]
+            other = [vals[f"{k}{1 - slot}"] for k in ("thirst", "sleep")]
+            if any(v and v[0] != v[1] for v in own):
+                changes.append({"slot": slot, "section": field(x, "section"), "own": own, "other": other,
+                                "other_untouched": all(v is None or v[0] == v[1] for v in other)})
+    report["checks"]["needs_separate"] = {"pass": bool(changes) and all(c["other_untouched"] for c in changes),
+                                          "changes": changes}
+    last_server = {}
+    for x in server_logs[-1] if server_logs else []:
+        if re.search(r" needs slot=", x):
+            last_server[field(x, "slot", int)] = field(x, "thirst", float)
+    client_needs = {}
+    for c in clients:
+        applied = [x for x in lines(logs / c / f"coop-{c}.log") if " needs-applied " in x]
+        client_needs[c] = {"applied": len(applied),
+                           "last_thirst": field(applied[-1], "thirst", float) if applied else None}
+    # the last values each side logged may be one or two update steps apart (thirst rises 30 a step)
+    lasts = sorted(v["last_thirst"] if v["last_thirst"] is not None else -999 for v in client_needs.values())
+    servers = sorted(last_server.values())
+    report["checks"]["needs_clients"] = {
+        "pass": bool(last_server) and bool(client_needs) and all(v["applied"] > 0 for v in client_needs.values()) and
+        len(lasts) == len(servers) and all(abs(a - b) <= 60 for a, b in zip(lasts, servers, strict=True)),
+        "clients": client_needs, "server_last": last_server}
+    held = [b for b in blocks if b["blocked_ticks"]]  # the window round 12 held the key through
+    report["checks"]["fire_block"] = {
+        "pass": bool(held) and all(b["first_press_after_ms"] and b["first_press_after_ms"] >= b["window_ms"] - 40
+                                   for b in held),
+        "blocks": blocks}
 
     if a.expect_restart:
         second = server_logs[-1] if len(server_logs) > 1 else []

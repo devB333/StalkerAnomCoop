@@ -14,12 +14,13 @@
   in the review (rows to add on confirmation).
 - Fixed on the way: a restart after participant 1's respawn could not start
   (S07-T07 era); a client's Lua "Use" would have dropped the eaten item.
-- Protocol v1.6 `proto-build-44` (st-14, st-15); final builds campaign-291 /
-  client-190 (patch 0052). Runs: eq-1…17, eqr-1 (S08-T07), ct-1…12, ctr-1
+- Protocol v1.6 `proto-build-44` (st-14, st-15); final builds campaign-292 /
+  client-191 (patches 0052, 0053). Runs: eq-1…18, eqr-1 (S08-T07), ct-1…12, ctr-1
   (S08-T08), pq-1…6, pqr-1…6 (S08-T09); eq-3 unused.
 - 2026-10-27, the user's review: T07-1…4, 6, 7, 9 approved; T07-5 (no
   firing during the use animation) and T07-8 (thirst, sleep, psy health per
-  player) revised and implemented in patch 0052; proposed limits L44–L49 in
+  player) revised and implemented in patch 0052; each HUD shows the server's
+  hunger, stamina and radiation (patch 0053); proposed limits L44–L49 in
   carried-limits.md. T08 and T09 decisions and the gate still wait.
 - Open from earlier: the user's K1/K5 hands-on retest.
 
@@ -31,8 +32,8 @@ Completed; then S09-T01 (party travel: request and two-player consent).
 
 ## Run names
 
-- Next: `campaign-292`, `client-191`, `proto-build-45`, `st-16`, patch
-  check 59.
+- Next: `campaign-293`, `client-192`, `proto-build-45`, `st-16`, patch
+  check 60.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

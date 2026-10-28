@@ -9,7 +9,9 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
            [--transfer c1,c2 [--transfer-start 20]] [--quest c1,c2 [--quest-start 20]]
            [--use c1,c2 [--use-start 20]] [--stack c1,c2 [--stack-start 20]]
-           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1]]
+           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4] [--travel-barrier-hold 5]
+            [--travel-ready-delay c2:15] [--travel-ready-wrong c2] [--travel-rejoin-delay c2:75]
+            [--travel-load-fail c2]]
            [--protocol-build proto-build-42] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
@@ -141,13 +143,24 @@ def main():
                              "travel:after-propose the server exits itself after round 0's proposal); 2 (S09-T02) "
                              "round 0 only and the agreed travel is carried out (the party arrives on the "
                              "destination level; --failpoint travel:before-take / travel:after-commit for the "
-                             "crash windows)")
+                             "crash windows); 3 (S09-T04) the partner accepts and drops its connection inside the "
+                             "barrier (with --travel-barrier-hold), then the party asks again and travels; 4 "
+                             "(S09-T04) two agreed travels, the first's publication failed from outside "
+                             "(--failpoint checkpoint:after-manifest:3:fail), the second carried out")
+    parser.add_argument("--travel-barrier-hold", type=int, default=0,
+                        help="S09-T04 harness: seconds the server keeps the barrier up before the take (0 off)")
     parser.add_argument("--travel-ready-delay", default="",
                         help="S09-T03 driver: <client>:<seconds>[,...]: that client sends its ready N s after "
                              "arriving on the destination level (999: never)")
     parser.add_argument("--travel-ready-wrong", default="",
                         help="S09-T03 driver: comma-separated clients that first send a ready with a wrong "
                              "transition id, then a wrong level, then the right one")
+    parser.add_argument("--travel-rejoin-delay", default="",
+                        help="S09-T04 driver: <client>:<seconds> the client waits after a committed travel before "
+                             "it reconnects (default 2 s)")
+    parser.add_argument("--travel-load-fail", default="",
+                        help="S09-T04 driver: comma-separated clients that terminate themselves when the destination "
+                             "world is received (a crash during the load; restart them with Run-CoopSession -Restart)")
     parser.add_argument("--restart-no-fixture", action="store_true",
                         help="with --failpoint: the restarted server runs no fixture (the clients' pending "
                              "requests are retried against the recovered world) (S08-T06)")
@@ -207,6 +220,8 @@ def main():
     travel = {n for n in args.travel.split(",") if n}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
+    rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
+    load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
@@ -294,7 +309,8 @@ def main():
                       f"quest_party = {args.quest_start if quest else 0}", f"quest_holder = {args.quest_holder}",
                       f"quest_variant = {args.quest_variant}",
                       f"travel_party = {args.travel_start if travel else 0}",
-                      f"travel_variant = {args.travel_variant}"]
+                      f"travel_variant = {args.travel_variant}",
+                      f"travel_barrier_hold = {args.travel_barrier_hold}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -333,7 +349,9 @@ def main():
                       f"predict = {0 if name in no_predict else 1}",
                       f"auto_respawn = {args.auto_respawn}",
                       f"travel_ready_delay = {ready_delay.get(name, 0)}",
-                      f"travel_ready_wrong = {1 if name in ready_wrong else 0}"]
+                      f"travel_ready_wrong = {1 if name in ready_wrong else 0}",
+                      f"travel_rejoin_delay = {rejoin_delay.get(name, 0)}",
+                      f"travel_load_fail = {1 if name in load_fail else 0}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile
@@ -392,6 +410,9 @@ def main():
         "travel_variant": args.travel_variant if travel else 0,
         "travel_ready_delay": ready_delay,
         "travel_ready_wrong": sorted(ready_wrong),
+        "travel_barrier_hold": args.travel_barrier_hold,
+        "travel_rejoin_delay": rejoin_delay,
+        "travel_load_fail": sorted(load_fail),
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

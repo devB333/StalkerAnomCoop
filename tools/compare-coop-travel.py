@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Check the S09-T01 party travel request and two-player consent (plan.md S09-T01, docs/travel-contract.md).
 
-Usage: python3 tools/compare-coop-travel.py <session logs> [--variant 0|1] [--out compare-travel.json]
+Usage: python3 tools/compare-coop-travel.py <session logs> [--variant 0|1|2|3|4] [--out compare-travel.json]
+         [--expect-resume all-ready|timeout] [--expect-wrong-readies N] [--expect-late c2]
+         [--expect-client-crash c2] [--expect-retry-after-crash]
 
 Inputs (builds/logs/<task>/run-<run>/): server/ (and server-first-run/ for variant 1): coop-server.log;
 c1/, c2/: coop-c*.log. The session runs the travel fixture (--travel c1,c2): both actors are placed in a
@@ -28,6 +30,9 @@ Checks:
                 discarded, no actor moved) until every client's ready named the pending transition and
                 level (or the 60-s deadline), refused the driver's wrong readies (31), answered a
                 ready's repeat from its stored outcome, and both clients saw the resume
+  rollback      (variants 3 and 4, S09-T04) the first agreed travel was rolled back in process for the expected
+                reason (3: a party member left during the barrier, nothing durable; 4: the publication failed,
+                phase 3 recorded) and both players were told; the retry was carried out
   recovery      (variant 2 with a crash window) the restarted server recovered on the right level: the
                 source level after travel:before-take (prepared only), the destination level after
                 travel:after-commit (committed, rolled forward), and both clients rejoined there
@@ -68,6 +73,9 @@ EXPECT_ENDS = {
     0: ["agreed"], 1: ["refused"], 2: ["expired"], 3: ["agreed"], 4: ["aborted:partner-left", "agreed"],
     5: ["cancelled"], 6: [], 7: ["agreed"], 8: ["agreed"],
 }
+# S09-T04 variants 3 and 4: two agreed travels; the first is rolled back by the executor (not a consent end)
+EXPECT_STEPS_RETRY = {0: [(0, 11, A, 0), (1, 12, A, 0)], 1: [(0, 11, A, 0), (1, 12, A, 0)]}
+EXPECT_ENDS_RETRY = {0: ["agreed"], 1: ["agreed"]}
 
 
 def server_rounds(log):
@@ -92,13 +100,27 @@ def main():
                     help="variant 2 (S09-T03): how the hold on the destination level is expected to end")
     ap.add_argument("--expect-wrong-readies", type=int, default=0,
                     help="variant 2: readies the server must have refused as wrong (the driver's)")
+    ap.add_argument("--expect-late", default="",
+                    help="S09-T04: the client that rejoins after the hold timed out (travel_rejoin_delay): it gets no "
+                         "resume, its ready is refused as no-hold and it plays on the destination level")
+    ap.add_argument("--expect-client-crash", default="",
+                    help="S09-T04: the client whose first run died at the destination load (travel_load_fail); its "
+                         "restart is told the hold (state 10) and reports ready")
+    ap.add_argument("--expect-retry-after-crash", action="store_true",
+                    help="S09-T04: after travel:before-take the restarted server ran the fixture again and the "
+                         "party travelled")
     a = ap.parse_args()
     root = Path(a.logs)
     server = lines(root / "server" / "coop-server.log")
     first = lines(root / "server-first-run" / "coop-server.log")
-    clients = {n: lines(root / n / f"coop-{n}.log") for n in ("c1", "c2")}
+    # a client's first run (before a restart) comes first: the logs read chronologically; the restarted
+    # process appends to the same log file, so when the final log already begins with the first run's
+    # first line it holds both runs and the kept copy is not added again
+    clients = {}
     for n in ("c1", "c2"):
-        clients[n] += lines(root / f"{n}-first-run" / f"coop-{n}.log")
+        earlier = lines(root / f"{n}-first-run" / f"coop-{n}.log")
+        later = lines(root / n / f"coop-{n}.log")
+        clients[n] = later if earlier and later and earlier[0] == later[0] else earlier + later
     checks = {}
     detail = {}
 
@@ -117,7 +139,11 @@ def main():
     both_runs = first + server  # a crash window splits one story over two server logs
     rounds = server_rounds(both_runs)
     ran = sorted(r for r in rounds if r >= 0)
-    expected_rounds = [0, 1] if a.variant == 1 else [0] if a.variant == 2 else list(range(9))
+    expected_rounds = [0, 1] if a.variant in (1, 3, 4) else [0] if a.variant == 2 else list(range(9))
+    if a.variant == 2 and a.expect_retry_after_crash:
+        expected_rounds = [0]  # round 0 in each server run; judged per run below
+    expect_steps = EXPECT_STEPS_RETRY if a.variant in (3, 4) else EXPECT_STEPS
+    expect_ends = EXPECT_ENDS_RETRY if a.variant in (3, 4) else EXPECT_ENDS
     detail["rounds_ran"] = ran
     combat_line = next((kv(ln) for ln in server if "fixture-travel combat=" in ln), None)
     detail["combat_exercised"] = combat_line.get("combat") == "1" if combat_line else None
@@ -127,7 +153,7 @@ def main():
     no_combat = bool(combat_line) and combat_line.get("combat") != "1"
     detail["combat_not_exercised"] = no_combat
     for r in expected_rounds:
-        steps = EXPECT_STEPS_NO_COMBAT_8 if r == 8 and no_combat else EXPECT_STEPS[r]
+        steps = EXPECT_STEPS_NO_COMBAT_8 if r == 8 and no_combat else expect_steps[r]
         for s, exp in enumerate(steps):
             got = results.get((r, s), [])
             if exp is None:
@@ -149,6 +175,16 @@ def main():
                     want = [(0, 11, A, 0), (0, 11, R, 0)]
                 else:
                     want = [(1, 12, R, 28), (1, 12, A, 0)]
+            if a.expect_retry_after_crash:
+                # round 0 ran in both server runs (the failpoint at travel:before-take killed the first
+                # after the accept, in the same tick: its result was not flushed, so c2 re-sends the
+                # accept to the restarted server, which refuses the pre-restart id 28); the restarted
+                # fixture's round 0 is accepted whole
+                alternatives = [[(0, 11, A, 0), (0, 11, A, 0)]] if s == 0 else \
+                    [[(1, 12, R, 28), (1, 12, A, 0)], [(1, 12, A, 0), (1, 12, A, 0)]]
+                if have not in [sorted(w) for w in alternatives]:
+                    failures.append(f"round {r} step {s}: expected one of {alternatives}, got {have}")
+                continue
             if have != sorted(want):
                 failures.append(f"round {r} step {s}: expected {sorted(want)}, got {have}")
     checks["rounds"] = {"pass": not failures, "failures": failures}
@@ -161,9 +197,11 @@ def main():
             m = re.search(r"travel-end id=(\w+) state=([\w-]+) abort=([\w-]+)", line)
             if m:
                 ends.append(m.group(2) if m.group(2) != "aborted" else f"aborted:{m.group(3)}")
-        want = list(EXPECT_ENDS[r])
+        want = list(expect_ends[r])
         if a.variant == 1 and r == 0:
             want = ["agreed"]  # the restarted server's round 0; the first run's proposal never ended there
+        if a.expect_retry_after_crash:
+            want = ["agreed", "agreed"]  # once per server run
         if r == 8 and no_combat:
             want = ["cancelled", "agreed"]
         # transitions requested by hand (a player's USE key in a client window) after the round's
@@ -199,8 +237,8 @@ def main():
                 if d["outcome"] == "2":
                     refused_at.setdefault(d["operation"], int(ln.split(" ", 1)[0]))
     repeat_proposals = sorted(op for op, t in refused_at.items() if op in proposed_at and proposed_at[op] > t)
-    checks["duplicates"] = {"pass": dup_total > 0 and not repeat_proposals, "server_duplicates": dup_total,
-                            "refused_then_proposed": repeat_proposals}
+    checks["duplicates"] = {"pass": (dup_total > 0 or a.variant >= 3) and not repeat_proposals,
+                            "server_duplicates": dup_total, "refused_then_proposed": repeat_proposals}
 
     # prompt
     prompts = {n: sum(1 for ln in log if "travel-prompt changer=" in ln) for n, log in clients.items()}
@@ -208,9 +246,15 @@ def main():
                                        for n, log in clients.items()}
     checks["prompt"] = {"pass": all(v > 0 for v in prompts.values()), "prompts": prompts}
 
-    if a.variant == 2:
+    if a.variant >= 2:
         dest = next((kv(ln) for ln in server + first if "travel-proposed" in ln), None)
         level = dest["level"] if dest else None
+        first_level = level
+        if a.expect_retry_after_crash:
+            # the restarted fixture may choose another changer (tv-23: Garbage after Darkscape): the
+            # retry is judged against its own proposal
+            retry = next((kv(ln) for ln in reversed(server) if "travel-proposed" in ln), None)
+            level = retry["level"] if retry else level
         prepared = any("travel-record" in ln and "phase=1" in ln for ln in server + first)
         committed = any("travel-record" in ln and "phase=2" in ln for ln in server + first)
         published = any("checkpoint-published" in ln and "reason=travel" in ln for ln in server + first)
@@ -219,9 +263,15 @@ def main():
         arrived_ok = len(arrivals) == 2 and all(float(x["distance"]) <= 3.0 and x["alive"] == "1"
                                                 and x["level"] == level for x in arrivals)
         client_arrivals = {n: [kv(ln) for ln in log if "travel-arrived" in ln] for n, log in clients.items()}
+        # a client that crashed at the load and restarted knows no arrival: its restart's world on the
+        # destination level stands for it
+        for n in (a.expect_client_crash,):
+            if n in client_arrivals:
+                client_arrivals[n] = [kv(ln) for ln in clients[n] if "world-level level=" in ln
+                                      and kv(ln)["level"] == level]
         clients_ok = all(len(v) >= 1 and v[-1]["level"] == level for v in client_arrivals.values())
-        # the participants' item layout hash: the last point before the take, the first after the reload
-        take_at = next((i for i, ln in enumerate(server) if "travel-take id=" in ln), None)
+        # the participants' item layout hash: the last point before the (last) take, the first after the reload
+        take_at = next((i for i, ln in reversed(list(enumerate(server))) if "travel-take id=" in ln), None)
         before = [kv(ln)["layout"] for ln in server[:take_at] if "item-graph tag=" in ln] if take_at else []
         after = [kv(ln)["layout"] for ln in server[take_at:] if "item-graph tag=" in ln] if take_at else []
         layout_same = bool(before) and bool(after) and before[-1] == after[0]
@@ -233,12 +283,45 @@ def main():
         exec_ok = (prepared and not committed and not published) if before_take else \
             (prepared and committed and published and (crash or (bool(reloaded) and arrived_ok and clients_ok
                                                                 and layout_same)))
+        if before_take and a.expect_retry_after_crash:
+            # the first run: prepared only, nothing published; the restarted server's run: the whole travel
+            first_ok = any("travel-record" in ln and "phase=1" in ln for ln in first) and \
+                not any("phase=2" in ln and "travel-record" in ln for ln in first) and \
+                not any("checkpoint-published" in ln and "reason=travel" in ln for ln in first)
+            exec_ok = first_ok and bool(reloaded) and arrived_ok and clients_ok and layout_same
+        if a.variant >= 3:
+            # the retry: the first execution failed (checked below), the second went through
+            exec_ok = exec_ok and sum(1 for ln in server if "travel-committed" in ln) == 1 and len(reloaded) == 1
         checks["execution"] = {"pass": exec_ok, "destination": level,
                                "prepared": prepared, "committed": committed, "published": published,
                                "reloaded": [r.get("level") for r in reloaded], "arrivals": arrivals,
                                "client_arrivals": {n: [v["level"] for v in vs] for n, vs in client_arrivals.items()},
                                "layout_before_after": (before[-1] if before else None, after[0] if after else None),
                                "executions": barred, "crash_window": crash}
+        if a.variant >= 3:
+            failed = [kv(ln) for ln in server if "travel-exec-failed" in ln]
+            phase3 = sum(1 for ln in server if "travel-record" in ln and "phase=3" in ln)
+            pub_failed = [kv(ln) for ln in server if "checkpoint-failed" in ln]
+            told = {n: [kv(ln) for ln in log if "travel-event" in ln and "state=6" in ln] for n, log in clients.items()}
+            if a.variant == 3:
+                # the partner left during the barrier: rolled back before anything durable, the
+                # requester told who left; the partner is away and learns nothing (it asks again)
+                want_why, want_abort, want_state = "party-member-left", "2", "draining"
+                ok = (len(failed) == 1 and failed[0].get("why") == want_why and failed[0].get("abort") == want_abort
+                      and failed[0].get("state") == want_state and phase3 == 0
+                      and any(e.get("abort") == want_abort for e in told["c1"]))
+            else:
+                # the publication failed: phase 3 recorded, both told execution-failed (8)
+                want_why, want_abort, want_state = "publication", "8", "publishing"
+                ok = (len(failed) == 1 and failed[0].get("why") == want_why and failed[0].get("abort") == want_abort
+                      and failed[0].get("state") == want_state and phase3 == 1
+                      and len(pub_failed) == 1 and pub_failed[0].get("reason") == "travel"
+                      and all(any(e.get("abort") == want_abort for e in v) for v in told.values()))
+            checks["rollback"] = {"pass": ok, "exec_failed": [{k: f.get(k) for k in ("state", "why", "abort")}
+                                  for f in failed], "phase3_records": phase3,
+                                  "publication_failures": [{k: f.get(k) for k in ("generation", "reason", "detail")}
+                                                           for f in pub_failed],
+                                  "clients_told_abort": {n: [e.get("abort") for e in v] for n, v in told.items()}}
         if not crash:
             hold = next((kv(ln) for ln in server if "travel-hold id=" in ln), None)
             readies = [kv(ln) for ln in server if "travel-ready slot=" in ln]
@@ -251,31 +334,81 @@ def main():
             ready_dups = sum(1 for ln in server if "travel-duplicate" in ln and "kind=13" in ln)
             client_resumes = {n: sum(1 for ln in log if "travel-resumed id=" in ln) for n, log in clients.items()}
             want_ready = 1 if a.expect_resume == "timeout" else 2
+            late = a.expect_late
+            # every present client is told the resume; a late one (back after the timeout) is not: its
+            # ready is refused as no-hold and it knows the party went on (travel-hold-over), on the level
+            resumes_ok = all(v >= 1 for n, v in client_resumes.items() if n != late)
+            late_ok = True
+            late_detail = None
+            if late:
+                no_hold = [kv(ln) for ln in server if "travel-ready-no-hold" in ln]
+                resumed_at = int(next(ln for ln in server if "travel-resumed id=" in ln).split(" ", 1)[0]) \
+                    if resumed else 0
+                overs = [ln for ln in clients[late] if "travel-hold-over" in ln]
+                late_levels = [(int(ln.split(" ", 1)[0]), kv(ln)["level"]) for ln in clients[late]
+                               if "world-level level=" in ln]
+                late_ok = (client_resumes.get(late, 0) == 0 and len(no_hold) == 1 and bool(overs)
+                           and bool(late_levels) and late_levels[-1][1] == level and late_levels[-1][0] > resumed_at)
+                late_detail = {"no_hold_readies": len(no_hold), "hold_overs": len(overs),
+                               "levels_after_resume": [lv for ts, lv in late_levels if ts > resumed_at]}
+            crashed = a.expect_client_crash
+            crash_ok = True
+            crash_detail = None
+            if crashed:
+                # the first run died at the load; the restart was told the hold (state 10) and reported ready
+                died = sum(1 for ln in clients[crashed] if "travel-load-crash" in ln)
+                notices = [kv(ln) for ln in server if "travel-held-notice" in ln]
+                held = sum(1 for ln in clients[crashed] if "travel-held id=" in ln)
+                crash_ok = died == 1 and len(notices) >= 1 and held >= 1 and a.expect_resume == "all-ready"
+                crash_detail = {"load_crashes": died, "held_notices": [n.get("slot") for n in notices],
+                                "client_held": held}
             ok = (hold is not None and resumed is not None and resumed.get("why") == a.expect_resume
                   and len({r["slot"] for r in readies}) == want_ready and wrong == a.expect_wrong_readies
-                  and moved_during_hold == 0 and all(v >= 1 for v in client_resumes.values()))
+                  and moved_during_hold == 0 and resumes_ok and late_ok and crash_ok)
             ready_slots = sorted({r["slot"] for r in readies})
             checks["resume"] = {"pass": ok, "hold": hold is not None, "ready_slots": ready_slots,
                                 "ready_after_ms": [r["after_ms"] for r in readies], "wrong_readies": wrong,
                                 "ready_duplicates": ready_dups, "resumed": resumed and {k: resumed[k] for k in
                                 ("why", "after_ms", "inputs_ignored")}, "inputs_applied_during_hold": moved_during_hold,
-                                "client_resumes": client_resumes}
+                                "client_resumes": client_resumes, "late": late_detail, "client_crash": crash_detail}
         if crash:
             window = next((ln for ln in first if "failpoint" in ln and "travel:" in ln), "")
             rec = [kv(ln) for ln in server if "recovery-transition" in ln]
-            # after travel:after-commit the recovery must run on the destination level; after
-            # travel:before-take on any other (the source) level
+            # after travel:before-take the recovery must run on the source level (prepared only, rolled
+            # back); after every later window (after-commit, reloading, after-ready) on the destination
             level_now = rec[-1]["level_now"] if rec else None
-            if "after-commit" in window:
-                right = level_now == level and rec and rec[-1]["verdict"] == "committed-rolled-forward"
-            else:
-                right = level_now is not None and level_now != level and rec and \
+            levels_now = {n: [kv(ln)["level"] for ln in log if "world-level level=" in ln]
+                          for n, log in clients.items()}
+            recovered = next((kv(ln) for ln in server if "recovery status=" in ln), None)
+            if rec is None or not rec:
+                # no transition record in the recovered generation's journal: the crash came after the
+                # reload, when later (join) generations had been published on the destination (tv-20);
+                # the level is the one both clients' worlds went live on after the restart
+                after = {v[-1] for v in levels_now.values() if v}
+                level_now = after.pop() if len(after) == 1 else None
+            if "before-take" in window:
+                right = level_now is not None and level_now != first_level and rec and \
                     rec[-1]["verdict"] == "prepared-only-rolled-back"
+            elif rec:
+                right = level_now == level and rec[-1]["verdict"] == "committed-rolled-forward"
+            else:
+                right = level_now == level and recovered is not None and recovered.get("status") == "recovered"
+            # a restarted server holds nothing: no hold in its run
+            no_hold_after = not any("travel-hold id=" in ln for ln in server) or a.expect_retry_after_crash
             levels = {n: [kv(ln)["level"] for ln in log if "world-level level=" in ln] for n, log in clients.items()}
-            rejoined = all(v and v[-1] == level_now for v in levels.values())
-            checks["recovery"] = {"pass": bool(right) and rejoined, "window": window.split()[-1] if window else "",
+            if a.expect_retry_after_crash:
+                # the restarted server ran the fixture again: the party travelled from the recovered source
+                retried = bool(reloaded) and arrived_ok and clients_ok
+                rejoined = retried and all(v and v[-1] == level for v in levels.values())
+            else:
+                rejoined = all(v and v[-1] == level_now for v in levels.values())
+            voids = {n: sum(1 for ln in log if "travel-hold-void" in ln) for n, log in clients.items()}
+            checks["recovery"] = {"pass": bool(right) and rejoined and no_hold_after,
+                                  "window": window.split()[-1] if window else "",
                                   "recovery_transition": rec[-1] if rec else None, "level_now": level_now,
-                                  "clients_levels": levels}
+                                  "recovered_generation": recovered.get("generation") if recovered else None,
+                                  "clients_levels": levels, "hold_voids": voids,
+                                  "retried_after_recovery": a.expect_retry_after_crash and rejoined}
     if a.variant == 1:
         first_proposed = [kv(ln) for ln in first if "travel-proposed" in ln]
         exited = any("failpoint" in ln and "travel:after-propose" in ln for ln in first)

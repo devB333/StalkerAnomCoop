@@ -233,6 +233,10 @@
     {
       "path": "patches/engine/0056-travel-resume.patch",
       "sha256": "91d629ba3d453df48598515a7ccc120c47f1f053e0e0bc2675e95d6557a02dc7"
+    },
+    {
+      "path": "patches/engine/0057-travel-failures.patch",
+      "sha256": "a8844a8f02a8ab776132a00f97125b380f2b423b1cdf1946390b0fb9d3e85ec6"
     }
   ],
   "submodules": [

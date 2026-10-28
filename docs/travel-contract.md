@@ -200,6 +200,43 @@ per connection (the queue starts afresh at the join) and the hold discards
 them until the resume; its unanswered actions are re-sent on the new level
 and judged there.
 
+## 11. The failure matrix (S09-T04)
+
+Code: `CoopServerHost.cpp` "S09-T04" (the executor's rollback reasons,
+`travel_hold_tick`'s held notice, failpoints `travel:reloading` and
+`travel:after-ready`), `CoopClientLink.cpp` (`held`, the hold-over refusal,
+the void on a new epoch). Validation: [S09-T04](validation/S09-T04.md).
+
+Every window a travel can fail in, what the world does, and how the players
+recover. "Source" and "destination" name the generation a restarted server
+recovers (§9). No window lets one player travel alone (R10): a rollback
+leaves both on the source level, a roll-forward puts both on the destination.
+
+| When | What fails | Outcome | The players |
+|---|---|---|---|
+| Proposed | the partner refuses, the requester cancels, 30 s pass | Refused / Cancelled / Expired (§2) | ask again |
+| Proposed | a party member's session ends, a party actor dies, combat, the changer goes | Aborted with the reason (§5) | ask again once both are back and safe |
+| Proposed | the server crashes | the proposal is forgotten (not durable); its id is refused 28 by the restarted server | ask again |
+| Draining (the barrier) | a party member's session ends or its actor dies | **rolled back** before anything durable: Aborted, reason requester/partner-left or -dead; the present player is told who | the absent one rejoins (its actor stood still), the party asks again |
+| Draining | the server crashes | the source generation | ask again |
+| Taking | the prepared record fails (store failed) | Aborted execution-failed; the server stops (fail-closed) | a restart recovers the source |
+| Taking | the server crashes after `prepared` (`travel:before-take`) | the source generation, `prepared-only-rolled-back` | ask again (the restarted fixture does, tv-23) |
+| Taking | the take finds no entity for a party actor | Aborted execution-failed | ask again |
+| Publishing | the publication fails before the pointer swap (a full disk) | **rolled back**: phase 3 recorded, Aborted execution-failed to both, the entities already restored; the store goes on | ask again |
+| Publishing | a party member's session ends | the travel goes on (its actor is in the taken save); the absent player rejoins on the destination (T02-4) | — |
+| Publishing | the server crashes before the swap | the source generation | ask again |
+| Committed | the server crashes before the reload (`travel:after-commit`) | the destination generation, `committed-rolled-forward` | both rejoin on the destination |
+| Reloading | the server crashes while the level is replaced (`travel:reloading`) | the destination generation | both rejoin on the destination |
+| Reloading | the destination generation cannot be loaded, or the identity registry cannot restart | the server stops; a restart recovers the destination | both rejoin after the restart |
+| Hold | a client takes long, disconnects and comes back, or crashes and restarts before the deadline | the hold waits; a client whose world goes live without having been told the transition is told it (`held`, state 10) and reports ready; all ready → resumed | nobody moves until both are there |
+| Hold | a client has not reported ready in 60 s | resumed at the deadline (`timeout`): the present player goes on; the absent one's actor stands at the arrival point (T03-2) | the late one's ready is refused 31 and it is told the party went on; it plays on the destination |
+| Hold | the server crashes (`travel:after-ready`) | the destination generation; the restarted server holds nothing (a recovery is not a travel) | both rejoin and play as after any recovery; a client's pending hold is void on the new epoch |
+| Any | a duplicate or re-sent request, answer or ready | its stored outcome (§3, §4, §10) | — |
+
+What the failures never do: move one player and not the other, lose a
+committed travel, keep a rolled-back one, or continue a transition across a
+restart (§1).
+
 ## 8. Not in S09-T01
 
 - A live proposal is **not durable**: a crash forgets it (the players

@@ -330,6 +330,16 @@ another transition or level, 32 before the server sees that world live)
 or the 60-s deadline; CampaignEvent 13 state 9 `resumed`; the committed event
 carries the destination generation; the drivers' `travel_ready_delay` and
 `travel_ready_wrong` knobs. Single player is unchanged.
+`0057-travel-failures.patch` (S09-T04, 2026-10-28): the failure matrix
+(docs/travel-contract.md §11): a barrier rollback names who left or died;
+the `held` notice (CampaignEvent 13 state 10) to a client in the world during
+the hold that was not told the transition (a new session is told afresh);
+a right ready refused with no hold ends the client's wait; a new authority
+epoch voids a client's hold; failpoints `travel:reloading` and
+`travel:after-ready`; harness knobs `travel_barrier_hold` (server),
+`travel_rejoin_delay` and `travel_load_fail` (client); fixture variants 3
+and 4; the step driver's connection drop on a travel answer waits for the
+answer's result. Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

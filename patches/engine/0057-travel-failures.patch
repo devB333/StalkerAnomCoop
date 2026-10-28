@@ -1,0 +1,464 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 468f9e0..61221ca 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -371,6 +371,11 @@ struct Link
+ 		u8 ready_step = 0; // the driver's wrong readies first (travel_ready_wrong)
+ 		bool holding = false; // the server holds the world until both are ready
+ 		u64 readies = 0, resumes = 0;
++		// S09-T04: the transition this client expects to be held for (a ready for it refused 31 means the
++		// hold is over: the party went on); the driver's deferred connection drop (variant 3)
++		u64 hold_id = 0;
++		bool drop_on_result = false;
++		u64 held_notices = 0, hold_overs = 0, hold_voids = 0;
+ 	} travel;
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+@@ -666,6 +671,13 @@ void world_received()
+ 	g_link->blob.clear();
+ 	g_link->blob.shrink_to_fit();
+ 	campaign::replica_begin(g_link->local_actor, ids);
++	if (g_link->travel.arriving && g_link->config.travel_load_fail)
++	{
++		// S09-T04 driver: the destination load fails outright (the process
++		// dies as a crashed loader would; the harness restarts the client)
++		g_link->log.line("travel-load-crash level=%s save=%s", g_link->travel.arrive_level.c_str(), g_link->save_name);
++		TerminateProcess(GetCurrentProcess(), 0xDEAD);
++	}
+ 	g_link->start_permitted = true;
+ 	g_link->world = WorldLoading;
+ 	g_link->load_started_ms = g_link->wall.GetElapsed_ms();
+@@ -946,6 +958,7 @@ void travel_hud(LPCSTR text, int seconds);
+ void travel_session_reset();
+ void travel_frame();
+ void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
++void driver_disconnect(LPCSTR why); // S09-T04
+ u64 request_travel(const coop::proto::EntityRef& changer, u32 round, bool player, LPCSTR why);
+ u64 answer_travel(u64 id, u8 answer, u32 round, bool player, LPCSTR why);
+ void amounts_frame(); // S08-T08
+@@ -3301,7 +3314,22 @@ void on_event(const coop::session::ClientEvent& e)
+ 		// S07-T05: the authority epoch names the server incarnation; a new
+ 		// one means a restart and a world that must be streamed afresh.
+ 		if (g_link->last_epoch && w.authority_epoch != g_link->last_epoch)
++		{
+ 			g_link->log.line("epoch-changed from=%I64u to=%I64u", g_link->last_epoch, w.authority_epoch);
++			// S09-T04: a restarted server holds nothing (a recovery is not a
++			// travel): a hold or an arrival this client was waiting for is void
++			Link::Travel& t = g_link->travel;
++			if (t.holding || t.arriving || t.hold_id)
++			{
++				++t.hold_voids;
++				g_link->log.line("travel-hold-void id=%I64x holding=%d arriving=%d", t.hold_id, t.holding ? 1 : 0,
++					t.arriving ? 1 : 0);
++				t.holding = false;
++				t.arriving = false;
++				t.ready_id = 0;
++				t.hold_id = 0;
++			}
++		}
+ 		g_link->last_epoch = w.authority_epoch;
+ 		g_link->reconnect_backoff_ms = 1000;
+ 		g_link->tracker = coop::proto::ResyncTracker();
+@@ -4954,17 +4982,30 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 		// the connection drops right after the request: the request stays
+ 		// pending and is sent again after the reconnect with the same id
+ 		g_link->log.line("transfer-step-disconnect round=%u step=%u linked=%d", st.round, st.step, st.linked ? 1 : 0);
+-		if (g_link->world == WorldLive || g_link->world == WorldLoading)
+-		{
+-			g_link->leaving = true;
+-			++g_link->worlds_left;
+-			Console->Execute("disconnect");
+-		}
+-		if (g_link->client)
+-			g_link->client->close(coop::net::close_code::kNormal, "transfer driver: disconnect mid-operation");
+-		g_link->reconnect_backoff_ms = 1000;
+-		g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + 500;
++		if (st.action == 12 && st.extra)
++			// S09-T04 (variant 3): a travel answer is let through first; the
++			// drop follows its result (travel_result), inside the barrier
++			g_link->travel.drop_on_result = true;
++		else
++			driver_disconnect("transfer driver: disconnect mid-operation");
++	}
++}
++
++// The driver's connection drop (flags bit 2): the world is torn down and the
++// client reconnects half a second later; pending requests are re-sent.
++void driver_disconnect(LPCSTR why)
++{
++	g_link->log.line("driver-disconnect why=\"%s\"", why);
++	if (g_link->world == WorldLive || g_link->world == WorldLoading)
++	{
++		g_link->leaving = true;
++		++g_link->worlds_left;
++		Console->Execute("disconnect");
+ 	}
++	if (g_link->client)
++		g_link->client->close(coop::net::close_code::kNormal, why);
++	g_link->reconnect_backoff_ms = 1000;
++	g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + 500;
+ }
+ 
+ // ------------------------------------------------------------ S09-T01
+@@ -5088,6 +5129,7 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 		t.arriving = true;
+ 		t.arrive_level = level;
+ 		t.ready_id = id;
++		t.hold_id = id; // S09-T04
+ 		t.ready_step = 0;
+ 		xr_sprintf(text, "Travelling to %s...", level);
+ 		travel_hud(text, 30);
+@@ -5100,14 +5142,35 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 		if (g_link->client)
+ 			g_link->client->close(coop::net::close_code::kNormal, "travel: rejoin on the destination level");
+ 		g_link->reconnect_backoff_ms = 1000;
+-		g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + 2000;
++		// S09-T04 driver: travel_rejoin_delay keeps this client away (a player whose client took long)
++		g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() +
++			_max(2000u, g_link->config.travel_rejoin_delay * 1000u);
++		return;
++	}
++	if (state == 10)
++	{
++		// S09-T04: held: the server holds this level for a transition this
++		// client was not told of (it joined afresh or reconnected during the
++		// hold): report ready like the others, once the world is live
++		++t.held_notices;
++		g_link->log.line("travel-held id=%I64x level=%s remaining_ms=%u holding=%d", id, level, remaining, t.holding ? 1 : 0);
++		if (!t.holding)
++		{
++			t.holding = true;
++			t.hold_id = id;
++			t.ready_id = id;
++			t.ready_step = 0;
++			t.arrive_level = level;
++			t.ready_at_ms = g_link->wall.GetElapsed_ms() + g_link->config.travel_ready_delay * 1000;
++			travel_hud("Waiting for your partner to arrive...", 30);
++		}
+ 		return;
+ 	}
+ 	LPCSTR what = state == 2 ? "agreed" : state == 3 ? "refused" : state == 4 ? "expired" : state == 5 ? "cancelled" :
+ 		state == 6 ? "aborted" : "ended";
+ 	LPCSTR why = abort == 1 ? " (the requester left)" : abort == 2 ? " (the partner left)" :
+ 		abort == 3 ? " (the requester died)" : abort == 4 ? " (the partner died)" : abort == 5 ? " (combat)" :
+-		abort == 6 ? " (the passage is gone)" : "";
++		abort == 6 ? " (the passage is gone)" : abort == 8 ? " (the travel failed; ask again)" : "";
+ 	if (state == 2)
+ 		xr_sprintf(text, "Travel to %s agreed by both players. (The level change itself is not in this build.)", level);
+ 	else
+@@ -5253,6 +5316,35 @@ void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult
+ 		++g_link->travel.refused;
+ 	g_link->log.line("travel-result kind=%u round=%d step=%d operation=%I64x outcome=%u reason=%u transition=%I64x",
+ 		u32(p.action), int(p.round), int(p.step), p.operation, u32(result.outcome), u32(result.reason), result.revision);
++	if (p.action == coop::proto::kActionTravelAnswer && g_link->travel.drop_on_result)
++	{
++		// S09-T04 driver (variant 3): the connection drops once the answer was
++		// judged, so the drop lands in the barrier, not before the consent
++		g_link->travel.drop_on_result = false;
++		driver_disconnect("travel driver: disconnect after the answer");
++	}
++	if (p.action == coop::proto::kActionTravelReady && result.outcome == coop::proto::ActionOutcome::Rejected &&
++		result.reason == coop::proto::kReasonWrongDestination && g_link->travel.holding && p.params.size() >= 9)
++	{
++		// S09-T04: a right ready (this client's held transition, this level)
++		// refused: the hold is over (the party went on, or the server was
++		// restarted and holds nothing); the driver's wrong ones differ
++		u64 id = 0;
++		for (int b = 0; b < 8; ++b)
++			id |= u64(p.params[b]) << (8 * b);
++		string128 level;
++		const size_t len = _min<size_t>(_min<size_t>(p.params[8], p.params.size() - 9), sizeof(level) - 1);
++		memcpy(level, p.params.data() + 9, len);
++		level[len] = 0;
++		if (id == g_link->travel.hold_id && !xr_strcmp(level, Level().name().c_str()))
++		{
++			++g_link->travel.hold_overs;
++			g_link->travel.holding = false;
++			g_link->travel.ready_id = 0;
++			g_link->log.line("travel-hold-over id=%I64x level=%s", id, level);
++			travel_hud("Your partner went on ahead: you may go.", 5);
++		}
++	}
+ 	if (p.action == coop::proto::kActionTravelReady && result.outcome == coop::proto::ActionOutcome::Rejected &&
+ 		result.reason == coop::proto::kReasonNotLoaded && g_link->travel.holding)
+ 	{
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index dc3651d..1604bea 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -145,6 +145,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.quest_variant = ini.line_exist("coop", "quest_variant") ? ini.r_u32("coop", "quest_variant") : 0;
+ 		out.travel_party = ini.line_exist("coop", "travel_party") ? ini.r_u32("coop", "travel_party") : 0; // S09-T01
+ 		out.travel_variant = ini.line_exist("coop", "travel_variant") ? ini.r_u32("coop", "travel_variant") : 0;
++		out.travel_barrier_hold = ini.line_exist("coop", "travel_barrier_hold") ? ini.r_u32("coop", "travel_barrier_hold") : 0; // S09-T04
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+@@ -169,6 +170,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.auto_respawn = ini.line_exist("coop", "auto_respawn") ? ini.r_u32("coop", "auto_respawn") : 0;
+ 		out.travel_ready_delay = ini.line_exist("coop", "travel_ready_delay") ? ini.r_u32("coop", "travel_ready_delay") : 0; // S09-T03
+ 		out.travel_ready_wrong = ini.line_exist("coop", "travel_ready_wrong") ? ini.r_u32("coop", "travel_ready_wrong") : 0;
++		out.travel_rejoin_delay = ini.line_exist("coop", "travel_rejoin_delay") ? ini.r_u32("coop", "travel_rejoin_delay") : 0; // S09-T04
++		out.travel_load_fail = ini.line_exist("coop", "travel_load_fail") ? ini.r_u32("coop", "travel_load_fail") : 0;
+ 		if (ok && !absolute(out.key_path))
+ 		{
+ 			Msg("! S05-T01 coop config: key must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 41f3c58..7cc5ea2 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -39,7 +39,12 @@
+ //                 until the box, body and stacks appear; 0 off)
+ //                 travel_party (S09-T01 fixture: seconds after both attach
+ //                 until the travel consent rounds start; 0 off), travel_variant
+-//                 (0 every round; 1 the crash run)
++//                 (0 every round; 1 the crash run; 2 one agreed travel carried
++//                 out; 3 S09-T04: the partner drops during the barrier, then a
++//                 retry; 4 two agreed travels, the first's publication failed
++//                 from outside), travel_barrier_hold (S09-T04 harness: seconds
++//                 the barrier stays up before the take, so a disconnect can
++//                 land in it; 0 off)
+ //                 checkpoint_seconds (S07-T02: seconds between periodic
+ //                 checkpoint generations; 0 off; joins and a clean stop
+ //                 always publish one),
+@@ -58,6 +63,9 @@
+ //                 confirmed without a key, plus one early request while alive, expected refused; 0 off)
+ //                 travel_ready_delay, travel_ready_wrong (S09-T03 driver: the ready after a travel:
+ //                 delayed by N s (999 never); 1: wrong id, wrong level first)
++//                 travel_rejoin_delay (S09-T04 driver: seconds after a committed travel until the
++//                 client reconnects; 0: 2 s), travel_load_fail (1: the client terminates itself
++//                 when the destination world is received: a crash during the load)
+ //   both, S06-T02: net_loss (percent of this process's packets dropped),
+ //                 net_lag (ms added to them): declared test network
+ //                 conditions through the library's simulated impairment
+@@ -102,7 +110,9 @@ struct CoopConfig
+ 	u32 quest_holder; // S08-T04 fixture: the slot whose accept comes first in round 1 (the other's 10 ticks later)
+ 	u32 quest_variant; // S08-T05 fixture: round 6: 0 both turn in at once, 1 the other disconnects first
+ 	u32 travel_party; // S09-T01 fixture: seconds after both attach until the travel rounds start (0 off)
+-	u32 travel_variant; // S09-T01 fixture: 0 every round, 1 the crash run (rounds 0, 1; failpoint travel:after-propose)
++	u32 travel_variant; // S09-T01 fixture: 0 every round, 1 the crash run (rounds 0, 1; failpoint travel:after-propose),
++	                    // 2 one agreed travel (S09-T02), 3 partner drops in the barrier then retries, 4 two travels (S09-T04)
++	u32 travel_barrier_hold; // S09-T04 harness: seconds the barrier stays up before the take (0 off)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+@@ -122,6 +132,8 @@ struct CoopConfig
+ 	                        // client sends its ready (0: at once; 999: never)
+ 	u32 travel_ready_wrong; // S09-T03 test driver: 1 sends a ready naming a wrong transition id first, then a wrong
+ 	                        // level, then the right one
++	u32 travel_rejoin_delay; // S09-T04 test driver: seconds after a committed travel until the client reconnects (0: 2 s)
++	u32 travel_load_fail; // S09-T04 test driver: 1 terminates the process when the destination world is received
+ 	                  // by itself (0: the player confirms with the use key); also sends one early (refused) request
+ };
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 7357536..5e7dc23 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -561,6 +561,7 @@ struct Host
+ 		xr_string hold_level;
+ 		bool ready[2] = {false, false};
+ 		u64 readies = 0, readies_refused = 0, inputs_ignored = 0, holds = 0, resumes_timeout = 0;
++		u64 readies_no_hold = 0, held_notices = 0; // S09-T04
+ 		struct Fixture
+ 		{
+ 			u64 both_since = 0;
+@@ -8973,6 +8974,12 @@ void travel_on_left(const PlayerLink& link)
+ // terminates itself at travel:after-propose in round 0 (profile failpoint).
+ // travel_variant 2 (S09-T02): round 0 only; the agreed travel is carried out
+ // (the party arrives on the changer's destination level).
++// travel_variant 3 (S09-T04): rounds 0 and 1, 70 s apart: in round 0 p2
++// accepts and drops its connection at once (with travel_barrier_hold the
++// barrier is still up: rolled back, partner-left); p2 back, round 1 agrees
++// and the travel is carried out. travel_variant 4 (S09-T04): rounds 0 and 1
++// both plain (the first's publication is failed from outside with
++// checkpoint:<phase>:3:fail; the second travel goes through).
+ const u32 kTravelRounds = 9;
+ 
+ void travel_fixtures()
+@@ -9056,7 +9063,7 @@ void travel_fixtures()
+ 		f.round_tick = g_host->tick;
+ 		return;
+ 	}
+-	const u32 rounds = config.travel_variant == 1 ? 2 : config.travel_variant == 2 ? 1 : kTravelRounds;
++	const u32 rounds = config.travel_variant == 1 || config.travel_variant >= 3 ? 2 : config.travel_variant == 2 ? 1 : kTravelRounds;
+ 	if (f.phase != 2 || f.round >= rounds || g_host->tick < f.round_tick)
+ 		return;
+ 	const u16 C = f.changer;
+@@ -9124,11 +9131,15 @@ void travel_fixtures()
+ 	{
+ 	case 0:
+ 		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
+-		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 0, 1});
++		// S09-T04 variant 3: the accept, then the connection drops (flags bit 2)
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, u8(config.travel_variant == 3 ? 4 : 0), 1});
++		if (config.travel_variant >= 3)
++			f.round_tick = g_host->tick + 70 * 50; // the rollback, p2's rejoin, the retry
+ 		break;
+ 	case 1:
+ 		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
+-		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 0, 2});
++		// S09-T04 variants 3 and 4: the retry agrees and travels
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 0, u8(config.travel_variant >= 3 ? 1 : 2)});
+ 		break;
+ 	case 2:
+ 		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
+@@ -9237,6 +9248,21 @@ void travel_fixture_boar()
+ // A failed take or publication rolls back (phase 3; the entities were
+ // restored; the players are told). A crash before the publication recovers
+ // the source generation; after it, the destination one (contract §7).
++//
++// S09-T04 (contract §11, the failure matrix): a party member leaving or
++// dying during the barrier rolls back with that reason (the other player is
++// told who); from the take on the travel goes through and an absent player
++// rejoins on the destination. Failpoints travel:reloading (the level is
++// being replaced) and travel:after-ready (the hold, one player ready) are
++// the two post-commit crash windows besides travel:after-commit; all three
++// recover the destination generation, and a recovered server holds nothing
++// (a recovery is not a travel). A client whose world goes live during the
++// hold without having been told the transition (it crashed and restarted,
++// or reconnected) is told it (CampaignEvent 13 state 10 `held`) and reports
++// ready like the others; one that arrives after the hold ended gets its
++// ready refused 31 and knows the party went on. The harness knob
++// travel_barrier_hold keeps the barrier up for N s so a disconnect can land
++// in it.
+ 
+ void log_status(LPCSTR tag);
+ 
+@@ -9284,15 +9310,19 @@ void travel_record(u8 phase, u64 revision)
+ 		g_host->log.line("travel-record-failed phase=%u reason=%s", u32(phase), g_host->persistence ? g_host->persistence->failure() : "no-store");
+ }
+ 
+-void travel_exec_fail(LPCSTR why)
++// S09-T04: `abort` names the reason the players see (a party member left or
++// died during the barrier: who; otherwise execution-failed).
++void travel_exec_fail(LPCSTR why, coop::proto::TravelAbort abort = coop::proto::TravelAbort::ExecutionFailed)
+ {
+ 	Host::Travel& tv = g_host->travel;
+-	g_host->log.line("travel-exec-failed id=%I64x state=%s why=%s", tv.exec_id, travel_exec_name(tv.exec), why);
++	g_host->log.line("travel-exec-failed id=%I64x state=%s why=%s abort=%u", tv.exec_id, travel_exec_name(tv.exec), why,
++		u32(abort));
++	travel_csv("exec-failed", 0, 0, tv.exec_id, u16(abort), travel_exec_name(tv.exec), why);
+ 	if (tv.exec >= 2 && g_host->persistence && !g_host->persistence->failed())
+ 		travel_record(3, ++g_host->commit);
+ 	coop::proto::Transition t = g_host->travel.coordinator->last_ended();
+ 	t.state = coop::proto::TravelState::Aborted;
+-	t.abort = coop::proto::TravelAbort::ExecutionFailed;
++	t.abort = abort;
+ 	tv.level = tv.exec_level;
+ 	travel_event(t, 0);
+ 	tv.exec = 0;
+@@ -9425,7 +9455,12 @@ void travel_execute_tick()
+ 		{
+ 			if (tv.exec < 3)
+ 			{
+-				travel_exec_fail(!client_in_world(l) ? "party-member-left" : "party-member-dead");
++				// S09-T04: the other player is told who (contract §11)
++				const bool requester = l.ref.slot == tv.coordinator->last_ended().requester;
++				const bool left = !client_in_world(l);
++				travel_exec_fail(left ? "party-member-left" : "party-member-dead",
++					left ? (requester ? coop::proto::TravelAbort::RequesterLeft : coop::proto::TravelAbort::PartnerLeft)
++						 : (requester ? coop::proto::TravelAbort::RequesterDead : coop::proto::TravelAbort::PartnerDead));
+ 				return;
+ 			}
+ 		}
+@@ -9437,6 +9472,9 @@ void travel_execute_tick()
+ 			g_host->turn_ins.empty() && g_host->quest_answers.empty();
+ 		if (!drained && g_host->tick - tv.exec_since < 10 * 50)
+ 			return;
++		// S09-T04 harness: the barrier stays up so a disconnect can land in it
++		if (g_host->config.travel_barrier_hold && g_host->tick - tv.exec_since < u64(g_host->config.travel_barrier_hold) * 50)
++			return;
+ 		if (!drained)
+ 			g_host->log.line("travel-drain-timeout id=%I64x in_flight=%d pickups=%u confirm=%u inventory=%u stacks=%u "
+ 				"turn_ins=%u quest_answers=%u", tv.exec_id, persistence->in_flight() ? 1 : 0,
+@@ -9575,6 +9613,9 @@ void travel_before_reload()
+ 	tv.fixture.phase = 99; // the fixture ran on the source level; it does not run again
+ 	g_host->log.line("travel-reload id=%I64x generation=%u save=%s from=%s to=%s", tv.exec_id, tv.destination_generation,
+ 		save.c_str(), Level().name().c_str(), tv.exec_level.c_str());
++	// S09-T04 harness: a crash while the level is being replaced (the
++	// sessions detached, the committed generation on disk)
++	coop::store::failpoint("travel:reloading");
+ }
+ 
+ // After the new level loaded and ticked (the identity service re-bound the
+@@ -9691,7 +9732,16 @@ u16 take_travel_ready(PlayerLink& link, const coop::proto::ActionIntent& intent,
+ 	string128 level;
+ 	memcpy(level, intent.params.data() + 9, intent.params[8]);
+ 	level[intent.params[8]] = 0;
+-	if (!tv.hold_id || id != tv.hold_id || xr_strcmp(level, tv.hold_level.c_str()))
++	if (!tv.hold_id)
++	{
++		// S09-T04: no hold (it ended, or this server never held: a recovery
++		// is not a travel): the client learns the party went on
++		++tv.readies_refused;
++		++tv.readies_no_hold;
++		g_host->log.line("travel-ready-no-hold slot=%u id=%I64x level=%s", u32(link.ref.slot), id, level);
++		return coop::proto::kReasonWrongDestination;
++	}
++	if (id != tv.hold_id || xr_strcmp(level, tv.hold_level.c_str()))
+ 	{
+ 		++tv.readies_refused;
+ 		g_host->log.line("travel-ready-wrong slot=%u id=%I64x level=%s hold=%I64x hold_level=%s", u32(link.ref.slot), id,
+@@ -9712,6 +9762,8 @@ u16 take_travel_ready(PlayerLink& link, const coop::proto::ActionIntent& intent,
+ 	travel_remember(link, intent.operation_id, 0, id);
+ 	result.commit_id = 0;
+ 	result.revision = id;
++	// S09-T04 harness: a crash during the hold, one player ready
++	coop::store::failpoint("travel:after-ready");
+ 	return 0;
+ }
+ 
+@@ -9721,15 +9773,39 @@ void travel_hold_tick()
+ 	if (!tv.hold_id)
+ 		return;
+ 	bool all = true;
++	const u64 now = g_host->wall.GetElapsed_ms();
+ 	for (PlayerLink& l : g_host->links)
+-		if (l.bound && l.ref.slot < 2 && !tv.ready[l.ref.slot])
++	{
++		if (!l.bound || l.ref.slot > 1)
++			continue;
++		if (!tv.ready[l.ref.slot])
+ 			all = false;
++		// S09-T04: a client that is in the world here (its input arrives: the
++		// client's own world is live, not just its checkpoint acknowledged,
++		// which comes ~8 s earlier and before it would apply an event; tv-25)
++		// and has not been told this hold (it joined afresh after a crash, or
++		// reconnected) learns the transition and reports ready like the
++		// others (contract §11)
++		if (!tv.ready[l.ref.slot] && client_in_world(l) && l.travel_sent_id != tv.hold_id)
++		{
++			coop::proto::Transition t = tv.coordinator->last_ended();
++			t.id = tv.hold_id;
++			t.state = coop::proto::TravelState(10); // held
++			t.abort = coop::proto::TravelAbort::None;
++			tv.level = tv.hold_level;
++			travel_event_to(l, t, u32(tv.hold_deadline_ms > now ? tv.hold_deadline_ms - now : 0));
++			l.travel_sent_id = tv.hold_id;
++			++tv.held_notices;
++			g_host->log.line("travel-held-notice slot=%u id=%I64x level=%s remaining_ms=%I64u", u32(l.ref.slot), tv.hold_id,
++				tv.hold_level.c_str(), tv.hold_deadline_ms > now ? tv.hold_deadline_ms - now : 0);
++		}
++	}
+ 	if (all)
+ 	{
+ 		travel_resume("all-ready");
+ 		return;
+ 	}
+-	if (g_host->wall.GetElapsed_ms() >= tv.hold_deadline_ms)
++	if (now >= tv.hold_deadline_ms)
+ 	{
+ 		++tv.resumes_timeout;
+ 		travel_resume("timeout");
+@@ -9758,6 +9834,10 @@ void on_joined(const coop::session::SessionEvent& e)
+ 	if (attached == Refusal::None)
+ 		link->session = session;
+ 	link->join_serial = e.join_serial;
++	// S09-T04: a new session has been told nothing: a live proposal or a hold
++	// is sent to it again (tv-22: a client's restart during the hold was never
++	// told the hold because its predecessor had been)
++	link->travel_sent_id = 0;
+ 	++link->joins;
+ 	// S05-T02: every join (new or resumed) gets the world from a fresh checkpoint.
+ 	link->world = WorldPending;

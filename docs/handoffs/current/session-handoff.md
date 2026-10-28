@@ -1,45 +1,33 @@
-# Session handoff — Stage 9 tasks complete; G09 waits for the user's review
+# Session handoff — G09 accepted, Stage 9 Completed; next S10-T01
 
 ## State (2026-10-28)
 
-- **S09-T04 Completed** (2026-10-28, patch 0057 `travel-failures`, protocol
-  `proto-build-48`, final builds **campaign-305 / client-202**):
-  [S09-T04](../../validation/S09-T04.md) — the
-  [failure matrix](../../travel-contract.md#11-the-failure-matrix-s09-t04):
-  a disconnect during the barrier rolls back naming who left, retry travels
-  (tv-17); a failed publication rolls back with a phase 3 record, both told,
-  retry travels (tv-18); crashes during the reload (tv-19) and the hold
-  (tv-20) recover the destination, a recovered server holds nothing; a
-  client back after the hold's timeout is told the party went on (tv-21); a
-  client that crashed at the destination load restarts, is told the hold
-  (CampaignEvent 13 state 10 `held`) and the party resumes together (tv-26;
-  two defects in that notice found by tv-22/tv-25 and fixed); after a crash
-  before the take the party asked again and travelled, to Garbage (tv-23).
-  tv-24 was an invalid run (server rebuilt alone: `game build differs`).
-- **Every Stage 9 task is Completed.** Stage 9 stays In Progress until
-  **[G09](../../validation/G09.md)** is accepted.
-- Gameplay decisions for the review: [Stage 9 decisions](../../stage9-decisions.md)
-  T01-1…9, T02-1…7, T03-1…2, T04-1…6. Most likely to need the user's word:
-  T01-3 (no travel while the partner is away), T03-2 (60-s wait, then the
-  present player goes on), T02-6 (vehicles not carried over), T04-4 (a
-  recovered server does not hold).
-- L14 closure is proposed at G09 with new rows for what remains (two
-  passages only, no new game, vehicles, the hold's running world, the
-  untuned 60-s/10-s policies, the untested death-in-barrier and duplicated
-  ready) — add them to `docs/carried-limits.md` only when the user accepts.
-- Still to do by hand: the user's two-window travel trial (walk into a
+- **G09 accepted 2026-10-28** ("ok that sounds good I accept the gate"):
+  [G09](../../validation/G09.md). Every Stage 9 task is Completed (patches
+  0054–0057, protocol `proto-build-48`, final builds **campaign-305 /
+  client-202**). Decisions T01-1…T04-6 approved as listed
+  ([Stage 9 decisions](../../stage9-decisions.md)). **L14 closed**; new
+  limits **L50–L56** in [carried limits](../../carried-limits.md#added-at-g09-accepted-2026-10-28)
+  (two passages only, no new game, vehicles, the hold's running world, the
+  untuned 60-s/10-s policies, death-in-barrier and failed take untested,
+  duplicated ready untested). **Stage 9 Completed.**
+- The travel stack: [travel contract](../../travel-contract.md) §1–§11
+  (request and consent, execution, resume, failure matrix); reports
+  [S09-T01](../../validation/S09-T01.md) … [S09-T04](../../validation/S09-T04.md).
+- Still the user's to run by hand: the two-window travel trial (walk into a
   changer, USE, partner USE/DROP, arrive together) and the K1/K5 retest.
+- The user commits the G09 closing edits themself (this session's last
+  commit is `436fa16`, S09-T04).
 
 ## Next
 
-**Stop at the gate.** Walk the user through G09 item by item (the
-requirement table, the decisions T01-1…T04-6, L14's closure and the new
-limits), implement any revision they ask for (new run names below), then
-record the decision in `docs/validation/G09.md`, close L14 and add the new
-limit rows in `docs/carried-limits.md`, mark Stage 9 Completed in
-`plan.md` (§A table, §I) and commit. After acceptance: **S10-T01** (the
-bounded campaign coverage matrix; it should name the passages the release
-needs).
+**S10-T01** (plan.md): the bounded campaign coverage matrix — inventory the
+installed systems and content families (stalkers, mutant abilities, offline
+ALife, dialogue, factions, traders/stashes, time/emissions, story chains),
+rank the remaining global-Actor mutations, and create fixture-sized child
+tasks with stable IDs before any broad implementation. It owns L50/L51
+(name the passages the release needs; a new game) and L52; targeted source/script search only, no whole-binary analysis. Output: the
+matrix document plus `docs/validation/S10-T01.md`.
 
 ## Run names
 
@@ -49,4 +37,4 @@ needs).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before the G09 review](../done/snapshot-before-G09-review.md).
+Previous snapshot: [before S10-T01](../done/snapshot-before-S10-T01.md).

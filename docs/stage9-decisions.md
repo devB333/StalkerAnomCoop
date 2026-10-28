@@ -3,7 +3,7 @@
 Started 2026-10-27 with S09-T01. Every gameplay decision taken while
 implementing coordinated travel is listed here with the task that took it
 and where it is implemented, so the user can approve or change each one at
-G09. None is final until approved. Decision D5 (plan.md) and risk R10 bind:
+G09. **All approved as listed at G09 (2026-10-28).** Decision D5 (plan.md) and risk R10 bind:
 both players confirm; no automatic or unconfirmed teleport; a changed
 consent policy needs the user's approval.
 

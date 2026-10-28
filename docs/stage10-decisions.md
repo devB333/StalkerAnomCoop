@@ -1,0 +1,36 @@
+# Stage 10 — gameplay and scope decisions for approval
+
+Started 2026-10-28 with S10-T01. Stage 10 widens the co-op campaign from the
+covered slices (G06–G09) to the installed content, and every widening needs
+a policy for "the player": R04 (installed scripts use global player state),
+R09 (shared rewards, reputation and dialogue vary by content) and R12 (a
+coverage matrix with explicit exclusions). The decisions below were taken by
+S10-T01 while building the [coverage matrix](campaign-coverage-matrix.md);
+**none is implemented yet** and none is final until the user approves or
+changes it. Later Stage 10 children add their own rows here.
+
+Decisions D4 (explicit participants; player 2 is not a companion), D5 (party
+travel with both confirmations) and the Stage 8 policies (one party task,
+the anchor, per-player rewards and inventories, T07/T08/T09 rows in
+[Stage 8 decisions](stage8-closing-decisions.md)) bind and are not reopened.
+
+## S10-T01 — scope and the meaning of "the player"
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T01-1 | **Every passage is in scope:** the 98 directed passages between the 33 installed levels must work both ways, proven by an automated sweep (S10-T03e) and a hands-on trial of a few | the campaign is the whole map; a passage that silently fails strands the party (R10) | a bounded set (the loner start region: marsh, Cordon, Garbage, Darkscape, Agroprom) with the rest excluded |
+| T01-2 | **A new game is supported** on the campaign server (S10-T03f): the host starts a new game instead of loading a save, both actors spawn at the start | every other release path starts from a save the host made alone in single player, which is awkward and leaves player 2's start to the host's save | the release starts from a host save only (L51 becomes a product limit) |
+| T01-3 | At a new game **both players are the same faction** (the party faction chosen by the host); each picks their own loadout | the installed faction relations are per community: two factions in one party would make each player's friends the other's enemies, and every NPC-logic rule below would need a per-player relation model | per-player factions (a second model of NPC relations; not in Stage 10) |
+| T01-4 | **Story info portions are party-shared**; a short explicit list of personal portions (sleep state, disguise, drug flags, tutorials, the first-update flags) is per player; the portable store (pstor) is per player | story progress is one world (D4: both players are participants of one campaign); personal flags describe one body | all portions per player (each player plays a separate story in one world; dialogue and task gates diverge) |
+| T01-5 | **NPC and world logic decides against the nearest alive participant** (condlists, meet/greet, usability, danger, combat-ignore, squad relationship and target condlists); presence checks mean **any** participant | the engine's own ALife switching already uses the nearest participant (S03-T04); the NPC should react to the player in front of it, not to whoever is actor 0 | participant 1 always (status quo: an NPC greets the absent anchor) |
+| T01-6 | **Goodwill and reputation are per player** (the native relation registry is keyed by character id); **faction-vs-faction relations are world** (the DoctorX dynamic relations) | the engine already keeps goodwill per character; a faction's war with another is one world's state | party goodwill (one player's crimes are the other's) |
+| T01-7 | **Trade:** each player's money is theirs; a trader's stock and restock are world; the trade window serves **one buyer at a time** (the other player is told the trader is busy); repair and upgrades run on the server in the buyer's context | one stock, two purses; concurrent trades on one stock are the duplicate-money risk R09 names | shared party purse; or two simultaneous trade windows with a conflict rule |
+| T01-8 | **Sleeping needs both players' consent** (the S09 consent flow: one asks, the other accepts within 30 s); the world's time skips once; **passing out from exhaustion takes only that player's control** (a blackout for a few real seconds, no time skip, the installed 5 % death chance kept) | a time skip is world state; one player must not skip the other's night; a forced per-player skip is impossible | no sleeping in co-op; or the first sleeper skips for both |
+| T01-9 | **Guides, fast travel and the backpack travel are party travel requests** under the S09 contract (both consent, both move, the time skips once, the requester pays the fee) | they are level changes by another name; D5 forbids an unconfirmed teleport of the partner | exclude them (the level changers remain the only passages) |
+| T01-10 | **Companions are supported per recruiter:** each player's companions follow and obey their own player; the other player cannot command them | companions are a central Anomaly feature; the installed script keeps slots on `db.actor`, which is the recruiter in context | exclude companions from the release |
+| T01-11 | **Emissions and psi-storms:** one schedule for the world; cover, damage, immunity (`surge_immuned`) and the death camera **per player** | the blowout is world weather; whether a body is in cover is that body's fact | — |
+| T01-12 | **Excluded from the release**, refused or ignored by the server and named in the release notes: Warfare, Azazel, Ironman and survival mode (the optional game modes, L31), vehicles and mounted guns (L52), debug tools, the multiplayer game modes | optional modes replace the campaign's rules; holders assume one actor and have never been exercised | include vehicles (a holder-per-player model and its travel) |
+| T01-13 | **All 17 engine mutant classes must target either player**; the Anomaly config variants (karlik, lurker, psysucker, bibliotekar, rotan, gigant jumper, borya) are covered by their base class and stay labelled untested until a fixture spawns them | the abilities are the remaining global-Actor code (L12); variants add no engine code | require a fixture per variant |
+| T01-14 | **Stashes:** contents are world (first come, journaled as transfers); the marker given for a stash reward goes to both players' maps (as S08-T09's map spots do) | one world, one box; a shared party should see the party's stashes | per-player stash markers |
+| T01-15 | **An NPC talks to one player at a time**; the second player is told the NPC is busy and the window closes when the first ends | the engine's dialogue is one phrase tree per NPC; two speakers would interleave commits | queue the second player; or allow both with independent trees |
+| T01-16 | **Story chains required for release:** the DoctorX storyline (every faction's chain) and Living Legend; Mortal Sin, Operation Afterglow, the Hidden Blade chain and MLR are **untested** (they run, nothing is claimed) until a later child takes them | 218 storyline tasks cannot each be fixture-tested in Stage 10; the two named chains are the ones a new party meets first | all chains required (several more sessions); or none |

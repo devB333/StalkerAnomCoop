@@ -20,3 +20,15 @@ consent policy needs the user's approval.
 | T01-7 | **One request at a time** for the party; a second is refused ("a travel request is already up") until the first ends | one world, one destination; simpler to reason about and to present | queue requests |
 | T01-8 | The requester's own accept counts for nothing (refused as "not yours to give"); only the partner's accept agrees | the request is the requester's consent; the partner's answer must come from the partner | — |
 | T01-9 | After both agree, **S09-T01 does not change level**: both players see "agreed by both players (the level change itself is not in this build)" | the migration is S09-T02's work; this task owns the consent only | — |
+
+## S09-T02 — the travel itself
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02-1 | While an agreed travel is carried out (a few seconds: the barrier, the save, the publication), **nobody can move or act**; actions sent then are refused ("travel in progress") and a player's client re-sends the unanswered ones on the new level | one consistent world is saved and loaded; nothing may change between the take and the reload | keep playing until the reload (changes after the take would be lost) |
+| T02-2 | The two players arrive **side by side** at the passage's arrival point (the second 0.8 m beside the first), facing the way the passage says, as a single player would arrive | the level changer defines one arrival point | spread them further / keep their relative positions |
+| T02-3 | The arrival point becomes each player's **respawn point** on the new level (as the level's entry is in single player, G07 decision 2) | the previous respawn point is on the old level | the destination's own first spawn point |
+| T02-4 | A **disconnect or death during the barrier** rolls the travel back (both are told); after the commit the travel goes on and an absent player rejoins on the new level | nothing durable has changed before the commit; after it the world is already there | wait for the player |
+| T02-5 | The travel is **not undone by a crash after the commit**: a restarted server comes up on the destination level with both players there; a crash before the commit leaves everyone on the source level (the players ask again) | the published generation is the one recoverable world (the persistence contract) | — |
+| T02-6 | A **vehicle** a player sits in is not carried over (the player arrives on foot) | the native change-level moves the holder too, but vehicles are outside the tested content (L-list) | move the vehicle's entity as well |
+| T02-7 | The **same server incarnation continues** on the new level (same authority epoch, same transition ids, the clients reconnect to the same server) rather than restarting the process | a restart would take the same load time and add a recovery; the in-process path is the engine's own level change | restart the process from the committed generation |

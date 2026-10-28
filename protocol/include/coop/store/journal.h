@@ -46,6 +46,8 @@ enum JournalKind : std::uint8_t
     kRecordUse = 11,     // S08-T07: an item used: its post-state, the items the use created or removed, the
                          // actor's condition after it
     kRecordStack = 12,   // S08-T08: ammunition stacks in a container after a merge (counts, released stacks)
+    kRecordTransition = 13, // S09-T02: a party travel's durable phases (prepared before the destination take;
+                            // committed once the destination generation is published; rolled back)
 };
 
 struct JournalHeader

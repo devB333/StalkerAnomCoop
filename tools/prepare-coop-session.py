@@ -138,7 +138,10 @@ def main():
                         help="with --travel: seconds after both players are in the world until the actors are placed")
     parser.add_argument("--travel-variant", type=int, default=0,
                         help="with --travel: 0 every round; 1 the crash run (rounds 0 and 1; with --failpoint "
-                             "travel:after-propose the server exits itself after round 0's proposal)")
+                             "travel:after-propose the server exits itself after round 0's proposal); 2 (S09-T02) "
+                             "round 0 only and the agreed travel is carried out (the party arrives on the "
+                             "destination level; --failpoint travel:before-take / travel:after-commit for the "
+                             "crash windows)")
     parser.add_argument("--restart-no-fixture", action="store_true",
                         help="with --failpoint: the restarted server runs no fixture (the clients' pending "
                              "requests are retried against the recovered world) (S08-T06)")

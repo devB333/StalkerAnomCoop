@@ -412,6 +412,8 @@ enum ActionReason : std::uint16_t
     kReasonNoTransition = 28,     // S09-T01: the answer names no live proposal (stale, replayed, unknown, or
                                   // after a restart)
     kReasonWrongParty = 29,       // S09-T01: accept/refuse from the requester, or cancel from the partner
+    kReasonTravelInProgress = 30, // S09-T02: an agreed travel is being executed (the barrier): no action until the
+                                  // party is on the destination level
 };
 
 struct Input

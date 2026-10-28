@@ -133,14 +133,50 @@ absent one's (R10).
   slot, u8 partner slot, u8 abort reason, u64 changer entity, str level,
   f32 x, y, z (the arrival position), u32 remaining ms`.
 
+## 9. Execution: the barrier, the take, the commit, the reload (S09-T02)
+
+Code: `CoopServerHost.cpp` "S09-T02" (`travel_execute_tick`, `travel_take`,
+`travel_on_published`, `travel_before_reload`, `travel_after_reload`),
+`x_ray.cpp` (the serve loop reloads the level in process),
+`CoopPersistence` (`TransitionRecord`, `load_generation`). Validation:
+[S09-T02](validation/S09-T02.md).
+
+An agreed transition is carried out as the native `change_level`
+(`alife_update_manager.cpp:166`) carries out a single player's: the live
+state is written into the ALife entities (`ClientSend`), the actor's entity
+is given the destination (graph vertex, level vertex, position, angles,
+torso), the objects are saved (`ClientSave`) and the game is saved; then
+the level is restarted from that save. Here it is done for both participant
+actors, through the durable store, with the clients following:
+
+| Phase | What happens | A crash here recovers |
+|---|---|---|
+| **Draining** (the barrier) | inputs are not applied and every action is refused (reason 30 `TravelInProgress`; the client re-sends unanswered ones later); in-flight durable work drains: a publication, deferred pickups, inventory and stack work, quest answers; 10 s at most. A party member's disconnect or death here rolls back (nothing durable changed) | the source generation; nothing durable changed |
+| **Taking** | the `transition` record phase 1 `prepared` is committed (the transition id, the source generation = the rollback point, the generation the take will publish, the destination); `ClientSend`; both actors' entities get the destination (the second 0.8 m beside the first), the arrival becomes each player's entry point (the respawn point on the new level, G07 decision 2); `ClientSave`; the destination generation is taken by the ALife save itself (not `M_SAVE_GAME`, whose `prepare_objects_for_save` would write the live positions back over the moved entities); the entities are restored at once (the source level keeps running until the publication is done) | the source generation (`recovery-transition … prepared-only-rolled-back`) |
+| **Publishing** | the worker publishes the generation; **its pointer swap is the commit point** | before the swap: the source generation; after it: the destination generation, the actors on the new level |
+| **Committed** | the record's phase 2 `committed`; both clients are told (CampaignEvent 13 state 8) and leave their world to rejoin; the serve loop ends its tick loop | the destination generation (`committed-rolled-forward`) |
+| **Reloading** | the sessions are detached from the level that goes away (the transport and the session server stay; the authority epoch does not change: the same incarnation continues); the level and its identity registry are stopped; the destination generation is loaded the way a recovery loads one (`load_generation`: its record and its save, no epoch change, no replay); the identity registry restarts and re-binds the roster from that record; the level starts, ticks, passes the identity check; the host's per-level state is rebuilt (adapters, party tasks, the published set); both clients rejoin and get the new level as a fresh checkpoint stream, their replicas reset | the destination generation |
+
+A failed take or publication rolls back: phase 3 `rolled back` is
+committed, the entities were already restored, both players are told
+(Aborted, reason 8 `execution-failed`). The travel fixture's round 0 under
+`travel_variant 2` carries one out; failpoints `travel:before-take` and
+`travel:after-commit` are the two crash windows.
+
+### 9.1 Not carried over
+
+- A vehicle the actor sits in (`m_holderID`): logged, not moved.
+- Online objects the players did not own: the destination level's ALife
+  state is whatever the save holds (the one world; offline ALife continues
+  as in single player).
+- The item graph is checked unchanged across the travel (the participants'
+  layout hash); the party's tasks are rebuilt from the save.
+
 ## 8. Not in S09-T01
 
-- The transition is **not durable**: nothing is journaled before Agreed;
-  a crash forgets a live proposal (the players request again). S09-T02
-  records the transition and the source recovery generation durably at
-  the barrier, where loss would matter.
-- No load, no barrier, no mutation ordering: Agreed is the hand-over
-  point for S09-T02.
+- A live proposal is **not durable**: a crash forgets it (the players
+  request again). From Agreed on, S09-T02 records it (§9).
+- (S09-T02 adds the execution: §9.)
 - The combat test is the NPCs' enemy memory; a player shot at by someone
   who has not selected him as an enemy, or hit by an anomaly, is not "in
   combat". Hits in the last seconds could be added if play shows the need.

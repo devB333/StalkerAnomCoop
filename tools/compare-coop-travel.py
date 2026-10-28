@@ -19,6 +19,14 @@ Checks:
   prompt        each client's own actor touching the changer raised the travel prompt
   crash         (variant 1) the server exited at travel:after-propose with a proposal live; the restarted
                 server refused the partner's accept of it (no-transition) and ran a fresh agreed round
+  execution     (variant 2, S09-T02) the agreed travel was carried out: the transition record prepared and
+                committed, the destination generation published (reason travel), the level reloaded in
+                process, both actors arrived within 3 m of the changer's destination point alive, both
+                clients rejoined on the destination level (travel-arrived), the participants' item layout
+                hash is unchanged across the travel, and no input or action was applied during the barrier
+  recovery      (variant 2 with a crash window) the restarted server recovered on the right level: the
+                source level after travel:before-take (prepared only), the destination level after
+                travel:after-commit (committed, rolled forward), and both clients rejoined there
 """
 
 import argparse
@@ -98,9 +106,10 @@ def main():
                                                 int(d["reason"]), d["transition"]))
     detail["results"] = {f"{r}/{s}": v for (r, s), v in sorted(results.items())}
 
-    rounds = server_rounds(server)
+    both_runs = first + server  # a crash window splits one story over two server logs
+    rounds = server_rounds(both_runs)
     ran = sorted(r for r in rounds if r >= 0)
-    expected_rounds = [0, 1] if a.variant == 1 else list(range(9))
+    expected_rounds = [0, 1] if a.variant == 1 else [0] if a.variant == 2 else list(range(9))
     detail["rounds_ran"] = ran
     combat_line = next((kv(ln) for ln in server if "fixture-travel combat=" in ln), None)
     detail["combat_exercised"] = combat_line.get("combat") == "1" if combat_line else None
@@ -158,28 +167,30 @@ def main():
     checks["ends"] = {"pass": not end_failures, "failures": end_failures}
 
     # consent
-    agreed = sum(1 for ln in server if re.search(r"travel-end \S+ state=agreed", ln))
-    accepts = sum(1 for ln in server if "travel-answer" in ln and "answer=accept -> agreed" in ln)
+    agreed = sum(1 for ln in both_runs if re.search(r"travel-end \S+ state=agreed", ln))
+    accepts = sum(1 for ln in both_runs if "travel-answer" in ln and "answer=accept -> agreed" in ln)
     loads = sum(1 for ln in server + first if "change_level" in ln and "refused" not in ln)
     checks["consent"] = {"pass": agreed == accepts and agreed > 0 and loads == 0, "agreed": agreed,
                          "partner_accepts": accepts, "loads": loads}
 
     # duplicates: dup-result csv events on the clients with outcome Duplicate for accepted steps
-    dup_total = sum(1 for ln in server if "travel-duplicate" in ln)
-    proposed_ops = set()
-    for ln in server:
-        m = re.search(r"travel-proposed .*operation=(\w+)", ln)
+    dup_total = sum(1 for ln in both_runs if "travel-duplicate" in ln)
+    proposed_at = {}  # operation -> UTC ms of its proposal
+    for ln in both_runs:
+        m = re.search(r"^(\d+) travel-proposed .*operation=(\w+)", ln)
         if m:
-            proposed_ops.add(m.group(1))
-    # a proposal whose operation already had a refused result would be a refused repeat turned proposal
-    refused_ops = set()
+            proposed_at.setdefault(m.group(2), int(m.group(1)))
+    # a proposal made after the same operation had already been refused would be a refused repeat
+    # turned proposal (a request refused in one run and re-evaluated after a restart is the reverse
+    # order and is the contract's behaviour)
+    refused_at = {}
     for log in clients.values():
         for ln in log:
             if "travel-result kind=11" in ln:
                 d = kv(ln)
                 if d["outcome"] == "2":
-                    refused_ops.add(d["operation"])
-    repeat_proposals = sorted(proposed_ops & refused_ops)
+                    refused_at.setdefault(d["operation"], int(ln.split(" ", 1)[0]))
+    repeat_proposals = sorted(op for op, t in refused_at.items() if op in proposed_at and proposed_at[op] > t)
     checks["duplicates"] = {"pass": dup_total > 0 and not repeat_proposals, "server_duplicates": dup_total,
                             "refused_then_proposed": repeat_proposals}
 
@@ -189,6 +200,53 @@ def main():
                                        for n, log in clients.items()}
     checks["prompt"] = {"pass": all(v > 0 for v in prompts.values()), "prompts": prompts}
 
+    if a.variant == 2:
+        dest = next((kv(ln) for ln in server + first if "travel-proposed" in ln), None)
+        level = dest["level"] if dest else None
+        prepared = any("travel-record" in ln and "phase=1" in ln for ln in server + first)
+        committed = any("travel-record" in ln and "phase=2" in ln for ln in server + first)
+        published = any("checkpoint-published" in ln and "reason=travel" in ln for ln in server + first)
+        reloaded = [kv(ln) for ln in server if "travel-reloaded" in ln]
+        arrivals = [kv(ln) for ln in server if "travel-arrival slot=" in ln and "actor=none" not in ln]
+        arrived_ok = len(arrivals) == 2 and all(float(x["distance"]) <= 3.0 and x["alive"] == "1"
+                                                and x["level"] == level for x in arrivals)
+        client_arrivals = {n: [kv(ln) for ln in log if "travel-arrived" in ln] for n, log in clients.items()}
+        clients_ok = all(len(v) >= 1 and v[-1]["level"] == level for v in client_arrivals.values())
+        # the participants' item layout hash: the last point before the take, the first after the reload
+        take_at = next((i for i, ln in enumerate(server) if "travel-take id=" in ln), None)
+        before = [kv(ln)["layout"] for ln in server[:take_at] if "item-graph tag=" in ln] if take_at else []
+        after = [kv(ln)["layout"] for ln in server[take_at:] if "item-graph tag=" in ln] if take_at else []
+        layout_same = bool(before) and bool(after) and before[-1] == after[0]
+        barred = sum(1 for ln in both_runs if "travel-exec id=" in ln and "state=draining" in ln)
+        crash = any("failpoint" in ln and "travel:" in ln for ln in first)
+        before_take = any("failpoint" in ln and "travel:before-take" in ln for ln in first)
+        # before the take: prepared only, nothing published; after the commit: all three phases; no
+        # crash: the whole travel through the reload and the arrivals
+        exec_ok = (prepared and not committed and not published) if before_take else \
+            (prepared and committed and published and (crash or (bool(reloaded) and arrived_ok and clients_ok
+                                                                and layout_same)))
+        checks["execution"] = {"pass": exec_ok, "destination": level,
+                               "prepared": prepared, "committed": committed, "published": published,
+                               "reloaded": [r.get("level") for r in reloaded], "arrivals": arrivals,
+                               "client_arrivals": {n: [v["level"] for v in vs] for n, vs in client_arrivals.items()},
+                               "layout_before_after": (before[-1] if before else None, after[0] if after else None),
+                               "executions": barred, "crash_window": crash}
+        if crash:
+            window = next((ln for ln in first if "failpoint" in ln and "travel:" in ln), "")
+            rec = [kv(ln) for ln in server if "recovery-transition" in ln]
+            # after travel:after-commit the recovery must run on the destination level; after
+            # travel:before-take on any other (the source) level
+            level_now = rec[-1]["level_now"] if rec else None
+            if "after-commit" in window:
+                right = level_now == level and rec and rec[-1]["verdict"] == "committed-rolled-forward"
+            else:
+                right = level_now is not None and level_now != level and rec and \
+                    rec[-1]["verdict"] == "prepared-only-rolled-back"
+            levels = {n: [kv(ln)["level"] for ln in log if "world-level level=" in ln] for n, log in clients.items()}
+            rejoined = all(v and v[-1] == level_now for v in levels.values())
+            checks["recovery"] = {"pass": bool(right) and rejoined, "window": window.split()[-1] if window else "",
+                                  "recovery_transition": rec[-1] if rec else None, "level_now": level_now,
+                                  "clients_levels": levels}
     if a.variant == 1:
         first_proposed = [kv(ln) for ln in first if "travel-proposed" in ln]
         exited = any("failpoint" in ln and "travel:after-propose" in ln for ln in first)

@@ -128,6 +128,7 @@ const char* to_string(TravelAbort a)
     case TravelAbort::Combat: return "combat";
     case TravelAbort::ChangerGone: return "changer-gone";
     case TravelAbort::Shutdown: return "shutdown";
+    case TravelAbort::ExecutionFailed: return "execution-failed";
     }
     return "?";
 }

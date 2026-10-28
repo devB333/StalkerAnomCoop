@@ -225,6 +225,10 @@
     {
       "path": "patches/engine/0054-travel-consent.patch",
       "sha256": "f9e7a213c15e5efe86da4ca93a97682050afa620394f535741cb5b5df542c2f4"
+    },
+    {
+      "path": "patches/engine/0055-travel-execution.patch",
+      "sha256": "b56e6c70c658fddb5534df2a48a0b06330e81d691077e15e647b486667627a57"
     }
   ],
   "submodules": [

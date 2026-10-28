@@ -310,6 +310,18 @@ nothing loads (an agreed transition ends as the S09-T02 hand-over); the
 travel fixture (`travel_party`, `travel_variant`) and the step driver's
 actions 11/12. Single-player level changers are unchanged.
 
+`0055-travel-execution.patch` (S09-T02, 2026-10-28): the agreed travel is
+carried out (docs/travel-contract.md §9): the barrier (inputs ignored, actions
+refused with reason 30), the `transition` journal record (kind 13, phases
+prepared / committed / rolled back), both participant actors' ALife entities
+moved to the changer's destination as `CALifeUpdateManager::change_level`
+moves one, the destination generation taken through the ALife save (not
+`M_SAVE_GAME`) and published as the commit point, the level reloaded in
+process by the serve loop (`x_ray.cpp`: level and identity registry stopped
+and restarted from the destination generation, `CoopPersistence::load_generation`,
+the saves folder re-indexed) while the clients leave and rejoin (CampaignEvent
+13 state 8); recovery logs the record's verdict. Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

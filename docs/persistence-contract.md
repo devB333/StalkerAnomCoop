@@ -423,6 +423,21 @@ Rows 1–7 are the failpoints S07-T06 injects (`before-append`,
 the publication failpoints; rows 13, 16 and 17 are store tests in
 `tests/store/`; 14 and 15 run in S07-T07's restart scenario.
 
+## 13. Party travel (S09-T02)
+
+Journal kind 13 `transition` ([travel contract](travel-contract.md) §9):
+`u64 id, u8 phase (1 prepared, 2 committed, 3 rolled back), u32 source
+generation, u32 destination generation, level name, u16 graph vertex, u32
+level vertex, f32 position ×3, f32 angles ×3`. Phase 1 is committed before
+the destination take; the destination generation's publication is the
+commit point (its pointer swap); phase 2 follows it. Recovery applies
+nothing for it: the generation it loads is either the rollback point or
+the destination; the record is logged with the verdict
+(`recovery-transition … prepared-only-rolled-back | committed-rolled-forward`).
+After the publication the serving server loads the destination generation
+in process (`CoopPersistence::load_generation`: the record and the save,
+the same epoch, no replay list) and continues.
+
 ## 12. What this contract does not promise
 
 - No deterministic replay: inputs are never re-executed; only resolved

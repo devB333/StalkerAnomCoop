@@ -31,6 +31,8 @@ enum class TravelState : std::uint8_t
     Expired = 4,
     Cancelled = 5, // by the requester
     Aborted = 6,   // by the world: see TravelAbort
+    // 8 is used on the wire only (CampaignEvent 13): S09-T02 `committed`: the destination generation is
+    // published and both clients rejoin on the new level
 };
 
 enum class TravelAnswer : std::uint8_t
@@ -50,6 +52,7 @@ enum class TravelAbort : std::uint8_t
     Combat = 5,
     ChangerGone = 6,
     Shutdown = 7,
+    ExecutionFailed = 8, // S09-T02: the take or the publication of the destination failed; rolled back
 };
 
 // Why a request or an answer was refused (0: accepted). The host maps them

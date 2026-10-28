@@ -1,0 +1,964 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index e044046..66a3475 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1036,6 +1036,9 @@ extern "C" bool __cdecl xrCoopServer_Prepare(LPCSTR command_line);
+ extern "C" LPCSTR __cdecl xrCoopServer_SaveName();
+ extern "C" bool __cdecl xrCoopServer_AfterServerReady(); // S07-T04
+ extern "C" bool __cdecl xrCoopServer_Start();
++extern "C" bool __cdecl xrCoopServer_ReloadRequested(); // S09-T02: a travel's destination level
++extern "C" void __cdecl xrCoopServer_BeforeReload();
++extern "C" bool __cdecl xrCoopServer_AfterReload();
+ extern "C" void __cdecl xrCoopServer_Tick(u64 tick);
+ extern "C" bool __cdecl xrCoopServer_ShouldStop();
+ extern "C" void __cdecl xrCoopServer_Stop();
+@@ -1801,6 +1804,14 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+             // server loading stages: xrServer, game_sv_Single and ALife, which
+             // chooses and loads the level's AI graph. Loading is not simulation
+             // time, so the clock pauses.
++            // S09-T02: a serving server reloads the level in process after a
++            // party travel (from the travel's destination generation), so the
++            // level start, the serve loop and the level stop form a loop.
++            bool coop_started = false;
++            bool reload = false;
++            do
++            {
++            reload = false;
+             g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
+             string512 server_options;
+             xr_sprintf(server_options, "%s/single/alife/load", serve ? xrCoopServer_SaveName() : "player - autosave");
+@@ -1908,26 +1919,76 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 // S05-T01: serve co-op clients in real time until the stop file
+                 // or the profile's time limit. Each tick: network input first
+                 // (the only place it reaches the world), then the simulation.
+-                if (!xrCoopServer_Start())
++                bool serving = false;
++                if (coop_started)
++                {
++                    // S09-T02: the destination level is loaded and ticked; the host
++                    // continues on it (the transport and the sessions stayed)
++                    if (xrCoopServer_AfterReload())
++                    {
++                        stage("coop-server-reloaded");
++                        serving = true;
++                    }
++                    else
++                    {
++                        stage("coop-server-reload-failed");
++                        result = 44;
++                    }
++                }
++                else if (!xrCoopServer_Start())
+                 {
+                     stage("coop-server-start-failed");
+                     result = 41;
+                 }
+                 else
+                 {
++                    coop_started = true;
+                     stage("coop-server-listening");
++                    serving = true;
++                }
++                if (serving)
++                {
+                     g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
+-                    while (!xrCoopServer_ShouldStop())
++                    while (!xrCoopServer_ShouldStop() && !xrCoopServer_ReloadRequested())
+                     {
+                         xrCoopServer_Tick(g_campaign_clock->Stats().ticks);
+                         RunCampaignTicksTo(g_campaign_clock->Stats().ticks + 1);
+                     }
+-                    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
+-                    stage("coop-server-served");
++                    if (xrCoopServer_ReloadRequested() && !xrCoopServer_ShouldStop())
++                    {
++                        // S09-T02: the level goes away with its identity registry; the
++                        // next pass of this loop loads the destination generation (and
++                        // pauses the clock for the load, as the first pass did)
++                        stage("coop-server-travel-reload");
++                        xrCoopServer_BeforeReload();
++                        if (xrCoopServer_ShouldStop())
++                            g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                        else
++                        {
++                            xrCampaignLevel_Stop();
++                            xrCampaignIdentity_Stop();
++                            if (xrCampaignIdentity_Start())
++                                reload = true;
++                            else
++                            {
++                                stage("coop-server-reload-identity-failed");
++                                result = 45;
++                            }
++                        }
++                    }
++                    else
++                    {
++                        g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                        stage("coop-server-served");
++                    }
++                }
++                if (!reload)
++                {
++                    xrCoopServer_Stop();
++                    stage("coop-server-stopped");
+                 }
+-                xrCoopServer_Stop();
+-                stage("coop-server-stopped");
+             }
++            } while (reload && result == 0);
+             if (!serve)
+             {
+             if (result == 0)
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index ce68caa..349d547 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -361,6 +361,10 @@ struct Link
+ 		u32 dismissed_ms = 0;
+ 		u8 last_end = 0;
+ 		u64 events = 0, prompts = 0, requests = 0, answers = 0, accepted = 0, refused = 0;
++		// S09-T02: a committed travel: this client leaves its world and rejoins on the destination
++		bool arriving = false;
++		xr_string arrive_level;
++		u64 arrivals = 0;
+ 	} travel;
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+@@ -932,6 +936,7 @@ void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
+ void on_party_tasks(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_needs(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_travel(const coop::proto::CampaignEvent& event); // S09-T01
++void travel_hud(LPCSTR text, int seconds);
+ void travel_session_reset();
+ void travel_frame();
+ void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
+@@ -976,6 +981,20 @@ void world_frame()
+ 		// server clock again from live snapshots.
+ 		g_link->clock.reset();
+ 		prediction_begin(); // S06-T03
++		g_link->log.line("world-level level=%s actor=%u pos=%.2f,%.2f,%.2f", Level().name().c_str(),
++			g_actor ? u32(g_actor->ID()) : 0xffffu, g_actor ? g_actor->Position().x : 0.f,
++			g_actor ? g_actor->Position().y : 0.f, g_actor ? g_actor->Position().z : 0.f);
++		if (g_link->travel.arriving)
++		{
++			// S09-T02: the world after a committed travel
++			g_link->travel.arriving = false;
++			++g_link->travel.arrivals;
++			string256 arrived;
++			xr_sprintf(arrived, "Arrived at %s.", Level().name().c_str());
++			travel_hud(arrived, 5);
++			g_link->log.line("travel-arrived level=%s expected=%s actor=%u", Level().name().c_str(),
++				g_link->travel.arrive_level.c_str(), g_actor ? u32(g_actor->ID()) : 0xffffu);
++		}
+ 		g_link->log.line("world-live load_ms=%u applied_buffered=%u applied=%I64u actor=%u paused=%d snapshots=%I64u "
+ 			"seeded=%I64u",
+ 			g_link->live_ms - g_link->load_started_ms, buffered, g_link->applied, u32(g_actor->ID()),
+@@ -5039,6 +5058,27 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 		t.live_id = 0;
+ 	}
+ 	t.last_end = state;
++	if (state == 8)
++	{
++		// S09-T02: committed: the server reloads the destination level from the
++		// published generation; this client leaves its world and rejoins (the
++		// S07-T07 path; the reconnect backs off until the server listens again)
++		t.arriving = true;
++		t.arrive_level = level;
++		xr_sprintf(text, "Travelling to %s...", level);
++		travel_hud(text, 30);
++		if (g_link->world == WorldLive || g_link->world == WorldLoading)
++		{
++			g_link->leaving = true;
++			++g_link->worlds_left;
++			Console->Execute("disconnect");
++		}
++		if (g_link->client)
++			g_link->client->close(coop::net::close_code::kNormal, "travel: rejoin on the destination level");
++		g_link->reconnect_backoff_ms = 1000;
++		g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + 2000;
++		return;
++	}
+ 	LPCSTR what = state == 2 ? "agreed" : state == 3 ? "refused" : state == 4 ? "expired" : state == 5 ? "cancelled" :
+ 		state == 6 ? "aborted" : "ended";
+ 	LPCSTR why = abort == 1 ? " (the requester left)" : abort == 2 ? " (the partner left)" :
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+index 326c570..8331dc9 100644
+--- a/src/xrGame/CoopPersistence.cpp
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -427,6 +427,69 @@ void CoopPersistence::fail(LPCSTR what, const FileError& error)
+ 	m_log->line("store-failed what=%s code=%u", m_failure.c_str(), error.code);
+ }
+ 
++std::vector<u8> encode_transition(const TransitionRecord& r)
++{
++	std::vector<u8> out;
++	put<u64>(out, r.id);
++	put<u8>(out, r.phase);
++	put<u32>(out, r.source_generation);
++	put<u32>(out, r.destination_generation);
++	put<u8>(out, u8(_min<size_t>(r.level.size(), 64)));
++	out.insert(out.end(), r.level.c_str(), r.level.c_str() + _min<size_t>(r.level.size(), 64));
++	put<u16>(out, r.graph_vertex);
++	put<u32>(out, r.level_vertex);
++	for (int i = 0; i < 3; ++i)
++		put<float>(out, r.position[i]);
++	for (int i = 0; i < 3; ++i)
++		put<float>(out, r.angles[i]);
++	return out;
++}
++
++bool decode_transition(const std::vector<u8>& payload, TransitionRecord& out)
++{
++	size_t at = 0;
++	u8 len = 0;
++	if (!get(payload, at, out.id) || !get(payload, at, out.phase) || !get(payload, at, out.source_generation) ||
++		!get(payload, at, out.destination_generation) || !get(payload, at, len) || at + len > payload.size())
++		return false;
++	out.level.assign(reinterpret_cast<const char*>(payload.data() + at), len);
++	at += len;
++	if (!get(payload, at, out.graph_vertex) || !get(payload, at, out.level_vertex))
++		return false;
++	for (int i = 0; i < 3; ++i)
++		if (!get(payload, at, out.position[i]))
++			return false;
++	for (int i = 0; i < 3; ++i)
++		if (!get(payload, at, out.angles[i]))
++			return false;
++	return at == payload.size() && out.phase >= 1 && out.phase <= 3;
++}
++
++bool CoopPersistence::load_generation(u32 generation, xr_string& save_name, xr_string& reason)
++{
++	save_name = "";
++	reason = "";
++	Recovered r;
++	std::string detail;
++	if (!m_store.verify_generation(generation, r.manifest, r.supplemental, detail))
++	{
++		reason = "travel-generation-invalid";
++		m_log->line("travel-load-refused generation=%u detail=%s", generation, detail.c_str());
++		return false;
++	}
++	r.generation = generation;
++	r.highest_epoch = m_epoch;
++	r.highest_revision = _max<u64>(m_recovered_state.highest_revision, r.manifest.revision);
++	m_recovered_state = r; // no replay: nothing after the take is applied by a reload (the committed record logs)
++	m_recovered = true;
++	m_generation = generation;
++	save_name = StoreNames::save_name(generation).c_str();
++	m_log->line("travel-load generation=%u revision=%I64u participants=%u entities=%u save=%s", generation,
++		r.manifest.revision, u32(r.supplemental.participants.size()), u32(r.supplemental.entities.size()),
++		save_name.c_str());
++	return true;
++}
++
+ bool CoopPersistence::recover(xr_string& save_name, xr_string& reason)
+ {
+ 	save_name = "";
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+index d5e5537..9072aed 100644
+--- a/src/xrGame/CoopPersistence.h
++++ b/src/xrGame/CoopPersistence.h
+@@ -220,6 +220,27 @@ struct StackRecord
+ std::vector<u8> encode_stack(const StackRecord& r);
+ bool decode_stack(const std::vector<u8>& payload, StackRecord& out);
+ 
++// S09-T02: a party travel's durable record (docs/travel-contract.md §9).
++// Phase 1 `prepared` is committed at the barrier, before the destination
++// take: it names the source generation (the rollback point) and the
++// generation the take will publish; phase 2 `committed` once that
++// generation is published (the commit point is its pointer swap); phase 3
++// `rolled back` when the take or the publication failed.
++struct TransitionRecord
++{
++	u64 id;
++	u8 phase; // 1 prepared, 2 committed, 3 rolled back
++	u32 source_generation;
++	u32 destination_generation;
++	xr_string level; // the destination level
++	u16 graph_vertex;
++	u32 level_vertex;
++	float position[3];
++	float angles[3];
++};
++std::vector<u8> encode_transition(const TransitionRecord& r);
++bool decode_transition(const std::vector<u8>& payload, TransitionRecord& out);
++
+ // Reason codes of ActionResult for the critical operations (S07-T03).
+ const u16 kActionReasonStoreFailed = 5;
+ 
+@@ -236,6 +257,12 @@ public:
+ 	// False: refuse to start; reason names why (recovery-no-pointer,
+ 	// recovery-no-valid-generation, recovery-incompatible, recovery-journal).
+ 	bool recover(xr_string& save_name, xr_string& reason);
++	// S09-T02: after a travel's destination generation is published, the
++	// in-process reload loads it as a recovery would (its supplemental, its
++	// save name), with no epoch change and no replay list: the same
++	// incarnation continues on the new level. False: the generation does
++	// not verify (reason).
++	bool load_generation(u32 generation, xr_string& save_name, xr_string& reason);
+ 	bool recovered() const { return m_recovered; }
+ 	const coop::store::Recovered& recovered_state() const { return m_recovered_state; }
+ 	u64 epoch() const { return m_epoch; }
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 62dd88a..e17a991 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -544,6 +544,17 @@ struct Host
+ 		u64 last_check_tick = 0;
+ 		FILE* csv = nullptr;
+ 		u64 requests = 0, answers = 0, proposals = 0, duplicates = 0;
++		// S09-T02: the executor (docs/travel-contract.md §9)
++		u8 exec = 0; // 0 none, 1 draining, 2 taking, 3 publishing, 4 committed, 5 reloading
++		u64 exec_id = 0;
++		u64 exec_since = 0;
++		xr_string exec_level;
++		GameGraph::_GRAPH_ID graph_vertex = GameGraph::_GRAPH_ID(-1); // the live proposal's destination
++		u32 level_vertex = u32(-1);
++		Fvector angles = {0.f, 0.f, 0.f};
++		u32 source_generation = 0, destination_generation = 0;
++		bool reload_requested = false;
++		u64 executions = 0, committed = 0, reloads = 0, exec_failed = 0, barred = 0;
+ 		struct Fixture
+ 		{
+ 			u64 both_since = 0;
+@@ -1183,6 +1194,8 @@ void participants_now(std::vector<PersistParticipant>& participants)
+ 
+ void check_ownership(LPCSTR tag); // S08-T02
+ void answer_quests(u32 generation, bool ok); // S08-T05
++void travel_on_published(u32 generation, bool ok); // S09-T02
++bool travel_executing();
+ 
+ // S08-T02: EntityIds in blocks, each made durable before its first id is
+ // issued (journal kind `entity-reserve`, payload: the new limit).
+@@ -1203,7 +1216,7 @@ void reserve_entity_block(u64 next, u64& limit)
+ 	limit = upto;
+ }
+ 
+-bool request_publication(LPCSTR reason)
++bool request_publication(LPCSTR reason, bool prepared = false)
+ {
+ 	CoopPersistence* persistence = g_host->persistence;
+ 	if (!persistence || persistence->failed() || !g_pGameLevel || !ai().get_alife())
+@@ -1226,7 +1239,13 @@ bool request_publication(LPCSTR reason)
+ 	timer.Start();
+ 	g_host->take_world = &job.world;
+ 	g_alife_save_sink = take_sink;
+-	native_save(coop::store::StoreNames::temp_save_name(job.generation).c_str());
++	if (prepared)
++		// S09-T02: the caller did ClientSend, changed the actors' entities and
++		// did ClientSave (as change_level): the ALife save without
++		// prepare_objects_for_save, which would write the live positions back
++		const_cast<CALifeSimulator&>(ai().alife()).save(coop::store::StoreNames::temp_save_name(job.generation).c_str());
++	else
++		native_save(coop::store::StoreNames::temp_save_name(job.generation).c_str());
+ 	g_alife_save_sink = nullptr;
+ 	g_host->take_world = nullptr;
+ 	const u32 save_ms = timer.GetElapsed_ms();
+@@ -1313,6 +1332,7 @@ void poll_publications(bool final_stop)
+ 			g_host->stop_requested = true;
+ 		}
+ 		answer_quests(r.generation, r.ok); // S08-T05
++		travel_on_published(r.generation, r.ok); // S09-T02
+ 		// the joins that waited for this generation
+ 		for (PlayerLink& link : g_host->links)
+ 			if (link.world == WorldPublishing && link.waiting_generation == r.generation)
+@@ -1601,6 +1621,9 @@ void nearby_creatures(CActor* actor, string512& out)
+ 
+ void apply_inputs()
+ {
++	if (travel_executing())
++		return; // S09-T02: the barrier: no input moves an actor while the travel is carried out
++
+ 	const u32 now = g_host->wall.GetElapsed_ms();
+ 	// What the previous tick did with the input it was given.
+ 	for (PlayerLink& link : g_host->links)
+@@ -8506,7 +8529,8 @@ CLevelChanger* travel_changer(u16 id)
+ 
+ // The destination as the changer's server entity names it (the game vertex's
+ // level in the game graph; the spawn's own level name as a fallback).
+-void travel_destination(u16 changer_id, xr_string& level, Fvector& position)
++void travel_destination(u16 changer_id, xr_string& level, Fvector& position, GameGraph::_GRAPH_ID* gvid = nullptr,
++	u32* lvid = nullptr, Fvector* angles = nullptr)
+ {
+ 	level = "?";
+ 	position.set(0.f, 0.f, 0.f);
+@@ -8515,6 +8539,12 @@ void travel_destination(u16 changer_id, xr_string& level, Fvector& position)
+ 	if (!lc)
+ 		return;
+ 	position = lc->m_tNextPosition;
++	if (gvid)
++		*gvid = lc->m_tNextGraphID;
++	if (lvid)
++		*lvid = lc->m_dwNextNodeID;
++	if (angles)
++		*angles = lc->m_tAngles;
+ 	if (ai().get_game_graph() && ai().game_graph().valid_vertex_id(lc->m_tNextGraphID))
+ 		level = *ai().game_graph().header().level(ai().game_graph().vertex(lc->m_tNextGraphID)->level_id()).name();
+ 	else if (lc->m_caLevelToChange.size())
+@@ -8599,6 +8629,8 @@ void travel_event(const coop::proto::Transition& t, u32 remaining_ms)
+ 			travel_event_to(link, t, remaining_ms);
+ }
+ 
++void travel_begin_execution(const coop::proto::Transition& t); // S09-T02
++
+ // The live proposal ended: both players are told, the engine facts cleared.
+ void end_travel(const coop::proto::Transition& t)
+ {
+@@ -8609,10 +8641,13 @@ void end_travel(const coop::proto::Transition& t)
+ 	travel_csv("end", t.requester, 0, t.id, 0, coop::proto::to_string(t.state), coop::proto::to_string(t.abort));
+ 	travel_event(t, 0);
+ 	if (t.state == coop::proto::TravelState::Agreed)
+-		// S09-T02 takes it from here (the barrier, the native change_level for
+-		// both identities, the destination load); nothing loads yet
+-		g_host->log.line("travel-agreed id=%I64x executor=none level=%s pos=%.2f,%.2f,%.2f (S09-T02)", t.id,
++	{
++		// S09-T02: the executor takes it from here
++		g_host->log.line("travel-agreed id=%I64x executor=travel_execute_tick level=%s pos=%.2f,%.2f,%.2f", t.id,
+ 			g_host->travel.level.c_str(), VPUSH(g_host->travel.position));
++		travel_begin_execution(t);
++		return;
++	}
+ 	g_host->travel.changer = kNoEngineId;
+ 	g_host->travel.level.clear();
+ }
+@@ -8668,6 +8703,8 @@ u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& inten
+ 	++g_host->travel.requests;
+ 	if (!link.session || !g_host->travel.coordinator)
+ 		return coop::proto::kReasonNoActor;
++	if (g_host->travel.exec)
++		return coop::proto::kReasonTravelInProgress; // S09-T02
+ 	if (!intent.params.empty())
+ 		return coop::proto::kReasonMalformed;
+ 	PartyId party;
+@@ -8725,7 +8762,8 @@ u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& inten
+ 	if (verdict != coop::proto::TravelVerdict::Ok)
+ 		return coop::proto::kReasonWrongParty;
+ 	g_host->travel.changer = changer_id;
+-	travel_destination(changer_id, g_host->travel.level, g_host->travel.position);
++	travel_destination(changer_id, g_host->travel.level, g_host->travel.position, &g_host->travel.graph_vertex,
++		&g_host->travel.level_vertex, &g_host->travel.angles);
+ 	++g_host->travel.proposals;
+ 	g_host->log.line("travel-proposed id=%I64x requester=%u partner=%u changer=%u name=%s level=%s pos=%.2f,%.2f,%.2f "
+ 		"distance=%.2f deadline_ms=%I64u operation=%I64x",
+@@ -8914,6 +8952,8 @@ void travel_on_left(const PlayerLink& link)
+ //      (28; else cancelled); the boar killed; p1 requests, p2 accepts -> agreed
+ // travel_variant 1 (the crash run): rounds 0 and 1 only; the server
+ // terminates itself at travel:after-propose in round 0 (profile failpoint).
++// travel_variant 2 (S09-T02): round 0 only; the agreed travel is carried out
++// (the party arrives on the changer's destination level).
+ const u32 kTravelRounds = 9;
+ 
+ void travel_fixtures()
+@@ -8997,7 +9037,7 @@ void travel_fixtures()
+ 		f.round_tick = g_host->tick;
+ 		return;
+ 	}
+-	const u32 rounds = config.travel_variant == 1 ? 2 : kTravelRounds;
++	const u32 rounds = config.travel_variant == 1 ? 2 : config.travel_variant == 2 ? 1 : kTravelRounds;
+ 	if (f.phase != 2 || f.round >= rounds || g_host->tick < f.round_tick)
+ 		return;
+ 	const u16 C = f.changer;
+@@ -9156,6 +9196,424 @@ void travel_fixture_boar()
+ 	g_host->log.line("fixture-travel boar-killed id=%u dead=%d", u32(f.boar), boar && !boar->g_Alive() ? 1 : 0);
+ }
+ 
++// ------------------------------------------------------------ S09-T02
++// The travel executor (docs/travel-contract.md §9): an agreed transition is
++// carried out as the native change_level does it for one actor
++// (alife_update_manager.cpp:166), for both participant actors and through
++// the durable store:
++//   Draining   the barrier: inputs and actions refused; in-flight durable
++//              work (a publication, deferred pickups, inventory, stacks,
++//              quest answers) drains, 10 s at most
++//   Taking     the `transition` record (phase 1 prepared: the source
++//              generation is the rollback point) is committed; ClientSend;
++//              both actors' ALife entities get the destination (graph
++//              vertex, level vertex, position, angles, torso); ClientSave;
++//              the destination generation is taken (the ALife save, not the
++//              M_SAVE_GAME path, whose prepare_objects_for_save would write
++//              the live positions back); the entities are restored
++//   Publishing the worker publishes it; its pointer swap is the commit point
++//   Committed  phase 2 committed; both clients are told (CampaignEvent 13
++//              state 8) and rejoin; the serve loop reloads the level in
++//              process from that generation (xrCoopServer_ReloadRequested)
++// A failed take or publication rolls back (phase 3; the entities were
++// restored; the players are told). A crash before the publication recovers
++// the source generation; after it, the destination one (contract §7).
++
++void log_status(LPCSTR tag);
++
++const char* travel_exec_name(u8 s)
++{
++	switch (s)
++	{
++	case 0: return "none";
++	case 1: return "draining";
++	case 2: return "taking";
++	case 3: return "publishing";
++	case 4: return "committed";
++	case 5: return "reloading";
++	}
++	return "?";
++}
++
++bool travel_executing() { return g_host && g_host->travel.exec != 0; }
++
++void travel_record(u8 phase, u64 revision)
++{
++	Host::Travel& tv = g_host->travel;
++	TransitionRecord r;
++	r.id = tv.exec_id;
++	r.phase = phase;
++	r.source_generation = tv.source_generation;
++	r.destination_generation = tv.destination_generation;
++	r.level = tv.level;
++	r.graph_vertex = tv.graph_vertex;
++	r.level_vertex = tv.level_vertex;
++	for (int i = 0; i < 3; ++i)
++	{
++		r.position[i] = (&tv.position.x)[i];
++		r.angles[i] = (&tv.angles.x)[i];
++	}
++	const bool ok = g_host->persistence && g_host->persistence->commit(coop::store::kRecordTransition, g_host->tick,
++		revision, encode_transition(r));
++	g_host->log.line("travel-record id=%I64x phase=%u source=%u destination=%u level=%s revision=%I64u ok=%d", r.id,
++		u32(phase), r.source_generation, r.destination_generation, r.level.c_str(), revision, ok ? 1 : 0);
++	travel_csv(phase == 1 ? "prepared" : phase == 2 ? "committed" : "rolled-back", 0, 0, r.id, 0,
++		travel_exec_name(tv.exec), tv.level.c_str());
++	if (!ok)
++		g_host->log.line("travel-record-failed phase=%u reason=%s", u32(phase), g_host->persistence ? g_host->persistence->failure() : "no-store");
++}
++
++void travel_exec_fail(LPCSTR why)
++{
++	Host::Travel& tv = g_host->travel;
++	g_host->log.line("travel-exec-failed id=%I64x state=%s why=%s", tv.exec_id, travel_exec_name(tv.exec), why);
++	if (tv.exec >= 2 && g_host->persistence && !g_host->persistence->failed())
++		travel_record(3, ++g_host->commit);
++	coop::proto::Transition t = g_host->travel.coordinator->last_ended();
++	t.state = coop::proto::TravelState::Aborted;
++	t.abort = coop::proto::TravelAbort::ExecutionFailed;
++	tv.level = tv.exec_level;
++	travel_event(t, 0);
++	tv.exec = 0;
++	tv.exec_id = 0;
++	++tv.exec_failed;
++}
++
++// Agreed: the executor starts (called from end_travel).
++void travel_begin_execution(const coop::proto::Transition& t)
++{
++	Host::Travel& tv = g_host->travel;
++	tv.exec = 1;
++	tv.exec_id = t.id;
++	tv.exec_since = g_host->tick;
++	tv.exec_level = tv.level;
++	tv.source_generation = g_host->persistence ? g_host->persistence->current_generation() : 0;
++	tv.destination_generation = 0;
++	++tv.executions;
++	g_host->log.line("travel-exec id=%I64x state=draining level=%s gvid=%u lvid=%u pos=%.2f,%.2f,%.2f source=%u in_flight=%d "
++		"pickups=%u inventory=%u stacks=%u turn_ins=%u quest_answers=%u",
++		t.id, tv.exec_level.c_str(), u32(tv.graph_vertex), tv.level_vertex, VPUSH(tv.position), tv.source_generation,
++		g_host->persistence && g_host->persistence->in_flight() ? 1 : 0, u32(g_host->pickups_pending.size()),
++		u32(g_host->inventory_pending.size()), u32(g_host->stacks_pending.size()), u32(g_host->turn_ins.size()),
++		u32(g_host->quest_answers.size()));
++}
++
++// The take: both actors' entities moved as the native change_level moves the
++// one actor's, the generation taken, the entities restored (the level keeps
++// running until the publication is done).
++bool travel_take()
++{
++	Host::Travel& tv = g_host->travel;
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence || persistence->failed() || persistence->in_flight())
++		return false;
++	struct Moved
++	{
++		CSE_ALifeCreatureActor* se;
++		PlayerLink* link;
++		GameGraph::_GRAPH_ID graph;
++		u32 node;
++		Fvector position, angles;
++		SRotation torso;
++		Fvector entry;
++		u32 entry_vertex;
++		bool have_entry;
++	};
++	xr_vector<Moved> moved;
++	Level().ClientSend(); // the live state into the entities first (as change_level)
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (!actor)
++			continue;
++		CSE_ALifeDynamicObject* o = ai().alife().objects().object(u16(actor->ID()), true);
++		CSE_ALifeCreatureActor* se = o ? smart_cast<CSE_ALifeCreatureActor*>(o) : nullptr;
++		if (!se)
++		{
++			g_host->log.line("travel-take-no-entity slot=%u actor=%u", u32(link.ref.slot), u32(actor->ID()));
++			return false;
++		}
++		if (se->m_holderID != 0xffff)
++			g_host->log.line("travel-take-holder slot=%u holder=%u (vehicles are not carried over)", u32(link.ref.slot),
++				u32(se->m_holderID));
++		Moved m = {se, &link, se->m_tGraphID, se->m_tNodeID, se->o_Position, se->o_Angle, se->o_torso, link.entry,
++			link.entry_vertex, link.have_entry};
++		moved.push_back(m);
++		Fvector at = tv.position;
++		at.x += link.ref.slot ? 0.8f : 0.f; // the two actors side by side at the arrival point
++		se->m_tGraphID = tv.graph_vertex;
++		se->m_tNodeID = tv.level_vertex;
++		se->o_Position = at;
++		se->o_Angle = tv.angles;
++		se->o_torso.yaw = tv.angles.y;
++		se->o_torso.pitch = tv.angles.x;
++		se->o_torso.roll = 0.f;
++		// G07 decision 2: the arrival is the respawn point on the new level
++		link.entry = at;
++		link.entry_vertex = tv.level_vertex;
++		link.have_entry = true;
++		g_host->log.line("travel-take-moved slot=%u actor=%u entity=%I64u from=%.2f,%.2f,%.2f gvid=%u to=%.2f,%.2f,%.2f gvid=%u lvid=%u",
++			u32(link.ref.slot), u32(actor->ID()), entity_of(u16(actor->ID())), VPUSH(m.position), u32(m.graph), VPUSH(at),
++			u32(tv.graph_vertex), tv.level_vertex);
++	}
++	if (moved.empty())
++		return false;
++	Level().ClientSave();
++	tv.destination_generation = persistence->next_generation();
++	const bool taken = request_publication("travel", true);
++	for (Moved& m : moved)
++	{
++		m.se->m_tGraphID = m.graph;
++		m.se->m_tNodeID = m.node;
++		m.se->o_Position = m.position;
++		m.se->o_Angle = m.angles;
++		m.se->o_torso = m.torso;
++		if (!taken)
++		{
++			m.link->entry = m.entry;
++			m.link->entry_vertex = m.entry_vertex;
++			m.link->have_entry = m.have_entry;
++		}
++	}
++	g_host->log.line("travel-take id=%I64x generation=%u taken=%d actors=%u", tv.exec_id, tv.destination_generation,
++		taken ? 1 : 0, u32(moved.size()));
++	return taken;
++}
++
++void travel_execute_tick()
++{
++	Host::Travel& tv = g_host->travel;
++	if (!tv.exec || tv.exec >= 4)
++		return;
++	CoopPersistence* persistence = g_host->persistence;
++	if (!persistence || persistence->failed())
++	{
++		travel_exec_fail("store-failed");
++		return;
++	}
++	// the party must still be whole: a disconnect or a death during the
++	// barrier rolls the travel back (nothing durable has changed yet)
++	for (PlayerLink& l : g_host->links)
++	{
++		if (!l.bound || l.ref.slot > 1)
++			continue;
++		CActor* a = participant_actor(l.ref);
++		if (!client_in_world(l) || !a || !a->g_Alive())
++		{
++			if (tv.exec < 3)
++			{
++				travel_exec_fail(!client_in_world(l) ? "party-member-left" : "party-member-dead");
++				return;
++			}
++		}
++	}
++	if (tv.exec == 1)
++	{
++		const bool drained = !persistence->in_flight() && g_host->pickups_pending.empty() &&
++			g_host->pickup_confirm.empty() && g_host->inventory_pending.empty() && g_host->stacks_pending.empty() &&
++			g_host->turn_ins.empty() && g_host->quest_answers.empty();
++		if (!drained && g_host->tick - tv.exec_since < 10 * 50)
++			return;
++		if (!drained)
++			g_host->log.line("travel-drain-timeout id=%I64x in_flight=%d pickups=%u confirm=%u inventory=%u stacks=%u "
++				"turn_ins=%u quest_answers=%u", tv.exec_id, persistence->in_flight() ? 1 : 0,
++				u32(g_host->pickups_pending.size()), u32(g_host->pickup_confirm.size()),
++				u32(g_host->inventory_pending.size()), u32(g_host->stacks_pending.size()), u32(g_host->turn_ins.size()),
++				u32(g_host->quest_answers.size()));
++		if (persistence->in_flight())
++			return; // a publication must finish before the take (one worker job at a time)
++		tv.exec = 2;
++		g_host->log.line("travel-exec id=%I64x state=taking drained=%d after_ticks=%I64u", tv.exec_id, drained ? 1 : 0,
++			g_host->tick - tv.exec_since);
++		tv.destination_generation = persistence->next_generation();
++		travel_record(1, ++g_host->commit);
++		if (persistence->failed())
++		{
++			travel_exec_fail("prepare-record");
++			return;
++		}
++		// S09-T02 harness: a crash after the prepared record, before the take
++		coop::store::failpoint("travel:before-take");
++		if (!travel_take())
++		{
++			travel_exec_fail("take");
++			return;
++		}
++		tv.exec = 3;
++		g_host->log.line("travel-exec id=%I64x state=publishing generation=%u", tv.exec_id, tv.destination_generation);
++		return;
++	}
++	// exec 3: poll_publications completes it
++}
++
++// Called by poll_publications for every published generation.
++void travel_on_published(u32 generation, bool ok)
++{
++	Host::Travel& tv = g_host->travel;
++	if (tv.exec != 3 || generation != tv.destination_generation)
++		return;
++	if (!ok)
++	{
++		travel_exec_fail("publication");
++		return;
++	}
++	tv.exec = 4;
++	travel_record(2, ++g_host->commit);
++	++tv.committed;
++	g_host->log.line("travel-committed id=%I64x generation=%u level=%s", tv.exec_id, generation, tv.exec_level.c_str());
++	// both clients leave their world and rejoin once the server is on the new level
++	coop::proto::Transition t = tv.coordinator->last_ended();
++	t.state = coop::proto::TravelState(8); // committed: reload
++	tv.level = tv.exec_level;
++	travel_event(t, 0);
++	for (PlayerLink& link : g_host->links)
++		if (link.world == WorldStreaming || link.world == WorldLive)
++			flush_outbox(link);
++	// S09-T02 harness: a crash after the commit, before the reload
++	coop::store::failpoint("travel:after-commit");
++	tv.exec = 5;
++	tv.reload_requested = true;
++}
++
++// The serve loop's reload (x_ray.cpp): the sessions are detached from the
++// level that goes away; the transport and the session server stay.
++void travel_before_reload()
++{
++	Host::Travel& tv = g_host->travel;
++	poll_publications(true);
++	g_host->events.clear();
++	for (PlayerLink& link : g_host->links)
++	{
++		if (link.session)
++			g_campaign_identity->detach_session(g_campaign_identity->authority(), link.session, Device.dwFrame);
++		link.session = 0;
++		link.world = WorldNone;
++		link.outbox.clear();
++		link.blob.clear();
++		link.inputs.reset();
++		link.snapshots.reset();
++		link.settled.clear();
++		link.sent_commit = 0;
++		link.fire_down = false;
++		link.pending_actor = kNoEngineId;
++		link.layouts_sent = false;
++		link.party_sent = false;
++		link.travel_sent_id = 0;
++		link.presentation_started = false;
++		link.kit_pending = false;
++	}
++	xr_string save, reason;
++	if (!g_host->persistence->load_generation(tv.destination_generation, save, reason))
++	{
++		g_host->log.line("travel-reload-refused id=%I64x generation=%u reason=%s", tv.exec_id, tv.destination_generation,
++			reason.c_str());
++		g_host->stop_requested = true; // the committed generation is on disk: a restart recovers it
++		return;
++	}
++	g_host->recovered_save = save;
++	// the generation's files were written by the store, not through FS: the
++	// saves folder is re-indexed so the level start finds them (as the client
++	// does for a received checkpoint)
++	FS.rescan_path(FS.get_path("$game_saves$")->m_Path, FALSE);
++	// the online set and everything keyed by the level's objects goes with the level
++	g_host->published.clear();
++	g_host->motion.clear();
++	g_host->gait.clear();
++	g_host->guns.clear();
++	g_host->layouts.clear();
++	g_host->observed_children.clear();
++	g_host->observed_entities.clear();
++	g_host->observed_sections.clear();
++	g_host->observer_ready = false;
++	g_host->pickup_expected.clear();
++	g_host->inventory_expected.clear();
++	g_host->container_expected.clear();
++	g_host->containers_recorded.clear();
++	g_host->stack_expected.clear();
++	g_host->stack_entities.clear();
++	g_host->use_consumed.clear();
++	g_host->use_followups.clear();
++	g_host->party_tasks.clear();
++	g_host->party_actor_ids[0] = g_host->party_actor_ids[1] = 0xffff;
++	g_host->party_hash = 0;
++	g_host->dropped.clear();
++	g_host->dropped_release_ms.clear();
++	g_host->dropped_tossed.clear();
++	g_host->encounter = Host::Encounter();
++	g_host->thunder = Host::Thunder();
++	g_host->last_env_key[0] = 0;
++	g_host->last_weather = shared_str();
++	g_host->party_adapter = false;
++	g_host->item_adapter = false;
++	g_host->needs_adapter = false;
++	g_host->needs_current = 0;
++	g_host->pickup_recovery_logged = false;
++	tv.changer = kNoEngineId;
++	tv.fixture.phase = 99; // the fixture ran on the source level; it does not run again
++	g_host->log.line("travel-reload id=%I64x generation=%u save=%s from=%s to=%s", tv.exec_id, tv.destination_generation,
++		save.c_str(), Level().name().c_str(), tv.exec_level.c_str());
++}
++
++// After the new level loaded and ticked (the identity service re-bound the
++// roster from the destination generation's record, the actors were
++// assigned by xrCoopServer_AfterServerReady): the per-level host state.
++bool travel_after_reload()
++{
++	Host::Travel& tv = g_host->travel;
++	g_host->last_published.clear();
++	for (const coop::store::SupplementalParticipant& sp : g_host->persistence->recovered_state().supplemental.participants)
++	{
++		PersistParticipant p;
++		p.slot = sp.slot;
++		p.slot_generation = sp.slot_generation;
++		p.player = sp.player;
++		p.actor_id = sp.actor_id;
++		p.actor_entity = sp.actor_entity;
++		p.alive = sp.alive;
++		p.position.set(sp.position[0], sp.position[1], sp.position[2]);
++		p.entry.set(sp.entry[0], sp.entry[1], sp.entry[2]);
++		p.entry_vertex = sp.entry_vertex;
++		p.name = sp.name.c_str();
++		g_host->last_published.push_back(p);
++	}
++	g_campaign_identity->set_entity_reserver(reserve_entity_block);
++	install_party_adapter(); // S08-T04
++	install_item_adapter(); // S08-T07
++	install_needs_adapter(); // S08-T09
++	rebuild_party_tasks(); // S08-T06
++	bool ok = true;
++	u32 arrived = 0;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (!actor)
++		{
++			g_host->log.line("travel-arrival slot=%u actor=none", u32(link.ref.slot));
++			ok = false;
++			continue;
++		}
++		const float distance = actor->Position().distance_to(tv.position);
++		g_host->log.line("travel-arrival slot=%u actor=%u entity=%I64u level=%s pos=%.2f,%.2f,%.2f distance=%.2f alive=%d "
++			"entry=%.2f,%.2f,%.2f",
++			u32(link.ref.slot), u32(actor->ID()), entity_of(u16(actor->ID())), Level().name().c_str(),
++			VPUSH(actor->Position()), distance, actor->g_Alive() ? 1 : 0, VPUSH(link.entry));
++		++arrived;
++	}
++	g_host->log.line("travel-reloaded id=%I64x generation=%u level=%s arrived=%u ok=%d", tv.exec_id,
++		tv.destination_generation, Level().name().c_str(), arrived, ok ? 1 : 0);
++	travel_csv("reloaded", 0, 0, tv.exec_id, 0, Level().name().c_str(), "");
++	++tv.reloads;
++	tv.exec = 0;
++	tv.exec_id = 0;
++	tv.reload_requested = false;
++	log_status("reloaded");
++	return ok;
++}
++
+ void on_joined(const coop::session::SessionEvent& e)
+ {
+ 	PlayerLink* link = link_of(e.player);
+@@ -9247,6 +9705,20 @@ void on_message(const coop::session::SessionEvent& e)
+ 	}
+ 	if (const auto* intent = std::get_if<coop::proto::ActionIntent>(&e.message.body))
+ 	{
++		if (travel_executing())
++		{
++			// S09-T02: the barrier: every action is refused until the party is on
++			// the destination level (the client retries unanswered ones; a refused
++			// one is the player's to repeat there)
++			coop::proto::ActionResult barred;
++			barred.operation_id = intent->operation_id;
++			barred.outcome = coop::proto::ActionOutcome::Rejected;
++			barred.reason = coop::proto::kReasonTravelInProgress;
++			barred.server_tick = g_host->tick;
++			g_host->server->send(e.player, coop::proto::Message(barred));
++			++g_host->travel.barred;
++			return;
++		}
+ 		// S06-T04: activate a slot and reload are the defined kinds; every
+ 		// other kind is refused, and nothing in the world changes.
+ 		coop::proto::ActionResult result;
+@@ -10032,6 +10504,27 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		}
+ 		if (record.kind == coop::store::kRecordEntityReserve)
+ 			continue; // S08-T02: read by the identity restore
++		if (record.kind == coop::store::kRecordTransition)
++		{
++			// S09-T02: nothing to apply: the generation this recovery loaded is
++			// the rollback point (phase 1 only: the destination was never
++			// published) or the destination (phase 2); logged for the evidence
++			TransitionRecord t;
++			if (!decode_transition(record.payload, t))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			g_host->log.line("recovery-transition id=%I64x phase=%u source=%u destination=%u level=%s recovered_generation=%u "
++				"level_now=%s verdict=%s",
++				t.id, u32(t.phase), t.source_generation, t.destination_generation, t.level.c_str(),
++				g_host->persistence->current_generation(), Level().name().c_str(),
++				t.phase == 2 ? "committed-rolled-forward" : t.phase == 3 ? "rolled-back-by-server" :
++				g_host->persistence->current_generation() >= t.destination_generation ? "committed-rolled-forward" :
++				"prepared-only-rolled-back");
++			continue;
++		}
+ 		g_host->log.line("recovery-replay-skipped kind=%u revision=%I64u reason=no-adapter-yet", u32(record.kind),
+ 			record.revision);
+ 	}
+@@ -10146,6 +10639,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
+ 	quest_fixtures(); // S08-T04
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
++	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+ 	travel_fixtures(); // S09-T01
+ 	travel_fixture_boar();
+ 	encounter_fixtures();
+@@ -10200,6 +10694,19 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ }
+ 
+ extern "C" bool __cdecl xrCoopServer_ShouldStop() { return !g_host || !g_host->started || g_host->stop_requested; }
++// S09-T02: the serve loop reloads the level from the travel's destination generation.
++extern "C" bool __cdecl xrCoopServer_ReloadRequested() { return g_host && g_host->started && g_host->travel.reload_requested; }
++extern "C" void __cdecl xrCoopServer_BeforeReload()
++{
++	if (g_host && g_host->started)
++		travel_before_reload();
++}
++extern "C" bool __cdecl xrCoopServer_AfterReload()
++{
++	if (!g_host || !g_host->started)
++		return false;
++	return travel_after_reload();
++}
+ 
+ extern "C" void __cdecl xrCoopServer_Stop()
+ {

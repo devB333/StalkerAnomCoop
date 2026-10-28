@@ -2,7 +2,7 @@
 
 The open limits each accepted gate carried forward, in one place, so they can
 be tracked to closure. Created 2026-10-20 at the user's request when G05 was
-accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, accepted 2026-10-23; L37–L43 at G08, accepted 2026-10-25); it collects the limits recorded in [G01](validation/G01.md),
+accepted (L28–L31 added at G06, 2026-10-21; L32–L36 at G07, accepted 2026-10-23; L37–L43 at G08, accepted 2026-10-25; L44–L49 at the G08 condition review, accepted 2026-10-27); it collects the limits recorded in [G01](validation/G01.md),
 [G02](validation/G02.md), [G03](validation/G03.md), [G04](validation/G04.md)
 and [G05](validation/G05.md). The gate records stay the source of what was
 accepted; this file is the working list.
@@ -95,10 +95,11 @@ solved": each row's owner is the task that solves it.
 | L42 | A party task whose anchor (participant 1's actor) dies and respawns is undefined and untested | G08 ([S08-T05](validation/S08-T05.md)) | S08-T09 | Closed 2026-10-26: the task stays active; its turn-in waits for participant 1's respawn and then runs in the new body; its script data stays in the original body's saved store; tested live and with a restart between the respawn and the turn-in (which also fixed a restart that could not start after participant 1's respawn) ([S08-T09](validation/S08-T09.md), pq-2, pq-6) |
 | L43 | The talk window does not reach the server: players cannot yet accept or turn in the party quest by talking to the giver (the fixture sends the intents) | G08 ([S08-T04](validation/S08-T04.md)) | S10-T04 (first child) | Open |
 
-## Proposed at the G08 condition review (2026-10-27) — pending the user's confirmation
+## Added at the G08 condition review (accepted 2026-10-27)
 
 Found while closing L37–L42 (S08-T07…T09). Each has an owner task; the user
-asked for them to be listed with the gate.
+asked for them to be listed with the gate and accepted them with it on
+2026-10-27 ("they all work You can close the gate").
 
 | ID | Limit | From | Owner | Status |
 |---|---|---|---|---|

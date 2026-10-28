@@ -6,8 +6,8 @@ Every gameplay decision taken while solving them is listed here, with the
 task that took it and where it is implemented, so the user can approve or
 change each one when Stage 8 closes. None of them is final until approved.
 
-**Status (2026-10-26): S08-T07…T09 Completed; waiting for the user's approval** together with the
-[G08 condition review](validation/G08.md#condition-review--ready-for-the-users-confirmation-2026-10-26).
+**Status: approved by the user on 2026-10-27** ("they all work You can close the gate"), with T07-5 and T07-8 as the user revised them
+(patches 0052, 0053). See the [G08 condition review](validation/G08.md#condition-review--ready-for-the-users-confirmation-2026-10-26).
 
 ## S08-T07 — equip, use and consumption
 
@@ -31,6 +31,8 @@ separate for each player (implemented: below).
 
 ## S08-T08 — durable containers and stack semantics
 
+**User's answer (2026-10-27):** all approved ("they all work You can close the gate").
+
 | # | Decision | Why | Alternative |
 |---|---|---|---|
 | T08-1 | A box or a body that a player's committed transfer touches is **re-created after a restart** if the recovered world lacks it (a stash a script made, the body of an NPC spawned after the checkpoint); a re-created body is a dead body at the same place | committed contents must be in their container, not on the ground (L38) | keep them on the ground at the container's place (the S08-T02 rule) |
@@ -43,6 +45,8 @@ separate for each player (implemented: below).
 | T08-8 | The deployable backpack (`itm_actor_backpack`) is not deleted by the engine after use (it cannot be deleted); the installed stash script then moves it into the stash with the rest of the ruck — kept as in single player | installed behaviour | — |
 
 ## S08-T09 — party quest presentation and robustness
+
+**User's answer (2026-10-27):** all approved.
 
 | # | Decision | Why | Alternative |
 |---|---|---|---|

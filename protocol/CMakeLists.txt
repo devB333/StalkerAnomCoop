@@ -42,7 +42,8 @@ add_library(coop_protocol STATIC
     src/proto/input_queue.cpp
     src/proto/snapshot.cpp
     src/proto/interpolation.cpp
-    src/proto/prediction.cpp)
+    src/proto/prediction.cpp
+    src/proto/transition.cpp)
 target_include_directories(coop_protocol PUBLIC include)
 target_compile_options(coop_protocol PRIVATE ${COOP_WARNINGS})
 target_link_libraries(coop_protocol PUBLIC coop_net)

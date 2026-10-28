@@ -299,6 +299,17 @@ its own camera per frame for 2 s after the other player's weapon change
 (`coop-camera-client.csv`, `remote-slot-change`), which showed in cam-1 that
 the camera itself did not move. No single-player behaviour changes.
 
+`0054-travel-consent.patch` (S09-T01, 2026-10-27): party travel request and
+two-player consent (docs/travel-contract.md): ActionIntent kinds 11 (travel
+request at a level changer) and 12 (answer) on the server with the
+`coop::proto::TransitionCoordinator` state machine (30-s consent, abort on a
+party member's disconnect, death, combat or the changer's loss), CampaignEvent
+13 to both players; on a co-op client a level changer touch is a prompt (USE
+asks the partner, DROP stays; the partner's USE/DROP answers; DROP cancels),
+nothing loads (an agreed transition ends as the S09-T02 hand-over); the
+travel fixture (`travel_party`, `travel_variant`) and the step driver's
+actions 11/12. Single-player level changers are unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

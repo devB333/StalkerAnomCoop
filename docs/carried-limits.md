@@ -47,7 +47,7 @@ accepted; this file is the working list.
 | L11 | Installed scripts outside a participant context still decide for actor 0 (NPC condlists, meet/talk, disguise, warfare; 167 lines in the S03-T05 audit); `has_alife_info`, `alife():actor()` and the story object are not participant-aware; party vs personal info portions undecided (R04, R09) | G03 | S08, S10-T04/T05 | Open |
 | L12 | Player-bound monster abilities (phantom, psy dog aura, controller, snork, pseudogigant, scanning) are explicit no-ops or guarded (B21) | G02, G03 | S10-T02 | Open |
 | L13 | AI lighting: NPCs outside every participant's view keep their last lighting; dynamic lights do not count (as on the DX11 client) | G03 (S03-T06) | S10-T02 | Open |
-| L14 | One level (`k00_marsh`) and one save; no level change or new game | G02–G05 | S09, S10-T01 | Open. 2026-10-21: now enforced: a level-changer touch crashed the headless server (enc-9); the campaign server and co-op clients refuse level-changer touches and `M_CHANGE_LEVEL` and log them ([S06-T05](validation/S06-T05.md), enc-12) |
+| L14 | One level (`k00_marsh`) and one save; no level change or new game | G02–G05 | S09, S10-T01 | Open. 2026-10-21: now enforced: a level-changer touch crashed the headless server (enc-9); the campaign server and co-op clients refuse level-changer touches and `M_CHANGE_LEVEL` and log them ([S06-T05](validation/S06-T05.md), enc-12); 2026-10-27: still holds — S09-T01 adds the travel request and two-player consent on top of the refusal (a changer touch on a client is a prompt, the server proposes and both consent, nothing loads yet; [S09-T01](validation/S09-T01.md), [travel contract](travel-contract.md)); the level change itself is S09-T02 |
 
 ## Persistence
 

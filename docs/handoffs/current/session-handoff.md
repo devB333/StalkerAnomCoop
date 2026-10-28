@@ -1,36 +1,46 @@
-# Session handoff — Stage 8 completed (G08 condition confirmed); next S09-T01
+# Session handoff — S09-T01 completed; next S09-T02
 
 ## State (2026-10-27)
 
-- **G08 condition confirmed** ("they all work You can close the gate",
-  [G08](../../validation/G08.md#condition-review--ready-for-the-users-confirmation-2026-10-26)):
-  L37–L42 closed by S08-T07…T09; every gameplay decision approved
-  ([Stage 8 closing decisions](../../stage8-closing-decisions.md)), T07-5
-  (no firing during a use animation) and T07-8 (thirst, sleep, psy health per
-  player; each HUD shows the server's hunger, stamina, radiation) as the user
-  revised them; new carried limits **L44–L49** added with owners. **Stage 8
-  Completed.** L43 (the talk window) stays with S10-T04.
-- Engine patches 0001–0053, protocol v1.6 `proto-build-44`; final builds
-  campaign-292 / client-191. Reports: [S08-T07](../../validation/S08-T07.md),
-  [S08-T08](../../validation/S08-T08.md), [S08-T09](../../validation/S08-T09.md).
-- Open from earlier: the user's K1/K5 hands-on retest.
+- **S09-T01 Completed** ([S09-T01](../../validation/S09-T01.md), patch 0054
+  `travel-consent`, protocol `proto-build-45`, final builds **campaign-298 /
+  client-195**): the [travel contract](../../travel-contract.md) (transition
+  ids `(epoch << 32) | serial`, the consent state machine
+  `coop::proto::TransitionCoordinator` with 7 unit tests, request kind 11 at
+  a level changer, answer kind 12, CampaignEvent 13, 30-s expiry, aborts on
+  disconnect / death / combat / changer loss, no one-player consent, no
+  load). Validated: tv-3 and tv-6 (nine rounds incl. combat), tv-4 (server
+  crash with a proposal live). Gameplay decisions **T01-1…T01-9** listed for
+  G09 in [Stage 9 decisions](../../stage9-decisions.md); T01-3 (a request
+  while the partner is away is refused) is the one the user may want to
+  change (one-player travel would need approval, R10).
+- Stage 9 is In Progress. L14 still holds (no level change yet).
+- Hands-on: in tv-4 a few USE/DROP presses reached the client windows and
+  the prompts, keys and HUD lines worked for a real player; the user's own
+  two-window trial (walk into a changer, USE, partner USE/DROP) is still to
+  be done. Open from earlier: the K1/K5 hands-on retest.
 
 ## Next
 
-S09-T01 (plan.md): party travel request and two-player consent. Start from
-E11 (actor-based level travel), the level changer interaction (the server and
-clients refuse level changes since S06-T05: `CLevelChanger` / the client's
-refusal) and the session/party state; define the transition id, the state
-machine, expiry, refusal, cancellation, combat restriction and disconnect
-policy. A policy that would accept one player's consent after a disconnect
-needs the user's approval (plan.md risk). L49 (sleep and its time skip) is
-related world-time policy (S10-T03).
+S09-T02 (plan.md): the authoritative travel state and the destination load.
+Start from `end_travel` in `CoopServerHost.cpp` (the Agreed hand-over:
+`travel-agreed … executor=none`), `CALifeUpdateManager::change_level`
+(`alife_update_manager.cpp:166`, refused since S06-T05) and the checkpoint
+coordinator (`request_publication`, S07-T08): define the barrier (quiesce or
+order gameplay, refuse inputs and actions), journal the transition and the
+source recovery generation durably at the barrier (contract §8 says nothing
+is durable before Agreed), adapt the native one-actor level change for two
+participant identities and one online world, and define the commit point
+with rollback before it and roll-forward after it. The destination level
+and arrival position are already resolved per transition
+(`travel_destination`); the respawn entry point (`PlayerLink::entry`) should
+become the arrival on the new level (G07 decision 2).
 
 ## Run names
 
-- Next: `campaign-293`, `client-192`, `proto-build-45`, `st-16`, patch
-  check 60; session names `tv-1…`.
+- Next: `campaign-299`, `client-196`, `proto-build-46`, `st-18`, patch
+  check 61; session names `tv-7…` (tv-1…tv-6 used; tv-2 prepared, not run).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S09-T01](../done/snapshot-before-S09-T01.md).
+Previous snapshot: [before S09-T02](../done/snapshot-before-S09-T02.md).

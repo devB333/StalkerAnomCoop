@@ -459,3 +459,38 @@ walked out to open ground (about −90, −23, −232) with no companion, saved 
 (hash-checked); `--fixture marsh` still serves the marsh save.
 The single-player smoke and captures stay on the marsh fixture: their NPC and
 monster ids are that save's. No fixture or program names Fanat any more.
+
+## Party travel request and consent (S09-T01)
+
+Validation: [S09-T01](validation/S09-T01.md). Contract:
+[travel contract](travel-contract.md). Protocol `transition.h`
+(`TransitionCoordinator`, proto-build-45); engine: `CoopServerHost.cpp`
+"S09-T01", `CoopClientLink.cpp` "S09-T01", `level_changer.cpp`.
+
+- **A level changer touched on a client is a prompt, not a level change:**
+  USE sends the travel request (ActionIntent 11, the changer as its
+  target), DROP declines. The server proposes (CampaignEvent 13, 30 s) only
+  if the requester stands in an enabled changer, the partner is in the world
+  with a living actor and no NPC has either actor as its enemy; the partner
+  answers with USE/DROP (ActionIntent 12: accept/refuse), the requester can
+  cancel (DROP). Both players see every state change.
+- **One transition at a time, ids never reused:** `(epoch << 32) | serial`.
+  An answer is refused unless it names the live proposal: a stale, replayed
+  or pre-restart confirmation approves nothing; the requester's own accept
+  is not the partner's consent.
+- **The world aborts a proposal:** a party member's disconnect or death,
+  combat, the changer's loss. A rejoin starts over; no one-player consent.
+- **S09-T01 ends at Agreed:** the server logs `travel-agreed … executor=none`
+  and both clients see "agreed"; nothing loads (S09-T02).
+- **Test driver and fixture:** `--travel c1,c2` (profile `travel_party`,
+  `travel_variant`): the server places both actors inside Cordon's first
+  enabled level changer and runs nine rounds through the step driver
+  (actions 11 and 12; see the fixture's comment in `CoopServerHost.cpp`);
+  variant 1 is the crash run (failpoint `travel:after-propose`).
+  Comparison: `tools/compare-coop-travel.py`.
+
+```
+python3 tools/prepare-coop-session.py <run> --task S09-T01 --protocol-build proto-build-45 --travel c1,c2
+powershell.exe ... Run-CoopSession.ps1 -Run <run> -Task S09-T01 -ServerAloneSeconds 10 -ClientStarts '0,15' -ClientSeconds '330,315' -AfterSeconds 15
+python3 tools/compare-coop-travel.py builds/logs/S09-T01/run-<run> --out builds/logs/S09-T01/run-<run>/compare-travel.json
+```

@@ -368,6 +368,11 @@ enum ActionKind : std::uint16_t
                              // do not activate); the engine's slot rules decide (contract §6 `equip`)
     kActionUse = 10,         // S08-T07: target: an eatable item in the player's own actor's inventory; params:
                              // none; used by the engine on the server's actor (contract §6 `use`)
+    kActionTravelRequest = 11, // S09-T01: target: the level changer the player's actor stands in; params: none;
+                               // asks the partner to travel there (docs/travel-contract.md); the result's
+                               // revision is the transition id
+    kActionTravelAnswer = 12,  // S09-T01: params: u64 transition id, u8 answer (1 accept, 2 refuse: the partner;
+                               // 3 cancel: the requester); refused unless the id is the live proposal's
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -399,6 +404,14 @@ enum ActionReason : std::uint16_t
     kReasonNotUsable = 21,        // S08-T07: not an eatable item, or none of it left
     kReasonUseRefused = 22,       // S08-T07: the installed scripts refused the use (actor_on_item_before_use: a
                                   // stronger booster active, a required tool missing, anabiotic in combat)
+    kReasonTravelBusy = 23,       // S09-T01: a transition is live already (cancel or finish it first)
+    kReasonNoChanger = 24,        // S09-T01: the target is not an enabled level changer the server holds online
+    kReasonNotAtChanger = 25,     // S09-T01: the player's actor is not inside (or beside) the changer's shape
+    kReasonPartnerUnavailable = 26, // S09-T01: no partner in the world with a living actor: no one-player consent
+    kReasonInCombat = 27,         // S09-T01: an alive NPC or monster has one of the party's actors as its enemy
+    kReasonNoTransition = 28,     // S09-T01: the answer names no live proposal (stale, replayed, unknown, or
+                                  // after a restart)
+    kReasonWrongParty = 29,       // S09-T01: accept/refuse from the requester, or cancel from the partner
 };
 
 struct Input

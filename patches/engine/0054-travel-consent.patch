@@ -1,0 +1,1300 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index c4c9432..ce68caa 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -347,6 +347,21 @@ struct Link
+ 		coop::proto::EntityRef target;
+ 	};
+ 	xr_map<u64, TransferDup> transfer_dups; // same-id repeats sent after a step's first result
++	// S09-T01: party travel (docs/travel-contract.md)
++	struct Travel
++	{
++		u64 live_id = 0, prev_id = 0; // the proposal up now; the last one this client knew (ended or void)
++		u8 requester = 0, partner = 0;
++		xr_string level;
++		u32 deadline_ms = 0, hud_ms = 0;
++		u16 prompt_changer = 0xffff; // the changer the own actor stands in, prompting
++		u32 prompt_ms = 0;
++		xr_string prompt_level;
++		u16 dismissed_changer = 0xffff;
++		u32 dismissed_ms = 0;
++		u8 last_end = 0;
++		u64 events = 0, prompts = 0, requests = 0, answers = 0, accepted = 0, refused = 0;
++	} travel;
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+ 	u64 transfer_steps_unlinked = 0;
+@@ -916,6 +931,12 @@ void on_layout(const coop::proto::CampaignEvent& event); // S08-T07
+ void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
+ void on_party_tasks(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_needs(const coop::proto::CampaignEvent& event); // S08-T09
++void on_travel(const coop::proto::CampaignEvent& event); // S09-T01
++void travel_session_reset();
++void travel_frame();
++void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
++u64 request_travel(const coop::proto::EntityRef& changer, u32 round, bool player, LPCSTR why);
++u64 answer_travel(u64 id, u8 answer, u32 round, bool player, LPCSTR why);
+ void amounts_frame(); // S08-T08
+ 
+ void world_frame()
+@@ -1027,6 +1048,7 @@ void world_frame()
+ 		present_actors();
+ 		run_script();
+ 		respawn_frame(); // S07-T07
++		travel_frame(); // S09-T01
+ 		pickup_frame(); // S08-T01
+ 		layout_frame(); // S08-T07
+ 		amounts_frame(); // S08-T08
+@@ -3177,6 +3199,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 10: on_amounts(*event); break; // S08-T08
+ 			case 11: on_party_tasks(*event); break; // S08-T09
+ 			case 12: on_needs(*event); break; // S08-T09
++			case 13: on_travel(*event); break; // S09-T01
+ 			default: break;
+ 			}
+ 		}
+@@ -3239,6 +3262,7 @@ void on_event(const coop::session::ClientEvent& e)
+ 	{
+ 		const coop::proto::Welcome& w = e.welcome;
+ 		++g_link->welcomes;
++		travel_session_reset(); // S09-T01: a proposal from the last connection is void
+ 		g_link->log.line("welcomed slot=%u slot_generation=%u epoch=%I64u server_tick=%I64u tick_hz=%u snapshot_hz=%u "
+ 			"session=%s player=%s resumed=%d",
+ 			u32(w.slot), w.slot_generation, w.authority_epoch, w.server_tick, u32(w.tick_rate_hz),
+@@ -3518,7 +3542,8 @@ u64 request_ownership(u16 action, const coop::proto::EntityRef& target, const xr
+ 	g_link->log.line("%s-request why=%s operation=%I64x target=%I64u/%u round=%d kind=%d expected=%I64u",
+ 		action == coop::proto::kActionPickup ? "pickup" : action == coop::proto::kActionDrop ? "drop" :
+ 		action == coop::proto::kActionEquip ? "equip" : action == coop::proto::kActionUse ? "use" :
+-		action == coop::proto::kActionQuest ? "quest" : "transfer",
++		action == coop::proto::kActionQuest ? "quest" : action == coop::proto::kActionTravelRequest ? "travel-request" :
++		action == coop::proto::kActionTravelAnswer ? "travel-answer" : "transfer",
+ 		why, p.operation, target.id, target.generation, int(round), int(kind), expected);
+ 	return p.operation;
+ }
+@@ -3566,6 +3591,8 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 			}
+ 			g_link->log.line("pickup-result operation=%I64x outcome=%u reason=%u commit=%I64u round=%d", p.operation,
+ 				u32(result.outcome), u32(result.reason), result.commit_id, int(p.round));
++			if (p.action == coop::proto::kActionTravelRequest || p.action == coop::proto::kActionTravelAnswer)
++				travel_result(p, result); // S09-T01
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+ 			{
+ 				// S08-T07: the use's first-person presentation, as single player plays it
+@@ -4861,6 +4888,34 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 		pickup_csv_line("equip-sent", st.round, 0, 0, st.item, 0, 0, 0, st.action, st.step);
+ 		break;
+ 	}
++	case coop::proto::kActionTravelRequest:
++		// S09-T01: the request names the changer; the server decides
++		st.operation = request_travel(st.item, st.round, false, "driver");
++		g_link->pickup_pending.back().step = st.step; // the step's result and its same-id repeat
++		st.linked = true;
++		pickup_csv_line("travel-sent", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
++		break;
++	case coop::proto::kActionTravelAnswer:
++	{
++		if (st.extra == 0)
++		{
++			st.linked = st.done = true; // no answer (the step only drops the connection)
++			pickup_csv_line("no-request", st.round, 0, 0, st.item, 0, 0, 0, st.action, st.step);
++			break;
++		}
++		// the live proposal's id, or the last one known (a late answer); flags
++		// bit 3: the previous transition's id (stale); bit 5: an unknown id
++		u64 id = g_link->travel.live_id ? g_link->travel.live_id : g_link->travel.prev_id;
++		if (st.flags & 8)
++			id = g_link->travel.prev_id;
++		if (st.flags & 32)
++			id ^= 0x5a5a;
++		st.operation = answer_travel(id, st.extra, st.round, false, "driver");
++		g_link->pickup_pending.back().step = st.step;
++		st.linked = true;
++		pickup_csv_line("travel-sent", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
++		break;
++	}
+ 	default: break;
+ 	}
+ 	if (st.flags & 4)
+@@ -4881,6 +4936,239 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S09-T01
++// Party travel: the request and two-player consent as a client sees them
++// (docs/travel-contract.md). Touching a level changer prompts the player
++// (USE asks the partner, DROP stays); the server's proposal (CampaignEvent
++// 13) prompts the partner (USE goes, DROP refuses) and tells the requester
++// to wait (DROP cancels); the end of a proposal is shown. Requests and
++// answers are ActionIntents (kinds 11, 12) on the pending-request queue, so
++// an unanswered one is re-sent with the same id. The client never changes
++// level by itself: the native change-level path stays refused.
++
++const u32 kTravelPromptMs = 6000;    // the changer prompt stays this long (the engine re-touches every 5 s)
++const u32 kTravelDismissMs = 20000;  // a declined changer does not prompt again for this long
++
++void travel_hud(LPCSTR text, int seconds)
++{
++	luabind::functor<void> set_msg;
++	if (ai().script_engine().functor("actor_menu.set_msg", set_msg))
++		set_msg(1, text, seconds);
++	g_link->log.line("travel-hud text=\"%s\"", text);
++}
++
++u64 request_travel(const coop::proto::EntityRef& changer, u32 round, bool player, LPCSTR why)
++{
++	++g_link->travel.requests;
++	return request_ownership(coop::proto::kActionTravelRequest, changer, xr_vector<u8>(), 0, round, 0, player, why);
++}
++
++u64 answer_travel(u64 id, u8 answer, u32 round, bool player, LPCSTR why)
++{
++	xr_vector<u8> params;
++	for (int b = 0; b < 8; ++b)
++		params.push_back(u8(id >> (8 * b)));
++	params.push_back(answer);
++	++g_link->travel.answers;
++	g_link->log.line("travel-answer-sent id=%I64x answer=%u why=%s", id, u32(answer), why);
++	return request_ownership(coop::proto::kActionTravelAnswer, coop::proto::EntityRef(), params, 0, round, 0, player,
++		why);
++}
++
++// A new connection: a proposal held from the last one is void (the server
++// aborted it when the session ended; a rejoin starts over).
++void travel_session_reset()
++{
++	if (g_link->travel.live_id)
++	{
++		g_link->log.line("travel-session-reset live=%I64x", g_link->travel.live_id);
++		g_link->travel.prev_id = g_link->travel.live_id;
++		g_link->travel.live_id = 0;
++	}
++	g_link->travel.prompt_changer = 0xffff;
++}
++
++void on_travel(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.size() < 21)
++		return;
++	u64 id = 0, changer = 0;
++	for (int i = 0; i < 8; ++i)
++		id |= u64(b[i]) << (8 * i);
++	const u8 state = b[8], requester = b[9], partner = b[10], abort = b[11];
++	for (int i = 0; i < 8; ++i)
++		changer |= u64(b[12 + i]) << (8 * i);
++	const u8 len = b[20];
++	if (len > 100 || b.size() != 21 + size_t(len) + 12 + 4)
++		return;
++	string128 level;
++	memcpy(level, b.data() + 21, len);
++	level[len] = 0;
++	u32 remaining = 0;
++	memcpy(&remaining, b.data() + 21 + len + 12, 4);
++	++g_link->travel.events;
++	g_link->log.line("travel-event id=%I64x state=%u requester=%u partner=%u abort=%u changer=%I64u level=%s "
++		"remaining_ms=%u me=%u",
++		id, u32(state), u32(requester), u32(partner), u32(abort), changer, level, remaining, u32(g_link->local_slot));
++	Link::Travel& t = g_link->travel;
++	string256 text;
++	if (state == 1)
++	{
++		if (t.live_id && t.live_id != id)
++			t.prev_id = t.live_id;
++		t.live_id = id;
++		t.requester = requester;
++		t.partner = partner;
++		t.level = level;
++		t.deadline_ms = g_link->wall.GetElapsed_ms() + remaining;
++		t.prompt_changer = 0xffff;
++		t.hud_ms = g_link->wall.GetElapsed_ms();
++		if (g_link->local_slot == requester)
++			xr_sprintf(text, "Waiting for Player %u to agree to travel to %s (%u s). DROP cancels.", u32(partner) + 1,
++				level, remaining / 1000);
++		else
++			xr_sprintf(text, "Player %u wants to travel to %s. USE to go along, DROP to refuse.", u32(requester) + 1,
++				level);
++		travel_hud(text, int(remaining / 1000) + 1);
++		return;
++	}
++	if (id == t.live_id)
++	{
++		t.prev_id = t.live_id;
++		t.live_id = 0;
++	}
++	t.last_end = state;
++	LPCSTR what = state == 2 ? "agreed" : state == 3 ? "refused" : state == 4 ? "expired" : state == 5 ? "cancelled" :
++		state == 6 ? "aborted" : "ended";
++	LPCSTR why = abort == 1 ? " (the requester left)" : abort == 2 ? " (the partner left)" :
++		abort == 3 ? " (the requester died)" : abort == 4 ? " (the partner died)" : abort == 5 ? " (combat)" :
++		abort == 6 ? " (the passage is gone)" : "";
++	if (state == 2)
++		xr_sprintf(text, "Travel to %s agreed by both players. (The level change itself is not in this build.)", level);
++	else
++		xr_sprintf(text, "Travel to %s %s%s.", level, what, why);
++	travel_hud(text, 6);
++}
++
++// A level changer touched by this client's own actor (CLevelChanger on a
++// co-op client): the prompt, unless a proposal is up or the player declined
++// this passage a moment ago.
++void travel_changer_touched(u16 changer, u16 actor, LPCSTR level, LPCSTR invite)
++{
++	if (g_link->world != WorldLive || !g_actor || actor != g_actor->ID() || !g_actor->g_Alive())
++		return;
++	Link::Travel& t = g_link->travel;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (t.live_id)
++		return;
++	if (t.dismissed_changer == changer && now - t.dismissed_ms < kTravelDismissMs)
++		return;
++	if (t.prompt_changer == changer && now - t.prompt_ms < 4000)
++		return;
++	t.prompt_changer = changer;
++	t.prompt_ms = now;
++	t.prompt_level = level;
++	++t.prompts;
++	string256 text;
++	xr_sprintf(text, "Travel to %s? USE asks your partner to come along, DROP stays.", level);
++	travel_hud(text, int(kTravelPromptMs / 1000));
++	g_link->log.line("travel-prompt changer=%u level=%s invite=%s", u32(changer), level, invite);
++}
++
++bool travel_key_press(int key)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || !g_actor)
++		return false;
++	const EGameActions action = get_binded_action(key);
++	if (action != kUSE && action != kDROP)
++		return false;
++	Link::Travel& t = g_link->travel;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (t.live_id)
++	{
++		if (g_link->local_slot == t.partner)
++		{
++			answer_travel(t.live_id, action == kUSE ? 1 : 2, 0xffffffff, true, action == kUSE ? "use-key" : "drop-key");
++			return true;
++		}
++		if (g_link->local_slot == t.requester && action == kDROP)
++		{
++			answer_travel(t.live_id, 3, 0xffffffff, true, "drop-key");
++			return true;
++		}
++		return false;
++	}
++	if (t.prompt_changer == 0xffff || now - t.prompt_ms > kTravelPromptMs)
++		return false;
++	const u16 changer = t.prompt_changer;
++	t.prompt_changer = 0xffff;
++	if (action == kDROP)
++	{
++		t.dismissed_changer = changer;
++		t.dismissed_ms = now;
++		g_link->log.line("travel-prompt-declined changer=%u", u32(changer));
++		travel_hud("You stay.", 3);
++		return true;
++	}
++	const auto ref = g_link->refs.find(changer);
++	if (ref == g_link->refs.end())
++	{
++		g_link->log.line("travel-prompt-unknown-changer id=%u", u32(changer));
++		return true;
++	}
++	request_travel(ref->second, 0xffffffff, true, "use-key");
++	travel_hud("Asking your partner...", 4);
++	return true;
++}
++
++void travel_frame()
++{
++	Link::Travel& t = g_link->travel;
++	if (!t.live_id)
++		return;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (g_link->local_slot == t.requester && now - t.hud_ms >= 5000 && now < t.deadline_ms)
++	{
++		t.hud_ms = now;
++		string256 text;
++		xr_sprintf(text, "Waiting for Player %u to agree to travel to %s (%u s). DROP cancels.", u32(t.partner) + 1,
++			t.level.c_str(), (t.deadline_ms - now) / 1000);
++		travel_hud(text, 6);
++	}
++	if (now > t.deadline_ms + 10000)
++	{
++		// no end event within 10 s of the deadline (a lost session): void
++		g_link->log.line("travel-stale-proposal id=%I64x", t.live_id);
++		t.prev_id = t.live_id;
++		t.live_id = 0;
++	}
++}
++
++void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult& result)
++{
++	const bool accepted = result.outcome == coop::proto::ActionOutcome::Accepted;
++	if (accepted)
++		++g_link->travel.accepted;
++	else if (result.outcome == coop::proto::ActionOutcome::Rejected)
++		++g_link->travel.refused;
++	g_link->log.line("travel-result kind=%u round=%d step=%d operation=%I64x outcome=%u reason=%u transition=%I64x",
++		u32(p.action), int(p.round), int(p.step), p.operation, u32(result.outcome), u32(result.reason), result.revision);
++	if (!p.player || accepted || result.outcome != coop::proto::ActionOutcome::Rejected)
++		return;
++	switch (result.reason)
++	{
++	case coop::proto::kReasonTravelBusy: travel_hud("A travel request is already up.", 4); break;
++	case coop::proto::kReasonNoChanger: travel_hud("That passage is closed.", 4); break;
++	case coop::proto::kReasonNotAtChanger: travel_hud("Stand in the passage to travel.", 4); break;
++	case coop::proto::kReasonPartnerUnavailable: travel_hud("Your partner is not here: you travel together.", 5); break;
++	case coop::proto::kReasonInCombat: travel_hud("Not while something is hunting you.", 4); break;
++	case coop::proto::kReasonNoTransition: travel_hud("That travel request is no longer open.", 4); break;
++	case coop::proto::kReasonWrongParty: travel_hud("That answer is not yours to give.", 4); break;
++	default: travel_hud("You can't travel now.", 4); break;
++	}
++}
++
+ void run_script8(u32 t)
+ {
+ 	if (!g_link->clock.ready() || !g_actor)
+@@ -4907,7 +5195,12 @@ void run_script8(u32 t)
+ namespace campaign
+ {
+ bool coop_client_active() { return g_link && g_link->active; }
+-bool coop_client_key_press(int key) { return respawn_key_press(key); } // S07-T07
++bool coop_client_key_press(int key) { return travel_key_press(key) || respawn_key_press(key); } // S07-T07, S09-T01
++void coop_client_level_changer(u16 changer, u16 actor, LPCSTR level, LPCSTR invite)
++{
++	if (g_link && g_link->active)
++		travel_changer_touched(changer, actor, level, invite); // S09-T01
++}
+ 
+ // S08-T01: see the pickup section above.
+ bool coop_client_pickup(u16 who, u16 what)
+@@ -5181,6 +5474,9 @@ void coop_client_app_end()
+ 		fclose(g_link->ledger_csv);
+ 	if (g_link->camera_csv)
+ 		fclose(g_link->camera_csv);
++	g_link->log.line("travel-summary events=%I64u prompts=%I64u requests=%I64u answers=%I64u accepted=%I64u refused=%I64u",
++		g_link->travel.events, g_link->travel.prompts, g_link->travel.requests, g_link->travel.answers,
++		g_link->travel.accepted, g_link->travel.refused);
+ 	g_link->log.line("respawn-final results=%u refusals=%u rejoins=%u reconnects=%u", g_link->respawn_results,
+ 		g_link->respawn_refusals, g_link->rejoins, g_link->reconnects);
+ 	if (g_link->config.script == 6)
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 4a006b3..587590c 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -44,6 +44,9 @@ void coop_client_inventory_event(u16 type, u16 destination, NET_Packet& P);
+ // S08-T07: CInventory::Eat on a co-op client: true when nothing may be used
+ // locally (the replica); for the player's own actor the use becomes its intent.
+ bool coop_client_eat(CInventoryOwner* owner, CInventoryItem* item);
++// S09-T01: a level changer touched on a co-op client (CLevelChanger::feel_touch_new
++// and its 5-s invitation): the travel prompt for the own actor; nothing changes level.
++void coop_client_level_changer(u16 changer, u16 actor, LPCSTR level, LPCSTR invite);
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 3d74b52..a38baf1 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -143,6 +143,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.quest_party = ini.line_exist("coop", "quest_party") ? ini.r_u32("coop", "quest_party") : 0;
+ 		out.quest_holder = ini.line_exist("coop", "quest_holder") ? ini.r_u32("coop", "quest_holder") : 2;
+ 		out.quest_variant = ini.line_exist("coop", "quest_variant") ? ini.r_u32("coop", "quest_variant") : 0;
++		out.travel_party = ini.line_exist("coop", "travel_party") ? ini.r_u32("coop", "travel_party") : 0; // S09-T01
++		out.travel_variant = ini.line_exist("coop", "travel_variant") ? ini.r_u32("coop", "travel_variant") : 0;
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index c0ded83..d123123 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -37,6 +37,9 @@
+ //                 the equip and use items appear; 0 off)
+ //                 stack_race (S08-T08 fixture: seconds after both attach
+ //                 until the box, body and stacks appear; 0 off)
++//                 travel_party (S09-T01 fixture: seconds after both attach
++//                 until the travel consent rounds start; 0 off), travel_variant
++//                 (0 every round; 1 the crash run)
+ //                 checkpoint_seconds (S07-T02: seconds between periodic
+ //                 checkpoint generations; 0 off; joins and a clean stop
+ //                 always publish one),
+@@ -96,6 +99,8 @@ struct CoopConfig
+ 	u32 quest_party; // S08-T04 fixture: seconds after both attach until the party quest rounds start (0 off)
+ 	u32 quest_holder; // S08-T04 fixture: the slot whose accept comes first in round 1 (the other's 10 ticks later)
+ 	u32 quest_variant; // S08-T05 fixture: round 6: 0 both turn in at once, 1 the other disconnects first
++	u32 travel_party; // S09-T01 fixture: seconds after both attach until the travel rounds start (0 off)
++	u32 travel_variant; // S09-T01 fixture: 0 every round, 1 the crash run (rounds 0, 1; failpoint travel:after-propose)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 32a9179..62dd88a 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -59,6 +59,15 @@
+ #include "eatable_item.h" // S08-T07: use
+ #include "WeaponAmmo.h" // S08-T08: stacks
+ #include "alife_registry_wrappers.h" // S08-T09: info portions
++#include "level_changer.h" // S09-T01: party travel
++#include "coop/proto/transition.h"
++#include "memory_manager.h"
++#include "enemy_manager.h"
++#include "ai/monsters/basemonster/base_monster.h" // S09-T01: a monster's enemy
++#include "game_graph.h"
++#include "../xrEngine/xr_collide_form.h"
++
++extern xr_vector<CLevelChanger*> g_lchangers; // S09-T01: level_changer.cpp
+ 
+ #include <memory>
+ #include <mmsystem.h>
+@@ -146,6 +155,7 @@ struct PlayerLink
+ 	u16 respawn_old_actor = 0xffff; // S08-T09: the body a respawned actor continues
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+ 	float needs_last[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
++	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
+ };
+ 
+ enum WorldState : u8
+@@ -524,6 +534,32 @@ struct Host
+ 		u64 waiting_since = 0;
+ 		Fvector waiting_at;
+ 	} pickup_fixture;
++	// S09-T01: party travel (docs/travel-contract.md)
++	struct Travel
++	{
++		std::unique_ptr<coop::proto::TransitionCoordinator> coordinator;
++		u16 changer = kNoEngineId; // the live proposal's level changer
++		xr_string level; // its destination level
++		Fvector position = {0.f, 0.f, 0.f};
++		u64 last_check_tick = 0;
++		FILE* csv = nullptr;
++		u64 requests = 0, answers = 0, proposals = 0, duplicates = 0;
++		struct Fixture
++		{
++			u64 both_since = 0;
++			u32 phase = 0; // 0 waiting, 1 placed, 2 rounds
++			u64 phase_tick = 0;
++			u32 round = 0;
++			u64 round_tick = 0;
++			u16 changer = kNoEngineId;
++			Fvector center = {0.f, 0.f, 0.f};
++			u16 actors[2] = {kNoEngineId, kNoEngineId};
++			bool moved = false;
++			u16 boar = kNoEngineId;
++			u64 boar_tick = 0, boar_kill_tick = 0;
++			bool boar_set = false;
++		} fixture;
++	} travel;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -8437,6 +8473,689 @@ void combat_record(const coop::proto::EntityState& s, u16 id, CActor* actor)
+ 		u32(actor->conditions().GetWhoHitLastTimeID()), VPUSH(actor->Position()));
+ }
+ 
++// ------------------------------------------------------------ S09-T01
++// Party travel: the request and two-player consent (docs/travel-contract.md).
++// The consent state machine is coop::proto::TransitionCoordinator; this is
++// the engine side: a request (ActionIntent kind 11) names the level changer
++// the player's actor stands in, the server checks the changer, the actor's
++// place, the partner's presence and the party's combat state, proposes
++// (CampaignEvent 13 to both players, 30 s), and the partner's answer (kind
++// 12) agrees, refuses, or the requester cancels. A disconnect, a death, a
++// fight or the changer's loss aborts the proposal. Nothing of this loads a
++// level: an agreed transition ends here as "agreed" for the executor that
++// S09-T02 adds; no load begins from one player's intent.
++
++const u16 kTravelPartnerUnavailable = coop::proto::kReasonPartnerUnavailable;
++
++void travel_csv(LPCSTR phase, u8 slot, u64 operation, u64 transition, u16 reason, LPCSTR state, LPCSTR detail)
++{
++	if (g_host->travel.csv)
++	{
++		fprintf(g_host->travel.csv, "%I64u,%I64u,%u,%I64x,%I64x,%u,%s,%s,%s\n", coop::store::utc_now_ms(), g_host->tick,
++			u32(slot), operation, transition, u32(reason), phase, state, detail);
++		fflush(g_host->travel.csv);
++	}
++}
++
++CLevelChanger* travel_changer(u16 id)
++{
++	CObject* o = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
++	CLevelChanger* changer = o ? smart_cast<CLevelChanger*>(o) : nullptr;
++	return changer && changer->IsLevelChangerEnabled() ? changer : nullptr;
++}
++
++// The destination as the changer's server entity names it (the game vertex's
++// level in the game graph; the spawn's own level name as a fallback).
++void travel_destination(u16 changer_id, xr_string& level, Fvector& position)
++{
++	level = "?";
++	position.set(0.f, 0.f, 0.f);
++	const CSE_ALifeDynamicObject* se = ai().get_alife() ? ai().alife().objects().object(changer_id, true) : nullptr;
++	const CSE_ALifeLevelChanger* lc = se ? smart_cast<const CSE_ALifeLevelChanger*>(se) : nullptr;
++	if (!lc)
++		return;
++	position = lc->m_tNextPosition;
++	if (ai().get_game_graph() && ai().game_graph().valid_vertex_id(lc->m_tNextGraphID))
++		level = *ai().game_graph().header().level(ai().game_graph().vertex(lc->m_tNextGraphID)->level_id()).name();
++	else if (lc->m_caLevelToChange.size())
++		level = *lc->m_caLevelToChange;
++}
++
++// Inside the changer's shape (the engine's own touch test), or within 1 m of
++// its bounding sphere: the server's actor trails the client's by the input
++// delay, and the client touched it.
++bool actor_at_changer(CActor* actor, CLevelChanger* changer, float& distance)
++{
++	Fvector center;
++	changer->Center(center);
++	distance = center.distance_to(actor->Position());
++	if (((CCF_Shape*)changer->CFORM())->Contact(actor))
++		return true;
++	return distance <= changer->Radius() + 1.f;
++}
++
++// The party is in combat when an alive NPC or monster online has one of the
++// participants' actors as its chosen enemy: a stalker's CMemoryManager::enemy()
++// selection, a monster's CBaseMonster::EnemyMan (as CampaignCombatCapture reads them).
++bool party_in_combat(string256& who)
++{
++	who[0] = 0;
++	u16 actors[2] = {kNoEngineId, kNoEngineId};
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot < 2)
++			if (CActor* a = participant_actor(l.ref))
++				actors[l.ref.slot] = u16(a->ID());
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CCustomMonster* m = smart_cast<CCustomMonster*>(Level().Objects.o_get_by_iterator(i));
++		if (!m || !m->g_Alive() || smart_cast<CActor*>(m))
++			continue;
++		CBaseMonster* monster = smart_cast<CBaseMonster*>(m);
++		const CEntityAlive* enemy = monster ? monster->EnemyMan.get_enemy() : m->memory().enemy().selected();
++		if (!enemy)
++			continue;
++		const u16 e = u16(enemy->ID());
++		if (e == actors[0] || e == actors[1])
++		{
++			xr_sprintf(who, "%u:%s->%u", u32(m->ID()), *m->cNameSect(), u32(e));
++			return true;
++		}
++	}
++	return false;
++}
++
++PlayerLink* travel_partner(u8 slot)
++{
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot < 2 && l.ref.slot != slot)
++			return &l;
++	return nullptr;
++}
++
++void travel_event_to(PlayerLink& link, const coop::proto::Transition& t, u32 remaining_ms)
++{
++	std::vector<u8> payload;
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(t.id >> (8 * b)));
++	put_u8(payload, u8(t.state));
++	put_u8(payload, t.requester);
++	put_u8(payload, t.partner);
++	put_u8(payload, u8(t.abort));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(t.destination >> (8 * b)));
++	put_str(payload, g_host->travel.level.c_str());
++	put_f32(payload, g_host->travel.position.x);
++	put_f32(payload, g_host->travel.position.y);
++	put_f32(payload, g_host->travel.position.z);
++	put_u32(payload, remaining_ms);
++	queue_event(link, 13, payload);
++	link.travel_sent_id = t.state == coop::proto::TravelState::Proposed ? t.id : 0;
++}
++
++void travel_event(const coop::proto::Transition& t, u32 remaining_ms)
++{
++	for (PlayerLink& link : g_host->links)
++		if (client_in_world(link))
++			travel_event_to(link, t, remaining_ms);
++}
++
++// The live proposal ended: both players are told, the engine facts cleared.
++void end_travel(const coop::proto::Transition& t)
++{
++	const u64 now = g_host->wall.GetElapsed_ms();
++	g_host->log.line("travel-end id=%I64x state=%s abort=%s requester=%u partner=%u changer=%u level=%s after_ms=%I64u",
++		t.id, coop::proto::to_string(t.state), coop::proto::to_string(t.abort), u32(t.requester), u32(t.partner),
++		u32(g_host->travel.changer), g_host->travel.level.c_str(), now - t.proposed_ms);
++	travel_csv("end", t.requester, 0, t.id, 0, coop::proto::to_string(t.state), coop::proto::to_string(t.abort));
++	travel_event(t, 0);
++	if (t.state == coop::proto::TravelState::Agreed)
++		// S09-T02 takes it from here (the barrier, the native change_level for
++		// both identities, the destination load); nothing loads yet
++		g_host->log.line("travel-agreed id=%I64x executor=none level=%s pos=%.2f,%.2f,%.2f (S09-T02)", t.id,
++			g_host->travel.level.c_str(), VPUSH(g_host->travel.position));
++	g_host->travel.changer = kNoEngineId;
++	g_host->travel.level.clear();
++}
++
++bool travel_abort(coop::proto::TravelAbort why)
++{
++	coop::proto::Transition out;
++	if (!g_host->travel.coordinator || !g_host->travel.coordinator->abort(why, g_host->wall.GetElapsed_ms(), out))
++		return false;
++	end_travel(out);
++	return true;
++}
++
++// The stored outcome of a known operation (the operation index; in memory
++// for this incarnation: a restart has no live transition, so a replayed
++// request or answer meets NoTransition or starts afresh).
++bool travel_known(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result,
++	u16& reason)
++{
++	StoredOutcome stored;
++	if (!g_host->persistence || !g_host->persistence->lookup(link.player, intent.operation_id, stored))
++		return false;
++	result.outcome = coop::proto::ActionOutcome(stored.outcome);
++	result.reason = stored.reason;
++	result.commit_id = 0;
++	result.revision = stored.revision;
++	reason = stored.reason;
++	++g_host->travel.duplicates;
++	g_host->log.line("travel-duplicate slot=%u kind=%u operation=%I64x outcome=%u reason=%u transition=%I64x",
++		u32(link.ref.slot), u32(intent.kind), intent.operation_id, u32(stored.outcome), u32(stored.reason),
++		stored.revision);
++	return true;
++}
++
++void travel_remember(PlayerLink& link, u64 operation, u16 reason, u64 transition)
++{
++	// refusals are not stored (a later request may succeed); an accepted
++	// request or answer is, so its repeat gets the same answer
++	if (reason || !g_host->persistence)
++		return;
++	StoredOutcome stored;
++	stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
++	stored.reason = 0;
++	stored.revision = transition;
++	g_host->persistence->remember(link.player, operation, stored);
++}
++
++u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	u16 reason = 0;
++	if (travel_known(link, intent, result, reason))
++		return reason;
++	++g_host->travel.requests;
++	if (!link.session || !g_host->travel.coordinator)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor || !actor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	const u16 changer_id = engine_id_of(intent.target);
++	CLevelChanger* changer = travel_changer(changer_id);
++	if (!changer)
++	{
++		g_host->log.line("travel-no-changer slot=%u target=%I64u/%u id=%u", u32(link.ref.slot), intent.target.id,
++			intent.target.generation, u32(changer_id));
++		return coop::proto::kReasonNoChanger;
++	}
++	float distance = 0.f;
++	if (!actor_at_changer(actor, changer, distance))
++	{
++		g_host->log.line("travel-not-at-changer slot=%u changer=%u distance=%.2f radius=%.2f", u32(link.ref.slot),
++			u32(changer_id), distance, changer->Radius());
++		return coop::proto::kReasonNotAtChanger;
++	}
++	// the partner: in the world with a living actor. No partner, no travel
++	// (D5: both confirm; a one-player consent would need the user's approval)
++	PlayerLink* partner = travel_partner(link.ref.slot);
++	CActor* partner_actor = partner ? participant_actor(partner->ref) : nullptr;
++	if (!partner || !client_in_world(*partner) || !partner_actor || !partner_actor->g_Alive())
++	{
++		g_host->log.line("travel-partner-unavailable slot=%u partner=%d in_world=%d actor=%d alive=%d",
++			u32(link.ref.slot), partner ? int(partner->ref.slot) : -1, partner && client_in_world(*partner) ? 1 : 0,
++			partner_actor ? 1 : 0, partner_actor && partner_actor->g_Alive() ? 1 : 0);
++		return kTravelPartnerUnavailable;
++	}
++	string256 who;
++	if (party_in_combat(who))
++	{
++		g_host->log.line("travel-in-combat slot=%u enemy=%s", u32(link.ref.slot), who);
++		return coop::proto::kReasonInCombat;
++	}
++	coop::proto::Transition t;
++	const coop::proto::TravelVerdict verdict = g_host->travel.coordinator->propose(link.ref.slot, partner->ref.slot,
++		intent.target.id, g_host->wall.GetElapsed_ms(), t);
++	if (verdict == coop::proto::TravelVerdict::Busy)
++	{
++		g_host->log.line("travel-busy slot=%u live=%I64x", u32(link.ref.slot), t.id);
++		return coop::proto::kReasonTravelBusy;
++	}
++	if (verdict != coop::proto::TravelVerdict::Ok)
++		return coop::proto::kReasonWrongParty;
++	g_host->travel.changer = changer_id;
++	travel_destination(changer_id, g_host->travel.level, g_host->travel.position);
++	++g_host->travel.proposals;
++	g_host->log.line("travel-proposed id=%I64x requester=%u partner=%u changer=%u name=%s level=%s pos=%.2f,%.2f,%.2f "
++		"distance=%.2f deadline_ms=%I64u operation=%I64x",
++		t.id, u32(t.requester), u32(t.partner), u32(changer_id), changer->cName().c_str(), g_host->travel.level.c_str(),
++		VPUSH(g_host->travel.position), distance, t.deadline_ms - t.proposed_ms, intent.operation_id);
++	travel_csv("proposed", link.ref.slot, intent.operation_id, t.id, 0, "proposed", g_host->travel.level.c_str());
++	travel_event(t, u32(t.deadline_ms - t.proposed_ms));
++	travel_remember(link, intent.operation_id, 0, t.id);
++	result.commit_id = 0;
++	result.revision = t.id;
++	// S09-T01 harness: a crash right after the proposal went out (the clients
++	// hold a proposal the restarted server never continues)
++	coop::store::failpoint("travel:after-propose");
++	return 0;
++}
++
++u16 take_travel_answer(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	u16 reason = 0;
++	if (travel_known(link, intent, result, reason))
++		return reason;
++	++g_host->travel.answers;
++	if (!link.session || !g_host->travel.coordinator)
++		return coop::proto::kReasonNoActor;
++	if (intent.params.size() != 9)
++		return coop::proto::kReasonMalformed;
++	u64 id = 0;
++	for (int b = 0; b < 8; ++b)
++		id |= u64(intent.params[b]) << (8 * b);
++	const u8 answer = intent.params[8];
++	if (answer < 1 || answer > 3)
++		return coop::proto::kReasonMalformed;
++	coop::proto::TransitionCoordinator& c = *g_host->travel.coordinator;
++	const coop::proto::Transition* live = c.live();
++	if (!live || live->id != id)
++	{
++		// stale, replayed, unknown, or from before a restart: nothing it could
++		// approve; counted by the coordinator too
++		coop::proto::Transition out;
++		const coop::proto::TravelVerdict v = c.answer(link.ref.slot, id, coop::proto::TravelAnswer(answer),
++			g_host->wall.GetElapsed_ms(), out);
++		VERIFY(v == coop::proto::TravelVerdict::NoTransition);
++		(void)v;
++		g_host->log.line("travel-no-transition slot=%u id=%I64x answer=%u live=%I64x operation=%I64x", u32(link.ref.slot),
++			id, u32(answer), live ? live->id : 0ull, intent.operation_id);
++		travel_csv("answer", link.ref.slot, intent.operation_id, id, coop::proto::kReasonNoTransition, "no-transition",
++			"");
++		return coop::proto::kReasonNoTransition;
++	}
++	if (answer == 1)
++	{
++		// an accept is a consent given now: the partner's actor must be alive
++		// and the party out of combat at this moment
++		PartyId party;
++		party.hi = g_host->config.party_id.hi;
++		party.lo = g_host->config.party_id.lo;
++		ActionContext context;
++		context.origin = Origin::ClientIntent;
++		context.session = link.session;
++		context.actor = link.ref;
++		context.party = party;
++		Refusal why = Refusal::None;
++		CActor* actor = context_actor(context, Scope::Self, &why);
++		if (live->partner == link.ref.slot && (!actor || !actor->g_Alive()))
++			return coop::proto::kReasonNoActor;
++		string256 who;
++		if (live->partner == link.ref.slot && party_in_combat(who))
++		{
++			g_host->log.line("travel-in-combat slot=%u enemy=%s (accept refused; the proposal stands)",
++				u32(link.ref.slot), who);
++			return coop::proto::kReasonInCombat;
++		}
++	}
++	coop::proto::Transition out;
++	const coop::proto::TravelVerdict v =
++		c.answer(link.ref.slot, id, coop::proto::TravelAnswer(answer), g_host->wall.GetElapsed_ms(), out);
++	if (v == coop::proto::TravelVerdict::WrongParty)
++	{
++		g_host->log.line("travel-wrong-party slot=%u id=%I64x answer=%u requester=%u partner=%u", u32(link.ref.slot), id,
++			u32(answer), u32(live->requester), u32(live->partner));
++		travel_csv("answer", link.ref.slot, intent.operation_id, id, coop::proto::kReasonWrongParty, "wrong-party", "");
++		return coop::proto::kReasonWrongParty;
++	}
++	if (v != coop::proto::TravelVerdict::Ok)
++		return coop::proto::kReasonNoTransition;
++	g_host->log.line("travel-answer slot=%u id=%I64x answer=%s -> %s operation=%I64x", u32(link.ref.slot), id,
++		answer == 1 ? "accept" : answer == 2 ? "refuse" : "cancel", coop::proto::to_string(out.state),
++		intent.operation_id);
++	travel_csv("answer", link.ref.slot, intent.operation_id, id, 0,
++		answer == 1 ? "accept" : answer == 2 ? "refuse" : "cancel", coop::proto::to_string(out.state));
++	travel_remember(link, intent.operation_id, 0, id);
++	end_travel(out);
++	result.commit_id = 0;
++	result.revision = id;
++	return 0;
++}
++
++// Each tick: the deadline; every half second the world's conditions; a
++// client entering the world while a proposal is live gets it.
++void travel_tick()
++{
++	if (!g_host->travel.coordinator)
++		return;
++	coop::proto::TransitionCoordinator& c = *g_host->travel.coordinator;
++	const u64 now = g_host->wall.GetElapsed_ms();
++	coop::proto::Transition out;
++	if (c.expire(now, out))
++	{
++		end_travel(out);
++		return;
++	}
++	const coop::proto::Transition* live = c.live();
++	if (!live)
++		return;
++	if (g_host->tick - g_host->travel.last_check_tick >= 25)
++	{
++		g_host->travel.last_check_tick = g_host->tick;
++		if (!travel_changer(g_host->travel.changer))
++		{
++			travel_abort(coop::proto::TravelAbort::ChangerGone);
++			return;
++		}
++		for (PlayerLink& l : g_host->links)
++		{
++			if (!l.bound || (l.ref.slot != live->requester && l.ref.slot != live->partner))
++				continue;
++			const bool requester = l.ref.slot == live->requester;
++			CActor* a = participant_actor(l.ref);
++			if (!client_in_world(l))
++			{
++				travel_abort(requester ? coop::proto::TravelAbort::RequesterLeft : coop::proto::TravelAbort::PartnerLeft);
++				return;
++			}
++			if (!a || !a->g_Alive())
++			{
++				travel_abort(requester ? coop::proto::TravelAbort::RequesterDead : coop::proto::TravelAbort::PartnerDead);
++				return;
++			}
++		}
++		string256 who;
++		if (party_in_combat(who))
++		{
++			g_host->log.line("travel-combat-abort id=%I64x enemy=%s", live->id, who);
++			travel_abort(coop::proto::TravelAbort::Combat);
++			return;
++		}
++	}
++	for (PlayerLink& l : g_host->links)
++		if (client_in_world(l) && l.travel_sent_id != live->id)
++			travel_event_to(l, *live, u32(live->deadline_ms > now ? live->deadline_ms - now : 0));
++}
++
++// A player's connection ended: a proposal it is party to is aborted (its
++// consent, given or awaited, does not outlive its session: a rejoin starts
++// over; the other player's intent alone agrees nothing).
++void travel_on_left(const PlayerLink& link)
++{
++	if (!g_host->travel.coordinator)
++		return;
++	const coop::proto::Transition* live = g_host->travel.coordinator->live();
++	if (!live || !link.bound)
++		return;
++	if (link.ref.slot == live->requester)
++		travel_abort(coop::proto::TravelAbort::RequesterLeft);
++	else if (link.ref.slot == live->partner)
++		travel_abort(coop::proto::TravelAbort::PartnerLeft);
++}
++
++// The travel fixture (profile travel_party, travel_variant): once both
++// players are in the world, both actors are placed inside Cordon's first
++// enabled level changer and rounds run through the transfer driver's steps
++// (CampaignEvent 7, client script 8; action 11 = request: item = the changer;
++// action 12 = answer: extra = 1 accept, 2 refuse, 3 cancel, 0 none; flags
++// bit 3 = the previous transition's id (stale), bit 5 = an unknown id; bit 2
++// = drop the connection after the step):
++//   0  p1 requests, p2 accepts                              -> agreed
++//   1  p1 requests, p2 refuses                              -> refused
++//   2  p1 requests, nobody answers                          -> expired (30 s)
++//   3  p1 requests; p2 accepts the previous id (28), then the right one -> agreed
++//   4  p1 requests; p2 drops its connection -> aborted partner-left; p1 again while
++//      p2 is away (26); p2 back: accepts the aborted id (28); p1 requests, p2 accepts -> agreed
++//   5  p1 requests then cancels -> cancelled; p2's late accept (28)
++//   6  p1 placed 10 m away requests (25); put back
++//   7  p1 requests twice (23); p2 cancels (29); p1 accepts its own (29); p2 accepts -> agreed
++//   8  a boar beside p2: p1 requests (27 while it hunts; else accepted), p1 cancels
++//      (28; else cancelled); the boar killed; p1 requests, p2 accepts -> agreed
++// travel_variant 1 (the crash run): rounds 0 and 1 only; the server
++// terminates itself at travel:after-propose in round 0 (profile failpoint).
++const u32 kTravelRounds = 9;
++
++void travel_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.travel_party || !ai().get_alife())
++		return;
++	Host::Travel::Fixture& f = g_host->travel.fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-travel both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2)
++		return;
++	if (f.phase == 0)
++	{
++		if (g_host->tick < f.both_since + u64(config.travel_party) * 50)
++			return;
++		CLevelChanger* chosen = nullptr;
++		for (CLevelChanger* lc : g_lchangers)
++		{
++			xr_string level;
++			Fvector to;
++			travel_destination(u16(lc->ID()), level, to);
++			Fvector center;
++			lc->Center(center);
++			g_host->log.line("fixture-travel changer id=%u name=%s enabled=%d level=%s center=%.2f,%.2f,%.2f radius=%.2f",
++				u32(lc->ID()), lc->cName().c_str(), lc->IsLevelChangerEnabled() ? 1 : 0, level.c_str(), VPUSH(center),
++				lc->Radius());
++			if (!chosen && lc->IsLevelChangerEnabled() && level != "?")
++				chosen = lc;
++		}
++		if (!chosen)
++		{
++			g_host->log.line("fixture-travel no-changer");
++			f.phase = 99;
++			return;
++		}
++		f.changer = u16(chosen->ID());
++		Fvector center;
++		chosen->Center(center);
++		f.center = center;
++		for (u32 k = 0; k < 2; ++k)
++		{
++			f.actors[k] = u16(actors[k]->ID());
++			Fvector at = center;
++			at.x += k ? -0.6f : 0.6f;
++			place_beside(actors[k], at);
++			g_host->log.line("fixture-travel placed slot=%u actor=%u changer=%u at=%.2f,%.2f,%.2f", k, u32(f.actors[k]),
++				u32(f.changer), VPUSH(at));
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 5 * 50)
++			return;
++		for (u32 k = 0; k < 2; ++k)
++		{
++			float distance = 0.f;
++			CLevelChanger* lc = travel_changer(f.changer);
++			const bool at = lc && actor_at_changer(actors[k], lc, distance);
++			g_host->log.line("fixture-travel settled slot=%u at_changer=%d distance=%.2f pos=%.2f,%.2f,%.2f", k, at ? 1 : 0,
++				distance, VPUSH(actors[k]->Position()));
++		}
++		f.phase = 2;
++		f.round_tick = g_host->tick;
++		return;
++	}
++	const u32 rounds = config.travel_variant == 1 ? 2 : kTravelRounds;
++	if (f.phase != 2 || f.round >= rounds || g_host->tick < f.round_tick)
++		return;
++	const u16 C = f.changer;
++	if (f.round == 6 && !f.moved)
++	{
++		// p1 10 m from the changer for its request
++		f.moved = true;
++		Fvector away = f.center;
++		away.x += 10.f;
++		place_beside(actors[0], away);
++		g_host->log.line("fixture-travel moved-away slot=0 at=%.2f,%.2f,%.2f", VPUSH(away));
++		f.round_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.round == 7 && f.moved)
++	{
++		f.moved = false;
++		Fvector back = f.center;
++		back.x += 0.6f;
++		place_beside(actors[0], back);
++		g_host->log.line("fixture-travel moved-back slot=0 at=%.2f,%.2f,%.2f", VPUSH(back));
++		f.round_tick = g_host->tick + 3 * 50;
++		return;
++	}
++	if (f.round == 8)
++	{
++		if (f.boar == kNoEngineId)
++		{
++			u32 vertex = u32(-1);
++			Fvector position;
++			CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++			const CSE_ALifeDynamicObject* se = ai().alife().objects().object(u16(actors[1]->ID()), true);
++			CSE_Abstract* entity = se && encounter_vertex(actors[1], actors[0], vertex, position)
++				? alife->spawn_item(kEncounterMonster, position, vertex, se->m_tGraphID, 0xffff) : nullptr;
++			f.boar = entity ? entity->ID : u16(0xfffe);
++			f.boar_tick = g_host->tick;
++			g_host->log.line("fixture-travel boar id=%u", u32(f.boar));
++			f.round_tick = g_host->tick + 6 * 50;
++			return;
++		}
++		// the boar hunts participant 2: its script enemy (the installed scripts'
++		// set_enemy path; at the Darkscape passage it noticed nobody by itself
++		// in 25 s, tv-3/tv-5), once it is online; then polled every second
++		string256 who;
++		const bool combat = party_in_combat(who);
++		if (!combat && g_host->tick - f.boar_tick < 25 * 50)
++		{
++			if (!f.boar_set && g_host->tick - f.boar_tick >= 3 * 50)
++				if (CBaseMonster* boar = f.boar < 0xfffe ? smart_cast<CBaseMonster*>(Level().Objects.net_Find(f.boar)) : nullptr)
++				{
++					boar->EnemyMan.script_enemy(*actors[1]);
++					f.boar_set = true;
++					g_host->log.line("fixture-travel boar-enemy id=%u actor=%u", u32(f.boar), u32(actors[1]->ID()));
++				}
++			f.round_tick = g_host->tick + 50;
++			return;
++		}
++		g_host->log.line("fixture-travel combat=%d enemy=%s waited_ticks=%I64u", combat ? 1 : 0, who,
++			g_host->tick - f.boar_tick);
++	}
++	const u32 round = f.round++;
++	f.round_tick = g_host->tick + 12 * 50;
++	xr_vector<TransferStep> steps;
++	switch (round)
++	{
++	case 0:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 0, 1});
++		break;
++	case 1:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 0, 2});
++		break;
++	case 2:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		f.round_tick = g_host->tick + 40 * 50;
++		break;
++	case 3:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 8, 1}); // the previous transition's id
++		steps.push_back({1, 12, 200, C, 0xffff, 0xffff, 0, 1});
++		break;
++	case 4:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 4, 0}); // no answer: p2 drops its connection
++		steps.push_back({0, 11, 300, C, 0xffff, 0xffff, 0, 0}); // p2 away: 26
++		steps.push_back({1, 12, 2500, C, 0xffff, 0xffff, 8, 1}); // p2 back: the aborted id: 28
++		steps.push_back({0, 11, 2750, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 2850, C, 0xffff, 0xffff, 0, 1});
++		f.round_tick = g_host->tick + 70 * 50;
++		break;
++	case 5:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({0, 12, 100, C, 0xffff, 0xffff, 0, 3});
++		steps.push_back({1, 12, 200, C, 0xffff, 0xffff, 0, 1});
++		break;
++	case 6: steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0}); break;
++	case 7:
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({0, 11, 50, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, 0, 3});
++		steps.push_back({0, 12, 150, C, 0xffff, 0xffff, 0, 1});
++		steps.push_back({1, 12, 200, C, 0xffff, 0xffff, 0, 1});
++		break;
++	default:
++		// with the boar hunting: 27, then the cancel finds nothing (28); without
++		// (it noticed nobody in 25 s): accepted, then cancelled; either way the
++		// boar dies at +350 and the party agrees after it
++		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({0, 12, 150, C, 0xffff, 0xffff, 0, 3});
++		steps.push_back({0, 11, 500, C, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 12, 600, C, 0xffff, 0xffff, 0, 1});
++		f.round_tick = g_host->tick + 20 * 50;
++		break;
++	}
++	const u64 claim_tick = g_host->tick + 100;
++	std::vector<u8> payload;
++	put_u8(payload, u8(round));
++	put_u8(payload, u8(round));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(claim_tick >> (8 * b)));
++	put_u8(payload, u8(steps.size()));
++	string512 detail = "";
++	for (const TransferStep& st : steps)
++	{
++		put_u8(payload, st.slot);
++		put_u8(payload, st.action);
++		put_u16(payload, st.offset);
++		put_ref(payload, st.item);
++		put_ref(payload, st.from);
++		put_ref(payload, st.to);
++		put_u8(payload, st.flags);
++		put_u8(payload, st.extra);
++		string64 one;
++		xr_sprintf(one, " %u:%u@%u:%u:a%u:f%u", u32(st.slot), u32(st.action), u32(st.offset), u32(st.item), u32(st.extra),
++			u32(st.flags));
++		xr_strcat(detail, one);
++	}
++	broadcast_event(7, payload);
++	g_host->log.line("fixture-travel-round round=%u claim_tick=%I64u steps=%u%s", round, claim_tick, u32(steps.size()),
++		detail);
++	if (round == 8)
++		f.boar_kill_tick = claim_tick + 350; // the boar dies between the two requests
++}
++
++// Round 8's boar is killed natively between the two requests.
++void travel_fixture_boar()
++{
++	Host::Travel::Fixture& f = g_host->travel.fixture;
++	if (!f.boar_kill_tick || g_host->tick < f.boar_kill_tick)
++		return;
++	f.boar_kill_tick = 0;
++	CEntityAlive* boar = f.boar < 0xfffe ? smart_cast<CEntityAlive*>(Level().Objects.net_Find(f.boar)) : nullptr;
++	if (boar && boar->g_Alive())
++		boar->KillEntity(boar->ID(), TRUE);
++	g_host->log.line("fixture-travel boar-killed id=%u dead=%d", u32(f.boar), boar && !boar->g_Alive() ? 1 : 0);
++}
++
+ void on_joined(const coop::session::SessionEvent& e)
+ {
+ 	PlayerLink* link = link_of(e.player);
+@@ -8497,6 +9216,7 @@ void on_left(const coop::session::SessionEvent& e)
+ 	if (link->session)
+ 		detached = g_campaign_identity->detach_session(g_campaign_identity->authority(), link->session, Device.dwFrame);
+ 	link->session = 0;
++	travel_on_left(*link); // S09-T01: a proposal it is party to is aborted
+ 	// Detached-actor policy: the actor stays, vulnerable, and moves only by
+ 	// input, which arrives only on an attached session.
+ 	CActor* actor = participant_actor(link->ref);
+@@ -8548,6 +9268,10 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_equip(*link, *intent, result); // S08-T07
+ 		else if (intent->kind == coop::proto::kActionUse)
+ 			reason = take_use(*link, *intent, result); // S08-T07
++		else if (intent->kind == coop::proto::kActionTravelRequest)
++			reason = take_travel_request(*link, *intent, result); // S09-T01
++		else if (intent->kind == coop::proto::kActionTravelAnswer)
++			reason = take_travel_answer(*link, *intent, result); // S09-T01
+ 		else if (intent->kind == coop::proto::kActionQuest)
+ 		{
+ 			reason = take_quest(*link, *intent, result); // S08-T04
+@@ -9015,6 +9739,8 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 	config.party_id = g_host->config.party_id;
+ 	config.max_players = 2;
+ 	config.authority_epoch = g_host->persistence->epoch(); // S07-T04: allocated durably at recovery
++	// S09-T01: transition ids are (epoch << 32) | serial: never repeated, never continued across a restart
++	g_host->travel.coordinator.reset(new coop::proto::TransitionCoordinator(config.authority_epoch));
+ 	g_host->build = config.build;
+ 	config.tick_rate_hz = u16(_max(1u, 1000u / _max(1u, Device.dwTimeDelta ? Device.dwTimeDelta : 20u)));
+ 	config.snapshot_rate_hz = u16(_min<u32>(20u, config.tick_rate_hz));
+@@ -9096,6 +9822,11 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		if (g_host->inventory_csv)
+ 			fprintf(g_host->inventory_csv, "utc_ms,tick,revision,slot,operation,kind,item_entity,item,actor_entity,place,"
+ 				"inv_slot,uses,consumed,section,phase,reason\n");
++		string_path travel; // S09-T01
++		FS.update_path(travel, "$logs$", "coop-travel.csv");
++		g_host->travel.csv = fopen(travel, "w");
++		if (g_host->travel.csv)
++			fprintf(g_host->travel.csv, "utc_ms,tick,slot,operation,transition,reason,phase,state,detail\n");
+ 		string_path transfers;
+ 		FS.update_path(transfers, "$logs$", "coop-transfers.csv");
+ 		g_host->transfers_csv = fopen(transfers, "w");
+@@ -9414,6 +10145,9 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	send_party_tasks(); // S08-T09
+ 	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
+ 	quest_fixtures(); // S08-T04
++	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
++	travel_fixtures(); // S09-T01
++	travel_fixture_boar();
+ 	encounter_fixtures();
+ 	encounter_record();
+ 	poll_publications(false); // S07-T08: the worker's results and the joins waiting on them
+diff --git a/src/xrGame/level_changer.cpp b/src/xrGame/level_changer.cpp
+index 03c931c..6207ccd 100644
+--- a/src/xrGame/level_changer.cpp
++++ b/src/xrGame/level_changer.cpp
+@@ -21,6 +21,8 @@
+ #include "../xrengine/xr_collide_form.h"
+ #include "CampaignActorAccess.h" // S06-T05
+ #include "CoopReplica.h"
++#include "CoopClientLink.h" // S09-T01: the travel prompt
++#include "game_graph.h"
+ 
+ namespace
+ {
+@@ -32,7 +34,11 @@ namespace
+ // invitation opens the change-level dialog, which pauses the device. On a
+ // co-op client the level belongs to the server. Both only log the refusal.
+ // Plain single player (no registry, no replica) is unchanged.
+-bool refuse_level_change(const CLevelChanger* changer, const CObject* actor, LPCSTR path)
++// S09-T01: on a co-op client the touch becomes the travel prompt instead
++// (campaign::coop_client_level_changer): the player asks the partner through
++// the server, which alone decides (docs/travel-contract.md).
++bool refuse_level_change(const CLevelChanger* changer, const CObject* actor, LPCSTR path,
++	GameGraph::_GRAPH_ID destination, const shared_str& invite)
+ {
+ 	const bool server = campaign::process_role() == campaign::Role::Server;
+ 	if (!server && !campaign::replica_active())
+@@ -43,6 +49,13 @@ bool refuse_level_change(const CLevelChanger* changer, const CObject* actor, LPC
+ 	Msg("coop level-change-refused role=%s path=%s changer=%u name=%s actor=%u pos=%.2f/%.2f/%.2f refused=%u",
+ 	    server ? "server" : "client", path, changer->ID(), changer->cName().c_str(), actor->ID(), at.x, at.y, at.z,
+ 	    refused);
++	if (!server)
++	{
++		LPCSTR level = "?";
++		if (ai().get_game_graph() && ai().game_graph().valid_vertex_id(destination))
++			level = *ai().game_graph().header().level(ai().game_graph().vertex(destination)->level_id()).name();
++		campaign::coop_client_level_changer(changer->ID(), actor->ID(), level, invite.c_str());
++	}
+ 	return true;
+ }
+ } // namespace
+@@ -152,7 +165,7 @@ void CLevelChanger::feel_touch_new(CObject* tpObject)
+ 	if (!l_tpActor->g_Alive())
+ 		return;
+ 
+-	if (refuse_level_change(this, l_tpActor, m_bSilentMode ? "touch-silent" : "touch"))
++	if (refuse_level_change(this, l_tpActor, m_bSilentMode ? "touch-silent" : "touch", m_game_vertex_id, m_invite_str))
+ 	{
+ 		m_entrance_time = Device.fTimeGlobal;
+ 		return;
+@@ -215,7 +228,8 @@ bool CLevelChanger::feel_touch_contact(CObject* object)
+ 
+ void CLevelChanger::update_actor_invitation()
+ {
+-	if (m_bSilentMode) return;
++	// S09-T01: a co-op client's prompt refreshes every 5 s for a silent changer too
++	if (m_bSilentMode && !campaign::replica_active()) return;
+ 	xr_vector<CObject*>::iterator it = feel_touch.begin();
+ 	xr_vector<CObject*>::iterator it_e = feel_touch.end();
+ 
+@@ -229,7 +243,7 @@ void CLevelChanger::update_actor_invitation()
+ 
+ 		if (m_entrance_time + 5.0f < Device.fTimeGlobal)
+ 		{
+-			if (refuse_level_change(this, l_tpActor, "invitation"))
++			if (refuse_level_change(this, l_tpActor, "invitation", m_game_vertex_id, m_invite_str))
+ 			{
+ 				m_entrance_time = Device.fTimeGlobal;
+ 				continue;

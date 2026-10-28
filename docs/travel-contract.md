@@ -172,6 +172,34 @@ committed, the entities were already restored, both players are told
 - The item graph is checked unchanged across the travel (the participants'
   layout hash); the party's tasks are rebuilt from the save.
 
+## 10. The coordinated resume (S09-T03)
+
+Code: `CoopServerHost.cpp` "S09-T03" (`take_travel_ready`,
+`travel_hold_tick`, `travel_resume`), `CoopClientLink.cpp`
+(`send_travel_ready`). Validation: [S09-T03](validation/S09-T03.md).
+
+After the reload the destination world is **held**: the barrier stays up
+(each player's input for the tick is consumed and discarded, every action
+but the ready is refused 30), so nobody plays against a level the partner
+has not loaded. Each client, once its world is live on the destination,
+sends a **ready** (ActionIntent kind 13: `u64 transition id, u8 length,
+the level name it is live on`). The server accepts it only when it names
+the pending transition **and** its level (else 31 `WrongDestination`), and
+only once that client's world is live on the server's side too (its
+checkpoint streamed and acknowledged; else 32 `NotLoaded`, and the client
+sends it again 2 s later). A ready's repeat returns its stored outcome. The
+hold ends when every bound player is ready (`travel-resumed why=all-ready`,
+CampaignEvent 13 state 9) or at its deadline, **60 s** after the reload
+(`why=timeout`, abort field 9): the present players resume and the absent
+one rejoins later as a detached player would (its actor stands where it
+arrived). The committed event names the destination generation.
+
+What a client cannot do against the old level: it left that world on the
+committed event (replica reset, prediction baselines gone), its inputs are
+per connection (the queue starts afresh at the join) and the hold discards
+them until the resume; its unanswered actions are re-sent on the new level
+and judged there.
+
 ## 8. Not in S09-T01
 
 - A live proposal is **not durable**: a crash forgets it (the players

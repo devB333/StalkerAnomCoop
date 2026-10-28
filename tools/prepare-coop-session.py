@@ -142,6 +142,12 @@ def main():
                              "round 0 only and the agreed travel is carried out (the party arrives on the "
                              "destination level; --failpoint travel:before-take / travel:after-commit for the "
                              "crash windows)")
+    parser.add_argument("--travel-ready-delay", default="",
+                        help="S09-T03 driver: <client>:<seconds>[,...]: that client sends its ready N s after "
+                             "arriving on the destination level (999: never)")
+    parser.add_argument("--travel-ready-wrong", default="",
+                        help="S09-T03 driver: comma-separated clients that first send a ready with a wrong "
+                             "transition id, then a wrong level, then the right one")
     parser.add_argument("--restart-no-fixture", action="store_true",
                         help="with --failpoint: the restarted server runs no fixture (the clients' pending "
                              "requests are retried against the recovered world) (S08-T06)")
@@ -199,6 +205,8 @@ def main():
     use = {n for n in args.use.split(",") if n}
     stack = {n for n in args.stack.split(",") if n}
     travel = {n for n in args.travel.split(",") if n}
+    ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
+    ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     drivers = inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
@@ -323,7 +331,9 @@ def main():
                       f"inject = {1 if name in inject else 0}",
                       f"script = {program}",
                       f"predict = {0 if name in no_predict else 1}",
-                      f"auto_respawn = {args.auto_respawn}"]
+                      f"auto_respawn = {args.auto_respawn}",
+                      f"travel_ready_delay = {ready_delay.get(name, 0)}",
+                      f"travel_ready_wrong = {1 if name in ready_wrong else 0}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile
@@ -380,6 +390,8 @@ def main():
         "stack": sorted(stack),
         "travel": sorted(travel),
         "travel_variant": args.travel_variant if travel else 0,
+        "travel_ready_delay": ready_delay,
+        "travel_ready_wrong": sorted(ready_wrong),
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

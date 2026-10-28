@@ -1,0 +1,404 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 349d547..468f9e0 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -365,6 +365,12 @@ struct Link
+ 		bool arriving = false;
+ 		xr_string arrive_level;
+ 		u64 arrivals = 0;
++		// S09-T03: the ready after arriving, and the hold until the partner is there
++		u64 ready_id = 0; // the transition to send a ready for (0: none)
++		u32 ready_at_ms = 0;
++		u8 ready_step = 0; // the driver's wrong readies first (travel_ready_wrong)
++		bool holding = false; // the server holds the world until both are ready
++		u64 readies = 0, resumes = 0;
+ 	} travel;
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+@@ -994,6 +1000,11 @@ void world_frame()
+ 			travel_hud(arrived, 5);
+ 			g_link->log.line("travel-arrived level=%s expected=%s actor=%u", Level().name().c_str(),
+ 				g_link->travel.arrive_level.c_str(), g_actor ? u32(g_actor->ID()) : 0xffffu);
++			// S09-T03: the ready (the driver may delay it or send wrong ones first)
++			g_link->travel.holding = true;
++			g_link->travel.ready_at_ms = g_link->wall.GetElapsed_ms() + g_link->config.travel_ready_delay * 1000;
++			if (g_link->config.travel_ready_delay != 999)
++				travel_hud("Waiting for your partner to arrive...", 30);
+ 		}
+ 		g_link->log.line("world-live load_ms=%u applied_buffered=%u applied=%I64u actor=%u paused=%d snapshots=%I64u "
+ 			"seeded=%I64u",
+@@ -3562,7 +3573,7 @@ u64 request_ownership(u16 action, const coop::proto::EntityRef& target, const xr
+ 		action == coop::proto::kActionPickup ? "pickup" : action == coop::proto::kActionDrop ? "drop" :
+ 		action == coop::proto::kActionEquip ? "equip" : action == coop::proto::kActionUse ? "use" :
+ 		action == coop::proto::kActionQuest ? "quest" : action == coop::proto::kActionTravelRequest ? "travel-request" :
+-		action == coop::proto::kActionTravelAnswer ? "travel-answer" : "transfer",
++		action == coop::proto::kActionTravelAnswer ? "travel-answer" : action == coop::proto::kActionTravelReady ? "travel-ready" : "transfer",
+ 		why, p.operation, target.id, target.generation, int(round), int(kind), expected);
+ 	return p.operation;
+ }
+@@ -3610,8 +3621,9 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 			}
+ 			g_link->log.line("pickup-result operation=%I64x outcome=%u reason=%u commit=%I64u round=%d", p.operation,
+ 				u32(result.outcome), u32(result.reason), result.commit_id, int(p.round));
+-			if (p.action == coop::proto::kActionTravelRequest || p.action == coop::proto::kActionTravelAnswer)
+-				travel_result(p, result); // S09-T01
++			if (p.action == coop::proto::kActionTravelRequest || p.action == coop::proto::kActionTravelAnswer ||
++				p.action == coop::proto::kActionTravelReady)
++				travel_result(p, result); // S09-T01, S09-T03
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+ 			{
+ 				// S08-T07: the use's first-person presentation, as single player plays it
+@@ -5019,7 +5031,7 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 	for (int i = 0; i < 8; ++i)
+ 		changer |= u64(b[12 + i]) << (8 * i);
+ 	const u8 len = b[20];
+-	if (len > 100 || b.size() != 21 + size_t(len) + 12 + 4)
++	if (len > 100 || (b.size() != 21 + size_t(len) + 12 + 4 && b.size() != 21 + size_t(len) + 12 + 8))
+ 		return;
+ 	string128 level;
+ 	memcpy(level, b.data() + 21, len);
+@@ -5058,6 +5070,16 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 		t.live_id = 0;
+ 	}
+ 	t.last_end = state;
++	if (state == 9)
++	{
++		// S09-T03: resumed: both players are on the level (or the hold timed out)
++		t.holding = false;
++		t.ready_id = 0;
++		++t.resumes;
++		travel_hud(abort == 9 ? "Your partner did not arrive in time: you may go on." : "Both players are here.", 5);
++		g_link->log.line("travel-resumed id=%I64x level=%s timeout=%d", id, level, abort == 9 ? 1 : 0);
++		return;
++	}
+ 	if (state == 8)
+ 	{
+ 		// S09-T02: committed: the server reloads the destination level from the
+@@ -5065,6 +5087,8 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 		// S07-T07 path; the reconnect backs off until the server listens again)
+ 		t.arriving = true;
+ 		t.arrive_level = level;
++		t.ready_id = id;
++		t.ready_step = 0;
+ 		xr_sprintf(text, "Travelling to %s...", level);
+ 		travel_hud(text, 30);
+ 		if (g_link->world == WorldLive || g_link->world == WorldLoading)
+@@ -5162,9 +5186,44 @@ bool travel_key_press(int key)
+ 	return true;
+ }
+ 
++u64 send_travel_ready(u64 id, LPCSTR level, LPCSTR why)
++{
++	xr_vector<u8> params;
++	for (int b = 0; b < 8; ++b)
++		params.push_back(u8(id >> (8 * b)));
++	const u8 len = u8(_min<size_t>(xr_strlen(level), 64));
++	params.push_back(len);
++	params.insert(params.end(), level, level + len);
++	++g_link->travel.readies;
++	g_link->log.line("travel-ready-sent id=%I64x level=%s why=%s", id, level, why);
++	return request_ownership(coop::proto::kActionTravelReady, coop::proto::EntityRef(), params, 0, 0xffffffff, 0, true,
++		why);
++}
++
+ void travel_frame()
+ {
+ 	Link::Travel& t = g_link->travel;
++	if (t.ready_id && t.holding && g_link->world == WorldLive && g_link->config.travel_ready_delay != 999 &&
++		g_link->wall.GetElapsed_ms() >= t.ready_at_ms)
++	{
++		// S09-T03: the ready, once; the driver's wrong ones first (refused 31)
++		if (g_link->config.travel_ready_wrong && t.ready_step == 0)
++		{
++			send_travel_ready(t.ready_id ^ 0x5a5a, Level().name().c_str(), "driver-wrong-id");
++			t.ready_step = 1;
++			t.ready_at_ms = g_link->wall.GetElapsed_ms() + 2000;
++			return;
++		}
++		if (g_link->config.travel_ready_wrong && t.ready_step == 1)
++		{
++			send_travel_ready(t.ready_id, "l00_nowhere", "driver-wrong-level");
++			t.ready_step = 2;
++			t.ready_at_ms = g_link->wall.GetElapsed_ms() + 2000;
++			return;
++		}
++		send_travel_ready(t.ready_id, Level().name().c_str(), "arrived");
++		t.ready_id = 0;
++	}
+ 	if (!t.live_id)
+ 		return;
+ 	const u32 now = g_link->wall.GetElapsed_ms();
+@@ -5194,6 +5253,17 @@ void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult
+ 		++g_link->travel.refused;
+ 	g_link->log.line("travel-result kind=%u round=%d step=%d operation=%I64x outcome=%u reason=%u transition=%I64x",
+ 		u32(p.action), int(p.round), int(p.step), p.operation, u32(result.outcome), u32(result.reason), result.revision);
++	if (p.action == coop::proto::kActionTravelReady && result.outcome == coop::proto::ActionOutcome::Rejected &&
++		result.reason == coop::proto::kReasonNotLoaded && g_link->travel.holding)
++	{
++		// S09-T03: the server had not seen this world live yet: again in 2 s
++		g_link->travel.ready_id = result.revision ? result.revision : g_link->travel.ready_id;
++		u64 id = 0;
++		for (int b = 0; b < 8; ++b)
++			id |= u64(p.params[b]) << (8 * b);
++		g_link->travel.ready_id = id;
++		g_link->travel.ready_at_ms = g_link->wall.GetElapsed_ms() + 2000;
++	}
+ 	if (!p.player || accepted || result.outcome != coop::proto::ActionOutcome::Rejected)
+ 		return;
+ 	switch (result.reason)
+@@ -5205,6 +5275,8 @@ void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult
+ 	case coop::proto::kReasonInCombat: travel_hud("Not while something is hunting you.", 4); break;
+ 	case coop::proto::kReasonNoTransition: travel_hud("That travel request is no longer open.", 4); break;
+ 	case coop::proto::kReasonWrongParty: travel_hud("That answer is not yours to give.", 4); break;
++	case coop::proto::kReasonTravelInProgress: travel_hud("Hold on: the party is travelling.", 3); break;
++	case coop::proto::kReasonWrongDestination: case coop::proto::kReasonNotLoaded: break; // the driver's, or re-sent
+ 	default: travel_hud("You can't travel now.", 4); break;
+ 	}
+ }
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index a38baf1..dc3651d 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -167,6 +167,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.script = ini.line_exist("coop", "script") ? ini.r_u32("coop", "script") : 0;
+ 		out.predict = ini.line_exist("coop", "predict") ? ini.r_u32("coop", "predict") : 1;
+ 		out.auto_respawn = ini.line_exist("coop", "auto_respawn") ? ini.r_u32("coop", "auto_respawn") : 0;
++		out.travel_ready_delay = ini.line_exist("coop", "travel_ready_delay") ? ini.r_u32("coop", "travel_ready_delay") : 0; // S09-T03
++		out.travel_ready_wrong = ini.line_exist("coop", "travel_ready_wrong") ? ini.r_u32("coop", "travel_ready_wrong") : 0;
+ 		if (ok && !absolute(out.key_path))
+ 		{
+ 			Msg("! S05-T01 coop config: key must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index d123123..41f3c58 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -56,6 +56,8 @@
+ //                 predict (S06-T03: 1, the default, predicts the own actor; 0 waits for the server),
+ //                 auto_respawn (S07-T07 driver: seconds after the own death until the respawn is
+ //                 confirmed without a key, plus one early request while alive, expected refused; 0 off)
++//                 travel_ready_delay, travel_ready_wrong (S09-T03 driver: the ready after a travel:
++//                 delayed by N s (999 never); 1: wrong id, wrong level first)
+ //   both, S06-T02: net_loss (percent of this process's packets dropped),
+ //                 net_lag (ms added to them): declared test network
+ //                 conditions through the library's simulated impairment
+@@ -116,6 +118,10 @@ struct CoopConfig
+ 	u32 script; // 1: S05-T03 look/walk/screenshot driver; 2: S06-T01 movement validation program
+ 	u32 predict; // S06-T03: 1 predicts the own actor (default), 0 waits for the server
+ 	u32 auto_respawn; // S07-T07 test driver: seconds after the own death until the client confirms the respawn
++	u32 travel_ready_delay; // S09-T03 test driver: seconds after arriving on a travel's destination level until the
++	                        // client sends its ready (0: at once; 999: never)
++	u32 travel_ready_wrong; // S09-T03 test driver: 1 sends a ready naming a wrong transition id first, then a wrong
++	                        // level, then the right one
+ 	                  // by itself (0: the player confirms with the use key); also sends one early (refused) request
+ };
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index e17a991..7357536 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -555,6 +555,12 @@ struct Host
+ 		u32 source_generation = 0, destination_generation = 0;
+ 		bool reload_requested = false;
+ 		u64 executions = 0, committed = 0, reloads = 0, exec_failed = 0, barred = 0;
++		// S09-T03: the hold on the destination level until both clients are ready
++		u64 hold_id = 0; // 0: no hold
++		u64 hold_since_ms = 0, hold_deadline_ms = 0;
++		xr_string hold_level;
++		bool ready[2] = {false, false};
++		u64 readies = 0, readies_refused = 0, inputs_ignored = 0, holds = 0, resumes_timeout = 0;
+ 		struct Fixture
+ 		{
+ 			u64 both_since = 0;
+@@ -1622,7 +1628,19 @@ void nearby_creatures(CActor* actor, string512& out)
+ void apply_inputs()
+ {
+ 	if (travel_executing())
+-		return; // S09-T02: the barrier: no input moves an actor while the travel is carried out
++	{
++		// S09-T02/T03: the barrier: each player's input for this tick is
++		// consumed (the queue's bookkeeping, and the player counts as in the
++		// world) and discarded; no actor moves until the party has resumed
++		for (PlayerLink& link : g_host->links)
++			if (link.session)
++			{
++				coop::proto::Input in;
++				if (link.inputs.consume(in) != coop::proto::InputSource::None)
++					++g_host->travel.inputs_ignored;
++			}
++		return;
++	}
+ 
+ 	const u32 now = g_host->wall.GetElapsed_ms();
+ 	// What the previous tick did with the input it was given.
+@@ -8618,6 +8636,7 @@ void travel_event_to(PlayerLink& link, const coop::proto::Transition& t, u32 rem
+ 	put_f32(payload, g_host->travel.position.y);
+ 	put_f32(payload, g_host->travel.position.z);
+ 	put_u32(payload, remaining_ms);
++	put_u32(payload, g_host->travel.destination_generation); // S09-T03: the destination generation (0 before a take)
+ 	queue_event(link, 13, payload);
+ 	link.travel_sent_id = t.state == coop::proto::TravelState::Proposed ? t.id : 0;
+ }
+@@ -9221,6 +9240,8 @@ void travel_fixture_boar()
+ 
+ void log_status(LPCSTR tag);
+ 
++const u64 kTravelResumeMs = 60000; // S09-T03: the hold on the destination level, at most
++
+ const char* travel_exec_name(u8 s)
+ {
+ 	switch (s)
+@@ -9235,7 +9256,7 @@ const char* travel_exec_name(u8 s)
+ 	return "?";
+ }
+ 
+-bool travel_executing() { return g_host && g_host->travel.exec != 0; }
++bool travel_executing() { return g_host && (g_host->travel.exec != 0 || g_host->travel.hold_id != 0); }
+ 
+ void travel_record(u8 phase, u64 revision)
+ {
+@@ -9607,6 +9628,15 @@ bool travel_after_reload()
+ 		tv.destination_generation, Level().name().c_str(), arrived, ok ? 1 : 0);
+ 	travel_csv("reloaded", 0, 0, tv.exec_id, 0, Level().name().c_str(), "");
+ 	++tv.reloads;
++	// S09-T03: the world is held for the party until both clients are ready
++	// on this level (contract §10): the barrier stays up
++	tv.hold_id = tv.exec_id;
++	tv.hold_level = Level().name().c_str();
++	tv.hold_since_ms = g_host->wall.GetElapsed_ms();
++	tv.hold_deadline_ms = tv.hold_since_ms + kTravelResumeMs;
++	tv.ready[0] = tv.ready[1] = false;
++	++tv.holds;
++	g_host->log.line("travel-hold id=%I64x level=%s deadline_ms=%I64u", tv.hold_id, tv.hold_level.c_str(), kTravelResumeMs);
+ 	tv.exec = 0;
+ 	tv.exec_id = 0;
+ 	tv.reload_requested = false;
+@@ -9614,6 +9644,98 @@ bool travel_after_reload()
+ 	return ok;
+ }
+ 
++// ------------------------------------------------------------ S09-T03
++// The coordinated resume (docs/travel-contract.md §10): after the reload the
++// destination world is held (inputs consumed and discarded, every action
++// refused 30) until every bound player's client has sent a ready (kind 13)
++// naming the pending transition and the level its world is live on; the
++// server also requires that client's world to be live on its own side. A
++// ready for another id or level is refused (31); one from a client whose
++// world is not live yet is refused (32) and re-sent by the client. The hold
++// ends when all are ready, or at its deadline (kTravelResumeMs, 60 s): the
++// present players resume and an absent one rejoins later as a detached
++// player would (decision T03-2).
++
++void travel_resume(LPCSTR why)
++{
++	Host::Travel& tv = g_host->travel;
++	const u64 now = g_host->wall.GetElapsed_ms();
++	g_host->log.line("travel-resumed id=%I64x level=%s why=%s after_ms=%I64u ready=%d/%d inputs_ignored=%I64u", tv.hold_id,
++		tv.hold_level.c_str(), why, now - tv.hold_since_ms, tv.ready[0] ? 1 : 0, tv.ready[1] ? 1 : 0,
++		tv.inputs_ignored);
++	travel_csv("resumed", 0, 0, tv.hold_id, 0, tv.hold_level.c_str(), why);
++	coop::proto::Transition t = tv.coordinator->last_ended();
++	t.id = tv.hold_id;
++	t.state = coop::proto::TravelState(9); // resumed
++	t.abort = coop::proto::TravelAbort(!xr_strcmp(why, "timeout") ? 9 : 0);
++	tv.level = tv.hold_level;
++	travel_event(t, 0);
++	tv.hold_id = 0;
++	tv.hold_level.clear();
++}
++
++u16 take_travel_ready(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	Host::Travel& tv = g_host->travel;
++	u16 reason = 0;
++	if (travel_known(link, intent, result, reason))
++		return reason;
++	++tv.readies;
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (intent.params.size() < 9 || intent.params.size() != size_t(9 + intent.params[8]) || intent.params[8] > 64)
++		return coop::proto::kReasonMalformed;
++	u64 id = 0;
++	for (int b = 0; b < 8; ++b)
++		id |= u64(intent.params[b]) << (8 * b);
++	string128 level;
++	memcpy(level, intent.params.data() + 9, intent.params[8]);
++	level[intent.params[8]] = 0;
++	if (!tv.hold_id || id != tv.hold_id || xr_strcmp(level, tv.hold_level.c_str()))
++	{
++		++tv.readies_refused;
++		g_host->log.line("travel-ready-wrong slot=%u id=%I64x level=%s hold=%I64x hold_level=%s", u32(link.ref.slot), id,
++			level, tv.hold_id, tv.hold_level.c_str());
++		return coop::proto::kReasonWrongDestination;
++	}
++	if (link.world != WorldLive)
++	{
++		++tv.readies_refused;
++		g_host->log.line("travel-ready-not-loaded slot=%u world=%u", u32(link.ref.slot), u32(link.world));
++		return coop::proto::kReasonNotLoaded;
++	}
++	if (link.ref.slot < 2)
++		tv.ready[link.ref.slot] = true;
++	g_host->log.line("travel-ready slot=%u id=%I64x level=%s after_ms=%I64u operation=%I64x", u32(link.ref.slot), id, level,
++		g_host->wall.GetElapsed_ms() - tv.hold_since_ms, intent.operation_id);
++	travel_csv("ready", link.ref.slot, intent.operation_id, id, 0, level, "");
++	travel_remember(link, intent.operation_id, 0, id);
++	result.commit_id = 0;
++	result.revision = id;
++	return 0;
++}
++
++void travel_hold_tick()
++{
++	Host::Travel& tv = g_host->travel;
++	if (!tv.hold_id)
++		return;
++	bool all = true;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot < 2 && !tv.ready[l.ref.slot])
++			all = false;
++	if (all)
++	{
++		travel_resume("all-ready");
++		return;
++	}
++	if (g_host->wall.GetElapsed_ms() >= tv.hold_deadline_ms)
++	{
++		++tv.resumes_timeout;
++		travel_resume("timeout");
++	}
++}
++
+ void on_joined(const coop::session::SessionEvent& e)
+ {
+ 	PlayerLink* link = link_of(e.player);
+@@ -9705,11 +9827,11 @@ void on_message(const coop::session::SessionEvent& e)
+ 	}
+ 	if (const auto* intent = std::get_if<coop::proto::ActionIntent>(&e.message.body))
+ 	{
+-		if (travel_executing())
++		if (travel_executing() && intent->kind != coop::proto::kActionTravelReady)
+ 		{
+ 			// S09-T02: the barrier: every action is refused until the party is on
+ 			// the destination level (the client retries unanswered ones; a refused
+-			// one is the player's to repeat there)
++			// one is the player's to repeat there); S09-T03: the ready goes through
+ 			coop::proto::ActionResult barred;
+ 			barred.operation_id = intent->operation_id;
+ 			barred.outcome = coop::proto::ActionOutcome::Rejected;
+@@ -9744,6 +9866,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_travel_request(*link, *intent, result); // S09-T01
+ 		else if (intent->kind == coop::proto::kActionTravelAnswer)
+ 			reason = take_travel_answer(*link, *intent, result); // S09-T01
++		else if (intent->kind == coop::proto::kActionTravelReady)
++			reason = take_travel_ready(*link, *intent, result); // S09-T03
+ 		else if (intent->kind == coop::proto::kActionQuest)
+ 		{
+ 			reason = take_quest(*link, *intent, result); // S08-T04
+@@ -10640,6 +10764,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	quest_fixtures(); // S08-T04
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
++	travel_hold_tick(); // S09-T03: the resume once both clients are ready
+ 	travel_fixtures(); // S09-T01
+ 	travel_fixture_boar();
+ 	encounter_fixtures();

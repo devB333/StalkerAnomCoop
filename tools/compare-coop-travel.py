@@ -24,6 +24,10 @@ Checks:
                 process, both actors arrived within 3 m of the changer's destination point alive, both
                 clients rejoined on the destination level (travel-arrived), the participants' item layout
                 hash is unchanged across the travel, and no input or action was applied during the barrier
+  resume        (variant 2, S09-T03) after the reload the server held the world (inputs consumed and
+                discarded, no actor moved) until every client's ready named the pending transition and
+                level (or the 60-s deadline), refused the driver's wrong readies (31), answered a
+                ready's repeat from its stored outcome, and both clients saw the resume
   recovery      (variant 2 with a crash window) the restarted server recovered on the right level: the
                 source level after travel:before-take (prepared only), the destination level after
                 travel:after-commit (committed, rolled forward), and both clients rejoined there
@@ -84,6 +88,10 @@ def main():
     ap.add_argument("logs")
     ap.add_argument("--variant", type=int, default=0)
     ap.add_argument("--out", default="")
+    ap.add_argument("--expect-resume", default="all-ready", choices=("all-ready", "timeout"),
+                    help="variant 2 (S09-T03): how the hold on the destination level is expected to end")
+    ap.add_argument("--expect-wrong-readies", type=int, default=0,
+                    help="variant 2: readies the server must have refused as wrong (the driver's)")
     a = ap.parse_args()
     root = Path(a.logs)
     server = lines(root / "server" / "coop-server.log")
@@ -231,6 +239,27 @@ def main():
                                "client_arrivals": {n: [v["level"] for v in vs] for n, vs in client_arrivals.items()},
                                "layout_before_after": (before[-1] if before else None, after[0] if after else None),
                                "executions": barred, "crash_window": crash}
+        if not crash:
+            hold = next((kv(ln) for ln in server if "travel-hold id=" in ln), None)
+            readies = [kv(ln) for ln in server if "travel-ready slot=" in ln]
+            wrong = sum(1 for ln in server if "travel-ready-wrong" in ln)
+            resumed = next((kv(ln) for ln in server if "travel-resumed id=" in ln), None)
+            hold_at = next((i for i, ln in enumerate(server) if "travel-hold id=" in ln), None)
+            resume_at = next((i for i, ln in enumerate(server) if "travel-resumed id=" in ln), None)
+            moved_during_hold = sum(1 for ln in server[hold_at:resume_at] if "input-after-tick" in ln) \
+                if hold_at is not None and resume_at is not None else -1
+            ready_dups = sum(1 for ln in server if "travel-duplicate" in ln and "kind=13" in ln)
+            client_resumes = {n: sum(1 for ln in log if "travel-resumed id=" in ln) for n, log in clients.items()}
+            want_ready = 1 if a.expect_resume == "timeout" else 2
+            ok = (hold is not None and resumed is not None and resumed.get("why") == a.expect_resume
+                  and len({r["slot"] for r in readies}) == want_ready and wrong == a.expect_wrong_readies
+                  and moved_during_hold == 0 and all(v >= 1 for v in client_resumes.values()))
+            ready_slots = sorted({r["slot"] for r in readies})
+            checks["resume"] = {"pass": ok, "hold": hold is not None, "ready_slots": ready_slots,
+                                "ready_after_ms": [r["after_ms"] for r in readies], "wrong_readies": wrong,
+                                "ready_duplicates": ready_dups, "resumed": resumed and {k: resumed[k] for k in
+                                ("why", "after_ms", "inputs_ignored")}, "inputs_applied_during_hold": moved_during_hold,
+                                "client_resumes": client_resumes}
         if crash:
             window = next((ln for ln in first if "failpoint" in ln and "travel:" in ln), "")
             rec = [kv(ln) for ln in server if "recovery-transition" in ln]

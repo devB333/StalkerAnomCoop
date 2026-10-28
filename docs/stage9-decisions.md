@@ -32,3 +32,10 @@ consent policy needs the user's approval.
 | T02-5 | The travel is **not undone by a crash after the commit**: a restarted server comes up on the destination level with both players there; a crash before the commit leaves everyone on the source level (the players ask again) | the published generation is the one recoverable world (the persistence contract) | — |
 | T02-6 | A **vehicle** a player sits in is not carried over (the player arrives on foot) | the native change-level moves the holder too, but vehicles are outside the tested content (L-list) | move the vehicle's entity as well |
 | T02-7 | The **same server incarnation continues** on the new level (same authority epoch, same transition ids, the clients reconnect to the same server) rather than restarting the process | a restart would take the same load time and add a recovery; the in-process path is the engine's own level change | restart the process from the committed generation |
+
+## S09-T03 — the coordinated resume
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03-1 | After a travel **nobody moves until both players have loaded** the new level (each client reports ready; the server discards input until then); the world's NPCs and clock run meanwhile | one player must not play the new level against a partner who is still loading (D5) | let each player go as soon as loaded (the faster one would play alone for ~10 s) |
+| T03-2 | The wait lasts **60 s at most**: if a player has not reported ready by then (its client crashed, or it is away), the other resumes alone and the absent player's actor stands at the arrival point, vulnerable, until that player rejoins | a missing player must not freeze the game for ever; the detached-actor policy already covers an absent player | wait for ever; or pause the whole world |

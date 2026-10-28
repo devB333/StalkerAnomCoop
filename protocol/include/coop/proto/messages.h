@@ -373,6 +373,9 @@ enum ActionKind : std::uint16_t
                                // revision is the transition id
     kActionTravelAnswer = 12,  // S09-T01: params: u64 transition id, u8 answer (1 accept, 2 refuse: the partner;
                                // 3 cancel: the requester); refused unless the id is the live proposal's
+    kActionTravelReady = 13,   // S09-T03: params: u64 transition id, u8 length, the level name this client's
+                               // world is live on; the server holds the destination world until every party
+                               // member's ready names the pending transition and its level (contract §10)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -414,6 +417,9 @@ enum ActionReason : std::uint16_t
     kReasonWrongParty = 29,       // S09-T01: accept/refuse from the requester, or cancel from the partner
     kReasonTravelInProgress = 30, // S09-T02: an agreed travel is being executed (the barrier): no action until the
                                   // party is on the destination level
+    kReasonWrongDestination = 31, // S09-T03: the ready names another transition or another level than the one the
+                                  // server holds the party for (or no hold is pending)
+    kReasonNotLoaded = 32,        // S09-T03: the ready came before this client's world was live on the server's side
 };
 
 struct Input

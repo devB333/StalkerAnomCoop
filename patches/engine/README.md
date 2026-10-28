@@ -322,6 +322,15 @@ and restarted from the destination generation, `CoopPersistence::load_generation
 the saves folder re-indexed) while the clients leave and rejoin (CampaignEvent
 13 state 8); recovery logs the record's verdict. Single player is unchanged.
 
+`0056-travel-resume.patch` (S09-T03, 2026-10-28): the coordinated resume
+(docs/travel-contract.md §10): after the reload the destination world is held
+(each player's input consumed and discarded, actions refused 30) until every
+client's ready (ActionIntent 13: transition id and level; refused 31 for
+another transition or level, 32 before the server sees that world live)
+or the 60-s deadline; CampaignEvent 13 state 9 `resumed`; the committed event
+carries the destination generation; the drivers' `travel_ready_delay` and
+`travel_ready_wrong` knobs. Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

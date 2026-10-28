@@ -170,6 +170,7 @@ child's validation report must show for the family to count as covered.
 | F22 | Warfare, Azazel, Ironman, survival mode, timer modes | — | — | — | — | Excluded (T01-12, L31) |
 | F23 | Vehicles, mounted guns, helicopters | — | — | — | — | Excluded (T01-12, L52); helicopters Untested |
 | F24 | Debug tools, multiplayer game modes, the Modded Exes options overlay | the overlay runs as installed; options are client-local | — | — | — | Excluded from claims; the overlay's one audited site (`aaaa_script_fixes_mp.script:852`) is checked with F1 |
+| F25 | Co-op menu and session control: Create game (the standard creation screen), Load game, Join session; the owner role; first-run keys and roster acceptance | the server runs the world the owner chose (T01-17/18); the joiner inherits faction and game type (T01-19); clients never start a local world | a fresh server; one client creates, a second joins; the owner loads another campaign while both are in; a non-owner tries to load | the created game matches the creation screen's choices on the server; the joiner gets the same faction and type; a non-owner's command is refused; both clients follow a load | S10-T06 | Required (T01-17) |
 
 Already **Covered** before this matrix (not repeated above): movement,
 combat and deaths (G06); pickup, drop, transfers, equip, use, containers,
@@ -207,6 +208,7 @@ decisions of [Stage 10 decisions](stage10-decisions.md).
 | S10-T05b | Dynamic task types under the party policy | S10-T04a, S10-T04b | L10 | F19 |
 | S10-T05c | Storyline chains (DoctorX, Living Legend) | S10-T05b, S10-T03e | — | F20 |
 | S10-T05d | Presentation split: per-player news, PDA, HUD scripts, statistics | — | L05, L06, L33, L47 | F21 |
+| S10-T06 | Co-op menu and session control: Create game, Load game, Join session; owner role; in-game roster acceptance | S10-T03f (create) | L51 (with S10-T03f) | F25 |
 
 Suggested order: S10-T04a → S10-T04b (they unblock most script families),
 then S10-T02a, S10-T03a, S10-T03e in any order; S10-T02c/d/e are
@@ -215,8 +217,8 @@ Completed when their children are.
 
 ## 5. Release scope and exclusions (proposal, pending approval)
 
-- **Required for release:** F1–F5, F7–F11, F13–F21 as listed; with F6 and
-  F12 if T01-10 and T01-2 are approved.
+- **Required for release:** F1–F5, F7–F11, F13–F21 and F25 as listed; with
+  F6 and F12 if T01-10 and T01-2 are approved.
 - **Explicitly excluded** (the release notes name them; the server refuses
   or ignores them, as it refuses level changes it does not know): Warfare,
   Azazel, Ironman, survival mode (F22); vehicles, mounted guns (F23); debug
@@ -232,6 +234,6 @@ Completed when their children are.
 |---|---|
 | L48 | still holds; routed to S10-T04c (an outfit with belt slots bought from a trader, then an artefact on the belt) |
 | L50 | still holds; the release needs every passage (T01-1): the 98 directed passages of §2.1 are the scope; owner S10-T03e |
-| L51 | still holds; a new game is proposed as S10-T03f (T01-2); if declined it stays a product limit owned by S11 |
+| L51 | still holds; a new game is proposed as S10-T03f (T01-2), started from the client's creation screen through S10-T06 (T01-17); if declined it stays a product limit owned by S11 |
 | L52 | still holds; vehicles are proposed as excluded (T01-12); if approved the row stays open as a product limit and is listed in the release notes |
 | L10, L11, L12, L13, L28, L29, L32, L33, L43, L44, L47, L49, L53 | owners confirmed or narrowed to the children in §4 |

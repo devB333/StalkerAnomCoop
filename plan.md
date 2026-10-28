@@ -904,6 +904,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 - **Validation:** Two-client chained playthrough fixtures, emission with separated same-level actors, repeated tasks and crash/reconnect checkpoints.
 - **Risks/blockers:** Content coverage may reveal new authority paths; expand bounded tasks without bypassing G07/G08 guarantees.
 - **Children (S10-T01, 2026-10-28):** S10-T05a emission and psi-storm gameplay per participant (L28, L29; T01-11); S10-T05b dynamic task types under the party policy (L10); S10-T05c storyline chains (DoctorX, Living Legend; T01-16); S10-T05d presentation split: per-player news, PDA, HUD scripts, statistics (L05, L06, L33, L47).
+- **Child added 2026-10-28 by user direction (S10-T06, owner: the Stage 10 parent tasks' gate G10):** co-op menu and session control — a client's Co-op page with Create game (the standard creation screen), Load game and Join session as owner-only session-control commands to the dedicated server, the joiner inheriting faction and game type; decisions T01-17…T01-19 in [Stage 10 decisions](docs/stage10-decisions.md). Prerequisite S10-T03f.
 
 ### Stage 11 — Reliability, performance and release validation
 

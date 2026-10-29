@@ -1,0 +1,40 @@
+diff --git a/src/xrGame/HudItem.cpp b/src/xrGame/HudItem.cpp
+index ba05ece..e4971da 100644
+--- a/src/xrGame/HudItem.cpp
++++ b/src/xrGame/HudItem.cpp
+@@ -220,6 +220,19 @@ void CHudItem::OnEvent(NET_Packet& P, u16 type)
+ void CHudItem::OnStateSwitch(u32 S, u32 oldState)
+ {
+ 	m_lastState = oldState;
++	if (other_players_item(object()))
++	{
++		// S10-T04c (the K1 follow-up; trade-2 diagnostics): the other player's
++		// item plays no motion here, so a showing or hiding state would never
++		// end and the replica's weapon switch stalled (its knife stayed in
++		// eHiding, the next weapon never showed). Its switch is instant
++		// presentation: shown (eIdle) or hidden.
++		const u32 shown = (S == eHiding || S == eHidden) ? u32(eHidden) : (S == eShowing ? u32(eIdle) : S);
++		SetState(shown);
++		SetNextState(shown);
++		object().setVisible(shown != eHidden);
++		return;
++	}
+ 	SetState(S);
+ 
+ 	if (object().Remote())
+@@ -309,6 +322,15 @@ void CHudItem::SendDeactivateItem()
+ 
+ void CHudItem::SendHiddenItem()
+ {
++	if (other_players_item(object()) && !object().getDestroy())
++	{
++		// S10-T04c: CInventory::Update's deactivation of the other player's
++		// active item (the event path skips it, K1): hidden at once
++		SetState(eHidden);
++		SetNextState(eHidden);
++		object().setVisible(false);
++		return;
++	}
+ 	if (!object().getDestroy())
+ 	{
+ 		NET_Packet P;

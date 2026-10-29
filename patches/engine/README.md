@@ -434,6 +434,17 @@ weapon-switch diagnostics (`remote-slot-applied` / `remote-slot-watch`);
 the door and trade fixture `trade_party` and `compare-coop-trade.py`.
 Single player is unchanged.
 
+`0065-remote-weapon-switch.patch` (after the S10-T04c hands-on check,
+2026-10-29; the K1 follow-up): on a co-op client the other player's weapon
+switch is instant presentation. `CHudItem::OnStateSwitch` maps a showing
+or hiding state of another player's item to shown (eIdle) or hidden and
+sets its visibility, and `CHudItem::SendHiddenItem` hides such an item at
+once instead of sending the state event (whose motion is blocked for
+other players' items, K1), so `CInventory::Update` on the replica actor
+completes the switch and the next weapon shows (trade-2 diagnostics: the
+partner's knife stayed in eHiding and its pistol never appeared). Single
+player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

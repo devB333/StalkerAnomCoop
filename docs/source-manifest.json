@@ -249,6 +249,10 @@
     {
       "path": "patches/engine/0060-party-tasks-general.patch",
       "sha256": "8f5b953db75334c7989c5143ed80eaa698418aef8c017b3dc88a5e6ac973b3a0"
+    },
+    {
+      "path": "patches/engine/0061-demo-place-giver.patch",
+      "sha256": "5a3adc007c194c892066596c565344f0055f0a5fa843b6564ddbdd7b6d9d5b25"
     }
   ],
   "submodules": [

@@ -166,6 +166,9 @@ def main():
                              "the target is killed by p2 and the task turned in; fixture task_party)")
     parser.add_argument("--party-task-start", type=int, default=20,
                         help="with --party-task: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--place-giver", type=int, default=0,
+                        help="hands-on aid: seconds after both players are in the world until both actors are placed "
+                             "in front of Sidorovich, once (profile place_giver; 0 off)")
     parser.add_argument("--travel-barrier-hold", type=int, default=0,
                         help="S09-T04 harness: seconds the server keeps the barrier up before the take (0 off)")
     parser.add_argument("--travel-ready-delay", default="",
@@ -336,7 +339,8 @@ def main():
                       f"travel_barrier_hold = {args.travel_barrier_hold}",
                       f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}",
                       f"info_party = {args.info_start if info else 0}",
-                      f"task_party = {args.party_task_start if party_task else 0}"]
+                      f"task_party = {args.party_task_start if party_task else 0}",
+                      f"place_giver = {args.place_giver}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")

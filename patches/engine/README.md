@@ -384,6 +384,14 @@ attacker's context (`CEntityAlive::Die`, `CHitMemoryManager::add`); the
 fixture `task_party` and `CoopConfig` `task_party`. Single player is
 unchanged.
 
+`0061-demo-place-giver.patch` (a hands-on aid for the S10-T04a talk check,
+2026-10-29): the server setting `place_giver = N` (`CoopConfig`,
+`prepare-coop-session.py --place-giver`, `start-coop-demo.sh`'s fifth
+argument) places both participant actors in front of Sidorovich once, N
+seconds after both players are in the world (`demo_place_tick`), because a
+client's USE on his bunker door has no co-op path yet (S10-T04c). No
+gameplay change; off by default; single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

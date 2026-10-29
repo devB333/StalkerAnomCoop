@@ -241,6 +241,10 @@
     {
       "path": "patches/engine/0058-talk-window.patch",
       "sha256": "a753e5dac863f69b137bdd2d987d6492185e6559f33372abc993ff5ec2858694"
+    },
+    {
+      "path": "patches/engine/0059-party-info-portions.patch",
+      "sha256": "29ff42457faaa4ab7d9fc1780431ede47b6c2396927f93f4bee7a4180fefcde8"
     }
   ],
   "submodules": [

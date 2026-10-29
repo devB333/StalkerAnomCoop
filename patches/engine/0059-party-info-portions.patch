@@ -1,0 +1,552 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 332b055..b5128c5 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -423,6 +423,22 @@ CActor* script_context_actor(Refusal* why)
+ 	return actor;
+ }
+ 
++u16 info_actor_id(u16 id)
++{
++	if (!server_role() || !ai().get_alife())
++		return id;
++	const CSE_ALifeCreatureActor* sp_actor = ai().alife().graph().actor();
++	if (!sp_actor || sp_actor->ID != id)
++		return id;
++	ScriptContext context;
++	if (current_script_context(context) != Refusal::None)
++		return id;
++	CActor* actor = participant_actor(context.action.actor);
++	if (actor && u16(actor->ID()) != id)
++		++s_stats.info_redirected;
++	return actor ? u16(actor->ID()) : id;
++}
++
+ CActor* gameplay_script_actor(LPCSTR purpose)
+ {
+ 	ScriptContext context;
+@@ -1135,11 +1151,11 @@ void report_script_context(LPCSTR tag)
+ 		st.captured, st.captured_entered, st.captured_refused, st.captured_evicted);
+ 	Msg("S03-T05 script-context %s lua_calls=%I64u lua_no_context=%I64u task_scopes=%I64u task_unowned=%I64u "
+ 		"task_callbacks_hosted=%I64u presented=%I64u present_no_context=%I64u present_broadcast=%I64u dropped=%u "
+-		"gameplay_context=%I64u gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u",
++		"gameplay_context=%I64u gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u info_redirected=%I64u",
+ 		tag, s_stats.lua_actor_calls, s_stats.lua_no_context, s_stats.task_scopes, s_stats.task_unowned,
+ 		s_stats.task_callbacks_hosted, s_stats.presented, s_stats.present_no_context, s_stats.present_broadcast,
+ 		s_present_dropped, s_stats.gameplay_context, s_stats.gameplay_compat, s_stats.compat_installs,
+-		s_stats.compat_failures);
++		s_stats.compat_failures, s_stats.info_redirected);
+ 	for (u32 slot = 0; slot < kOutboxSlots; ++slot)
+ 		if (!s_outbox[slot].empty())
+ 			Msg("S03-T05 script-context %s outbox slot=%u records=%u", tag, slot, u32(s_outbox[slot].size()));
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index eb63769..a25ce4b 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -169,6 +169,11 @@ bool actor_context(const CObject* actor, ActionContext& out);
+ // Strict lookups: nothing outside a context.
+ Refusal current_script_context(ScriptContext& out);
+ CActor* script_context_actor(Refusal* why = nullptr);
++// S10-T04b: the actor an info-portion read by id means. The installed
++// has_alife_info hardcodes the single-player actor's id (0): inside a
++// participant context that id means the context's player, so the read goes
++// to that player's actor; any other id, or no context, is left as it is.
++u16 info_actor_id(u16 id);
+ // The native bindings' rule: the context's actor; outside a context the
+ // single-actor compatibility accessor (null and counted with two actors).
+ CActor* gameplay_script_actor(LPCSTR purpose);
+@@ -330,6 +335,7 @@ struct ScriptContextStats
+ 	u64 compat_installs;
+ 	u64 compat_failures;
+ 	u64 gameplay_context; // gameplay_script_actor answered from a context
++	u64 info_redirected; // S10-T04b: has_info(0, ...) reads sent to the context's player
+ 	u64 gameplay_compat; // ...from the compatibility accessor
+ };
+ 
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 976ae2e..8c5dcff 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -148,6 +148,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_barrier_hold = ini.line_exist("coop", "travel_barrier_hold") ? ini.r_u32("coop", "travel_barrier_hold") : 0; // S09-T04
+ 		out.talk_party = ini.line_exist("coop", "talk_party") ? ini.r_u32("coop", "talk_party") : 0; // S10-T04a
+ 		out.talk_variant = ini.line_exist("coop", "talk_variant") ? ini.r_u32("coop", "talk_variant") : 0;
++		out.info_party = ini.line_exist("coop", "info_party") ? ini.r_u32("coop", "info_party") : 0; // S10-T04b
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 164b891..46903c1 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -117,6 +117,7 @@ struct CoopConfig
+ 	u32 travel_barrier_hold; // S09-T04 harness: seconds the barrier stays up before the take (0 off)
+ 	u32 talk_party; // S10-T04a fixture: seconds after both attach until the talk rounds start at Sidorovich (0 off)
+ 	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
++	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 47a97ae..6c49e32 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -602,6 +602,19 @@ struct Host
+ 		xr_vector<u16> patches[2];
+ 		bool spawned = false;
+ 	} talk_fixture;
++	// S10-T04b: party info portions and the actor-state bridge
++	bool actor_state_installed = false;
++	xr_set<u16> actor_state_attached;
++	u64 actor_states_attached = 0, actor_states_restored = 0, infos_mirrored = 0, infos_story = 0, infos_personal = 0;
++	struct InfoFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u16 p1_old = 0xffff;
++		bool recovered = false;
++		u32 failures = 0;
++	} info_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -8914,6 +8927,331 @@ void talk_fixtures()
+ 	g_host->log.line("fixture-talk-round round=%u claim_tick=%I64u steps=%u%s", round, claim_tick, u32(steps.size()), detail);
+ }
+ 
++// ------------------------------------------------------------ S10-T04b
++// Party info portions and the script state of an actor without the
++// installed Lua binder (decisions T01-4, T04b-1..3; L11, L32, L44).
++//
++// Info portions: each actor's known portions live in the ALife registry
++// (CInfoPortionRegistry, keyed by the actor's id, in every checkpoint). A
++// portion given to or taken from one participant actor (any path:
++// dialogue, scripts in or outside a context) is mirrored to the other
++// participant actors (CActor::OnReceiveInfo / OnDisableInfo ->
++// coop_server_info_changed), so story knowledge is the party's. The
++// personal portions (the UI states the engine sends, tutorials, the sleep
++// and forced-sleep flags, the starting-equipment flag) stay per actor. The
++// installed has_alife_info reads actor 0 by id: inside a participant context
++// that read goes to the context's player (campaign::info_actor_id).
++//
++// Script state: the installed scripts keep per-object state in
++// db.storage[id].pstor (save_var / load_var) and persist it through
++// alife_storage_manager (m_data.game_object[id].pstor_all, encoded into the
++// .scoc on save, restored by the object's binder on load). An actor with no
++// binder (participant 2's, a respawned body: S03-T03 attaches the installed
++// actor binder to the script actor only) had no m_data entry and no load,
++// so its pstor was lost on a restart (L32, L44). The server now attaches an
++// actor-state entry for every participant actor without a binder once it is
++// online: m_data.game_object[id] exists (the save copies the pstor) and a
++// saved pstor_all is restored into db.storage[id].pstor.
++
++LPCSTR const actor_state_source =
++	"local A = rawget(_G, '__campaign_actor_state')\n"
++	"if type(A) == 'table' and A.installed then return end\n"
++	"A = { installed = false, attached = 0, restored = 0 }\n"
++	"rawset(_G, '__campaign_actor_state', A)\n"
++	"function campaign_actor_state_attach(id)\n"
++	"  local S = alife_storage_manager.get_state()\n"
++	"  if type(S) ~= 'table' or type(S.game_object) ~= 'table' then return -1 end\n"
++	"  if not db.storage[id] then db.storage[id] = {} end\n"
++	"  if not S.game_object[id] then S.game_object[id] = {} end\n"
++	"  local st = S.game_object[id]\n"
++	"  local restored = 0\n"
++	"  if type(st.pstor_all) == 'table' then\n"
++	"    db.storage[id].pstor = st.pstor_all\n"
++	"    st.pstor_all = nil\n"
++	"    for _ in pairs(db.storage[id].pstor) do restored = restored + 1 end\n"
++	"  end\n"
++	"  if type(st.pstor_ctime) == 'table' then db.storage[id].pstor_ctime = st.pstor_ctime st.pstor_ctime = nil end\n"
++	"  A.attached = A.attached + 1\n"
++	"  A.restored = A.restored + restored\n"
++	"  return restored\n"
++	"end\n"
++	"function campaign_actor_state_count(id)\n"
++	"  local n = 0\n"
++	"  if db.storage[id] and type(db.storage[id].pstor) == 'table' then for _ in pairs(db.storage[id].pstor) do n = n + 1 end end\n"
++	"  return n\n"
++	"end\n"
++	// the fixture's probes, in the context's player (db.actor)
++	"function campaign_info_give(info) db.actor:give_info_portion(info) end\n"
++	"function campaign_info_has(info) return db.actor:has_info(info) and 1 or 0 end\n"
++	"function campaign_info_alife_has(info) return has_alife_info(info) and 1 or 0 end\n"
++	"function campaign_probe_save(name, v) save_var(db.actor, name, v) end\n"
++	"function campaign_probe_load(name) return load_var(db.actor, name, -1) end\n"
++	"A.installed = true\n";
++
++void install_actor_state_adapter()
++{
++	if (g_host->actor_state_installed)
++		return;
++	lua_State* L = ai().script_engine().lua();
++	luabind::functor<luabind::object> probe;
++	if (!L || !ai().script_engine().functor("alife_storage_manager.get_state", probe))
++		return;
++	if (luaL_loadbuffer(L, actor_state_source, xr_strlen(actor_state_source), "campaign_actor_state") != 0 ||
++		lua_pcall(L, 0, 0, 0) != 0)
++	{
++		g_host->log.line("actor-state-adapter-failed error=%s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++		g_host->actor_state_installed = true; // once
++		return;
++	}
++	g_host->actor_state_installed = true;
++	g_host->log.line("actor-state-adapter installed");
++}
++
++// Every half second: every participant actor that is online without the
++// installed binder gets its actor-state entry (once per actor id).
++void actor_state_tick()
++{
++	if (!ai().get_alife() || g_host->tick % 25 != 0)
++		return;
++	install_actor_state_adapter();
++	if (!g_host->actor_state_installed)
++		return;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (!actor || actor->object())
++			continue; // no actor yet, or the installed binder keeps its state
++		const u16 id = u16(actor->ID());
++		if (g_host->actor_state_attached.count(id))
++			continue;
++		g_host->actor_state_attached.insert(id);
++		s32 restored = -2;
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "actor-state-attach");
++			if (scope.entered())
++				lua_call_ok("campaign_actor_state_attach", restored, int(id));
++		}
++		++g_host->actor_states_attached;
++		if (restored > 0)
++			g_host->actor_states_restored += u64(restored);
++		g_host->log.line("actor-state-attached slot=%u actor=%u binder=0 restored=%d alive=%d", u32(link.ref.slot), u32(id),
++			restored, actor->g_Alive() ? 1 : 0);
++	}
++}
++
++// Decision T04b-1: the personal portions.
++static bool personal_info(LPCSTR info)
++{
++	static LPCSTR const exact[] = {"actor_is_sleeping", "sleep_active", "force_slp", "force_slp2", "start_equippment_handled"};
++	for (LPCSTR e : exact)
++		if (!xr_strcmp(e, info))
++			return true;
++	if (!strncmp(info, "ui_", 3))
++		return true;
++	return strstr(info, "tutorial") != nullptr;
++}
++
++static bool s_info_mirroring = false;
++
++void info_changed(const CActor* actor, LPCSTR info, bool add)
++{
++	if (s_info_mirroring || !actor || !info || !info[0])
++		return;
++	u8 slot = 0xff;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && participant_actor(link.ref) == actor)
++			slot = link.ref.slot;
++	if (slot == 0xff)
++		return; // not a participant actor's (a former body, an NPC with info)
++	if (personal_info(info))
++	{
++		++g_host->infos_personal;
++		g_host->log.line("info-personal slot=%u info=%s add=%d", u32(slot), info, add ? 1 : 0);
++		return;
++	}
++	s_info_mirroring = true;
++	u32 mirrored = 0;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound || link.ref.slot == slot)
++			continue;
++		CActor* other = participant_actor(link.ref);
++		if (!other || other->HasInfo(info) == add)
++			continue;
++		other->TransferInfo(info, add);
++		++mirrored;
++		g_host->log.line("info-mirror from=%u to=%u actor=%u info=%s add=%d", u32(slot), u32(link.ref.slot), u32(other->ID()),
++			info, add ? 1 : 0);
++	}
++	s_info_mirroring = false;
++	g_host->infos_mirrored += mirrored;
++	++g_host->infos_story;
++}
++
++// The info fixture (profile info_party): once both players are in the world
++// (and info_party seconds later):
++//   give      p1 is given a story portion (STORY1); p2 a personal one
++//             (PERSONAL) and a pstor probe; the reads in each player's
++//             context are logged as info-check lines (expect / got)
++//   dead      p1's actor is killed; its client respawns it (auto_respawn)
++//   respawned p2 is given STORY2; p1's new body must hold STORY1 (the
++//             respawn copy) and STORY2 (the mirror); p1 saves a probe on the
++//             new body; a checkpoint is requested
++//   recovered (the restarted server, the same profile): every read again:
++//             both have STORY1 and STORY2, only p2 has PERSONAL, p2's probe
++//             and p1's new-body probe survived the restart
++const char* const kInfoStory1 = "zat_a9_actor_has_jup_a9_way_info";
++const char* const kInfoStory2 = "zat_a9_actor_has_jup_a9_meeting_info";
++const char* const kInfoPersonal = "tutorial_sleep";
++
++static void info_check(LPCSTR phase, PlayerLink& link, LPCSTR what, LPCSTR info, s32 expect)
++{
++	CActor* actor = participant_actor(link.ref);
++	s32 got = -2;
++	if (actor)
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "fixture-info");
++		if (scope.entered())
++		{
++			if (!xr_strcmp(what, "has_info"))
++				lua_call_ok("campaign_info_has", got, info);
++			else if (!xr_strcmp(what, "has_alife_info"))
++				lua_call_ok("campaign_info_alife_has", got, info);
++			else if (!xr_strcmp(what, "probe"))
++				lua_call_ok("campaign_probe_load", got, info);
++		}
++	}
++	if (got != expect)
++		++g_host->info_fixture.failures;
++	g_host->log.line("info-check phase=%s slot=%u actor=%u via=%s info=%s expect=%d got=%d ok=%d", phase, u32(link.ref.slot),
++		actor ? u32(actor->ID()) : 0xffffu, what, info, expect, got, got == expect ? 1 : 0);
++}
++
++static void info_do(PlayerLink& link, LPCSTR what, LPCSTR info, s32 value = 0)
++{
++	CActor* actor = participant_actor(link.ref);
++	if (!actor)
++		return;
++	campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "fixture-info");
++	if (!scope.entered())
++		return;
++	luabind::functor<void> f;
++	if (!xr_strcmp(what, "give") && ai().script_engine().functor("campaign_info_give", f))
++		f(info);
++	else if (!xr_strcmp(what, "probe") && ai().script_engine().functor("campaign_probe_save", f))
++		f(info, int(value));
++	g_host->log.line("info-do slot=%u actor=%u what=%s info=%s value=%d", u32(link.ref.slot), u32(actor->ID()), what, info,
++		value);
++}
++
++static void info_reads(LPCSTR phase, PlayerLink& p1, PlayerLink& p2, bool story2, bool probes)
++{
++	info_check(phase, p1, "has_info", kInfoStory1, 1);
++	info_check(phase, p2, "has_info", kInfoStory1, 1);
++	info_check(phase, p2, "has_alife_info", kInfoStory1, 1);
++	info_check(phase, p1, "has_info", kInfoPersonal, 0);
++	info_check(phase, p2, "has_info", kInfoPersonal, 1);
++	info_check(phase, p1, "has_alife_info", kInfoPersonal, 0); // the redirect: actor 0 means p1 here
++	info_check(phase, p2, "has_alife_info", kInfoPersonal, 1); // ...and p2 here
++	if (story2)
++	{
++		info_check(phase, p1, "has_info", kInfoStory2, 1);
++		info_check(phase, p2, "has_info", kInfoStory2, 1);
++	}
++	if (probes)
++	{
++		info_check(phase, p2, "probe", "coop_probe", 4242);
++		info_check(phase, p1, "probe", "coop_probe_body2", 7);
++	}
++}
++
++void info_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.info_party || !ai().get_alife() || !g_host->actor_state_installed)
++		return;
++	Host::InfoFixture& f = g_host->info_fixture;
++	PlayerLink* links[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2 && participant_actor(link.ref))
++		{
++			links[link.ref.slot] = &link;
++			++attached;
++		}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		f.recovered = g_host->persistence && g_host->persistence->recovered();
++		g_host->log.line("fixture-info both-attached tick=%I64u recovered=%d", g_host->tick, f.recovered ? 1 : 0);
++	}
++	if (attached < 2 || f.phase >= 9 || g_host->tick < f.both_since + u64(config.info_party) * 50)
++		return;
++	PlayerLink& p1 = *links[0];
++	PlayerLink& p2 = *links[1];
++	if (f.recovered)
++	{
++		// the restarted server: every read again
++		info_reads("recovered", p1, p2, true, true);
++		g_host->log.line("fixture-info done phase=recovered failures=%u", f.failures);
++		f.phase = 9;
++		return;
++	}
++	if (f.phase == 0)
++	{
++		info_do(p1, "give", kInfoStory1);
++		info_do(p2, "give", kInfoPersonal);
++		info_do(p2, "probe", "coop_probe", 4242);
++		info_reads("give", p1, p2, false, false);
++		info_check("give", p2, "probe", "coop_probe", 4242);
++		f.phase = 1;
++		f.phase_tick = g_host->tick + 5 * 50;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		// p1 dies; its client respawns it (profile auto_respawn)
++		CActor* a = participant_actor(p1.ref);
++		f.p1_old = u16(a->ID());
++		if (a->g_Alive())
++			a->KillEntity(a->ID(), TRUE);
++		f.phase = 2;
++		f.phase_tick = g_host->tick;
++		g_host->log.line("fixture-info p1-killed actor=%u", u32(f.p1_old));
++		return;
++	}
++	if (f.phase == 2)
++	{
++		CActor* a = participant_actor(p1.ref);
++		const bool respawned = a && a->g_Alive() && u16(a->ID()) != f.p1_old;
++		if (!respawned && g_host->tick - f.phase_tick < 90 * 50)
++			return;
++		g_host->log.line("fixture-info p1-respawned=%d actor=%u waited_ticks=%I64u", respawned ? 1 : 0,
++			a ? u32(a->ID()) : 0xffffu, g_host->tick - f.phase_tick);
++		f.phase = 3;
++		f.phase_tick = g_host->tick + 5 * 50; // the new body online, its actor-state attached
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		info_do(p2, "give", kInfoStory2);
++		info_do(p1, "probe", "coop_probe_body2", 7);
++		info_reads("respawned", p1, p2, true, true);
++		const bool requested = request_publication("info");
++		g_host->log.line("fixture-info done phase=respawned failures=%u publication=%d", f.failures, requested ? 1 : 0);
++		f.phase = 9;
++	}
++}
++
+ void pickup_fixtures()
+ {
+ 	const CoopConfig& config = g_host->config;
+@@ -11117,6 +11455,14 @@ bool coop_server_dialogue_answer(CInventoryOwner* speaker, LPCSTR text)
+ 	return true; // the server has no talk window
+ }
+ 
++// S10-T04b: see the party info portions section.
++void coop_server_info_changed(const CActor* actor, LPCSTR info_id, bool add)
++{
++	if (!g_host || !g_host->started)
++		return;
++	info_changed(actor, info_id, add);
++}
++
+ void coop_server_on_death(CEntityAlive* victim, CObject* killer)
+ {
+ 	if (!g_host || !g_host->started || !victim || !ai().get_alife())
+@@ -11710,6 +12056,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	quest_fixtures(); // S08-T04
+ 	talk_tick(); // S10-T04a: a talk ends with its actor, its NPC or its reach
+ 	talk_fixtures();
++	actor_state_tick(); // S10-T04b: the script state of an actor without the installed binder
++	info_fixtures();
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+ 	travel_hold_tick(); // S09-T03: the resume once both clients are ready
+@@ -11797,6 +12145,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		}
+ 		log_status("final");
+ 		log_talk_summary(); // S10-T04a
++		g_host->log.line("info-summary mirrored=%I64u story=%I64u personal=%I64u actor_states=%I64u restored=%I64u", // S10-T04b
++			g_host->infos_mirrored, g_host->infos_story, g_host->infos_personal, g_host->actor_states_attached,
++			g_host->actor_states_restored);
+ 		log_pickup_state("final"); // S08-T01
+ 		log_inventory_state("final"); // S08-T07
+ 		log_container_state("final"); // S08-T08
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 6c26b65..951d02f 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -22,6 +22,7 @@ class CEntityAlive;
+ class CObject;
+ class CGameObject;
+ class CInventoryOwner;
++class CActor;
+ 
+ namespace campaign
+ {
+@@ -53,4 +54,9 @@ bool coop_server_dialogue_action(LPCSTR action, const ::CGameObject* speaker, co
+ // true when the campaign server recorded it for the talking player's window
+ // (there is no talk window in the server process). False elsewhere.
+ bool coop_server_dialogue_answer(::CInventoryOwner* speaker, LPCSTR text);
++// S10-T04b: a participant actor received or lost an info portion
++// (CActor::OnReceiveInfo / OnDisableInfo): a story portion is mirrored to
++// the other participant actors (decision T01-4); personal portions stay
++// with the actor. No-op off the campaign server.
++void coop_server_info_changed(const ::CActor* actor, LPCSTR info_id, bool add);
+ } // namespace campaign
+diff --git a/src/xrGame/actor_communication.cpp b/src/xrGame/actor_communication.cpp
+index 53273b4..075542f 100644
+--- a/src/xrGame/actor_communication.cpp
++++ b/src/xrGame/actor_communication.cpp
+@@ -3,6 +3,7 @@
+ #include "CampaignActorAccess.h"
+ #include "CampaignScriptContext.h"
+ #include "CoopClientLink.h" // S10-T04a: a co-op client's talk
++#include "CoopServerHost.h" // S10-T04b: party info portions
+ #include "UIGameSP.h"
+ #include "PDA.h"
+ #include "level.h"
+@@ -56,6 +57,7 @@ bool CActor::OnReceiveInfo(shared_str info_id) const
+ 	info_portion.Load(info_id);
+ 
+ 	callback(GameObject::eInventoryInfo)(lua_game_object(), *info_id);
++	campaign::coop_server_info_changed(this, *info_id, true); // S10-T04b
+ 
+ 	if (!CurrentGameUI())
+ 		return false;
+@@ -76,6 +78,7 @@ bool CActor::OnReceiveInfo(shared_str info_id) const
+ void CActor::OnDisableInfo(shared_str info_id) const
+ {
+ 	CInventoryOwner::OnDisableInfo(info_id);
++	campaign::coop_server_info_changed(this, *info_id, false); // S10-T04b
+ 
+ 	if (!CurrentGameUI())
+ 		return;
+diff --git a/src/xrGame/alife_simulator_script.cpp b/src/xrGame/alife_simulator_script.cpp
+index 641e4e2..099698a 100644
+--- a/src/xrGame/alife_simulator_script.cpp
++++ b/src/xrGame/alife_simulator_script.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "pch_script.h"
+ #include "alife_simulator.h"
++#include "CampaignScriptContext.h" // S10-T04b: info_actor_id
+ #include "ai_space.h"
+ #include "alife_object_registry.h"
+ #include "alife_story_registry.h"
+@@ -389,7 +390,9 @@ KNOWN_INFO_VECTOR* registry(const CALifeSimulator* self, const ALife::_OBJECT_ID
+ 
+ bool has_info(const CALifeSimulator* self, const ALife::_OBJECT_ID& id, LPCSTR info_id)
+ {
+-	const KNOWN_INFO_VECTOR* known_info = registry(self, id);
++	// S10-T04b: has_alife_info's hardcoded actor 0 means the context's player on the campaign server
++	const ALife::_OBJECT_ID who = campaign::info_actor_id(id);
++	const KNOWN_INFO_VECTOR* known_info = registry(self, who);
+ 	if (!known_info)
+ 		return (false);
+ 

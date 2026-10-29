@@ -354,6 +354,18 @@ inputs are dropped; the client window's remote mode (trade and upgrade off);
 the talk fixture (`talk_party`, `talk_variant`) and the driver's actions 14–16. Single player
 is unchanged (the hooks return false off the campaign server).
 
+`0059-party-info-portions.patch` (S10-T04b, 2026-10-29): party info portions
+and the script state of an actor without the installed binder
+(docs/validation/S10-T04b.md): a story portion given to or taken from one
+participant actor is mirrored to the other participant actors
+(`CActor::OnReceiveInfo` / `OnDisableInfo` → `coop_server_info_changed`;
+the personal list `ui_*`, `*tutorial*`, the sleep flags,
+`start_equippment_handled` stays per actor); `alife():has_info(0, ...)`
+reads the context's player (`campaign::info_actor_id`); participant 2's
+actor and a respawned body get an `alife_storage_manager` entry so their
+`pstor` is saved with the checkpoint and restored (`actor_state_tick`); the
+info fixture (`info_party`). Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

@@ -261,6 +261,10 @@
     {
       "path": "patches/engine/0063-use-object-money.patch",
       "sha256": "faec0fa1136dc03c24f7856b8f2ee014582597d2fabd4179c728480f908d1b99"
+    },
+    {
+      "path": "patches/engine/0064-trade.patch",
+      "sha256": "bf820e424fb3178b0667211d30256a696038ed3668760fe428fc7b0bf2ef2e47"
     }
   ],
   "submodules": [

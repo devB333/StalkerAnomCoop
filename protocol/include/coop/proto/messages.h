@@ -389,6 +389,15 @@ enum ActionKind : std::uint16_t
                                // living thing or a level changer: those have their own kinds); params: none; the
                                // object's use callback runs on the server in the player's context (21 when the
                                // target is not such an object, 10 out of reach, 8 gone)
+    kActionTradeOpen = 18,     // S10-T04c: target: the trader the player talks to; params: none; the server starts
+                               // the engine's trade session for this buyer and sends the price table as
+                               // CampaignEvent 15 (34 without the talk, 37 when the NPC does not trade)
+    kActionTrade = 19,         // S10-T04c: target: the trader; params: u8 bought count, u8 sold count, then the
+                               // bought item refs (u64 id + u32 generation each) and the sold item refs, u32 the
+                               // client's expected net payment (diagnostics); re-priced and checked on the server,
+                               // journaled as one `trade` record, applied through CTrade::TransferItem (37 no
+                               // open trade, 38 not enough money, 39 an item not where expected or not tradeable)
+    kActionTradeClose = 20,    // S10-T04c: target: the trader; params: none; the player closed the trade window
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -438,6 +447,9 @@ enum ActionReason : std::uint16_t
     kReasonWrongPhrase = 35,      // S10-T04a: the said id is not in the talk's current list
     kReasonNoTalk = 36,           // S10-T04a: the target is not a living NPC that talks now (not an inventory owner,
                                   // an actor, talk disabled, dead), or the player's actor is dead or out of reach
+    kReasonNotTrading = 37,       // S10-T04c: no open trade with that NPC (or it does not trade)
+    kReasonNoMoney = 38,          // S10-T04c: the buyer's purse does not cover the trade
+    kReasonTradeRefused = 39,     // S10-T04c: an item is not where the client saw it, not tradeable, or priced 0
 };
 
 struct Input

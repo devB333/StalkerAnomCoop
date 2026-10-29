@@ -12,7 +12,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4] [--travel-barrier-hold 5]
             [--travel-ready-delay c2:15] [--travel-ready-wrong c2] [--travel-rejoin-delay c2:75]
             [--travel-load-fail c2]] [--talk c1,c2 [--talk-start 20]] [--info c1,c2 [--info-start 20]]
-           [--party-task c1,c2 [--party-task-start 20]]
+           [--party-task c1,c2 [--party-task-start 20]] [--trade c1,c2 [--trade-start 20]]
            [--protocol-build proto-build-42] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
@@ -166,6 +166,12 @@ def main():
                              "the target is killed by p2 and the task turned in; fixture task_party)")
     parser.add_argument("--party-task-start", type=int, default=20,
                         help="with --party-task: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--trade", default="",
+                        help="comma-separated client names present for the S10-T04c door and trade fixture "
+                             "(server-driven: p2 uses the bunker door, p1 opens the trade, buys and sells; an external "
+                             "restart replays the trade records; fixture trade_party)")
+    parser.add_argument("--trade-start", type=int, default=20,
+                        help="with --trade: seconds after both players are in the world until the fixture starts")
     parser.add_argument("--place-giver", type=int, default=0,
                         help="hands-on aid: seconds after both players are in the world until both actors are placed "
                              "in front of Sidorovich, once (profile place_giver; 0 off)")
@@ -243,12 +249,13 @@ def main():
     talk = {n for n in args.talk.split(",") if n}
     info = {n for n in args.info.split(",") if n}
     party_task = {n for n in args.party_task.split(",") if n}
+    trade_fix = {n for n in args.trade.split(",") if n}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
-               | info | party_task)
+               | info | party_task | trade_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -340,6 +347,7 @@ def main():
                       f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}",
                       f"info_party = {args.info_start if info else 0}",
                       f"task_party = {args.party_task_start if party_task else 0}",
+                      f"trade_party = {args.trade_start if trade_fix else 0}",
                       f"place_giver = {args.place_giver}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
@@ -352,7 +360,7 @@ def main():
                 restart_lines = list(lines)
                 if args.restart_no_fixture:
                     fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
-                                "talk_party", "info_party", "task_party")
+                                "talk_party", "info_party", "task_party", "trade_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -362,7 +370,7 @@ def main():
             elif args.restart_no_fixture:
                 # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
                 fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
-                            "talk_party", "info_party", "task_party")
+                            "talk_party", "info_party", "task_party", "trade_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")

@@ -881,7 +881,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S10-T04 — Expand dialogue, factions and economy transactions
 
-- [ ] **Status: In Progress** (S10-T04a Completed 2026-10-29: [the talk window](docs/validation/S10-T04a.md), patch 0058, L43 closed; S10-T04b Completed 2026-10-29: [party info portions and actor-2 script state](docs/validation/S10-T04b.md), patch 0059, L44 closed, L11/L32 narrowed; S10-T05b, reordered before S10-T04c by the user on 2026-10-29, Completed 2026-10-29: [every quest is a party quest](docs/validation/S10-T05b.md), patch 0060, L10 narrowed; next S10-T04c trade, repair and upgrades, pending the user's answers in the [handoff](docs/handoffs/current/session-handoff.md)) · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
+- [ ] **Status: In Progress** (S10-T04a Completed 2026-10-29: [the talk window](docs/validation/S10-T04a.md), patch 0058, L43 closed; S10-T04b Completed 2026-10-29: [party info portions and actor-2 script state](docs/validation/S10-T04b.md), patch 0059, L44 closed, L11/L32 narrowed; S10-T05b, reordered before S10-T04c by the user on 2026-10-29, Completed 2026-10-29: [every quest is a party quest](docs/validation/S10-T05b.md), patch 0060, L10 narrowed; S10-T04c In Progress 2026-10-29: [trade, repair and the use of world objects](docs/validation/S10-T04c.md), patches 0063–0064, protocol v1.7: the door (use-object + joint drive), the purse and the native trade window with server prices run (trade-2 pass); the repair condition to the client and the hands-on trade check remain; upgrades split to S10-T04f (T04c-3)) · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
 - **Purpose:** Cover shared consequences beyond the first quest.
 - **Prerequisites:** S10-T01.
 - **Relevant files/subsystems:** PhraseDialog/PhraseScript; reputation; traders; stashes; inventory journal.
@@ -890,7 +890,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 - **Acceptance:** Required consequences are shared or player-specific as explicitly defined; no duplicate money/items or conflicting dialogue commits.
 - **Validation:** Concurrent purchase/dialogue, NPC death, reconnect and crash before/after durable success.
 - **Risks/blockers:** Reputation and rewards may be per-player in some content; choose and document policies before migration.
-- **Children (S10-T01, 2026-10-28):** S10-T04a the talk window (L43, first child as decided at G08); S10-T04b party info portions and actor-2 script state (L11 info part, L32, L44; T01-4); S10-T04c trade, repair and upgrades (L01 trade, L36 trade, L48; T01-7); S10-T04d factions and reputation per player (T01-6); S10-T04e stashes and treasure (T01-14).
+- **Children (S10-T01, 2026-10-28):** S10-T04a the talk window (L43, first child as decided at G08); S10-T04b party info portions and actor-2 script state (L11 info part, L32, L44; T01-4); S10-T04c trade, repair and the use of world objects (L01 trade, L36 trade, L48; T01-7; **In Progress 2026-10-29**, patches 0063–0064); S10-T04f upgrades at mechanics (split from S10-T04c by the user, T04c-3; Not Started); S10-T04d factions and reputation per player (T01-6); S10-T04e stashes and treasure (T01-14).
 
 #### S10-T05 — Expand emissions and shared story progression
 

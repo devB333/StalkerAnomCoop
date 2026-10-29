@@ -414,6 +414,26 @@ the same joint of its copy; the per-player needs event (12) carries the
 player's money, which the client applies to its actor (the HUD and the
 trade window's purse). Single player is unchanged.
 
+`0064-trade.patch` (S10-T04c, the trade slice, 2026-10-29; protocol v1.7
+`proto-build-51`: kinds 18 trade open, 19 trade, 20 trade close, reasons
+37–39, journal record 14 `trade`): the talk window's Trade button in a
+co-op talk asks the server to open the trade; the server starts the engine's
+trade session for the buyer in his context (`CTrade::StartTradeEx`,
+`StartTrading`, the installed `trade_manager.update` and
+`ActorMenu_on_trade_started` hooks), prices the stock and the buyer's items
+with `CTrade::GetItemPrice` and sends the table as CampaignEvent 15; the
+client opens the native `CUIActorMenu` trade mode and `CTrade::GetItemPrice`
+on a co-op client reads the table; buy and sell go to `take_trade`, which
+re-prices, checks and journals one `trade` record (`TradeRecord`:
+transfer records plus both purses) before `CTrade::TransferItem` applies
+it; the clients rebuild the window's lists from the Reparent events
+(`CUIActorMenu::CoopTradeRefresh`); recovery replays the record. Also: the
+party task's map spot is placed only on an object the client holds and
+`CMapLocation::UpdateSpot` tolerates a missing owner (demo-1 crash); remote
+weapon-switch diagnostics (`remote-slot-applied` / `remote-slot-watch`);
+the door and trade fixture `trade_party` and `compare-coop-trade.py`.
+Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

@@ -245,6 +245,10 @@
     {
       "path": "patches/engine/0059-party-info-portions.patch",
       "sha256": "29ff42457faaa4ab7d9fc1780431ede47b6c2396927f93f4bee7a4180fefcde8"
+    },
+    {
+      "path": "patches/engine/0060-party-tasks-general.patch",
+      "sha256": "d6fad8faf037edef37edbb26326cf855c976c0c7b7731a4aba0759dd0729a6f8"
     }
   ],
   "submodules": [

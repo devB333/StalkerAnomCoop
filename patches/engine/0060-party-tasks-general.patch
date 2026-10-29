@@ -1,0 +1,182 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index b5128c5..eb439c7 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -329,6 +329,13 @@ ScriptContextScope::ScriptContextScope(u32 captured_handle, LPCSTR entry) : m_re
+ 	}
+ }
+ 
++static u32 s_task_scope_depth = 0; // S10-T05b
++
++bool party_inventory_view()
++{
++	return s_task_scope_depth > 0 && server_role();
++}
++
+ ScriptContextScope::ScriptContextScope(const CGameTask* task, LPCSTR entry) : m_refusal(Refusal::WrongRole), m_token(0)
+ {
+ 	ScriptContextStack* stack = script_contexts();
+@@ -352,6 +359,8 @@ ScriptContextScope::ScriptContextScope(const CGameTask* task, LPCSTR entry) : m_
+ 	if (m_refusal == Refusal::None)
+ 	{
+ 		++s_stats.task_scopes;
++		m_task = true;
++		++s_task_scope_depth;
+ 		sync_lua(true);
+ 	}
+ }
+@@ -374,6 +383,8 @@ ScriptContextScope::ScriptContextScope(const CObject* actor, LPCSTR entry) : m_r
+ 
+ ScriptContextScope::~ScriptContextScope()
+ {
++	if (m_task && s_task_scope_depth)
++		--s_task_scope_depth;
+ 	if (m_refusal != Refusal::None || !s_stack)
+ 		return;
+ 	const Refusal left = s_stack->leave(m_token);
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index a25ce4b..e3295bc 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -158,6 +158,7 @@ private:
+ 	ScriptContextScope& operator=(const ScriptContextScope&);
+ 	Refusal m_refusal;
+ 	u32 m_token;
++	bool m_task = false; // S10-T05b: a task scope (party_inventory_view)
+ };
+ 
+ // The server's own context for a participant (server-internal, Self, the
+@@ -174,6 +175,10 @@ CActor* script_context_actor(Refusal* why = nullptr);
+ // participant context that id means the context's player, so the read goes
+ // to that player's actor; any other id, or no context, is left as it is.
+ u16 info_actor_id(u16 id);
++// S10-T05b: true while a task's own check or completion runs on the server
++// (a task scope): the task owner's inventory reads see every participant
++// actor's inventory, so a fetch-style check counts the party's items.
++bool party_inventory_view();
+ // The native bindings' rule: the context's actor; outside a context the
+ // single-actor compatibility accessor (null and counted with two actors).
+ CActor* gameplay_script_actor(LPCSTR purpose);
+diff --git a/src/xrGame/entity_alive.cpp b/src/xrGame/entity_alive.cpp
+index 4b1c95e..94c1d59 100644
+--- a/src/xrGame/entity_alive.cpp
++++ b/src/xrGame/entity_alive.cpp
+@@ -1,6 +1,7 @@
+ #include "pch_script.h"
+ #include "entity_alive.h"
+-#include "CoopServerHost.h" // S07-T06
++#include "CoopServerHost.h"
++#include "CampaignScriptContext.h" // S10-T05b: the death callback in the killer's context
+ #include "inventoryowner.h"
+ #include "inventory.h"
+ #include "../xrphysics/physicsshell.h"
+@@ -341,7 +342,15 @@ void CEntityAlive::Die(CObject* who)
+ 
+ 	const CGameObject* who_object = smart_cast<const CGameObject*>(who);
+ 	if (!presented)
++	{
++		// S10-T05b (T05b-3): a kill by a participant actor is "the player's" for
++		// the installed death callbacks (AC_ID, db.actor): on the campaign server
++		// they run in the killer's context; elsewhere the scope refuses and
++		// nothing changes
++		const CActor* killer = smart_cast<const CActor*>(who);
++		campaign::ScriptContextScope killer_scope(killer ? static_cast<const CObject*>(killer) : nullptr, "death-callback");
+ 		callback(GameObject::eDeath)(lua_game_object(), who_object ? who_object->lua_game_object() : 0);
++	}
+ 
+ 	if (!presented && who && !getDestroy() && (GameID() == eGameIDSingle))
+ 	{
+diff --git a/src/xrGame/hit_memory_manager.cpp b/src/xrGame/hit_memory_manager.cpp
+index 3c6d6f7..09deb62 100644
+--- a/src/xrGame/hit_memory_manager.cpp
++++ b/src/xrGame/hit_memory_manager.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include "pch_script.h"
+ #include "hit_memory_manager.h"
++#include "CampaignScriptContext.h" // S10-T05b: the hit callback in the attacker's context
++#include "Actor.h"
+ #include "memory_space_impl.h"
+ #include "custommonster.h"
+ #include "ai_object_location.h"
+@@ -112,13 +114,19 @@ void CHitMemoryManager::add(float amount, const Fvector& vLocalDir, const CObjec
+ 		m_last_hit_time = Device.dwTimeGlobal;
+ 	}
+ 
+-	object().callback(GameObject::eHit)(
+-		m_object->lua_game_object(),
+-		amount,
+-		vLocalDir,
+-		smart_cast<const CGameObject*>(who)->lua_game_object(),
+-		element
+-	);
++	{
++		// S10-T05b (T05b-3): a hit by a participant actor is "the player's" for
++		// the installed hit callbacks (the bounty tag): the attacker's context
++		const CActor* attacker = smart_cast<const CActor*>(who);
++		campaign::ScriptContextScope attacker_scope(attacker ? static_cast<const CObject*>(attacker) : nullptr, "hit-callback");
++		object().callback(GameObject::eHit)(
++			m_object->lua_game_object(),
++			amount,
++			vLocalDir,
++			smart_cast<const CGameObject*>(who)->lua_game_object(),
++			element
++		);
++	}
+ 
+ 	Fvector direction;
+ 	m_object->XFORM().transform_dir(direction, vLocalDir);
+diff --git a/src/xrGame/script_game_object3.cpp b/src/xrGame/script_game_object3.cpp
+index 5c3a2ed..1a4c8e4 100644
+--- a/src/xrGame/script_game_object3.cpp
++++ b/src/xrGame/script_game_object3.cpp
+@@ -7,6 +7,9 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CampaignScriptContext.h" // S10-T05b: the party inventory view
++#include "CampaignActorAccess.h"
++#include "Actor.h"
+ #include "script_game_object.h"
+ #include "script_game_object_impl.h"
+ #include "ai_space.h"
+@@ -1634,6 +1637,17 @@ CScriptGameObject* CScriptGameObject::GetObjectByName(LPCSTR caObjectName) const
+ 	{
+ 		CInventoryItem* l_tpInventoryItem = l_tpInventoryOwner->inventory().GetItemFromInventory(caObjectName);
+ 		CGameObject* l_tpGameObject = smart_cast<CGameObject*>(l_tpInventoryItem);
++		if (!l_tpGameObject && campaign::party_inventory_view() && smart_cast<CActor*>(&object()))
++		{
++			// S10-T05b: a task's check on a participant actor sees the party's items
++			xr_vector<CActor*> actors;
++			campaign::participant_actors(actors);
++			for (CActor* other : actors)
++				if (other && other != &object())
++					if (CInventoryItem* item = other->inventory().GetItemFromInventory(caObjectName))
++						if (CGameObject* go = smart_cast<CGameObject*>(item))
++							return go->lua_game_object();
++		}
+ 		if (!l_tpGameObject)
+ 			return (0);
+ 		else
+diff --git a/src/xrGame/script_game_object_inventory_owner.cpp b/src/xrGame/script_game_object_inventory_owner.cpp
+index 2f8c547..84d4f3c 100644
+--- a/src/xrGame/script_game_object_inventory_owner.cpp
++++ b/src/xrGame/script_game_object_inventory_owner.cpp
+@@ -293,6 +293,17 @@ void CScriptGameObject::IterateInventory(::luabind::functor<bool> functor, ::lua
+ 	for (; I != E; ++I)
+ 		if (functor(object, (*I)->object().lua_game_object()) == true)
+ 			return;
++	if (campaign::party_inventory_view() && smart_cast<CActor*>(&this->object()))
++	{
++		// S10-T05b: a task's check on a participant actor sees the party's items
++		xr_vector<CActor*> actors;
++		campaign::participant_actors(actors);
++		for (CActor* other : actors)
++			if (other && other != &this->object())
++				for (CInventoryItem* item : other->inventory().m_all)
++					if (functor(object, item->object().lua_game_object()) == true)
++						return;
++	}
+ }
+ 
+ void CScriptGameObject::IterateRuck(::luabind::functor<bool> functor, ::luabind::object object)

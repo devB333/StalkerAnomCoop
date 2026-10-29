@@ -366,6 +366,15 @@ actor and a respawned body get an `alife_storage_manager` entry so their
 `pstor` is saved with the checkpoint and restored (`actor_state_tick`); the
 info fixture (`info_party`). Single player is unchanged.
 
+`0060-party-tasks-general.patch` (S10-T05b, **work in progress, exported
+unbuilt on 2026-10-29** so the session's edits are in version control; it
+will be replaced in place when the task completes): the party inventory
+view during a task scope (`campaign::party_inventory_view`;
+`CScriptGameObject::GetObjectByName` and `IterateInventory` on a participant
+actor also see the other participant actors' items), the death and hit
+callbacks run in the participant attacker's context (`CEntityAlive::Die`,
+`CHitMemoryManager`), nothing else yet (no server changes, no fixture).
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

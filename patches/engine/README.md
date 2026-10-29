@@ -392,6 +392,16 @@ seconds after both players are in the world (`demo_place_tick`), because a
 client's USE on his bunker door has no co-op path yet (S10-T04c). No
 gameplay change; off by default; single player is unchanged.
 
+`0062-party-task-map-npc-sounds.patch` (after the S10-T04a hands-on check,
+2026-10-29): the party-task event (CampaignEvent 11) is resent when a
+task's map location or map object changes (the installed `check_task` sets
+the target after the give) and a co-op client relocates its presentation
+copy (`CGameTask::ChangeMapLocation`), so the PDA shows the task's spot and
+centres on it; a script sound played on a living NPC or monster
+(`CScriptSound::Play` / `PlayAtPos`, e.g. Sidorovich's `xr_sound` greeting)
+is delivered to the players as a sound at its position (L05 narrowed).
+Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

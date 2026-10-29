@@ -1,0 +1,96 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index a330f0e..3fe61b5 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -4448,6 +4448,18 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 			t->m_Title = shown;
+ 			if (description[0])
+ 				t->m_Description = description;
++			// demo-5: the server's map location follows the installed check_task;
++			// the PDA's task spot and its map centring need the current one
++			const bool location_changed = xr_strcmp(t->GetMapLocation_script() ? t->GetMapLocation_script() : "", location) != 0 ||
++				t->GetMapObjectID_script() != object;
++			if (location_changed && state == 1)
++			{
++				if (location[0] && object != 0xffff)
++					t->ChangeMapLocation(location, object);
++				else
++					t->RemoveMapLocations(false);
++				what = "relocated";
++			}
+ 			const ETaskState want = state == 2 ? eTaskStateCompleted : state == 0 ? eTaskStateFail : eTaskStateInProgress;
+ 			if (t->GetTaskState() != want && want != eTaskStateInProgress)
+ 			{
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index f411d61..f859e82 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -7082,8 +7082,15 @@ void send_party_tasks()
+ 		++n;
+ 		hash = fnv1a(fnv1a(fnv1a(hash, t.instance), u64(state) | (u64(u32(t.count)) << 8)), u64(u32(t.need)));
+ 		if (gt)
++		{
+ 			for (const char* c = gt->m_Title.c_str(); c && *c; ++c)
+ 				hash = fnv1a(hash, u64(u8(*c)));
++			// demo-5: the installed check_task sets the map target a moment after
++			// the give; the clients must learn the task's map location too
++			for (const char* c = gt->GetMapLocation_script(); c && *c; ++c)
++				hash = fnv1a(hash, 0x200 | u64(u8(*c)));
++			hash = fnv1a(hash, 0x10000 | u64(gt->GetMapObjectID_script()));
++		}
+ 	}
+ 	for (const Host::PartyFinished& f : g_host->party_finished)
+ 	{
+diff --git a/src/xrGame/script_sound.cpp b/src/xrGame/script_sound.cpp
+index 06cdecb..e3d0a7f 100644
+--- a/src/xrGame/script_sound.cpp
++++ b/src/xrGame/script_sound.cpp
+@@ -13,6 +13,7 @@
+ #include "ai_space.h"
+ #include "script_engine.h"
+ #include "actor.h"
++#include "entity_alive.h"
+ #include "CampaignScriptContext.h"
+ #include "CampaignActorAccess.h" // process_role
+ 
+@@ -35,11 +36,21 @@ void coop_script_sound_present(u8 kind, u32 handle, LPCSTR name, const Fvector*
+ 	campaign::present_script(s_sound_kinds[kind], 0, name, args);
+ }
+ 
+-// A sound on no object or on an actor is the players' to hear; one on an NPC
+-// or an item stays where it is (not replicated, L05).
++// A sound on no object or on an actor is the players' to hear; so is one on
++// a living NPC or monster, at its position (demo-5: Sidorovich's greeting
++// and goodbye lines are his logic's xr_sound, not dialogue phrases; the
++// rest of the presentation split is S10-T05d); one on an item stays where
++// it is (not replicated, L05).
+ static bool coop_sound_for_players(CScriptGameObject* object)
+ {
+-	return !object || smart_cast<CActor*>(&object->object()) != nullptr;
++	return !object || smart_cast<CActor*>(&object->object()) != nullptr ||
++		smart_cast<CEntityAlive*>(&object->object()) != nullptr;
++}
++
++// A sound on an NPC has no position of its own: the NPC's, as a sound at a position.
++static bool coop_sound_on_npc(CScriptGameObject* object)
++{
++	return object && !smart_cast<CActor*>(&object->object()) && smart_cast<CEntityAlive*>(&object->object());
+ }
+ 
+ // { volume_mult = number } from a sound hook's return. 1.0 (vanilla) when nil, not a table, or not a number.
+@@ -124,7 +135,14 @@ void CScriptSound::Play(CScriptGameObject* object, float delay, int flags)
+ 	if (campaign::process_role() == campaign::Role::Server && coop_sound_for_players(object))
+ 	{
+ 		m_coop_routed = true;
+-		coop_script_sound_present(0, m_coop_handle, *m_caSoundToPlay, nullptr, delay, u32(flags)); // S06-T08
++		if (coop_sound_on_npc(object))
++		{
++			Fvector at = object->object().Position();
++			at.y += 1.6f; // about head height
++			coop_script_sound_present(1, m_coop_handle, *m_caSoundToPlay, &at, delay, u32(flags));
++		}
++		else
++			coop_script_sound_present(0, m_coop_handle, *m_caSoundToPlay, nullptr, delay, u32(flags)); // S06-T08
+ 	}
+ 	if (volume_mult < 1.0f)
+ 		m_sound.set_volume(volume_mult);

@@ -253,6 +253,10 @@
     {
       "path": "patches/engine/0061-demo-place-giver.patch",
       "sha256": "a49b201afb3552fed53fd3bfba1a7ed12cc6f7cf98ecd8daad1a095ca120f2c2"
+    },
+    {
+      "path": "patches/engine/0062-party-task-map-npc-sounds.patch",
+      "sha256": "80a0a61c25ac534a939c9603209bd445a252f108353d1ee880611972c40fedc3"
     }
   ],
   "submodules": [

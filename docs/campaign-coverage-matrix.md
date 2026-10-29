@@ -7,9 +7,9 @@ excluded and must not be represented as compatible (R12, G10). Written
 2026-10-28 against the accepted test installation
 (`builds/build_2/test-install/source-client/db/configs/{scripts,configs,spawns}.db0`,
 hashes in [S10-T01](validation/S10-T01.md)) and engine `c57fe5b9` with patches
-0001–0057. The scope decisions this matrix depends on are listed for the
-user's approval in [Stage 10 decisions](stage10-decisions.md) (T01-1…T01-16);
-until they are approved the "required" column is a proposal.
+0001–0057. The scope decisions this matrix depends on are in
+[Stage 10 decisions](stage10-decisions.md) (T01-1…T01-19), **approved by the
+user on 2026-10-28**; the "required" column is the release scope.
 
 Method: targeted search of the extracted installed scripts (413 `.script`
 files), configs (3,802 files) and the spawn file (`all.spawn`, a string scan
@@ -151,13 +151,13 @@ child's validation report must show for the family to count as covered.
 | F3 | Controller: psy hit, possession, aura; psy-dog aura | the ability targets its chosen enemy (either participant); auras affect every participant in range by its own distance | a controller and a psy dog beside the two actors; one player out of range | either player is psy-hit; the effect and the camera go to the hit player only; the other is unaffected; both converge under reconnect | S10-T02c | Required (L12) |
 | F4 | Bloodsucker (vampire, alien vision, invisibility, predator), burer (telekinesis, stamina hit, shield), poltergeist (telekinesis, flames, detection) | the ability's target is its enemy participant; shield reacts to the shooter | each kind spawned beside the two actors in Cordon (the S03-T04 guards are unexercised) | each ability lands on the targeted player, not on actor 0 by default; no fault with two actors (the S03-T04 guards become real behaviour); deaths converge | S10-T02d | Required (L12) |
 | F5 | Generic mutants (boar, dog, flesh, pseudodog, cat, chimera, fracture, pseudogigant, zombie, snork, tushkano/rat, phantoms) and AI lighting | the enemy manager picks either participant; threaten/scan abilities target the chosen enemy; AI lighting per participant view (L13) | a smoke stage that spawns each class beside two actors, one in the dark | each class attacks either player; lighting from the second player's view counts; the Anomaly config variants (karlik, lurker, psysucker, bibliotekar, rotan, gigant jumper, borya) run their base class and stay **Untested** until a fixture spawns them | S10-T02e | Required (L12, L13); variants Untested |
-| F6 | Companions (`axr_companions`) | per player: a companion follows and obeys its recruiter; its inventory transfers are the recruiter's server actions | each player recruits one companion; travel; restart | each companion follows its own player; commands from the other player are refused; survives travel and restart | S10-T02f | Required if T01-10 approved, else Excluded |
+| F6 | Companions (`axr_companions`) | per player: a companion follows and obeys its recruiter; its inventory transfers are the recruiter's server actions | each player recruits one companion; travel; restart | each companion follows its own player; commands from the other player are refused; survives travel and restart | S10-T02f | Required (T01-10) |
 | F7 | Online/offline switching, squads, smart terrains, respawn | world; activation by the union of participants (S03-T04); online exclusion and same-level checks use the nearest participant, never actor 0 | players far apart; one disconnects; a travel; a restart | no duplicate squad or resurrected NPC after switch, travel or restart; identity reuse stays correct; tick cost recorded | S10-T03a | Required (L53 watch) |
 | F8 | Offline combat, squad targets and relationship condlists | world; `assigned_target = actor` means the nearest participant; condlists per rule 2 | a squad sent against "the actor"; offline combat between squads near one player | the squad finds either player; offline combat results match single player's rules | S10-T03b | Required |
 | F9 | World time and sleep | the server owns the clock; sleep is a party consent (T01-8); forced blackout per player, no skip | both sleep; one declines; one passes out from exhaustion | one time skip for the world after both agree; emission and weather follow; a blackout takes one player's control only | S10-T03c | Required (L49) |
 | F10 | Guides, fast travel, backpack travel, MLR teleports | party travel under the S09 contract (T01-9); fee from the requester; same-level teleport moves both | a guide dialogue; a fast-travel marker; the backpack | both consent, both arrive, time skipped once, fee paid once; refusals as in S09 | S10-T03d | Required |
 | F11 | Passages: 98 directed, 33 levels | the S09 travel contract | the travel harness driven over every passage both ways from a scripted party position at each changer | every passage travelled headless with both clients rejoining; every destination level loads; failures listed by passage | S10-T03e | Required (L50) |
-| F12 | New game | the server starts the native new game for the party faction (T01-2/T01-3); each player's loadout per player | start a new game as two factions' starts | both actors spawn at the start with their loadouts; the first checkpoint publishes; the first quest giver works | S10-T03f | Required if T01-2 approved, else Excluded (sessions start from a host save) |
+| F12 | New game | the server starts the native new game for the party faction (T01-2/T01-3); each player's loadout per player | start a new game as two factions' starts | both actors spawn at the start with their loadouts; the first checkpoint publishes; the first quest giver works | S10-T03f | Required (T01-2) |
 | F13 | The talk window | the client's talk UI drives the server's `PhraseDialog`; one speaker per NPC at a time (T01-15) | both players at Sidorovich; both press talk | the second gets "busy"; accept and turn-in of the S08 party quest by talking; dialogue commits once | S10-T04a | Required (L43, L01) |
 | F14 | Info portions and actor-2 script state | story portions party-shared, personal list per player (T01-4); actor 2's pstor and binder state persisted (L32, L44) | a story portion given to one player; a personal one; restart; participant 1 dead | `has_alife_info` answers the same for both players for story portions and per player for personal ones; actor 2's pstor survives a restart | S10-T04b | Required (L11, L32, L44) |
 | F15 | Trade, repair and upgrades | money per player; trader stock and restock world; the trade window one buyer at a time; repair/upgrade on the server in the buyer's context (T01-7) | both buy from one trader; concurrent purchase of the last item; a repair; an outfit with belt slots then an artefact on the belt (L48) | one winner for the last item; money and stock converge; no duplicate item or money through every crash window; the artefact-belt path exercised | S10-T04c | Required (L01 trade, L36 trade, L48) |
@@ -215,10 +215,10 @@ then S10-T02a, S10-T03a, S10-T03e in any order; S10-T02c/d/e are
 independent; S10-T05 children last. The parent tasks S10-T02…T05 are
 Completed when their children are.
 
-## 5. Release scope and exclusions (proposal, pending approval)
+## 5. Release scope and exclusions (approved 2026-10-28)
 
-- **Required for release:** F1–F5, F7–F11, F13–F21 and F25 as listed; with
-  F6 and F12 if T01-10 and T01-2 are approved.
+- **Required for release:** F1–F5, F7–F11, F13–F21 and F25 as listed, F6
+  (T01-10) and F12 (T01-2).
 - **Explicitly excluded** (the release notes name them; the server refuses
   or ignores them, as it refuses level changes it does not know): Warfare,
   Azazel, Ironman, survival mode (F22); vehicles, mounted guns (F23); debug

@@ -5,9 +5,12 @@ covered slices (G06–G09) to the installed content, and every widening needs
 a policy for "the player": R04 (installed scripts use global player state),
 R09 (shared rewards, reputation and dialogue vary by content) and R12 (a
 coverage matrix with explicit exclusions). The decisions below were taken by
-S10-T01 while building the [coverage matrix](campaign-coverage-matrix.md);
-**none is implemented yet** and none is final until the user approves or
-changes it. Later Stage 10 children add their own rows here.
+S10-T01 while building the [coverage matrix](campaign-coverage-matrix.md).
+**T01-1…T01-19 approved by the user on 2026-10-28** ("I agree with almost
+all of the decisions" → the dedicated-server/session-control discussion
+added T01-17…T01-19 → "I approve the rest"). They bind Stage 10's children;
+none is implemented yet by S10-T01 itself. Later Stage 10 children add
+their own rows here for approval at G10.
 
 Decisions D4 (explicit participants; player 2 is not a companion), D5 (party
 travel with both confirmations) and the Stage 8 policies (one party task,

@@ -37,6 +37,8 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.6 (S08-T01): the pickup action (kind 5), the named refusal reasons, and
 // Reparent: an entity's owner changed (an item taken into an inventory, or
 // put on the ground), in the lifecycle order.
+// 1.6 + S10-T04a: the talk kinds (14 start, 15 say, 16 end) and reasons 33-36,
+// CampaignEvent kind 14 (the dialogue state); no wire layout change.
 constexpr std::uint16_t kProtocolMinor = 6;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -376,6 +378,13 @@ enum ActionKind : std::uint16_t
     kActionTravelReady = 13,   // S09-T03: params: u64 transition id, u8 length, the level name this client's
                                // world is live on; the server holds the destination world until every party
                                // member's ready names the pending transition and its level (contract §10)
+    kActionTalkStart = 14,     // S10-T04a: target: the NPC; params: none; the player's actor starts a talk with it
+                               // on the server (one speaker per NPC: reason 33 while another player talks to it);
+                               // the dialogue state follows as CampaignEvent 14
+    kActionTalkSay = 15,       // S10-T04a: params: u8 length, the id of the clicked topic (a dialog id) or phrase
+                               // (<= 64 bytes); said in the player's open talk (34 without one, 35 when the id is
+                               // not in the current list)
+    kActionTalkEnd = 16,       // S10-T04a: params: none; the player closed the talk window (34 without a talk)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -420,6 +429,11 @@ enum ActionReason : std::uint16_t
     kReasonWrongDestination = 31, // S09-T03: the ready names another transition or another level than the one the
                                   // server holds the party for (or no hold is pending)
     kReasonNotLoaded = 32,        // S09-T03: the ready came before this client's world was live on the server's side
+    kReasonTalkBusy = 33,         // S10-T04a: the NPC is talking to the other player (decision T01-15)
+    kReasonNotTalking = 34,       // S10-T04a: a say or an end with no open talk
+    kReasonWrongPhrase = 35,      // S10-T04a: the said id is not in the talk's current list
+    kReasonNoTalk = 36,           // S10-T04a: the target is not a living NPC that talks now (not an inventory owner,
+                                  // an actor, talk disabled, dead), or the player's actor is dead or out of reach
 };
 
 struct Input

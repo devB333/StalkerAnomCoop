@@ -11,7 +11,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--use c1,c2 [--use-start 20]] [--stack c1,c2 [--stack-start 20]]
            [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4] [--travel-barrier-hold 5]
             [--travel-ready-delay c2:15] [--travel-ready-wrong c2] [--travel-rejoin-delay c2:75]
-            [--travel-load-fail c2]]
+            [--travel-load-fail c2]] [--talk c1,c2 [--talk-start 20]]
            [--protocol-build proto-build-42] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
@@ -147,6 +147,11 @@ def main():
                              "barrier (with --travel-barrier-hold), then the party asks again and travels; 4 "
                              "(S09-T04) two agreed travels, the first's publication failed from outside "
                              "(--failpoint checkpoint:after-manifest:3:fail), the second carried out")
+    parser.add_argument("--talk", default="",
+                        help="comma-separated client names running the S10-T04a talk-window rounds at Sidorovich "
+                             "(profile script = 8; fixture talk_party)")
+    parser.add_argument("--talk-start", type=int, default=20,
+                        help="with --talk: seconds after both players are in the world until the actors are placed")
     parser.add_argument("--travel-barrier-hold", type=int, default=0,
                         help="S09-T04 harness: seconds the server keeps the barrier up before the take (0 off)")
     parser.add_argument("--travel-ready-delay", default="",
@@ -218,11 +223,12 @@ def main():
     use = {n for n in args.use.split(",") if n}
     stack = {n for n in args.stack.split(",") if n}
     travel = {n for n in args.travel.split(",") if n}
+    talk = {n for n in args.talk.split(",") if n}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
-    drivers = inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel
+    drivers = inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -310,7 +316,8 @@ def main():
                       f"quest_variant = {args.quest_variant}",
                       f"travel_party = {args.travel_start if travel else 0}",
                       f"travel_variant = {args.travel_variant}",
-                      f"travel_barrier_hold = {args.travel_barrier_hold}"]
+                      f"travel_barrier_hold = {args.travel_barrier_hold}",
+                      f"talk_party = {args.talk_start if talk else 0}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -321,7 +328,8 @@ def main():
                 point = ":".join(parts[:2])
                 restart_lines = list(lines)
                 if args.restart_no_fixture:
-                    fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party")
+                    fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
+                                "talk_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -330,13 +338,14 @@ def main():
                 profiles["server-restart"] = restart
             elif args.restart_no_fixture:
                 # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
-                fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party")
+                fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
+                            "talk_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")
                 profiles["server-restart"] = restart
         else:
-            stepped = transfer | quest | use | stack | travel
+            stepped = transfer | quest | use | stack | travel | talk
             program = (8 if name in stepped else 7 if name in pickup else 6 if name in ledger
                        else 5 if name in weather
                        else 4 if name in encounter
@@ -413,6 +422,7 @@ def main():
         "travel_barrier_hold": args.travel_barrier_hold,
         "travel_rejoin_delay": rejoin_delay,
         "travel_load_fail": sorted(load_fail),
+        "talk": sorted(talk),
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

@@ -341,6 +341,19 @@ epoch voids a client's hold; failpoints `travel:reloading` and
 and 4; the step driver's connection drop on a travel answer waits for the
 answer's result. Single player is unchanged.
 
+`0058-talk-window.patch` (S10-T04a, 2026-10-29): a co-op client's talk window
+drives the server's dialogue (docs/validation/S10-T04a.md): ActionIntent 14
+talk start / 15 talk say / 16 talk end (reasons 33 busy, 34 not talking, 35
+wrong phrase, 36 no talk), CampaignEvent 14 (open, answer, list, closed); the
+server runs CUITalkWnd's logic in the player's script context with one
+speaker per NPC (T01-15); hooks in `CDialogScriptHelper::Action` and
+`CAI_PhraseDialogManager::AnswerPhrase` route the party quest's accept and
+turn-in phrases through the S08 party path (`party_task_accepted` factored
+out of `take_quest`) and the NPC's replies to the player; a talking actor's
+inputs are dropped; the client window's remote mode (trade and upgrade off);
+the talk fixture (`talk_party`) and the driver's actions 14–16. Single player
+is unchanged (the hooks return false off the campaign server).
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

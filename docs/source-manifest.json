@@ -237,6 +237,10 @@
     {
       "path": "patches/engine/0057-travel-failures.patch",
       "sha256": "a8844a8f02a8ab776132a00f97125b380f2b423b1cdf1946390b0fb9d3e85ec6"
+    },
+    {
+      "path": "patches/engine/0058-talk-window.patch",
+      "sha256": "8272bd6372f90e550c1bd4badcfbaa1721dba0616d381fc3d2baa72901975ea8"
     }
   ],
   "submodules": [

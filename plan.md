@@ -881,7 +881,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S10-T04 — Expand dialogue, factions and economy transactions
 
-- [ ] **Status: Not Started** · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
+- [ ] **Status: In Progress** (S10-T04a started 2026-10-28: source reading and design in the [handoff](docs/handoffs/current/session-handoff.md); no change yet) · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
 - **Purpose:** Cover shared consequences beyond the first quest.
 - **Prerequisites:** S10-T01.
 - **Relevant files/subsystems:** PhraseDialog/PhraseScript; reputation; traders; stashes; inventory journal.

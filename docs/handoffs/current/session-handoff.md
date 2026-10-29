@@ -39,7 +39,17 @@
 
 ## Next
 
-1. **S10-T04c — trade, repair and upgrades** (L01 trade, L36 trade, L48;
+0. **S10-T05b — every quest is a party quest** (reordered by the user on
+   2026-10-29: before trade; decisions T05b-1 and T05b-2 in
+   [Stage 10 decisions](../../stage10-decisions.md)): one adapter per
+   progress family instead of the S08 allow list; the reward to both
+   players in full; accept and turn-in by either player through the talk
+   window or the kind-8 intent. Reading first: `task_manager.script`
+   (`CGeneralTask`, `task_type`, `status_functor`), `task_status_functor.script`,
+   the `tm_*.ltx` task sections (progress keys per type), the kill
+   attribution in the installed death callbacks, the S08 adapter
+   (`party_source` in `CoopServerHost.cpp`) to generalise.
+1. **S10-T04c — trade, repair and upgrades** (after S10-T05b) (L01 trade, L36 trade, L48;
    T01-7). **Reading done (2026-10-29), no code yet.** What the source
    says: a price is `CTrade::GetItemPrice` (`trade2.cpp:154`): base cost ×
    condition factor × the relation factor (the trader's attitude to the

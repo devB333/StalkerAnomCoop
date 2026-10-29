@@ -881,7 +881,7 @@ A stage's first task requires the previous stage gate; other prerequisites below
 
 #### S10-T04 — Expand dialogue, factions and economy transactions
 
-- [ ] **Status: In Progress** (S10-T04a Completed 2026-10-29: [the talk window](docs/validation/S10-T04a.md), patch 0058, L43 closed; S10-T04b Completed 2026-10-29: [party info portions and actor-2 script state](docs/validation/S10-T04b.md), patch 0059, L44 closed, L11/L32 narrowed; next S10-T04c) · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
+- [ ] **Status: In Progress** (S10-T04a Completed 2026-10-29: [the talk window](docs/validation/S10-T04a.md), patch 0058, L43 closed; S10-T04b Completed 2026-10-29: [party info portions and actor-2 script state](docs/validation/S10-T04b.md), patch 0059, L44 closed, L11/L32 narrowed; next S10-T05b, reordered before S10-T04c by the user on 2026-10-29) · **Reasoning effort: Extra High** · **Complexity: High; execute as subsystem-sized children**
 - **Purpose:** Cover shared consequences beyond the first quest.
 - **Prerequisites:** S10-T01.
 - **Relevant files/subsystems:** PhraseDialog/PhraseScript; reputation; traders; stashes; inventory journal.

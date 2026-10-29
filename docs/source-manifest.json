@@ -248,7 +248,7 @@
     },
     {
       "path": "patches/engine/0060-party-tasks-general.patch",
-      "sha256": "d6fad8faf037edef37edbb26326cf855c976c0c7b7731a4aba0759dd0729a6f8"
+      "sha256": "8f5b953db75334c7989c5143ed80eaa698418aef8c017b3dc88a5e6ac973b3a0"
     }
   ],
   "submodules": [

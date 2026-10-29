@@ -366,14 +366,23 @@ actor and a respawned body get an `alife_storage_manager` entry so their
 `pstor` is saved with the checkpoint and restored (`actor_state_tick`); the
 info fixture (`info_party`). Single player is unchanged.
 
-`0060-party-tasks-general.patch` (S10-T05b, **work in progress, exported
-unbuilt on 2026-10-29** so the session's edits are in version control; it
-will be replaced in place when the task completes): the party inventory
-view during a task scope (`campaign::party_inventory_view`;
-`CScriptGameObject::GetObjectByName` and `IterateInventory` on a participant
-actor also see the other participant actors' items), the death and hit
-callbacks run in the participant attacker's context (`CEntityAlive::Die`,
-`CHitMemoryManager`), nothing else yet (no server changes, no fixture).
+`0060-party-tasks-general.patch` (S10-T05b, replacing the work-in-progress
+export of 2026-10-29 in place): every task the installed task ini knows is
+the party's (`party_task_supported` asks `task_manager.task_ini`; the S08
+allow list is gone; `rebuild_party_tasks` registers every in-process native
+task after a restart; `party_accept_task` / `party_turn_in_task` shared by
+the talk window and the fixture); the adapter resolves the general reward
+paths while a party turn-in is pending (`dialogs.relocate_money` "in",
+`dialogs.relocate_item_section` "in", `xr_effects.reward_item`,
+`CGeneralTask.give_reward` as the completion marker) and the server applies
+them to every participant actor (`apply_party_effects` item gives, the same
+sum each); a task scope sees the party's inventory
+(`campaign::party_inventory_view`; `CScriptGameObject::GetObjectByName` and
+`IterateInventory` on a participant actor also see the other participant
+actors' items); the death and hit callbacks run in the participant
+attacker's context (`CEntityAlive::Die`, `CHitMemoryManager::add`); the
+fixture `task_party` and `CoopConfig` `task_party`. Single player is
+unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

@@ -23,7 +23,7 @@ index d236331..899fb60 100644
  	u32 failpoint_count; // ...on its count-th hit (default 1)
  	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
 diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
-index bb72fa7..c81c3b1 100644
+index bb72fa7..f411d61 100644
 --- a/src/xrGame/CoopServerHost.cpp
 +++ b/src/xrGame/CoopServerHost.cpp
 @@ -629,6 +629,9 @@ struct Host
@@ -36,7 +36,7 @@ index bb72fa7..c81c3b1 100644
  };
  
  Host* g_host = nullptr;
-@@ -9434,6 +9437,60 @@ void info_fixtures()
+@@ -9434,6 +9437,55 @@ void info_fixtures()
  	}
  }
  
@@ -75,19 +75,14 @@ index bb72fa7..c81c3b1 100644
 +		g_host->log.line("demo-place giver-missing");
 +		return;
 +	}
-+	// 1.5 m in front of him, side by side, facing him
++	// the talk fixture's spots, 1.2 m to either side of him (demo-3/4: a spot
++	// 1.5 m in front of him is inside his desk; the physics ejected the actor
++	// when the partner brushed it and the contact damage killed it)
 +	const Fvector g = giver->Position();
-+	Fvector forward = giver->XFORM().k;
-+	forward.y = 0.f;
-+	if (forward.square_magnitude() < 0.01f)
-+		forward.set(0.f, 0.f, 1.f);
-+	forward.normalize();
-+	const Fvector side = Fvector().set(-forward.z, 0.f, forward.x);
 +	for (u32 k = 0; k < 2; ++k)
 +	{
 +		Fvector at = g;
-+		at.mad(forward, 1.5f);
-+		at.mad(side, k ? -0.6f : 0.6f);
++		at.x += k ? -1.2f : 1.2f;
 +		place_beside(actors[k], at);
 +		g_host->log.line("demo-place slot=%u actor=%u giver=%u at=%.2f,%.2f,%.2f", k, u32(actors[k]->ID()), u32(giver_id),
 +			VPUSH(at));
@@ -97,7 +92,7 @@ index bb72fa7..c81c3b1 100644
  // ------------------------------------------------------------ S10-T05b
  // The general party-task fixture (profile task_party; a server kill and
  // restart between its two halves, -ServerKill / -ServerRestartAfter):
-@@ -12532,6 +12589,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+@@ -12532,6 +12584,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
  	actor_state_tick(); // S10-T04b: the script state of an actor without the installed binder
  	info_fixtures();
  	task_fixtures(); // S10-T05b

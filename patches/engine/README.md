@@ -444,6 +444,15 @@ other players' items, K1), so `CInventory::Update` on the replica actor
 completes the switch and the next weapon shows (trade-2 diagnostics: the
 partner's knife stayed in eHiding and its pistol never appeared). Single
 player is unchanged.
+`0066-remote-weapon-anim-repair-belt.patch` (S10-T04c, the K1 follow-up 2 and
+the repair and belt slices) stores the server's sampled weapon state on a
+replica actor (`CActor::replica_set_weapon_state`) and reads it in the
+third-person animation picker alone (`ActorAnimation.cpp`), so the other
+player's swing, reload, draw and holster play while its weapon object stays in
+K1's idle; the combat program gets a knife leg. The inventory layout event
+(kind 9) carries a condition byte per item, applied by the client; the trade
+fixture wears and repairs a weapon and puts an artefact on the belt of an
+outfit with artefact slots (L48). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

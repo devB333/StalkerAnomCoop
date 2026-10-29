@@ -269,6 +269,10 @@
     {
       "path": "patches/engine/0065-remote-weapon-switch.patch",
       "sha256": "d0226394265006007b9c968e79c395e24c491e302fa562586a0df052fe145192"
+    },
+    {
+      "path": "patches/engine/0066-remote-weapon-anim-repair-belt.patch",
+      "sha256": "7bf55174e3d7af37ef7e58148a96fe7ba1699ca0ab2aa3bacd65fa5176bdeb96"
     }
   ],
   "submodules": [

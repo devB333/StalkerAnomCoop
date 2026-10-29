@@ -77,6 +77,19 @@ When an issue is fixed, move it to "Fixed" with the report and run names.
   **Check tomorrow:** the demo; player 2 equips while player 1 watches with a
   weapon drawn: no sway; the engine log of player 1's client shows the
   blocked motions.
+- **Follow-up 2 (patch 0066, S10-T04c, 2026-10-29):** with every first-person
+  motion of the other player's item blocked, its third-person body never
+  swung, reloaded, drew or holstered either: `CActor::g_SetAnimation` picks
+  the torso animation from the active weapon's `GetState()`
+  (`ActorAnimation.cpp`), and on a replica that item is forced to idle
+  (K1 + patch 0065). The server's sampled `weapon_state` (snapshot kWeapon)
+  is now stored on the replica actor (`CActor::replica_set_weapon_state`)
+  and read by the animation picker alone (`replica_anim_weapon_state`); the
+  item's own state stays idle, because setting eFire on the weapon object
+  would fire it on the client (`CWeaponMagazined::UpdateCL`). An attack
+  state is held at least 350 ms. Proven by the combat program's knife leg
+  (anim-1: `remote-weapon-state`, `remote-torso` in the logs); the user's
+  hands-on check is pending.
 - **Owner:** this fix; S10-T02 for the rest of the other player's presentation.
 
 ### K2. Stalker NPCs shuffle instead of walking

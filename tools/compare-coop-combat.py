@@ -77,8 +77,11 @@ def client(d):
     logs = list(d.glob("coop-c*.log"))
     if not logs:
         return None
-    legs, actions, results = {}, {}, {}
+    legs, actions, results, wpn_states = {}, {}, {}, []
     for line in open(logs[0], errors="replace"):
+        m = re.search(r"^(\d+) remote-weapon-state id=(\d+) state=(\d+)->(\d+) slot=(\d+) item=(\S+)", line)
+        if m:
+            wpn_states.append((int(m.group(2)), int(m.group(4)), m.group(6)))
         m = re.search(r"^(\d+) script-leg name=(\S+) start_utc=(\d+) end_utc=(\d+)", line)
         if m:
             legs.setdefault(m.group(2), []).append((int(m.group(3)), int(m.group(4))))
@@ -92,7 +95,7 @@ def client(d):
     f = d / "coop-combat-client.csv"
     if f.exists():
         rows = [{k: int(v) for k, v in r.items()} for r in csv.DictReader(open(f, newline=""))]
-    return {"legs": legs, "actions": actions, "results": results, "rows": rows}
+    return {"legs": legs, "actions": actions, "results": results, "rows": rows, "wpn_states": wpn_states}
 
 
 def main():
@@ -221,6 +224,16 @@ def main():
             for r, s_end in last.values())
         ratio = agree / total if total else 0
         add(f"{name} agreement", ratio >= 0.95 and final_ok, f"{agree}/{total} ({ratio:.3f}) final_ok={final_ok}")
+        # S10-T04c: the partner's weapon states reached this client for its
+        # third-person animations: firing (5), a reload (7) and a draw or
+        # holster (1, 2); a knife swing (5 with a knife) when the partner has one
+        other_id = next((r["id"] for r in c["rows"] if r["local"] == 0), None)
+        seen = [(st, item) for ent, st, item in c["wpn_states"] if ent == other_id]
+        states = {st for st, _ in seen}
+        knife = sum(1 for st, item in seen if st in (5, 6) and "knife" in item)
+        add(f"{name} partner_anim", {5, 7} <= states and bool(states & {1, 2}),
+            f"states={sorted(states)} knife_swings={knife} changes={len(seen)}")
+        info["partner_states"] = sorted(states)
         result["clients"][name] = info
     if len(first_sim_shot) >= 2:
         firsts = [t for t in first_sim_shot.values() if t is not None]

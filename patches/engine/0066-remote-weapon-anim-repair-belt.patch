@@ -1,0 +1,501 @@
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 9444add..a12292a 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -313,6 +313,17 @@ protected:
+ 	//положение торса без воздействия эффекта отдачи оружия
+ 	SRotation unaffected_r_torso;
+ 
++	// S10-T04c: see replica_set_weapon_state. An attack state is held at
++	// least kHoldMs so a single sampled or counted shot shows a swing.
++	struct ReplicaWeaponAnim
++	{
++		enum { kHoldMs = 350 };
++		u32 server = u32(-1); // the server's last sampled state
++		u32 held = u32(-1); // an attack state kept until held_until
++		u32 held_until_ms = 0; // Device.dwTimeGlobal
++		u32 changed_at_ms = 0;
++	} r_wpn_anim;
++
+ 	//ориентация модели
+ 	float r_model_yaw_dest;
+ 	float r_model_yaw; // orientation of model
+@@ -360,6 +371,15 @@ public:
+ 	u32 replica_wishful() const { return mstate_wishful; }
+ 	float replica_torso_roll() const { return r_torso.roll; } // the lean as presented
+ 	void replica_set_wishful(u32 value) { mstate_wishful = value; }
++	// S10-T04c (K1 follow-up): the other player's weapon state as the server
++	// sampled it (EntityState::weapon_state), read by g_SetAnimation alone for
++	// the third-person attack, reload, draw and holster animations. The item's
++	// own state stays K1's instant shown/hidden: a weapon put into eFire here
++	// would fire on this client (CWeaponMagazined::UpdateCL runs state_Fire).
++	void replica_set_weapon_state(u32 server_state);
++	void replica_present_attack(u32 attack_state); // a shot seen by the counter between samples
++	u32 replica_anim_weapon_state(u32 item_state);
++	bool replica_anim_weapon_state_active() const { return r_wpn_anim.server != u32(-1); }
+ 	// S06-T01: what the last native control step did with its input (the
+ 	// co-op host logs it after each tick that applied an input).
+ 	struct ControlTrace
+diff --git a/src/xrGame/ActorAnimation.cpp b/src/xrGame/ActorAnimation.cpp
+index 1aa465c..07b9791 100644
+--- a/src/xrGame/ActorAnimation.cpp
++++ b/src/xrGame/ActorAnimation.cpp
+@@ -480,10 +480,14 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 					if (W)
+ 					{
+ 						bool R3 = W->IsTriStateReload();
++						// S10-T04c: on a co-op client the other player's weapon
++						// keeps K1's idle, so its state here is the server's
++						// (replica_set_weapon_state); elsewhere the item's own
++						const u32 wpn_state = replica_anim_weapon_state(W->GetState());
+ 
+ 						if (smart_cast<CWeaponKnife*>(W))
+ 						{
+-							switch (W->GetState())
++							switch (wpn_state)
+ 							{
+ 							case CWeapon::eIdle: M_torso = TW->moving[moving_idx];
+ 								break;
+@@ -514,7 +518,7 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 						}
+ 						else
+ 						{
+-							switch (W->GetState())
++							switch (wpn_state)
+ 							{
+ 							case CWeapon::eIdle: M_torso = W->IsZoomed() ? TW->zoom : (m_bSafemode && moving_idx != STorsoWpn::eSprint) ? TW->safemode : TW->moving[moving_idx];
+ 								break;
+@@ -555,9 +559,10 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 					}
+ 					else if (M)
+ 					{
++						const u32 msl_state = replica_anim_weapon_state(M->GetState()); // S10-T04c: see above
+ 						if (is_standing)
+ 						{
+-							switch (M->GetState())
++							switch (msl_state)
+ 							{
+ 							case CMissile::eShowing: M_torso = TW->draw;
+ 								break;
+@@ -579,7 +584,7 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 						}
+ 						else
+ 						{
+-							switch (M->GetState())
++							switch (msl_state)
+ 							{
+ 							case CMissile::eShowing: M_torso = TW->draw;
+ 								break;
+@@ -671,6 +676,14 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 		else
+ 			m_current_torso_blend = smart_cast<IKinematicsAnimated*>(Visual())->PlayCycle(M_torso);
+ 
++		const u32 r_state = replica_anim_weapon_state_active() ? replica_anim_weapon_state(u32(-1)) : u32(-1);
++		if (M_torso && r_state != u32(-1) && r_state != CHUDState::eIdle && r_state != CHUDState::eHidden)
++		{
++			// S10-T04c: the other player's torso animation as this client picked it
++			// (the motion by slot and index: its name is debug-only here)
++			Msg("S10-T04c remote-torso id=%u state=%u motion=%u/%u standing=%d", ID(), r_state, u32(M_torso.slot),
++				u32(M_torso.idx), is_standing ? 1 : 0);
++		}
+ 		m_current_torso = M_torso;
+ 	}
+ 
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index 75ceaf7..7ee0287 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -536,6 +536,44 @@ void CActor::replica_set_aim(float torso_yaw, float torso_pitch)
+ 	unaffected_r_torso = r_torso;
+ }
+ 
++// S10-T04c (K1 follow-up): see Actor.h. eFire and eFire2 are a knife's two
++// swings and a gun's firing (CMissile::eThrowStart and eReady share the values:
++// the animation switch below is per item class, and the server sampled the
++// same item this replica holds).
++static bool replica_attack_state(u32 state)
++{
++	return state == CWeapon::eFire || state == CWeapon::eFire2;
++}
++
++void CActor::replica_set_weapon_state(u32 server_state)
++{
++	if (r_wpn_anim.server == server_state)
++		return;
++	r_wpn_anim.server = server_state;
++	r_wpn_anim.changed_at_ms = Device.dwTimeGlobal;
++	if (replica_attack_state(server_state))
++		replica_present_attack(server_state);
++}
++
++void CActor::replica_present_attack(u32 attack_state)
++{
++	r_wpn_anim.held = attack_state;
++	r_wpn_anim.held_until_ms = _max(r_wpn_anim.held_until_ms, Device.dwTimeGlobal + u32(ReplicaWeaponAnim::kHoldMs));
++}
++
++u32 CActor::replica_anim_weapon_state(u32 item_state)
++{
++	if (r_wpn_anim.server == u32(-1))
++		return item_state; // not a presented actor: the item's own state
++	if (r_wpn_anim.held != u32(-1))
++	{
++		if (Device.dwTimeGlobal < r_wpn_anim.held_until_ms)
++			return r_wpn_anim.held;
++		r_wpn_anim.held = u32(-1);
++	}
++	return r_wpn_anim.server;
++}
++
+ bool CActor::g_LadderOrient()
+ {
+ 	Fvector leader_norm;
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index b18e778..b1fc354 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -192,6 +192,7 @@ struct Link
+ 		u8 slot = 0xff;
+ 		u16 ammo = 0xffff;
+ 		u16 shots = 0xffff;
++		u8 weapon_state = 0xff; // S10-T04c: the server's sampled weapon state
+ 		u32 watch_until_ms = 0, watch_last_ms = 0; // S10-T04c diagnostics
+ 	};
+ 	xr_map<u16, Outcome> outcomes;
+@@ -200,6 +201,7 @@ struct Link
+ 	bool own_reloading = false;
+ 	u64 player_slot_actions = 0, player_reload_actions = 0;
+ 	u64 shots_presented = 0, slots_applied = 0, ammo_applied = 0, health_applied = 0;
++	u64 weapon_states_presented = 0; // S10-T04c
+ 	u64 deaths_presented = 0, creature_health_applied = 0; // S06-T05
+ 	bool fire_sent = false; // the fire button as last sampled
+ 	bool drive_fire = false; // the test driver holds or pulses the fire key
+@@ -426,6 +428,7 @@ struct Link
+ 		u64 entity;
+ 		u8 place, slot;
+ 		u16 uses; // S08-T08: an eatable's uses or an ammunition box's rounds; 0xffff none
++		u8 condition; // S10-T04c: the item's condition x 255
+ 	};
+ 	u64 amounts_received = 0, amounts_applied = 0, amounts_unknown = 0; // S08-T08
+ 	struct ReparentRetry
+@@ -1459,6 +1462,19 @@ void apply_actor_outcomes(CActor* actor, const coop::proto::EntityState& s)
+ 			u32(actor->ID()), u32(actor->inventory().GetActiveSlot()), u32(actor->inventory().GetNextActiveSlot()),
+ 			active ? *active->object().cNameSect() : "-", hud ? (hud->IsHidden() ? 1 : 0) : -1, hud ? int(hud->GetState()) : -1);
+ 	}
++	if (actor != g_actor && s.weapon_state != o.weapon_state)
++	{
++		// S10-T04c (K1 follow-up): the server's weapon state drives the other
++		// player's third-person attack, reload, draw and holster animations
++		// (CActor::replica_anim_weapon_state); the item's own state stays K1's
++		// instant shown/hidden, so nothing fires or reloads here
++		PIItem active = actor->inventory().ActiveItem();
++		g_link->log.line("remote-weapon-state id=%u state=%u->%u slot=%u item=%s", u32(actor->ID()), u32(o.weapon_state),
++			u32(s.weapon_state), u32(s.weapon_slot), active ? *active->object().cNameSect() : "-");
++		o.weapon_state = s.weapon_state;
++		actor->replica_set_weapon_state(s.weapon_state);
++		++g_link->weapon_states_presented;
++	}
+ 	CWeapon* weapon = smart_cast<CWeapon*>(actor->inventory().ActiveItem());
+ 	if (s.ammo != o.ammo)
+ 	{
+@@ -1474,11 +1490,15 @@ void apply_actor_outcomes(CActor* actor, const coop::proto::EntityState& s)
+ 		const u16 fresh = o.shots == 0xffff ? 0 : u16(s.shots - o.shots);
+ 		o.shots = s.shots;
+ 		if (actor != g_actor && weapon)
++		{
+ 			for (u16 i = 0; i < _min<u16>(fresh, 3); ++i)
+ 			{
+ 				weapon->replica_present_shot();
+ 				++g_link->shots_presented;
+ 			}
++			if (fresh)
++				actor->replica_present_attack(CWeapon::eFire); // S10-T04c: a shot between samples still swings the arms
++		}
+ 	}
+ }
+ 
+@@ -2341,7 +2361,10 @@ void run_script3(u32 t)
+ 		{25500, "face-other"},
+ 		{26000, "W-move-fire"},
+ 		{28500, "W-forged"},
+-		{30500, "program-end"},
++		{30500, "equip-knife"}, // S10-T04c: the knife swings at the sky (no hit on the partner)
++		{31500, "face-sky"},
++		{32000, "W-knife"},
++		{34000, "program-end"},
+ 	};
+ 	const u32 count = u32(sizeof(steps) / sizeof(steps[0]));
+ 	if (g_link->script_phase < count)
+@@ -2362,6 +2385,14 @@ void run_script3(u32 t)
+ 			slot.push_back(u8(INV_SLOT_2));
+ 			send_action(coop::proto::kActionActivateSlot, slot, "equip-slot-2");
+ 		}
++		else if (!xr_strcmp(n, "equip-knife"))
++		{
++			xr_vector<u8> slot;
++			slot.push_back(u8(KNIFE_SLOT));
++			send_action(coop::proto::kActionActivateSlot, slot, "equip-knife");
++		}
++		else if (!xr_strcmp(n, "W-knife"))
++			combat_leg(n, 0, 1500, Link::SendNormal, 5);
+ 		else if (!xr_strcmp(n, "reload"))
+ 			send_action(coop::proto::kActionReload, xr_vector<u8>(), "reload");
+ 		else if (!xr_strcmp(n, "face-other"))
+@@ -4167,7 +4198,7 @@ void log_status(LPCSTR tag)
+ 		"pred_within=%I64u pred_smoothed=%I64u pred_snapped=%I64u pred_unknown=%I64u pred_max_error=%.3f "
+ 		"view_max_offset=%.3f correction_frames=%I64u hud_still_turn_max=%.3f hud_still_frames=%I64u "
+ 		"shots_presented=%I64u slots_applied=%I64u ammo_applied=%I64u health_applied=%I64u deaths_presented=%I64u "
+-		"creature_health_applied=%I64u player_slot_actions=%I64u player_reload_actions=%I64u",
++		"creature_health_applied=%I64u player_slot_actions=%I64u player_reload_actions=%I64u weapon_states_presented=%I64u",
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+@@ -4184,7 +4215,7 @@ void log_status(LPCSTR tag)
+ 		g_link->reconciler.counters().max_error, g_link->smoother.max_offset(), g_link->correction_frames,
+ 		g_link->hud_still_turn_max, g_link->hud_still_frames, g_link->shots_presented, g_link->slots_applied,
+ 		g_link->ammo_applied, g_link->health_applied, g_link->deaths_presented, g_link->creature_health_applied,
+-		g_link->player_slot_actions, g_link->player_reload_actions);
++		g_link->player_slot_actions, g_link->player_reload_actions, g_link->weapon_states_presented);
+ }
+ // ------------------------------------------------------------ S08-T02
+ // Drops and moves. Every inventory path on the client (the engine's
+@@ -4431,7 +4462,7 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 	for (int i = 0; i < 4; ++i)
+ 		serial |= u32(b[8 + i]) << (8 * i);
+ 	const u8 part = b[12], parts = b[13], count = b[14];
+-	if (!parts || part >= parts || parts > 16 || b.size() != 15 + size_t(count) * 12)
++	if (!parts || part >= parts || parts > 16 || b.size() != 15 + size_t(count) * 13)
+ 		return;
+ 	Link::ActorLayout& l = g_link->layouts[actor];
+ 	if (l.building_serial != serial || part == 0)
+@@ -4442,7 +4473,7 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 	}
+ 	for (u32 k = 0; k < count; ++k)
+ 	{
+-		const u8* e = b.data() + 15 + k * 12;
++		const u8* e = b.data() + 15 + k * 13;
+ 		Link::LayoutItem item;
+ 		item.entity = 0;
+ 		for (int i = 0; i < 8; ++i)
+@@ -4450,6 +4481,7 @@ void on_layout(const coop::proto::CampaignEvent& event)
+ 		item.place = e[8];
+ 		item.slot = e[9];
+ 		item.uses = u16(e[10] | (e[11] << 8));
++		item.condition = e[12];
+ 		l.building.push_back(item);
+ 	}
+ 	l.parts_seen |= 1u << part;
+@@ -4752,13 +4784,29 @@ u32 apply_layout(u64 actor_entity, Link::ActorLayout& l, u32& moves)
+ 					ammo->m_boxCurr = e.uses; // S08-T08: the server's count (reloads, merges)
+ 					++moves;
+ 				}
++			// S10-T04c: the server's condition (a repair at a mechanic, the wear
++			// of a fight); the client's own shots wear its weapon locally too, so
++			// a one-step difference is corrected quietly and a repair is logged
++			const u8 shown = u8(clampr(item->GetCondition(), 0.f, 1.f) * 255.f + 0.5f);
++			if (shown != e.condition)
++			{
++				if (_abs(int(shown) - int(e.condition)) > 2)
++					g_link->log.line("layout-condition actor=%I64u entity=%I64u item=%s byte=%u->%u", actor_entity, e.entity,
++						*item->object().cNameSect(), u32(shown), u32(e.condition));
++				item->SetCondition(float(e.condition) / 255.f);
++				++moves;
++			}
+ 			if (item->CurrPlace() == e.place && (e.place != 1 || item->CurrSlot() == e.slot))
+ 				continue;
+ 			bool ok;
+ 			if (e.place == 3)
+ 				ok = inventory.Ruck(item, true);
+ 			else if (e.place == 2)
++			{
+ 				ok = inventory.Belt(item, true);
++				g_link->log.line("layout-belt actor=%I64u entity=%I64u item=%s ok=%d belt_width=%u", actor_entity, e.entity,
++					*item->object().cNameSect(), ok ? 1 : 0, inventory.BeltWidth()); // S10-T04c L48
++			}
+ 			else
+ 			{
+ 				if (PIItem occupant = inventory.ItemFromSlot(e.slot))
+@@ -4834,7 +4882,8 @@ u64 replica_layout_hash(u32& items)
+ 			const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
+ 			const CWeaponAmmo* ammo = smart_cast<const CWeaponAmmo*>(item);
+ 			const u64 uses = eatable ? eatable->GetRemainingUses() : ammo ? ammo->m_boxCurr : 0xffff;
+-			entries.push_back({r.id, (place << 16) | (slot << 8) | uses});
++			const u64 condition = u8(clampr(item->GetCondition(), 0.f, 1.f) * 255.f + 0.5f); // S10-T04c
++			entries.push_back({r.id, (condition << 32) | (place << 16) | (slot << 8) | uses});
+ 		}
+ 		std::sort(entries.begin(), entries.end());
+ 		items += u32(entries.size());
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 677feb8..2a799f2 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -646,6 +646,8 @@ struct Host
+ 		u64 phase_tick = 0;
+ 		bool recovered = false;
+ 		u16 giver = 0xffff, door = 0xffff;
++		u16 worn = 0xffff; // the repair slice: p1's weapon worn, then repaired
++		u16 outfit = 0xffff, artefact = 0xffff; // L48: an outfit with belt slots, an artefact on the belt
+ 		u64 ops = 0;
+ 		u32 failures = 0;
+ 	} trade_fixture;
+@@ -4685,12 +4687,15 @@ u16 take_use(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::pr
+ // holds it. Payload: u64 actor entity, u32 serial, u8 part, u8 parts, u8
+ // count, then count x (u64 item entity, u8 place, u8 slot, u16 amount: an
+ // eatable's remaining uses, an ammunition box's rounds (S08-T08), else
+-// 0xffff). The items sorted by entity; at most 80 per part.
++// 0xffff; u8 condition: the item's condition x 255, S10-T04c: a repair at a
++// mechanic or the wear of a weapon reaches the client). The items sorted by
++// entity; at most 80 per part.
+ struct LayoutEntry
+ {
+ 	u64 entity;
+ 	u8 place, slot;
+ 	u16 uses;
++	u8 condition;
+ 	bool operator<(const LayoutEntry& o) const { return entity < o.entity; }
+ };
+ 
+@@ -4712,6 +4717,7 @@ void actor_layout(CActor* actor, xr_vector<LayoutEntry>& out)
+ 		const CEatableItem* eatable = smart_cast<const CEatableItem*>(item);
+ 		const CWeaponAmmo* ammo = smart_cast<const CWeaponAmmo*>(item);
+ 		e.uses = eatable ? eatable->GetRemainingUses() : ammo ? ammo->m_boxCurr : 0xffff;
++		e.condition = u8(clampr(item->GetCondition(), 0.f, 1.f) * 255.f + 0.5f);
+ 		out.push_back(e);
+ 	}
+ 	std::sort(out.begin(), out.end());
+@@ -4720,7 +4726,7 @@ void actor_layout(CActor* actor, xr_vector<LayoutEntry>& out)
+ u64 layout_hash(const xr_vector<LayoutEntry>& entries, u64 h = 14695981039346656037ull)
+ {
+ 	for (const LayoutEntry& e : entries)
+-		h = fnv1a(fnv1a(h, e.entity), (u64(e.place) << 16) | (u64(e.slot) << 8) | e.uses);
++		h = fnv1a(fnv1a(h, e.entity), (u64(e.condition) << 32) | (u64(e.place) << 16) | (u64(e.slot) << 8) | e.uses);
+ 	return h;
+ }
+ 
+@@ -4748,6 +4754,7 @@ void send_layout(CActor* actor, const xr_vector<LayoutEntry>& entries, u32 seria
+ 			put_u8(payload, entries[i].place);
+ 			put_u8(payload, entries[i].slot);
+ 			put_u16(payload, entries[i].uses);
++			put_u8(payload, entries[i].condition);
+ 		}
+ 		if (only)
+ 			queue_event(*only, 9, payload);
+@@ -10209,6 +10216,118 @@ void trade_fixtures()
+ 		fixture_intent(intent, coop::proto::kActionTradeClose, f.giver, kTradeFixtureOpBase + ++f.ops);
+ 		take_trade_close(p1, intent, result);
+ 		talk_close(p1, "fixture");
++		// the repair slice: p1's first weapon is worn to 0.35 the way a fight
++		// wears it, and two seconds later repaired to 1.0 the way the mechanic's
++		// dialogue does (item:set_condition on the server); the layout event
++		// carries the condition byte to the clients
++		for (PIItem item : actors[0]->inventory().m_all)
++			if (item && smart_cast<CWeapon*>(item) && g_host->published.count(u16(item->object().ID())))
++			{
++				f.worn = u16(item->object().ID());
++				break;
++			}
++		if (f.worn != 0xffff)
++		{
++			CInventoryItem* item = smart_cast<CInventoryItem*>(Level().Objects.net_Find(f.worn));
++			coop::proto::EntityRef ref;
++			entity_ref_of(f.worn, ref);
++			item->SetCondition(0.35f);
++			g_host->log.line("fixture-trade worn item=%u entity=%I64u section=%s byte=%u", u32(f.worn), ref.id,
++				*item->object().cNameSect(), u32(u8(item->GetCondition() * 255.f + 0.5f)));
++		}
++		else
++		{
++			++f.failures;
++			g_host->log.line("fixture-trade worn-missing (no published weapon on p1)");
++		}
++		f.phase = 4;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.phase == 4)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		CInventoryItem* item = f.worn != 0xffff ? smart_cast<CInventoryItem*>(Level().Objects.net_Find(f.worn)) : nullptr;
++		if (item)
++		{
++			coop::proto::EntityRef ref;
++			entity_ref_of(f.worn, ref);
++			item->SetCondition(1.f);
++			g_host->log.line("fixture-trade repaired item=%u entity=%I64u byte=%u", u32(f.worn), ref.id,
++				u32(u8(item->GetCondition() * 255.f + 0.5f)));
++		}
++		// L48: p1 gets an outfit with artefact slots (the first installed outfit
++		// section with artefact_count > 0) and an artefact; the outfit is worn
++		// (take_equip, the outfit slot), then the artefact goes to the belt
++		LPCSTR outfit_section = nullptr;
++		for (const CInifile::Sect& section : pSettings->sections())
++			if (pSettings->line_exist(section.Name, "artefact_count") && pSettings->r_u32(section.Name, "artefact_count") > 0 &&
++				pSettings->line_exist(section.Name, "class") && strstr(pSettings->r_string(section.Name, "class"), "STLK") &&
++				strstr(*section.Name, "outfit"))
++			{
++				outfit_section = *section.Name;
++				break;
++			}
++		if (outfit_section)
++		{
++			CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++			f.outfit = give_to(alife, outfit_section, u16(actors[0]->ID()));
++			f.artefact = give_to(alife, "af_medusa", u16(actors[0]->ID()));
++			g_host->log.line("fixture-trade belt-given outfit=%u section=%s artefact_count=%u artefact=%u", u32(f.outfit),
++				outfit_section, pSettings->r_u32(outfit_section, "artefact_count"), u32(f.artefact));
++		}
++		else
++		{
++			++f.failures;
++			g_host->log.line("fixture-trade belt-no-outfit-section");
++		}
++		f.phase = 5;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.phase == 5)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		u16 reason = 0xffff;
++		if (f.outfit != kNoEngineId && f.outfit != 0xffff)
++		{
++			fixture_intent(intent, coop::proto::kActionEquip, f.outfit, kTradeFixtureOpBase + ++f.ops);
++			intent.params.push_back(kPlaceSlot);
++			intent.params.push_back(u8(OUTFIT_SLOT));
++			intent.params.push_back(0);
++			reason = take_equip(p1, intent, result);
++		}
++		g_host->log.line("fixture-trade belt-outfit outfit=%u reason=%u belt_width=%u", u32(f.outfit), u32(reason),
++			actors[0]->inventory().BeltWidth());
++		if (reason)
++			++f.failures;
++		f.phase = 6;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.phase == 6)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		u16 reason = 0xffff;
++		coop::proto::EntityRef ref;
++		if (f.artefact != kNoEngineId && f.artefact != 0xffff)
++		{
++			fixture_intent(intent, coop::proto::kActionEquip, f.artefact, kTradeFixtureOpBase + ++f.ops);
++			intent.params.push_back(kPlaceBelt);
++			intent.params.push_back(0);
++			intent.params.push_back(0);
++			reason = take_equip(p1, intent, result);
++			entity_ref_of(f.artefact, ref);
++		}
++		CInventoryItem* art = f.artefact != 0xffff ? smart_cast<CInventoryItem*>(Level().Objects.net_Find(f.artefact)) : nullptr;
++		g_host->log.line("fixture-trade belt artefact=%u entity=%I64u reason=%u place=%u belt_width=%u belt_items=%u",
++			u32(f.artefact), ref.id, u32(reason), art ? u32(art->CurrPlace()) : 0u, actors[0]->inventory().BeltWidth(),
++			u32(actors[0]->inventory().m_belt.size()));
++		if (reason)
++			++f.failures;
+ 		g_host->log.line("fixture-trade done phase=traded failures=%u money_p1=%u (no publication: the restart replays the "
+ 			"journal)", f.failures, actors[0]->get_money());
+ 		f.phase = 9;

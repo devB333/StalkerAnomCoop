@@ -25,6 +25,10 @@ Checks:
   replayed   the restarted run has two trade-replayed lines and fixture-trade recovered money_p1 equal to
              the first run's final money
   failures   both fixture-trade done lines have failures=0
+  condition  (repair slice) fixture-trade worn and repaired lines; c1 applied both condition bytes
+             (layout-condition entity=... byte=a->b) to the same entity
+  belt       (L48) fixture-trade belt-outfit and belt with reason=0, the artefact at place 2 on the server,
+             c1 layout-belt ok=1 for the same entity
 """
 
 import argparse
@@ -104,6 +108,27 @@ def main():
     checks["replayed"] = {"pass": len(replayed) == 2 and recovered.get("money_p1") is not None
                           and recovered.get("money_p1") == done1.get("money_p1"),
                           "replayed": replayed, "recovered": recovered, "first_final": done1}
+
+    # S10-T04c repair slice: the fixture wears p1's weapon and repairs it on the
+    # server; the layout event (kind 9) carries the condition byte and c1 applies it
+    worn = first_kv(first, " fixture-trade worn ")
+    repaired = first_kv(first, " fixture-trade repaired ")
+    c1_cond = [kv(ln) for ln in c1 if " layout-condition " in ln]
+    applied = {(c.get("entity"), c.get("byte", "").split("->")[-1]) for c in c1_cond}
+    checks["condition"] = {"pass": worn.get("byte") is not None and repaired.get("byte") is not None
+                           and (worn.get("entity"), worn.get("byte")) in applied
+                           and (repaired.get("entity"), repaired.get("byte")) in applied,
+                           "worn": worn, "repaired": repaired, "c1_applied": c1_cond[:6]}
+
+    # L48: an outfit with artefact slots worn, then an artefact on the belt (server reason 0,
+    # c1 applied the belt placement to the same entity)
+    belt_outfit = first_kv(first, " fixture-trade belt-outfit ")
+    belt = first_kv(first, " fixture-trade belt ")
+    c1_belt = [kv(ln) for ln in c1 if " layout-belt " in ln]
+    checks["belt"] = {"pass": belt_outfit.get("reason") == "0" and belt.get("reason") == "0"
+                      and belt.get("place") == "2"
+                      and any(b.get("entity") == belt.get("entity") and b.get("ok") == "1" for b in c1_belt),
+                      "outfit": belt_outfit, "belt": belt, "c1_belt": c1_belt[:4]}
 
     done2 = first_kv(second, " fixture-trade done phase=recovered ")
     checks["failures"] = {"pass": done1.get("failures") == "0" and done2.get("failures") == "0", "first": done1,

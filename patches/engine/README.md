@@ -351,7 +351,7 @@ speaker per NPC (T01-15); hooks in `CDialogScriptHelper::Action` and
 turn-in phrases through the S08 party path (`party_task_accepted` factored
 out of `take_quest`) and the NPC's replies to the player; a talking actor's
 inputs are dropped; the client window's remote mode (trade and upgrade off);
-the talk fixture (`talk_party`) and the driver's actions 14–16. Single player
+the talk fixture (`talk_party`, `talk_variant`) and the driver's actions 14–16. Single player
 is unchanged (the hooks return false off the campaign server).
 
 Root commit identity plus source manifest plus ordered patches defines project

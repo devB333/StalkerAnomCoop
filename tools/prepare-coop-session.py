@@ -152,6 +152,8 @@ def main():
                              "(profile script = 8; fixture talk_party)")
     parser.add_argument("--talk-start", type=int, default=20,
                         help="with --talk: seconds after both players are in the world until the actors are placed")
+    parser.add_argument("--talk-variant", type=int, default=0,
+                        help="with --talk: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 the other")
     parser.add_argument("--travel-barrier-hold", type=int, default=0,
                         help="S09-T04 harness: seconds the server keeps the barrier up before the take (0 off)")
     parser.add_argument("--travel-ready-delay", default="",
@@ -317,7 +319,7 @@ def main():
                       f"travel_party = {args.travel_start if travel else 0}",
                       f"travel_variant = {args.travel_variant}",
                       f"travel_barrier_hold = {args.travel_barrier_hold}",
-                      f"talk_party = {args.talk_start if talk else 0}"]
+                      f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -423,6 +425,7 @@ def main():
         "travel_rejoin_delay": rejoin_delay,
         "travel_load_fail": sorted(load_fail),
         "talk": sorted(talk),
+        "talk_variant": args.talk_variant if talk else 0,
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

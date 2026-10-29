@@ -240,7 +240,7 @@
     },
     {
       "path": "patches/engine/0058-talk-window.patch",
-      "sha256": "8272bd6372f90e550c1bd4badcfbaa1721dba0616d381fc3d2baa72901975ea8"
+      "sha256": "a753e5dac863f69b137bdd2d987d6492185e6559f33372abc993ff5ec2858694"
     }
   ],
   "submodules": [

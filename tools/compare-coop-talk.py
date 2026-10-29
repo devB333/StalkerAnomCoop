@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the S10-T04a talk-window fixture (plan.md S10-T04a; docs/validation/S10-T04a.md).
 
-Usage: python3 tools/compare-coop-talk.py <session logs> [--out compare-talk.json] [--expect-restart]
+Usage: python3 tools/compare-coop-talk.py <session logs> [--variant 0|1] [--out compare-talk.json] [--expect-restart]
 
 Inputs (builds/logs/<task>/run-<run>/): server/ (and server-first-run/ with --expect-restart): coop-server.log;
 c1/, c2/: coop-c*.log. The session runs the talk fixture (--talk c1,c2): both actors are placed beside
@@ -14,7 +14,8 @@ Rounds (CoopServerHost.cpp talk_fixtures):
                                                         manager's list is world state): p2 asks for the next task until
                                                         the giver has none and leaves; no second accept
   3  the patches appear beside each actor; each picks up its half
-  4  p1 starts, walks the turn-in path, ends         -> the party task completed by talking
+  4  p1 starts, walks the turn-in path, ends         -> the party task completed by talking (variant 1: p2, who
+                                                        did not accept, turns it in)
   5  p1 says with no talk open (34); p1 starts, says an unknown id (35); p2 starts (33); p1 ends; p2 ends
      with no talk (34)
 
@@ -79,7 +80,10 @@ def main():
     ap.add_argument("logs")
     ap.add_argument("--out", default="")
     ap.add_argument("--expect-restart", action="store_true")
+    ap.add_argument("--variant", type=int, default=0, help="1: round 4's turn-in by participant 2")
     a = ap.parse_args()
+    if a.variant == 1:
+        EXPECT_STEPS[4] = [(1, 14, A, 0), "says1", (1, 16, A, 0)]
     root = Path(a.logs)
     server = lines(root / "server" / "coop-server.log")
     first = lines(root / "server-first-run" / "coop-server.log")
@@ -174,7 +178,8 @@ def main():
     # quest through the talk
     accepted = [ln for ln in both_runs if "quest-accepted " in ln and "source=talk" in ln]
     completed = [ln for ln in both_runs if " quest-completed " in ln]
-    finish_ok = [ln for ln in both_runs if "talk-quest " in ln and "op=finish" in ln and "reason=0" in ln]
+    finish_ok = [ln for ln in both_runs if "talk-quest " in ln and "op=finish" in ln and "reason=0" in ln
+                 and f"slot={1 if a.variant == 1 else 0} " in ln]
     second_accept = [ln for ln in both_runs if "quest-accept" in ln and "slot=1" in ln]
     all_accepted = [ln for ln in both_runs if "quest-accepted " in ln]
     if a.expect_restart:

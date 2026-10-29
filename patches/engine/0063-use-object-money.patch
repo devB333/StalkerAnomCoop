@@ -1,0 +1,384 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index eb439c7..177ff65 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -576,6 +576,7 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::MapSpotAdd: return "map-spot-add";
+ 	case Presentation::MapSpotHint: return "map-spot-hint";
+ 	case Presentation::MapSpotRemove: return "map-spot-remove";
++	case Presentation::JointDrive: return "joint-drive";
+ 	default: return "?";
+ 	}
+ }
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index e3295bc..ac29266 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -237,6 +237,8 @@ enum class Presentation : u8
+ 	MapSpotAdd,
+ 	MapSpotHint,
+ 	MapSpotRemove,
++	JointDrive, // S10-T04c: handle: bone id; value: max force; position.x: velocity; position.y: axis (-1 all);
++	            // a scripted joint drive on a physics object (ph_door's open and close), applied by every client
+ 	Count,
+ };
+ 
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 3fe61b5..8ae2d18 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -66,6 +66,8 @@ ENGINE_API extern float psHUD_FOV; // the camera watch log
+ #include "../Include/xrRender/KinematicsAnimated.h"
+ #include "PhysicsShellHolder.h"
+ #include "../xrPhysics/PhysicsShell.h"
++#include "level_changer.h" // S10-T04c: a use on a world object
++#include "entity_alive.h"
+ #include "coop/session/crypto.h"
+ 
+ #include <memory>
+@@ -403,6 +405,7 @@ struct Link
+ 	u64 item_graph_matches = 0, item_graph_mismatches = 0, own_inventory_mismatches = 0; // S08-T03
+ 	// S08-T07: equip and use
+ 	u64 equips_requested = 0, uses_requested = 0, inventory_events_ignored = 0, local_eats_blocked = 0;
++	u64 use_objects_requested = 0, joint_drives = 0; // S10-T04c
+ 	u64 uses_presented = 0;
+ 	struct LayoutItem
+ 	{
+@@ -2959,6 +2962,24 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 			applied = "absent";
+ 		break;
+ 	}
++	case campaign::Presentation::JointDrive:
++	{
++		// S10-T04c: the server's scripted joint drive (a door's swing) on this
++		// client's copy of the physics object
++		CObject* o = Level().Objects.net_Find(object);
++		CPhysicsShellHolder* holder = o ? smart_cast<CPhysicsShellHolder*>(o) : nullptr;
++		CPhysicsShell* shell = holder ? holder->PPhysicsShell() : nullptr;
++		CPhysicsJoint* joint = shell ? shell->get_Joint(u16(handle)) : nullptr;
++		if (!joint)
++		{
++			applied = "absent";
++			break;
++		}
++		shell->Enable();
++		joint->SetForceAndVelocity(value, position.x, int(position.y));
++		++g_link->joint_drives;
++		break;
++	}
+ 	case campaign::Presentation::Sound:
+ 	case campaign::Presentation::SoundAtPos:
+ 	{
+@@ -3644,6 +3665,7 @@ u64 request_ownership(u16 action, const coop::proto::EntityRef& target, const xr
+ 		action == coop::proto::kActionEquip ? "equip" : action == coop::proto::kActionUse ? "use" :
+ 		action == coop::proto::kActionQuest ? "quest" : action == coop::proto::kActionTravelRequest ? "travel-request" :
+ 		action == coop::proto::kActionTravelAnswer ? "travel-answer" : action == coop::proto::kActionTravelReady ? "travel-ready" :
++		action == coop::proto::kActionUseObject ? "use-object" : // S10-T04c
+ 		action == coop::proto::kActionTalkStart ? "talk-start" : action == coop::proto::kActionTalkSay ? "talk-say" :
+ 		action == coop::proto::kActionTalkEnd ? "talk-end" : "transfer",
+ 		why, p.operation, target.id, target.generation, int(round), int(kind), expected);
+@@ -4563,7 +4585,7 @@ void amounts_frame()
+ void on_needs(const coop::proto::CampaignEvent& event)
+ {
+ 	PayloadReader r(event.payload);
+-	float v[6];
++	float v[7]; // S10-T04c: + money
+ 	for (float& x : v)
+ 		x = r.get<float>();
+ 	lua_State* L = ai().script_engine().lua();
+@@ -4613,9 +4635,14 @@ void on_needs(const coop::proto::CampaignEvent& event)
+ 		c.SetPower(v[4]);
+ 	if (v[5] >= 0.f && _valid(v[5]))
+ 		c.SetRadiation(v[5]);
++	// S10-T04c: this player's money as the server holds it (the replica policy
++	// drops GE_MONEY, so the HUD and the trade window read a stale purse
++	// otherwise)
++	if (v[6] >= 0.f && _valid(v[6]) && g_actor->get_money() != u32(v[6]))
++		g_actor->set_money(u32(v[6]), false);
+ 	++g_link->needs_received;
+-	g_link->log.line("needs-applied thirst=%.1f sleep=%.1f psy=%.4f satiety=%.4f power=%.4f radiation=%.4f set=%u",
+-		v[0], v[1], v[2], v[3], v[4], v[5], set);
++	g_link->log.line("needs-applied thirst=%.1f sleep=%.1f psy=%.4f satiety=%.4f power=%.4f radiation=%.4f money=%.0f set=%u",
++		v[0], v[1], v[2], v[3], v[4], v[5], v[6], set);
+ }
+ 
+ void refresh_inventory_ui()
+@@ -5849,6 +5876,31 @@ void coop_client_talk_say(LPCSTR id)
+ 	talk_send_say(id, 0xffffffff, 0xffffffff, true);
+ }
+ 
++// S10-T04c: a USE on a script-usable world object (a door, a switch) is the
++// server's: the object's logic (ph_door's on_use) runs there in this
++// player's context and its physics follows on every client (JointDrive);
++// the client's own copy does nothing (true: handled). Items (pickup),
++// living things (talk) and level changers (travel) keep their own paths.
++bool coop_client_use_object(CGameObject* object, CGameObject* who)
++{
++	if (!g_link || !g_link->active || !object || !who)
++		return false;
++	if (smart_cast<CInventoryItem*>(object) || smart_cast<CEntityAlive*>(object) || smart_cast<CLevelChanger*>(object))
++		return false;
++	if (g_link->world != WorldLive || !g_actor || who != g_actor)
++		return true; // nothing uses locally on a replica
++	coop::proto::EntityRef ref;
++	if (!ref_of(u16(object->ID()), ref))
++	{
++		g_link->log.line("use-object-unknown object=%u section=%s", u32(object->ID()), *object->cNameSect());
++		return true;
++	}
++	++g_link->use_objects_requested;
++	request_ownership(coop::proto::kActionUseObject, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("use-object-sent object=%u section=%s", u32(object->ID()), *object->cNameSect());
++	return true;
++}
++
+ void coop_client_talk_closed()
+ {
+ 	if (!g_link || !g_link->active)
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 5d619c7..4c89d0e 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -16,6 +16,7 @@ class NET_Packet;
+ 
+ class CInventoryOwner; // S08-T07
+ class CInventoryItem;
++class CGameObject; // S10-T04c
+ 
+ namespace campaign
+ {
+@@ -55,6 +56,11 @@ bool coop_client_talk_start(CInventoryOwner* partner);
+ // phrase becomes the say intent; closing the window ends the talk.
+ void coop_client_talk_say(LPCSTR id);
+ void coop_client_talk_closed();
++// S10-T04c: CUsableScriptObject::use on a co-op client: true when the link
++// took the use (the use-object intent; the object's logic runs on the
++// server in this player's context). Items, living things and level
++// changers keep their own paths (false).
++bool coop_client_use_object(CGameObject* object, CGameObject* who);
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index f859e82..95018cf 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -64,6 +64,7 @@
+ #include "WeaponAmmo.h" // S08-T08: stacks
+ #include "alife_registry_wrappers.h" // S08-T09: info portions
+ #include "level_changer.h" // S09-T01: party travel
++#include "UsableScriptObject.h" // S10-T04c: a use on a world object
+ #include "coop/proto/transition.h"
+ #include "memory_manager.h"
+ #include "enemy_manager.h"
+@@ -158,7 +159,7 @@ struct PlayerLink
+ 	bool fire_block_reported = true;
+ 	u16 respawn_old_actor = 0xffff; // S08-T09: the body a respawned actor continues
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+-	float needs_last[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
++	float needs_last[7] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f}; // S10-T04c: + money
+ 	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
+ 	// S10-T04a: the open talk (one per player)
+ 	u16 talk_npc = 0xffff; // the partner (0xffff: no talk)
+@@ -591,6 +592,7 @@ struct Host
+ 	// S10-T04a: the talk window
+ 	u64 talks_started = 0, talks_busy = 0, talks_refused = 0, talk_says = 0, talk_say_refused = 0, talks_closed = 0;
+ 	u64 talk_quest_routed = 0, talk_actions_blocked = 0, talk_answers = 0;
++	u64 uses_object = 0, uses_object_refused = 0; // S10-T04c
+ 	struct TalkFixture
+ 	{
+ 		u64 both_since = 0;
+@@ -5260,7 +5262,7 @@ void drive_needs()
+ 	}
+ 	if (g_host->tick % 10)
+ 		return;
+-	const float step[6] = {1.f, 1.f, 0.005f, 0.005f, 0.01f, 0.005f};
++	const float step[7] = {1.f, 1.f, 0.005f, 0.005f, 0.01f, 0.005f, 0.5f};
+ 	for (PlayerLink& link : g_host->links)
+ 	{
+ 		if (!client_in_world(link))
+@@ -5269,30 +5271,31 @@ void drive_needs()
+ 			continue;
+ 		}
+ 		CActor* actor = participant_actor(link.ref);
+-		float v[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
++		float v[7] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+ 		needs_values(link.ref.slot, v);
+ 		if (actor)
+ 		{
+ 			v[3] = actor->conditions().GetSatiety();
+ 			v[4] = actor->conditions().GetPower();
+ 			v[5] = actor->conditions().GetRadiation();
++			v[6] = float(actor->get_money()); // S10-T04c: the purse the client shows
+ 		}
+ 		const u32 now = host_ms();
+ 		bool changed = !link.needs_sent_ms || now - link.needs_sent_ms >= 10000;
+-		for (int i = 0; i < 6; ++i)
++		for (int i = 0; i < 7; ++i)
+ 			changed = changed || _abs(v[i] - link.needs_last[i]) > step[i];
+ 		if (!changed)
+ 			continue;
+ 		std::vector<u8> payload;
+-		for (int i = 0; i < 6; ++i)
++		for (int i = 0; i < 7; ++i)
+ 		{
+ 			put_f32(payload, v[i]);
+ 			link.needs_last[i] = v[i];
+ 		}
+ 		queue_event(link, 12, payload);
+ 		link.needs_sent_ms = now ? now : 1;
+-		g_host->log.line("needs slot=%u thirst=%.1f sleep=%.1f psy=%.4f satiety=%.4f power=%.4f radiation=%.4f",
+-			u32(link.ref.slot), v[0], v[1], v[2], v[3], v[4], v[5]);
++		g_host->log.line("needs slot=%u thirst=%.1f sleep=%.1f psy=%.4f satiety=%.4f power=%.4f radiation=%.4f money=%.0f",
++			u32(link.ref.slot), v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+ 	}
+ }
+ 
+@@ -8517,6 +8520,63 @@ void talk_close(PlayerLink& link, LPCSTR why, bool notify = true)
+ 		actor->StopTalk(); // the NPC already stopped (or talks to the other player now)
+ }
+ 
++// ------------------------------------------------------------ S10-T04c
++// A USE on a script-usable world object (a door, a switch; not an item, a
++// living thing or a level changer, which have their own kinds): the object's
++// use callback runs on the server in the player's context
++// (CUsableScriptObject::use enters it), so the installed logic (ph_door's
++// on_use condlist) decides, and its physics follows on every client through
++// the JointDrive presentation. Not journaled: a door's pose is world state
++// the checkpoint holds (the physics shell's state in its server object).
++const float kUseObjectReach = 3.5f; // the engine's use pick is 2 m from the eye; a door's handle may be farther
++
++u16 take_use_object(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor || !actor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	const u16 id = engine_id_of(intent.target);
++	CGameObject* object = id != kNoEngineId ? smart_cast<CGameObject*>(Level().Objects.net_Find(id)) : nullptr;
++	if (!object || object->getDestroy())
++		return coop::proto::kReasonItemGone;
++	CUsableScriptObject* usable = smart_cast<CUsableScriptObject*>(object);
++	if (!usable || usable->nonscript_usable() || smart_cast<CInventoryItem*>(object) || smart_cast<CEntityAlive*>(object) ||
++		smart_cast<CLevelChanger*>(object))
++	{
++		++g_host->uses_object_refused;
++		g_host->log.line("use-object-refused slot=%u object=%u section=%s why=not-usable", u32(link.ref.slot), u32(id),
++			*object->cNameSect());
++		return coop::proto::kReasonNotUsable;
++	}
++	const float distance = pickup_distance(actor, object);
++	if (distance > kUseObjectReach)
++	{
++		++g_host->uses_object_refused;
++		g_host->log.line("use-object-refused slot=%u object=%u section=%s why=out-of-reach distance=%.2f",
++			u32(link.ref.slot), u32(id), *object->cNameSect(), distance);
++		return coop::proto::kReasonOutOfReach;
++	}
++	const bool ok = usable->use(actor);
++	++g_host->uses_object;
++	g_host->log.line("use-object slot=%u actor=%u object=%u section=%s distance=%.2f ok=%d", u32(link.ref.slot),
++		u32(actor->ID()), u32(id), *object->cNameSect(), distance, ok ? 1 : 0);
++	result.revision = g_host->commit;
++	return ok ? 0 : coop::proto::kReasonNotUsable;
++}
++
+ u16 take_talk_start(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+ {
+ 	if (!link.session)
+@@ -11660,6 +11720,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_travel_ready(*link, *intent, result); // S09-T03
+ 		else if (intent->kind == coop::proto::kActionTalkStart)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
++		else if (intent->kind == coop::proto::kActionUseObject)
++			reason = take_use_object(*link, *intent, result); // S10-T04c
+ 		else if (intent->kind == coop::proto::kActionTalkSay)
+ 			reason = take_talk_say(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionTalkEnd)
+diff --git a/src/xrGame/UsableScriptObject.cpp b/src/xrGame/UsableScriptObject.cpp
+index 5972a11..3a8426d 100644
+--- a/src/xrGame/UsableScriptObject.cpp
++++ b/src/xrGame/UsableScriptObject.cpp
+@@ -1,6 +1,7 @@
+ #include "pch_script.h"
+ #include "UsableScriptObject.h"
+ #include "CampaignScriptContext.h"
++#include "CoopClientLink.h" // S10-T04c: a co-op client's use goes to the server
+ #include "GameObject.h"
+ #include "script_game_object.h"
+ #include "script_callback_ex.h"
+@@ -25,6 +26,8 @@ bool CUsableScriptObject::use(CGameObject* who_use)
+ 	VERIFY(who_use);
+ 	CGameObject* pThis = smart_cast<CGameObject*>(this);
+ 	VERIFY(pThis);
++	if (campaign::coop_client_use_object(pThis, who_use)) // S10-T04c
++		return true;
+ 
+ 	if (pThis->lua_game_object() && pThis->lua_game_object()->m_door && (pThis
+ 	                                                                     ->lua_game_object()->m_door->is_blocked(
+diff --git a/src/xrGame/physics_joint_scripted.cpp b/src/xrGame/physics_joint_scripted.cpp
+index 156b25e..27e558e 100644
+--- a/src/xrGame/physics_joint_scripted.cpp
++++ b/src/xrGame/physics_joint_scripted.cpp
+@@ -2,8 +2,33 @@
+ 
+ #include "physics_joint_scripted.h"
+ #include "physics_element_scripted.h"
++#include "CampaignScriptContext.h" // S10-T04c: the joint drive to every client
++#include "CampaignActorAccess.h" // process_role
++#include "../xrphysics/IPhysicsShellHolder.h"
+ using namespace luabind;
+ 
++// S10-T04c: on the campaign server a scripted joint drive (ph_door's open
++// and close: set_max_force_and_velocity on the door's joint) is presented to
++// every player, who applies it to the same joint of its own copy, so a door
++// swings on every client (no gameplay script runs on a client, L05).
++void cphysics_joint_scripted::SetForceAndVelocity(const float force, const float velocity, const int axis_num)
++{
++	physics_impl().SetForceAndVelocity(force, velocity, axis_num);
++	if (campaign::process_role() != campaign::Role::Server)
++		return;
++	CPhysicsElement* element = physics_impl().PFirst_element();
++	if (!element)
++		element = physics_impl().PSecond_element();
++	IPhysicsShellHolder* holder = element ? element->PhysicsRefObject() : nullptr;
++	if (!holder)
++		return;
++	campaign::PresentationArgs args;
++	args.handle = physics_impl().BoneID();
++	args.value = force;
++	args.position.set(velocity, float(axis_num), 0.f);
++	campaign::present_broadcast(campaign::Presentation::JointDrive, holder->ObjectID(), "", args);
++}
++
+ 
+ cphysics_element_scripted* cphysics_joint_scripted::PFirst_element()
+ {
+diff --git a/src/xrGame/physics_joint_scripted.h b/src/xrGame/physics_joint_scripted.h
+index 8af3571..06cc6f2 100644
+--- a/src/xrGame/physics_joint_scripted.h
++++ b/src/xrGame/physics_joint_scripted.h
+@@ -68,10 +68,7 @@ public:
+ 		physics_impl().SetLimits(low, high, axis_num);
+ 	}
+ 
+-	void SetForceAndVelocity(const float force, const float velocity = 0.f, const int axis_num = -1)
+-	{
+-		physics_impl().SetForceAndVelocity(force, velocity, axis_num);
+-	}
++	void SetForceAndVelocity(const float force, const float velocity = 0.f, const int axis_num = -1); // S10-T04c: presented
+ 
+ 	void GetMaxForceAndVelocity(float& force, float& velocity, int axis_num)
+ 	{

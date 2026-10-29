@@ -402,6 +402,18 @@ centres on it; a script sound played on a living NPC or monster
 is delivered to the players as a sound at its position (L05 narrowed).
 Single player is unchanged.
 
+`0063-use-object-money.patch` (S10-T04c, first slice, 2026-10-29): a
+client's USE on a script-usable world object (a door, a switch; not an
+item, a living thing or a level changer) is the use-object intent (kind 17,
+protocol v1.7 / `proto-build-50`): `take_use_object` runs the object's use
+callback on the server in the player's context (`CUsableScriptObject::use`),
+so the installed `ph_door` logic decides; a scripted joint drive
+(`cphysics_joint_scripted::SetForceAndVelocity`, the door's swing) is
+presented to every client (`Presentation::JointDrive`), which applies it to
+the same joint of its copy; the per-player needs event (12) carries the
+player's money, which the client applies to its actor (the HUD and the
+trade window's purse). Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

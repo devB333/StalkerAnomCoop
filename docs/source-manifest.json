@@ -257,6 +257,10 @@
     {
       "path": "patches/engine/0062-party-task-map-npc-sounds.patch",
       "sha256": "80a0a61c25ac534a939c9603209bd445a252f108353d1ee880611972c40fedc3"
+    },
+    {
+      "path": "patches/engine/0063-use-object-money.patch",
+      "sha256": "faec0fa1136dc03c24f7856b8f2ee014582597d2fabd4179c728480f908d1b99"
     }
   ],
   "submodules": [

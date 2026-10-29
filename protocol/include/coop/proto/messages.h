@@ -39,7 +39,7 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // put on the ground), in the lifecycle order.
 // 1.6 + S10-T04a: the talk kinds (14 start, 15 say, 16 end) and reasons 33-36,
 // CampaignEvent kind 14 (the dialogue state); no wire layout change.
-constexpr std::uint16_t kProtocolMinor = 6;
+constexpr std::uint16_t kProtocolMinor = 7;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -385,6 +385,10 @@ enum ActionKind : std::uint16_t
                                // (<= 64 bytes); said in the player's open talk (34 without one, 35 when the id is
                                // not in the current list)
     kActionTalkEnd = 16,       // S10-T04a: params: none; the player closed the talk window (34 without a talk)
+    kActionUseObject = 17,     // S10-T04c: target: a script-usable world object (a door, a switch; not an item, a
+                               // living thing or a level changer: those have their own kinds); params: none; the
+                               // object's use callback runs on the server in the player's context (21 when the
+                               // target is not such an object, 10 out of reach, 8 gone)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the

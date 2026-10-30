@@ -1,7 +1,38 @@
-# Session handoff — S10-T04 complete, S10-T02a–e complete; next S10-T02f
+# Session handoff — S10-T02a–e complete; S10-T02f in progress (companion follow)
 
 ## State (2026-10-30)
 
+- **In progress: S10-T02f companions per recruiter**
+  ([S10-T02f](../../validation/S10-T02f.md), draft; decisions T02f-1…5 in
+  `docs/stage10-decisions.md`). **The engine changes are in
+  `builds/build_1/engine-work` only, not yet exported** (patch 0075
+  `companions`, patch check 87, is still to do). Latest builds
+  **campaign-371 / client-263** (built clean, 0 errors; not run yet).
+  What's in it:
+  - Engine (`CampaignScriptContext.cpp`): a companion registry (npc → slot),
+    Lua `campaign.set_companion / clear_companion / companion_slot /
+    slot_actor_id`; `npc_evaluation_actor` answers a companion's `db.actor`
+    with its recruiter (`companion_reads`). Compat-layer wrappers:
+    `axr_companions.add_to_actor_squad` / `remove_from_actor_squad` (save
+    `se_save_var … "coop_recruiter"` + registry),
+    `sim_squad_scripted.get_script_target` (target 0 → the recruiter's actor,
+    the squad holds if the recruiter is away),
+    `dialogs_axr_companion.is_actor_companion` (false for the other player),
+    and `get_story_object` / `get_story_object_id` for `"actor"` (the
+    evaluated NPC's player, else the context's).
+  - Server (`CoopServerHost.cpp`): `coop_server_companion_changed` (logs
+    `companion-changed`, asks for a checkpoint); `companion_fixtures`
+    (profile `companion_party`, `--companion c1,c2`), helper
+    `companion_lua`; `tools/compare-coop-companion.py` (6 checks).
+  - **companion-1/2 (5 of 6 each):** the recruit (player 2, a 4-member
+    `sim_default_stalker_0` squad 103 m away), every check (slot, evaluation
+    with player 1 beside it, dialogue refused to player 1, squad target), the
+    server kill at 300 s and the **restored** checks all pass; **the
+    companion does not walk to player 2** (stays ~97 m away, beside player
+    1). The `get_story_object` wrapper (added after companion-1) did not
+    change it. campaign-371 adds a `follow-state` diagnostic every 10 s
+    (wait flag, active scheme `beh`, the target `axr_beh` picked, the story
+    actor, squad commander, target distance).
 - **Completed and committed:** **S10-T02e generic mutants, phantoms, AI
   lighting** ([S10-T02e](../../validation/S10-T02e.md), patch 0074 `fauna`,
   patch check 86; builds **campaign-367 / client-259**; **fauna-4 pass
@@ -64,26 +95,37 @@
 
 ## Next
 
-1. **S10-T02f companions per recruiter** (matrix F6, T01-10 Required):
-   `axr_companions` (22 global-actor reads) recruits, commands and moves a
-   companion's inventory; per player: a companion follows and obeys its
-   recruiter, the other player's commands are refused, its inventory
-   transfers are the recruiter's server actions; survives travel and
-   restart. Start from S10-T02a's NPC evaluation scope (a companion's logic
-   should answer for its recruiter, not the nearest player) and the dialogue
-   context of S10-T04b (recruiting is a dialogue).
+1. **Finish S10-T02f.** Run companion-3 on campaign-371 / client-263:
+   ```
+   python3 tools/prepare-coop-session.py companion-3 --task S10-T02f --protocol-build proto-build-53 --companion c1,c2
+   powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:\Users\djb20\StalkerAnomCoop\tools\Run-CoopSession.ps1' -Run companion-3 -Task S10-T02f -ServerAloneSeconds 10 -ClientStarts '0,15' -ClientSeconds '600,585' -AfterSeconds 10 -ServerKill 300 -ServerRestartAfter 10
+   python3 tools/compare-coop-companion.py builds/logs/S10-T02f/run-companion-3 --out builds/logs/S10-T02f/run-companion-3/compare-companion.json
+   ```
+   (companion-3 is already prepared; rerun the prepare line anyway or use companion-4).
+   Read the `fixture-companion follow-state` lines in
+   `server-first-run/coop-server.log`: whether the companion is waiting
+   (`wait=1`), not on the `beh` scheme (`beh=0`), targeting someone else
+   (`target` ≠ player 2's id), or not its squad's commander (followers walk
+   to the commander, `axr_beh` `goto_target = "{!is_squad_commander}
+   commander, actor"`). Leads: the recruited NPC may not be the commander,
+   or `beh_move` picks a point near its own position. Fix, rerun, then
+   export patch 0075 (`python3 tools/export-engine-patch.py
+   0075-companions.patch 87`), add its hash to `docs/source-manifest.json`,
+   add the README entry in `patches/engine/README.md`, finish the report,
+   plan.md row (S10-T02f) and commit.
 2. Then S10-T03a–f, S10-T05a/c/d, S10-T06; stop at G10 with the decisions
    list and the bug list.
 
 ## Run names
 
-- Used: `campaign-334…367`, `client-226…259`, `proto-build-52` (unused),
+- Used: `campaign-334…371`, `client-226…263`, `proto-build-52` (unused),
   `proto-build-53`, `st-28`, `upgrade-1…7`, `relations-1…3`, `stash-1…2`,
-  `npc-1`, `loot-1`, `psy-1…3`, `mutant-1…2`, `fauna-1…4`, demos
+  `npc-1`, `loot-1`, `psy-1…3`, `mutant-1…2`, `fauna-1…4`,
+  `companion-1…2` (`companion-3` prepared, not run), demos
   `demo-1…2` of S10-T04e, patch checks 77–86; the rest in the snapshots.
-- Next: `campaign-368`, `client-260`, `proto-build-54`, `st-29`, patch
-  check 87; sessions `companion-1…` (S10-T02f).
+- Next: `campaign-372`, `client-264`, `proto-build-54`, `st-29`, patch
+  check 87; sessions `companion-3…` (S10-T02f).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T02f](../done/snapshot-before-S10-T02f.md).
+Previous snapshot: [before S10-T02f resume](../done/snapshot-before-S10-T02f-resume.md).

@@ -190,3 +190,17 @@ T01-13 and T01-5 bind it. Awaiting the user's approval at G10.
 | T02e-2 | **The psy dog's aura and phantoms follow the player they go for**: the phantoms spawn when the psy dog has an enemy (either player) and fly at the nearest player; the aura's post-process is each viewer's own | as T02c-2 (auras are presentation) | the aura only on the host |
 | T02e-3 | **AI lighting keeps the S03-T06 rule**: each player's own light (sun, sky, the level's static lights at that player) and one object in each player's view are refreshed every frame; NPCs outside both views keep their last value; **a flashlight or a campfire does not make a player more visible to AI**, as in single player's DX11 renderer | it matches single player; refreshing every NPC costs server time (user decision 2026-10-19) | count dynamic lights (a player's torch would give it away), or refresh every NPC near a player |
 | T02e-4 | *(limit)* The Anomaly config variants (karlik, lurker, psysucker, bibliotekar, rotan, gigant jumper, borya) run their base class's code and stay **Untested** until a fixture spawns them | the base classes are the tested code | spawn each variant in the fauna fixture (one more run each) |
+
+## S10-T02f — companions per recruiter
+
+Taken 2026-10-30 while building the slice ([S10-T02f](validation/S10-T02f.md));
+T01-10 and T01-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02f-1 | **A companion belongs to the player who recruited it**: it follows that player, its logic (keep distance, wait, fight) answers for that player, and **the other player is not offered its command dialogue** (it can still talk to it as an NPC) | T01-10 (per player); a companion obeying both would fight over one squad | either player could command any companion |
+| T02f-2 | **With its recruiter away (disconnected or dead), a companion squad holds where it is** (its logic falls back to the nearest player for threats) | it waits for its player instead of walking to the other one | it could follow the remaining player until its own comes back |
+| T02f-3 | **A recruit or a dismissal asks for a checkpoint**, like a stash's spawn | the recruiter is kept in the save; a crash right after recruiting would otherwise lose it | journal it as its own record (a new journal kind) |
+| T02f-4 | **The companion cap is shared**: Anomaly's `max_actor_squad_size` (2 by default) counts every companion of both players together, because the installed script keeps one list | the scripts' own rule, unchanged | a cap per player (each player could have 2) |
+| T02f-5 | *(limit)* The companion hotkeys and the companion wheel (`axr_companions` `on_key_release`, `start_CW`: all-companion modes, per-squad settings, move-to-point) run in the pressing client's Lua and do not reach the server; orders through a companion's dialogue do | the keys and the wheel are client UI over server-owned companions | route them as an action intent to the server, applied to that player's own companions |
+

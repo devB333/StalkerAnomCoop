@@ -273,6 +273,10 @@
     {
       "path": "patches/engine/0066-remote-weapon-anim-repair-belt.patch",
       "sha256": "7bf55174e3d7af37ef7e58148a96fe7ba1699ca0ab2aa3bacd65fa5176bdeb96"
+    },
+    {
+      "path": "patches/engine/0067-upgrades.patch",
+      "sha256": "e2cc34aea75af9746f3337fb73fed4a1df1b87a8ac1cbede77e75def9826d5b5"
     }
   ],
   "submodules": [

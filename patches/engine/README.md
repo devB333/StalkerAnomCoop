@@ -453,6 +453,18 @@ K1's idle; the combat program gets a knife leg. The inventory layout event
 (kind 9) carries a condition byte per item, applied by the client; the trade
 fixture wears and repairs a weapon and puts an artefact on the belt of an
 outfit with artefact slots (L48). Single player is unchanged.
+`0067-upgrades.patch` (S10-T04f) adds upgrades and repairs at a mechanic: the
+server takes the dialogue phrases `dialogs.npc_is_tech` / `npc_is_trader` over
+and opens the player's upgrade or trade session, sends the upgrade table
+(CampaignEvent 16), checks and journals an install or a repair (kind 22, the
+`upgrade` record), applies it through the engine's own path in the player's
+context and tells every client (CampaignEvent 17); a mechanic is the engine's
+flag or a section of `misc\stalkers_upgrade_info.ltx`. On a co-op client the
+installed Lua windows' script exports (`install_upgrade`, `set_condition`,
+`transfer_item`, `give_money`) become the intents while a trade or upgrade
+session is open, and the Lua window is nudged after a server-made change; the
+engine's own upgrade window reads the table too. The upgrade fixture
+(`upgrade_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

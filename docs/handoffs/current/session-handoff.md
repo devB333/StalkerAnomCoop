@@ -1,69 +1,71 @@
-# Session handoff — S10-T04c complete (patch 0066); next S10-T04f upgrades
+# Session handoff — S10-T04c and S10-T04f complete; next S10-T04d
 
 ## State (2026-10-29, end of session)
 
-- **Completed this session, committed:** **S10-T04c** trade, repair and the
-  use of world objects ([S10-T04c](../../validation/S10-T04c.md)), finished
-  by **patch 0066 `remote-weapon-anim-repair-belt`** (patch check 76):
-  (1) **the partner's attack, reload, draw and holster animations** on a
-  replica: the server's sampled `weapon_state` is stored on the replica
-  actor (`CActor::replica_set_weapon_state`, `Actor_Movement.cpp`) and read
-  by the third-person animation picker alone (`ActorAnimation.cpp`,
-  `replica_anim_weapon_state`); the weapon object stays in K1's idle
-  (eFire on it would fire on the client); attack states held ≥ 350 ms; the
-  combat program got a knife leg and `compare-coop-combat.py` a
-  `partner_anim` check; **anim-1 pass 23/23** (campaign-330 / client-222):
-  client 2 saw client 1's knife swings; (2) **a repaired item's condition**
-  in the layout event (kind 9: a `condition` byte per item, both hashes);
-  (3) **L48 closed**: an outfit with artefact slots worn and an artefact on
-  the belt by the trade fixture; **trade-4 pass 8/8** (campaign-333 /
-  client-225, the final builds). Decision rows **T04c-6…T04c-8**
-  (technical). L01 narrowed again. K1 has a "follow-up 2" entry.
-- **Hands-on by the user, pending** (list for G10): the trade window (buy and
-  sell, the partner refused busy), the partner's weapon switch (0065), the
-  partner's knife swing / reload / draw / holster (0066), the task's map
-  spot and Sidorovich's voice (0062). Command: `bash
-  tools/start-coop-demo.sh S10-T04c 0 20 0`.
-- **The user's standing directions (2026-10-29):** trade is NPC-to-one-player
-  (T01-7), the native drag-and-drop window (T04c-1), quest rewards to both
-  players in full (T05b-2). Keep a running list of decisions for the gate.
+- **Completed this session, committed:** **S10-T04c** (patch 0066: the
+  partner's attack/reload/draw/holster animations from the server's
+  weapon state, the repaired item's condition in the layout event, L48
+  closed; anim-1 23/23, trade-4 8/8) and **S10-T04f upgrades at mechanics**
+  ([S10-T04f](../../validation/S10-T04f.md), patch 0067 `upgrades`, patch
+  check 77; protocol **v1.8** `proto-build-53`, st-28 51/51; builds
+  **campaign-341 / client-233**; **upgrade-7 pass 7/7**: the loner mechanic
+  Xenotech, an install for 17680 RU, a repair for 1042 RU, both records
+  replayed after the kill, the recovered helmet carries the upgrade).
+- **Finding that matters for every window (T04f-5, T04f-6):** Anomaly's
+  inventory, trade and repair/upgrade windows are the installed **Lua UI**
+  (`ui_inventory.script`), opened from the dialogue
+  (`dialogs.npc_is_tech` / `npc_is_trader` → `npc:start_upgrade` /
+  `start_trade`); the engine's `mechanic_mode` flag is commented out of the
+  character descriptions (a mechanic is a section of
+  `misc\stalkers_upgrade_info.ltx`). The server now takes those two phrase
+  actions over and opens the player's session; on a client the Lua window's
+  script exports (`install_upgrade`, `set_condition`, `transfer_item`,
+  `give_money`) become the intents while a session is open, the window is
+  nudged after server-made changes, and the session ends when the window is
+  gone. The S10-T04c engine-window hooks (`UIActorMenuTrade.cpp`) never run
+  in Anomaly: the trade by hand goes through the same Lua path. **The
+  fixtures are server-driven and do not click the Lua window: the user's
+  hands-on is the only check of that path.**
+- **Hands-on by the user, pending (list for G10):** the Lua repair window
+  at Xenotech (install, repair, the partner refused busy), the Lua trade
+  window at Sidorovich (buy, sell), the partner's weapon switch (0065) and
+  attack animations (0066), the task's map spot and Sidorovich's voice
+  (0062). Commands: `bash tools/start-coop-demo.sh S10-T04f 0 20 0` /
+  `S10-T04c`.
 - **Decisions awaiting the user at G10** ([Stage 10
   decisions](../../stage10-decisions.md)): T04a-1…4, T04b-1…3, T05b-1…5,
-  T04c-1…8.
-- Open visible limits: the partner's zoom pose is not presented; NPCs slide
-  (L57); the `sound-volume` presentation flood (since S06-T08).
+  T04c-1…8, **T04f-1…6** (T04f-2 is a gameplay choice: the mechanic's
+  lending of items for game hours follows the server's `mechanic_feature`
+  option, binding both players).
+- **New limit L58:** a 534 m server-side relocation of a client's own actor
+  crashed that client (upgrade-5); fixtures move player 1 only.
+- The user's standing directions (2026-10-29): trade is NPC-to-one-player
+  (T01-7), the game's own drag-and-drop window (T04c-1, now the Lua window),
+  quest rewards to both players in full (T05b-2). Keep the decisions list.
 
 ## Next
 
-1. **S10-T04f upgrades at mechanics** (T04c-3). Read first:
-   `UITalkWnd::SwitchToUpgrade` (`m_remote` returns early, S10-T04a),
-   `CUIGameSP::StartUpgrade`, `CUIInventoryUpgradeWnd::OnMesBoxYes`
-   (`upgrade_install` + `inventory_upgrades.effect_upgrade_item`),
-   `inventory_upgrade.cpp` (precondition / effect / prereq functors run
-   the installed `inventory_upgrades.script`, which charges `db.actor`),
-   `CInventoryUpgradeManager` (`inventory_upgrade_manager.h`). Model it on
-   trade (T04c-1): an upgrade-open intent (the mechanic the player talks
-   to; the server answers with the item's scheme state and the costs for
-   the items the player holds), an upgrade-install intent (item ref +
-   upgrade id; the server runs `upgrade_install` in the buyer's context,
-   journals it as a record so a restart keeps it, pushes the purse and the
-   layout), the client's upgrade window reading the server's table. New
-   kinds 21–22 and a campaign event → protocol v1.8 (`proto-build-52`,
-   `st-28`). Fixture: a mechanic on the Cordon fixture save (check which
-   NPC has `upgrade_mechanic`; the installed scripts' preconditions need
-   tools/parts), `compare-coop-upgrade.py`. Upgrades persist on the item
-   (`m_upgrades`) and are saved with it.
-2. Then S10-T04d (factions and reputation per player), S10-T04e (stashes),
-   then S10-T02a–f, S10-T03a–f, S10-T05a/c/d, S10-T06; stop at G10 with the
-   decisions list.
+1. **S10-T04d factions and reputation per player** (T01-6: goodwill and
+   reputation per player, faction-vs-faction relations world). Read the
+   coverage matrix row, `game_relations.script`, the relation registry
+   (`relation_registry.cpp`, keyed by character id), `CInventoryOwner::
+   SetCommunityGoodwill/ChangeCommunityGoodwill` and the DoctorX dynamic
+   relations; the server already runs dialogue and kills in the player's
+   context (T05b-3), so most goodwill changes land on the right actor; check
+   what reaches a client (the PDA's relations tab, the HUD's faction colours)
+   and journal/checkpoint durability. Fixture idea: a kill of a neutral NPC
+   by p2 lowers p2's goodwill only; a dialogue reward raises p1's only.
+2. Then S10-T04e (stashes), S10-T02a–f, S10-T03a–f, S10-T05a/c/d, S10-T06;
+   stop at G10 with the decisions list.
 
 ## Run names
 
-- Used: `campaign-329…333`, `client-222…225`, `anim-1`, `trade-4`, patch
-  check 76; all in the snapshots.
-- Next: `campaign-334`, `client-226`, `proto-build-52`, `st-28`, patch
-  check 77; sessions `upgrade-1…`, `anim-2`, `trade-5`.
+- Used: `campaign-334…341`, `client-226…233`, `proto-build-52` (unused:
+  headers stashed mid-build), `proto-build-53`, `st-28`, `upgrade-1…7`,
+  patch check 77; the rest in the snapshots.
+- Next: `campaign-342`, `client-234`, `proto-build-54`, `st-29`, patch
+  check 78; sessions `faction-1…`.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T04f](../done/snapshot-before-S10-T04f.md).
+Previous snapshot: [before S10-T04d](../done/snapshot-before-S10-T04d.md).

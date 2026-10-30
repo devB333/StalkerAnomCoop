@@ -172,6 +172,13 @@ def main():
                              "restart replays the trade records; fixture trade_party)")
     parser.add_argument("--trade-start", type=int, default=20,
                         help="with --trade: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--upgrade", default="",
+                        help="comma-separated client names present for the S10-T04f upgrade and repair fixture "
+                             "(server-driven: both placed at the nearest mechanic, p1 opens the upgrade session, "
+                             "installs an upgrade and repairs a weapon, p2 refused busy; an external restart replays "
+                             "the records; fixture upgrade_party)")
+    parser.add_argument("--upgrade-start", type=int, default=20,
+                        help="with --upgrade: seconds after both players are in the world until the fixture starts")
     parser.add_argument("--place-giver", type=int, default=0,
                         help="hands-on aid: seconds after both players are in the world until both actors are placed "
                              "in front of Sidorovich, once (profile place_giver; 0 off)")
@@ -250,12 +257,13 @@ def main():
     info = {n for n in args.info.split(",") if n}
     party_task = {n for n in args.party_task.split(",") if n}
     trade_fix = {n for n in args.trade.split(",") if n}
+    upgrade_fix = {n for n in args.upgrade.split(",") if n}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
-               | info | party_task | trade_fix)
+               | info | party_task | trade_fix | upgrade_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -348,6 +356,7 @@ def main():
                       f"info_party = {args.info_start if info else 0}",
                       f"task_party = {args.party_task_start if party_task else 0}",
                       f"trade_party = {args.trade_start if trade_fix else 0}",
+                      f"upgrade_party = {args.upgrade_start if upgrade_fix else 0}",
                       f"place_giver = {args.place_giver}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
@@ -360,7 +369,7 @@ def main():
                 restart_lines = list(lines)
                 if args.restart_no_fixture:
                     fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
-                                "talk_party", "info_party", "task_party", "trade_party")
+                                "talk_party", "info_party", "task_party", "trade_party", "upgrade_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -370,7 +379,7 @@ def main():
             elif args.restart_no_fixture:
                 # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
                 fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
-                            "talk_party", "info_party", "task_party", "trade_party")
+                            "talk_party", "info_party", "task_party", "trade_party", "upgrade_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")

@@ -39,7 +39,7 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // put on the ground), in the lifecycle order.
 // 1.6 + S10-T04a: the talk kinds (14 start, 15 say, 16 end) and reasons 33-36,
 // CampaignEvent kind 14 (the dialogue state); no wire layout change.
-constexpr std::uint16_t kProtocolMinor = 7;
+constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
 // ------------------------------------------------------------- channels
@@ -398,6 +398,16 @@ enum ActionKind : std::uint16_t
                                // journaled as one `trade` record, applied through CTrade::TransferItem (37 no
                                // open trade, 38 not enough money, 39 an item not where expected or not tradeable)
     kActionTradeClose = 20,    // S10-T04c: target: the trader; params: none; the player closed the trade window
+    kActionUpgradeOpen = 21,   // S10-T04f: target: the mechanic the player talks to; params: none; the server opens
+                               // an upgrade session for this player and sends the upgrade table (CampaignEvent 16:
+                               // per item of the player's inventory whether the mechanic upgrades it and each
+                               // upgrade's install state and price) (34 without the talk, 40 not a mechanic)
+    kActionUpgrade = 22,       // S10-T04f: target: an item in the player's own actor's inventory; params: u8 op (1
+                               // install an upgrade, 2 repair), u8 length, the upgrade id (op 1); checked and run
+                               // on the server in the player's context (the installed script charges the purse),
+                               // journaled as one `upgrade` record; CampaignEvent 17 tells the clients (40 no open
+                               // upgrade session, 41 the upgrade or repair is refused, 38 not enough money)
+    kActionUpgradeClose = 23,  // S10-T04f: target: the mechanic; params: none; the player closed the upgrade window
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -450,6 +460,9 @@ enum ActionReason : std::uint16_t
     kReasonNotTrading = 37,       // S10-T04c: no open trade with that NPC (or it does not trade)
     kReasonNoMoney = 38,          // S10-T04c: the buyer's purse does not cover the trade
     kReasonTradeRefused = 39,     // S10-T04c: an item is not where the client saw it, not tradeable, or priced 0
+    kReasonNoMechanic = 40,       // S10-T04f: no open upgrade session with that NPC (or it is not a mechanic)
+    kReasonUpgradeRefused = 41,   // S10-T04f: the upgrade cannot be installed (unknown, installed, locked by its
+                                  // group or a precondition) or the item cannot be repaired
 };
 
 struct Input

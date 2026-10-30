@@ -471,6 +471,11 @@ and feeds each co-op client's relation registry from the server (CampaignEvent
 18: the actor's community goodwill, the faction relation table and changes,
 the actor's reputation; hooks in the registry's setters and SetReputation).
 The relations fixture (`relations_party`). Single player is unchanged.
+`0069-stashes.patch` (S10-T04e) lets a client's USE on an inventory box reach the
+server (the treasure manager spawns a stash's contents there) while the client's
+own loot window opens; fires the box's take callback on the server in the
+taker's context for a participant's take; publishes a checkpoint after a stash's
+contents appear. The stash fixture (`stash_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

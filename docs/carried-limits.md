@@ -127,7 +127,7 @@ accept the gate").
 | L56 | A **duplicated ready** (packet duplication) was not exercised; the stored-outcome path is the one every travel kind uses (tv-3: 18 duplicates) | G09 ([S09-T03](validation/S09-T03.md)) | S11-T01 | Open |
 | L57 | **NPC walking animation on clients**: an NPC's movement type, body state and aim are not replicated, so a moving NPC slides along in its idle pose on a client (noted in [S06-T02](validation/S06-T02.md)'s limits and S06-T07's play-test FAQ; seen by the user in the S10-T04a hands-on check, 2026-10-29) | G06 (S06-T02) | S10-T02a | Open |
 | L58 | **A long server-side relocation of a client's own actor crashed that client**: the S10-T04f fixture moved player 2's actor 534 m in one snapshot (to the mechanic) and client 2 died at the snap with no dump, while client 1 survived the same move (`pred_snapped=1`, error 533.9 m); a hands-on never moves an actor that way (travel replaces the level instead), fixtures now move player 1 only ([S10-T04f](validation/S10-T04f.md) upgrade-5) | G10 (S10-T04f) | S11-T01 | Open |
-| L59 | **Client 2's process sometimes exits with an access violation after its clean stop** (`client-stopped` logged, then exit code −1 or 0xC0000005 at teardown: upgrade-6, relations-1; not in upgrade-7 or trade-4); no gameplay effect, the run's logs are complete | G10 (S10-T04f, S10-T04d) | S11-T01 | Open |
+| L59 | **A client's process sometimes exits with an access violation after its clean stop** (`client-stopped` logged, then exit code −1 or 0xC0000005 at teardown: upgrade-6, relations-1; client 1 in stash-2; not in upgrade-7, relations-3 or trade-4); no gameplay effect, the run's logs are complete | G10 (S10-T04f, S10-T04d) | S11-T01 | Open |
 
 ## Baseline waivers (G01)
 

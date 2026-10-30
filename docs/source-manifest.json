@@ -281,6 +281,10 @@
     {
       "path": "patches/engine/0068-relations.patch",
       "sha256": "72f5cd902c4689e8bc98fc3e36964c238aff4640a96825894cf222ebbc1ea02f"
+    },
+    {
+      "path": "patches/engine/0069-stashes.patch",
+      "sha256": "84b891a3e4adc2272121fa21dc14c5edc6fb0a339ed0c9406048396b4471faf2"
     }
   ],
   "submodules": [

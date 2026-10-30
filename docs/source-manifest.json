@@ -285,6 +285,10 @@
     {
       "path": "patches/engine/0069-stashes.patch",
       "sha256": "84b891a3e4adc2272121fa21dc14c5edc6fb0a339ed0c9406048396b4471faf2"
+    },
+    {
+      "path": "patches/engine/0070-npc-logic.patch",
+      "sha256": "292aa919df0204a0a83954ba287d3189b75d4b19aa3b5c99d8591d730bcbb527"
     }
   ],
   "submodules": [

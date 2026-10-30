@@ -476,6 +476,12 @@ server (the treasure manager spawns a stash's contents there) while the client's
 own loot window opens; fires the box's take callback on the server in the
 taker's context for a participant's take; publishes a checkpoint after a stash's
 contents appear. The stash fixture (`stash_party`). Single player is unchanged.
+`0070-npc-logic.patch` (S10-T02a) makes the installed scripts' `db.actor` and
+`AC_ID` mean the nearest alive participant while the campaign server runs an
+NPC's script binder update (`campaign::NpcEvaluationScope` in
+`CScriptBinder::shedule_Update`; the Lua exports `campaign.npc_actor` and
+`npc_actor_id`); a participant context keeps its own actor. The NPC logic
+fixture (`npc_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

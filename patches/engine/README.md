@@ -465,6 +465,12 @@ installed Lua windows' script exports (`install_upgrade`, `set_condition`,
 session is open, and the Lua window is nudged after a server-made change; the
 engine's own upgrade window reads the table too. The upgrade fixture
 (`upgrade_party`). Single player is unchanged.
+`0068-relations.patch` (S10-T04d) maps a character id of 0 in the Lua goodwill
+exports to the context's player (server) or the client's own actor (client),
+and feeds each co-op client's relation registry from the server (CampaignEvent
+18: the actor's community goodwill, the faction relation table and changes,
+the actor's reputation; hooks in the registry's setters and SetReputation).
+The relations fixture (`relations_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

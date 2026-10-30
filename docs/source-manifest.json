@@ -277,6 +277,10 @@
     {
       "path": "patches/engine/0067-upgrades.patch",
       "sha256": "e2cc34aea75af9746f3337fb73fed4a1df1b87a8ac1cbede77e75def9826d5b5"
+    },
+    {
+      "path": "patches/engine/0068-relations.patch",
+      "sha256": "72f5cd902c4689e8bc98fc3e36964c238aff4640a96825894cf222ebbc1ea02f"
     }
   ],
   "submodules": [

@@ -482,6 +482,10 @@ NPC's script binder update (`campaign::NpcEvaluationScope` in
 `CScriptBinder::shedule_Update`; the Lua exports `campaign.npc_actor` and
 `npc_actor_id`); a participant context keeps its own actor. The NPC logic
 fixture (`npc_party`). Single player is unchanged.
+`0071-npc-loot.patch` (S10-T02b) keeps a dead stalker's or monster's body from
+the installed release manager's ALife release while the nearest participant is
+within 75 m (`CALifeSimulator__release`), and adds the NPC loot fixture
+(`loot_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

@@ -289,6 +289,10 @@
     {
       "path": "patches/engine/0070-npc-logic.patch",
       "sha256": "292aa919df0204a0a83954ba287d3189b75d4b19aa3b5c99d8591d730bcbb527"
+    },
+    {
+      "path": "patches/engine/0071-npc-loot.patch",
+      "sha256": "70124230317c3bd67c75eb9e083a03e060db4c31c0f4146c2906be332e61a0ba"
     }
   ],
   "submodules": [

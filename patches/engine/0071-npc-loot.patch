@@ -1,0 +1,244 @@
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 7ad2000..aa1231c 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -156,6 +156,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.relations_party = ini.line_exist("coop", "relations_party") ? ini.r_u32("coop", "relations_party") : 0; // S10-T04d
+ 		out.stash_party = ini.line_exist("coop", "stash_party") ? ini.r_u32("coop", "stash_party") : 0; // S10-T04e
+ 		out.npc_party = ini.line_exist("coop", "npc_party") ? ini.r_u32("coop", "npc_party") : 0; // S10-T02a
++		out.loot_party = ini.line_exist("coop", "loot_party") ? ini.r_u32("coop", "loot_party") : 0; // S10-T02b
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 3231d5b..c34541e 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,6 +120,7 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
++	u32 loot_party; // S10-T02b fixture: seconds after both attach until the NPC loot rounds
+ 	u32 npc_party; // S10-T02a fixture: seconds after both attach until the NPC logic evaluation
+ 	u32 stash_party; // S10-T04e fixture: seconds after both attach until the stash rounds (a box made a stash, used, one item taken)
+ 	u32 relations_party; // S10-T04d fixture: seconds after both attach until the goodwill, relation and reputation rounds
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 7fc44e9..51c54a4 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -714,6 +714,16 @@ struct Host
+ 		u64 phase_tick = 0;
+ 		u32 failures = 0;
+ 	} npc_fixture;
++	// S10-T02b: the NPC loot fixture (profile loot_party)
++	struct LootFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u16 victim = 0xffff, looter = 0xffff;
++		u32 body_items = 0, looter_items = 0;
++		u32 failures = 0;
++	} loot_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -11871,6 +11881,151 @@ void npc_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T02b
++// The NPC loot fixture (profile loot_party, server-driven): once both players
++// are in the world, two stalkers are spawned beside p2 (p2 is the anchor;
++// nothing moves p2, L58); p2 kills the first (its death and the installed
++// death_manager's loot run in p2's context, T05b-3); the second loots the
++// body through the installed corpse scheme's own function (xr_corpse_detection
++// .get_all_from_corpse, inside its NPC evaluation scope): the items move body
++// -> NPC on the server and reach both clients as reparents; the body's
++// release is then asked for as the release manager would with p2 standing by
++// it: kept (T02b-2). Checked: the body's loot count, the looter's gain, the
++// clients' item graphs after the loot, the kept release.
++void loot_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.loot_party || !ai().get_alife())
++		return;
++	Host::LootFixture& f = g_host->loot_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-loot both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 9 || g_host->tick < f.both_since + u64(config.loot_party) * 50)
++		return;
++	if (slots[0] != 0)
++		std::swap(actors[0], actors[1]);
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (f.phase == 0)
++	{
++		Fvector forward;
++		forward.setHP(actors[1]->XFORM().k.getH(), 0.f);
++		Fvector side;
++		side.crossproduct(Fvector().set(0.f, 1.f, 0.f), forward);
++		f.victim = spawn_at(alife, "sim_default_stalker_0", Fvector().mad(actors[1]->Position(), forward, 4.f), u16(actors[1]->ID()));
++		f.looter = spawn_at(alife, "sim_default_stalker_0", Fvector().mad(Fvector().mad(actors[1]->Position(), forward, 4.f), side, 3.f),
++			u16(actors[1]->ID()));
++		g_host->log.line("fixture-loot spawned victim=%u looter=%u beside=%u", u32(f.victim), u32(f.looter), u32(actors[1]->ID()));
++		if (f.victim == kNoEngineId || f.looter == kNoEngineId)
++		{
++			++f.failures;
++			g_host->log.line("fixture-loot done phase=no-spawn failures=%u", f.failures);
++			f.phase = 9;
++			return;
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	CEntityAlive* victim = f.victim != 0xffff ? smart_cast<CEntityAlive*>(Level().Objects.net_Find(f.victim)) : nullptr;
++	CGameObject* looter = f.looter != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(f.looter)) : nullptr;
++	if (f.phase == 1)
++	{
++		// both online, then p2 kills the victim
++		if ((!victim || !looter) && g_host->tick - f.phase_tick < 15 * 50)
++			return;
++		if (!victim || !looter)
++		{
++			++f.failures;
++			g_host->log.line("fixture-loot done phase=not-online failures=%u victim=%d looter=%d", f.failures, victim ? 1 : 0, looter ? 1 : 0);
++			f.phase = 9;
++			return;
++		}
++		victim->KillEntity(u16(actors[1]->ID()));
++		g_host->log.line("fixture-loot killed victim=%u by=%u", u32(f.victim), u32(actors[1]->ID()));
++		f.phase = 2;
++		f.phase_tick = g_host->tick + 3 * 50;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		CInventoryOwner* body = victim ? smart_cast<CInventoryOwner*>(victim) : nullptr;
++		CInventoryOwner* taker = looter ? smart_cast<CInventoryOwner*>(looter) : nullptr;
++		f.body_items = body ? u32(body->inventory().m_all.size()) : 0;
++		f.looter_items = taker ? u32(taker->inventory().m_all.size()) : 0;
++		g_host->log.line("fixture-loot body dead=%d body_items=%u looter_items=%u", victim && !victim->g_Alive() ? 1 : 0, f.body_items,
++			f.looter_items);
++		if (!victim || victim->g_Alive() || !f.body_items)
++			++f.failures;
++		// the looter takes the body's valuables through the installed scheme's function
++		string512 chunk;
++		xr_sprintf(chunk,
++			"local npc = level.object_by_id(%u)\n"
++			"if not npc then return 'no-npc' end\n"
++			"db.storage[%u] = db.storage[%u] or {}\n"
++			"db.storage[%u].corpse_detection = db.storage[%u].corpse_detection or {}\n"
++			"db.storage[%u].corpse_detection.selected_corpse_id = %u\n"
++			"xr_corpse_detection.get_all_from_corpse(npc)\n"
++			"return 'looted'",
++			u32(f.looter), u32(f.looter), u32(f.looter), u32(f.looter), u32(f.looter), u32(f.looter), u32(f.victim));
++		lua_State* L = ai().script_engine().lua();
++		const int top = lua_gettop(L);
++		string64 outcome = "?";
++		if (luaL_loadstring(L, chunk) == 0)
++		{
++			campaign::NpcEvaluationScope scope(looter);
++			if (lua_pcall(L, 0, 1, 0) == 0)
++				xr_strcpy(outcome, lua_tostring(L, -1) ? lua_tostring(L, -1) : "nil");
++			else
++				xr_sprintf(outcome, "error:%s", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++		}
++		lua_settop(L, top);
++		g_host->log.line("fixture-loot looting looter=%u body=%u outcome=%s", u32(f.looter), u32(f.victim), outcome);
++		f.phase = 3;
++		f.phase_tick = g_host->tick + 3 * 50;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		CInventoryOwner* body = victim ? smart_cast<CInventoryOwner*>(victim) : nullptr;
++		CInventoryOwner* taker = looter ? smart_cast<CInventoryOwner*>(looter) : nullptr;
++		const u32 body_now = body ? u32(body->inventory().m_all.size()) : 0;
++		const u32 looter_now = taker ? u32(taker->inventory().m_all.size()) : 0;
++		g_host->log.line("fixture-loot looted body_items=%u->%u looter_items=%u->%u", f.body_items, body_now, f.looter_items, looter_now);
++		if (body_now >= f.body_items || looter_now <= f.looter_items)
++			++f.failures;
++		// the release manager's release with p2 standing at the body: kept (the engine log says body-release-kept)
++		luabind::functor<void> release;
++		CSE_Abstract* se = f.victim != 0xffff ? ai().alife().objects().object(f.victim, true) : nullptr;
++		if (se && ai().script_engine().functor("safe_release_manager.release", release))
++			release(se);
++		CSE_Abstract* still = f.victim != 0xffff ? ai().alife().objects().object(f.victim, true) : nullptr;
++		g_host->log.line("fixture-loot release-asked body=%u still_present=%d", u32(f.victim), still ? 1 : 0);
++		if (!still)
++			++f.failures;
++		g_host->log.line("fixture-loot done phase=looted failures=%u", f.failures);
++		f.phase = 9;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -15094,6 +15249,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	relations_fixtures(); // S10-T04d
+ 	stash_fixtures(); // S10-T04e
+ 	npc_fixtures(); // S10-T02a
++	loot_fixtures(); // S10-T02b
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+diff --git a/src/xrGame/alife_simulator_script.cpp b/src/xrGame/alife_simulator_script.cpp
+index 099698a..2fdf178 100644
+--- a/src/xrGame/alife_simulator_script.cpp
++++ b/src/xrGame/alife_simulator_script.cpp
+@@ -7,8 +7,10 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CampaignActorAccess.h" // S10-T02b: a body near a participant is kept
+ #include "alife_simulator.h"
+ #include "CampaignScriptContext.h" // S10-T04b: info_actor_id
++#include "CoopServerHost.h" // S10-T02b: the server process
+ #include "ai_space.h"
+ #include "alife_object_registry.h"
+ #include "alife_story_registry.h"
+@@ -349,6 +351,23 @@ void CALifeSimulator__release(CALifeSimulator* self, CSE_Abstract* object, bool)
+ 	CSE_ALifeObject* alife_object = smart_cast<CSE_ALifeObject*>(object);
+ 	THROW(alife_object);
+ 	if (!alife_object) return;
++	// S10-T02b (decision T02b-2): the installed release_body_manager releases a
++	// dead stalker's or monster's body when it is far from db.actor, the host's
++	// actor on the campaign server; a body the other player stands at is kept
++	// (the installed distance, 75 m, measured from the nearest participant)
++	if (campaign::coop_server_prepared())
++	{
++		CSE_ALifeCreatureAbstract* creature = smart_cast<CSE_ALifeCreatureAbstract*>(object);
++		if (creature && !creature->g_Alive() && (smart_cast<CSE_ALifeHumanStalker*>(object) || smart_cast<CSE_ALifeMonsterBase*>(object)))
++		{
++			float distance = 0.f;
++			if (campaign::nearest_participant_actor(creature->o_Position, nullptr, &distance) && distance < 75.f)
++			{
++				Msg("S10-T02b body-release-kept id=%u section=%s distance=%.1f", u32(object->ID), object->name(), distance);
++				return;
++			}
++		}
++	}
+ 	if (!alife_object->m_bOnline)
+ 	{
+ 		self->release(object, true);

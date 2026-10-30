@@ -301,6 +301,10 @@
     {
       "path": "patches/engine/0073-mutant-abilities.patch",
       "sha256": "ca85d50f1b368f879768074c65756c2e3d6eed3c254eebfe91060855b477c7ff"
+    },
+    {
+      "path": "patches/engine/0074-fauna.patch",
+      "sha256": "cc3a405f859ef456ff3b9e7025597d215a19f9ec12ee45d423e6e6c5fa922a2a"
     }
   ],
   "submodules": [

@@ -502,6 +502,13 @@ existing camera-effector presentation; the poltergeist's detection
 post-process runs on each client for its own actor. The mutant fixture
 (`mutant_party`). Single player is unchanged.
 
+`0074-fauna.patch` (S10-T02e) presents the pseudogigant's threaten kick to
+the kicked player's client (`MonsterEffect` phase 4), drives the psy dog's
+aura on co-op clients, fixes a client crash when a psy dog phantom's spawn
+fails (its particle names were uninitialized), logs which part of a custom
+monster's spawn refused, and adds the fauna fixture (`fauna_party`). Single
+player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

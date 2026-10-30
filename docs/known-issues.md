@@ -25,6 +25,7 @@ rows as they are found; mark a row fixed with the patch and run.
 | B7 | S10-T04c, S10-T02c reports | The partner's zoom (aim-down-sights) pose is not shown; a controller's camera pull during its psy attack is not shown (T02c-3) | replicate the zoom flag in the snapshot; present the controller's steering per frame | open |
 | B8 | S10-T04f report | The upgrade window's tooltip shows the base price; the server charges the mechanic's discounted price (T04f-4) | send the discount in the upgrade table and use it in the tooltip | open |
 | B10 | S10-T02d report | The bloodsucker's grab does not freeze the grabbed player or turn its camera toward the bloodsucker (T02d-3) | present the steering and an input hold to the grabbed client | open |
+| B11 | S10-T02e fauna-1 | A psy dog phantom's spawn failed on both clients once (the clients crashed then; now they survive it and log the refusing part); fauna-4's phantoms spawned cleanly | read `S10-T02e custom-monster spawn refused by …` in a client log when it recurs | open (crash fixed, patch 0074) |
 | B9 | S10-T04f report | The Lua windows show a bought, sold or taken item in its old list for a moment until the server's move arrives | expected latency; a local "pending" mark would hide it | open |
 
 ## Open

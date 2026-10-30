@@ -1,7 +1,16 @@
-# Session handoff — S10-T02 complete, S10-T03a complete; next S10-T03b
+# Session handoff — S10-T02 complete, S10-T03a/b complete; next S10-T03c
 
 ## State (2026-10-30)
 
+- **Completed and committed: S10-T03b offline combat and squad targets**
+  ([S10-T03b](../../validation/S10-T03b.md), patch 0077 `squad-targets`,
+  patch check 89; builds **campaign-380 / client-270**; **squad-1 pass
+  6/6**): a squad whose script target is "the actor" (bounty hunters, the
+  measuring task) went for actor 0 (player 1); now the nearest player
+  (`campaign.nearest_participant_id`, the `get_script_target` wrap). Offline
+  combat has no actor reference. Decisions T03b-1…3; **T03b-2 is a gameplay
+  call for the user** (bounty hunters triggered by player 1's rank and
+  reputation only). Fixture `--squad c1,c2`, `tools/compare-coop-squad.py`.
 - **Completed and committed: S10-T03a ALife switching and respawn**
   ([S10-T03a](../../validation/S10-T03a.md), patch 0076 `alife-respawn`,
   patch check 88; builds **campaign-379 / client-269**). The installed
@@ -48,31 +57,34 @@
 - **Decisions awaiting the user at G10** ([Stage 10
   decisions](../../stage10-decisions.md)): T04a-1…4, T04b-1…3, T05b-1…5,
   T04c-1…8, T04f-1…6, T04d-1…4, T04e-1…3, T02a-1…2, T02b-1…2, T02c-1…3,
-  T02d-1…3, T02e-1…4, T02f-1…5, **T03a-1…3**. Open question: T05b-4 (who pays a
+  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, **T03b-1…3** (T03b-2 open). Open question: T05b-4 (who pays a
   task's money cost).
 
 ## Next
 
-1. **S10-T03b offline combat and squad targets** (matrix F8). Lead: a
-   squad's script target `"actor"` returns 0 (`sim_squad_scripted:get_script_target`,
-   `sim_squad_scripted.script:128`), actor 0, player 1; the companion wrap
-   (S10-T02f) already intercepts `t == 0` for companion squads; extend it so
-   any other squad's 0 becomes the nearest participant's actor id, then check
-   `specific_update` / `simulation_objects.get_server_entity` accept player
-   2's actor id (is the second actor in the sim object registry?). Offline
-   combat (`sim_offline_combat.script`) has no actor reference. Fixture: a
-   squad sent at "the actor" near player 2 (player 1 far, L58) must reach
-   player 2. Then S10-T03c…f, S10-T05a/c/d, S10-T06; stop at G10 with the
-   decisions list and the bug list; S10-T07 (bugs) follows the user's review.
+1. **S10-T03c world time and sleep** (matrix F9, L49, decision T01-8: sleep
+   needs both players' consent, the world's time skips once; passing out
+   takes only that player's control, no skip, the 5 % death chance kept).
+   The installed sleep is the client's Lua window
+   (`ui_sleep_dialog.script`: `TestAndShow` checks shelter, bleeding and
+   radiation; `OnButtonSleep` plays the effects; `dream_callback` calls
+   `level.change_game_time(0, hours, 0)`, sets `db.actor.power = 1`, sends
+   `actor_on_sleep`; `sleep_forced(hours)` is the forced path). Plan: route
+   the sleep button to a server request with the S09 consent flow (read
+   `docs/travel-contract.md` and the S09-T01 proposal code for reuse), skip
+   time once on the server, restore both players' sleep need; the forced
+   sleep becomes a per-player blackout. Then S10-T03d…f, S10-T05a/c/d,
+   S10-T06; stop at G10 with the decisions list and the bug list; S10-T07
+   (bugs) follows the user's review.
 
 ## Run names
 
-- Used: `campaign-334…379` (373, 374 failed to compile), `client-226…269`,
+- Used: `campaign-334…380` (373, 374 failed to compile), `client-226…270`,
   `proto-build-52` (unused), `proto-build-53`, `st-28`, `companion-1…4`,
-  `alife-1…6`, patch checks 77–88; the rest in the snapshots.
-- Next: `campaign-380`, `client-270`, `proto-build-54`, `st-29`, patch
-  check 89.
+  `alife-1…6`, `squad-1`, patch checks 77–89; the rest in the snapshots.
+- Next: `campaign-381`, `client-271`, `proto-build-54`, `st-29`, patch
+  check 90.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T03b](../done/snapshot-before-S10-T03b.md).
+Previous snapshot: [before S10-T03c](../done/snapshot-before-S10-T03c.md).

@@ -214,3 +214,14 @@ matrix rule F7 binds it. Awaiting the user's approval at G10.
 | T03a-1 | **No squad respawns beside either player**: a smart terrain's respawn guard (no respawn while "the actor" is within its `respawn_radius`, 150 m by default) measures the nearest player, and so does a squad's `dist_to_actor` (task markers, survival help); the installed scripts measured actor 0, player 1, only | matrix rule F7 (the nearest participant, never actor 0); a squad must not appear out of thin air in front of player 2 | keep the single-player rule (player 2 unprotected) |
 | T03a-2 | **A disconnected player's area stays online**: its actor stays in the world (S09 detached-actor policy), so the ALife keeps the creatures around it online and running while the player is away | the actor is still there and vulnerable; switching its area offline would freeze NPCs that may be fighting it | take the area offline while the player is away (L53 would then not apply to a disconnect) |
 | T03a-3 | *(scope)* Respawn timing (`respawn_idle`, game time) and population are the world's, shared by both players; nothing about respawn is per player | one world, one clock (S10-T03c owns the clock) | — |
+
+## S10-T03b — offline combat and squad targets
+
+Taken 2026-10-30 while building the slice ([S10-T03b](validation/S10-T03b.md));
+matrix rule F8 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03b-1 | **A squad sent at "the actor" goes for the nearest player**, chosen again at every squad update (so it turns to whichever player is closer): Anomaly's bounty hit squads, the measuring task's escort and any squad whose script target is `"actor"` | matrix rule F8; the installed code sends every such squad at actor 0, player 1, even when player 2 is beside it | the player whose rank or task caused it (needs a per-squad owner) |
+| T03b-2 | ***(your call)* Bounty hit squads are triggered by player 1's rank and reputation**: the installed timer (`sim_squad_bounty.spawn_timer`) reads `db.actor`, which outside a player's context is player 1; player 2's rank and reputation (per player since S10-T04d) do not count. Proposed: trigger on either player (the worse of the two); not changed yet | the hunt itself is fixed by T03b-1; who *attracts* hunters is a gameplay choice | keep player 1's (the host's) values; or count both players' values together |
+| T03b-3 | *(scope)* Offline combat between squads is unchanged: `sim_offline_combat.script` never reads the actor; its results follow single player's rules by construction | no participant input to adapt | — |

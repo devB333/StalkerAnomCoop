@@ -529,6 +529,12 @@ distance to "the actor" the nearest participant's on the campaign server
 beside player 2; and adds the ALife identity fixture (`alife_party`).
 Single player is unchanged.
 
+`0077-squad-targets.patch` (S10-T03b) sends a squad whose script target is
+"the actor" (bounty hunters, task squads: `sim_squad_scripted.get_script_target`
+returns 0) at the nearest player instead of actor 0
+(`campaign.nearest_participant_id`, the existing compat-layer wrap), and adds
+the squad-target fixture (`squad_party`). Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

@@ -313,6 +313,10 @@
     {
       "path": "patches/engine/0076-alife-respawn.patch",
       "sha256": "9a7bd0db72b9baa6d87c1ab94a9a3ba71b550eabd1aef8715ef40c5ae9ca4c9c"
+    },
+    {
+      "path": "patches/engine/0077-squad-targets.patch",
+      "sha256": "a544c9f1204983744e7f4c54fc54c2ac115e979b8eaa22fd102d1b91430ba27d"
     }
   ],
   "submodules": [

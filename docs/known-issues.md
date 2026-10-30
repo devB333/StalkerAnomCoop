@@ -24,6 +24,7 @@ rows as they are found; mark a row fixed with the patch and run.
 | B6 | upgrade-5 | A long server-side move of a client's own actor (534 m) crashed that client (L58) | the client's prediction snap or a level-streaming step on a huge jump | open |
 | B7 | S10-T04c, S10-T02c reports | The partner's zoom (aim-down-sights) pose is not shown; a controller's camera pull during its psy attack is not shown (T02c-3) | replicate the zoom flag in the snapshot; present the controller's steering per frame | open |
 | B8 | S10-T04f report | The upgrade window's tooltip shows the base price; the server charges the mechanic's discounted price (T04f-4) | send the discount in the upgrade table and use it in the tooltip | open |
+| B10 | S10-T02d report | The bloodsucker's grab does not freeze the grabbed player or turn its camera toward the bloodsucker (T02d-3) | present the steering and an input hold to the grabbed client | open |
 | B9 | S10-T04f report | The Lua windows show a bought, sold or taken item in its old list for a moment until the server's move arrives | expected latency; a local "pending" mark would hide it | open |
 
 ## Open

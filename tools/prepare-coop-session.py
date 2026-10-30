@@ -209,6 +209,12 @@ def main():
                              "psy_party)")
     parser.add_argument("--psy-start", type=int, default=20,
                         help="with --psy: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--mutant", default="",
+                        help="comma-separated client names present for the S10-T02d mutant fixture (server-driven: p1 "
+                             "moved away, a bloodsucker, a burer and a poltergeist in turn near p2; fixture "
+                             "mutant_party)")
+    parser.add_argument("--mutant-start", type=int, default=20,
+                        help="with --mutant: seconds after both players are in the world until the fixture starts")
     parser.add_argument("--place-giver", type=int, default=0,
                         help="hands-on aid: seconds after both players are in the world until both actors are placed "
                              "in front of Sidorovich, once (profile place_giver; 0 off)")
@@ -293,12 +299,14 @@ def main():
     npc_fix = {n for n in args.npc.split(",") if n}
     loot_fix = {n for n in args.loot.split(",") if n}
     psy_fix = {n for n in args.psy.split(",") if n}
+    mutant_fix = {n for n in args.mutant.split(",") if n}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
-               | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix)
+               | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
+               | mutant_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -397,6 +405,7 @@ def main():
                       f"npc_party = {args.npc_start if npc_fix else 0}",
                       f"loot_party = {args.loot_start if loot_fix else 0}",
                       f"psy_party = {args.psy_start if psy_fix else 0}",
+                      f"mutant_party = {args.mutant_start if mutant_fix else 0}",
                       f"place_giver = {args.place_giver}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
@@ -410,7 +419,8 @@ def main():
                 if args.restart_no_fixture:
                     fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
-                                "relations_party", "stash_party", "npc_party", "loot_party", "psy_party")
+                                "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
+                                "mutant_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -421,7 +431,8 @@ def main():
                 # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
                 fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
-                            "relations_party", "stash_party", "npc_party", "loot_party", "psy_party")
+                            "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
+                            "mutant_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")

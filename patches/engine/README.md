@@ -492,6 +492,15 @@ and present their camera, HUD and sound effects to that player's client (a new
 presentation kind, `ControllerPsyHit`, applied by the client with the
 controller replica's own sounds and particles); logs each viewer's aura
 post-process; adds the psy fixture (`psy_party`). Single player is unchanged.
+`0073-mutant-abilities.patch` (S10-T02d) makes the bloodsucker's vampire grab,
+the anti-aim (with the burer's stamina hit and shield) and the poltergeist's
+detection and telekinesis target the monster's participant enemy (the
+nearest participant for the poltergeist) on the campaign server; the vampire's
+HUD, inventory and camera effects go to the grabbed player's client (a new
+presentation kind, `MonsterEffect`), the anti-aim's camera kick through the
+existing camera-effector presentation; the poltergeist's detection
+post-process runs on each client for its own actor. The mutant fixture
+(`mutant_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

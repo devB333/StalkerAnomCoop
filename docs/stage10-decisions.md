@@ -238,3 +238,16 @@ T01-8 binds it. Awaiting the user's approval at G10.
 | T03c-3 | **One sleep rests both players**: the world's time skips once by the asked hours; both players' sleep need and stamina recover as from that sleep; the world's sleep listeners (emission timers, Ironman's sleep count) run once | one world, one night | the partner does not recover (it only waited) |
 | T03c-4 | **Passing out is a blackout of 8 real seconds**: that player's screen fades and its input is held, its sleep need recovers by the hours it was out (3–9, the script's number), the world's time does not move; the installed 5 % death chance on passing out from thirst stays | T01-8; a forced per-player skip is impossible in one world | a longer blackout (the partner waits); or skip time for both |
 | T03c-5 | *(scope)* The sleep's save (`dream_callback2` saves "<name> - sleep") becomes the server's checkpoint after the skip | the server owns saving in co-op (S07) | — |
+
+## S10-T03d — guides, fast travel and backpack travel as party travel
+
+Taken 2026-10-30 while building the slice ([S10-T03d](validation/S10-T03d.md));
+T01-9 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03d-1 | **A guide's trip, a fast travel and a backpack travel are party travel proposals to a point**: the partner gets the travel prompt (USE goes, DROP refuses), and when agreed both players arrive side by side at the point, by the same load as a level changer's travel, on the same level too | T01-9; D5 (no unconfirmed teleport of the partner); one executor that already survives crashes and disconnects | a same-level jump without a load (faster, but the long server-side move crashed a client, L58) |
+| T03d-2 | **The trip's time skips once, when it is agreed**; refused or expired, no time passes | the installed scripts skip before they travel; in co-op the skip waits for the partner | skip at the request (time lost on a refusal) |
+| T03d-3 | **A guide's fee is paid by the player who asks, once; it comes back if the partner refuses** (or the request is refused) | T01-9 (requester pays); paying for a trip that did not happen would feel like a bug | no refund (the guide keeps it) |
+| T03d-4 | *(trust)* **A fast travel's or backpack's destination comes from the asking player's client** (its PDA's discovered markers and backpack stashes are client-side map spots); the server checks it is a real place in the game graph and that the party may travel (partner present, no combat), not that the marker was discovered | the markers live in the client's PDA; moving them to the server is S10-T05d's presentation work | refuse fast travel in co-op until the markers are the server's |
+| T03d-5 | *(scope)* **A script's time skip in a player's context that no travel follows** (an anabiotic, a script's own skip) is applied one tick late, as the script asked, for the whole world | the world has one clock; deciding which skips are personal is per item and not this slice's | — |

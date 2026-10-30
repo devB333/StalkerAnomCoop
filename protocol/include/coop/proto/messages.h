@@ -41,6 +41,7 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // CampaignEvent kind 14 (the dialogue state); no wire layout change.
 // 1.8 + S10-T03c: the sleep kinds (24 request, 25 answer), reason 42 and
 // CampaignEvent kind 19 (sleep); no wire layout change.
+// 1.8 + S10-T03d: the relocate kind (26); no wire layout change.
 constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -415,6 +416,11 @@ enum ActionKind : std::uint16_t
                                // docs/travel-contract.md §3-5); the result's revision is the proposal id
     kActionSleepAnswer = 25,   // S10-T03c: params: u64 proposal id, u8 answer (1 accept, 2 refuse: the partner;
                                // 3 cancel: the requester); refused unless the id is the live sleep proposal's
+    kActionRelocate = 26,      // S10-T03d: params: u16 game vertex, u32 level vertex, f32 x, y, z, u16 minutes of
+                               // time to skip, u8 source (1 fast travel, 2 backpack, 3 other); a party travel
+                               // request to a point instead of a level changer (fast travel, the backpack): the
+                               // proposal and the answer are the travel's (CampaignEvent 13, kind 12), the time
+                               // skips once when it is carried out (decision T01-9)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the

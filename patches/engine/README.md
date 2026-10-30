@@ -544,6 +544,16 @@ server) is that player's blackout with no time skip. A client logs every
 clock jump over 10 minutes. The sleep fixture (`sleep_party`). Single player
 is unchanged.
 
+`0079-relocate.patch` (S10-T03d) makes guides, fast travel and the backpack
+party travel to a point: a script's time skip is held (`change_game_time`
+gate: noted on a client, held for the tick on the server), a guide's
+`ChangeLevel` in a player's context (server) and a client's `ChangeLevel` or
+own-actor `set_actor_position` (ActionIntent 26) become a travel proposal
+without a changer, carried out by the S09 executor (same level too); the trip's
+time skips once when agreed and a guide's fee is refunded otherwise. The
+relocation fixture (`relocate_party`) and its client driver (`relocate_test`).
+Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

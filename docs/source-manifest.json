@@ -321,6 +321,10 @@
     {
       "path": "patches/engine/0078-sleep.patch",
       "sha256": "6a58ed7b7314527db11a1c27b23fb1465decc5f0756e4ec3d2759a01b48d45b1"
+    },
+    {
+      "path": "patches/engine/0079-relocate.patch",
+      "sha256": "71e8c0c3943ac03cab5e75d8c07bf6f06cffbd58fa5dae065a53893edaec9b21"
     }
   ],
   "submodules": [

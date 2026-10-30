@@ -1,7 +1,18 @@
-# Session handoff — S10-T02 complete, S10-T03a…c complete; next S10-T03d
+# Session handoff — S10-T02 complete, S10-T03a…d complete; next S10-T03e
 
 ## State (2026-10-30)
 
+- **Completed and committed: S10-T03d guides, fast travel, backpack travel**
+  ([S10-T03d](../../validation/S10-T03d.md), patch 0079 `relocate`, patch
+  check 91; protocol kind 26, **proto-build-55** (st-30 pass); builds
+  **campaign-388 / client-275**; **reloc-4 and reloc-5 pass 5/5**). A
+  script's time skip is held (`change_game_time` gate), a guide's
+  `ChangeLevel` (server) or a client's `ChangeLevel` / own
+  `set_actor_position` (kind 26) becomes a travel proposal to a point,
+  carried out by the S09 executor (same level too); the time skips once when
+  agreed; a guide's fee comes back on a refusal. Decisions T03d-1…5.
+  Contract §12 in `docs/travel-contract.md`. Fixture `--relocate c1,c2
+  [--relocate-variant 1 --relocate-test c2:40]`, `tools/compare-coop-relocate.py`.
 - **Completed and committed: S10-T03c world time and sleep**
   ([S10-T03c](../../validation/S10-T03c.md), patch 0078 `sleep`, patch check
   90; protocol kinds 24/25, reason 42, CampaignEvent 19, **proto-build-54**
@@ -64,35 +75,42 @@
   greeting player 2; the Lua loot, repair and trade windows; the partner's
   weapon animations; the relations tab; each player recruiting a
   companion that follows only its recruiter; **the sleep window asking the
-  partner (USE sleeps both, DROP refuses)**.
+  partner (USE sleeps both, DROP refuses); **a guide's trip, a PDA fast
+  travel and a backpack travel answered by the partner**.
   `bash tools/start-coop-demo.sh S10-T02c 0 20 0`.
 - **Decisions awaiting the user at G10** ([Stage 10
   decisions](../../stage10-decisions.md)): T04a-1…4, T04b-1…3, T05b-1…5,
   T04c-1…8, T04f-1…6, T04d-1…4, T04e-1…3, T02a-1…2, T02b-1…2, T02c-1…3,
-  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, T03b-1…3 (T03b-2 open), **T03c-1…5**. Open question: T05b-4 (who pays a
+  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, T03b-1…3 (T03b-2 open), T03c-1…5, **T03d-1…5**. Open question: T05b-4 (who pays a
   task's money cost).
 
 ## Next
 
-1. **S10-T03d guides, fast travel and backpack travel as party travel**
-   (matrix F10, decision T01-9: both consent, both arrive, time skipped once,
-   the fee paid once by the requester; refusals as in S09; a same-level
-   teleport moves both). Start from the coverage matrix F10 row and the
-   installed scripts (guides' dialogues, `pda`/fast-travel markers,
-   `item_backpack`/MLR teleports); reuse the S09 travel execution for a
-   level change and the sleep/travel consent coordinator for the request.
-   Then S10-T03e…f, S10-T05a/c/d, S10-T06; stop at G10 with the decisions
-   list and the bug list; S10-T07 (bugs) follows the user's review.
+1. **S10-T03e passage sweep over every level changer** (matrix F11, L50,
+   T01-1: 98 directed passages, `builds/logs/S10-T01/passages.tsv`). Plan: a
+   server fixture (`sweep_party`) that builds the passage graph from the
+   ALife registry's `CSE_ALifeLevelChanger` objects (source level from the
+   changer's game vertex, destination from `m_tNextGraphID`), and on each
+   level places both actors in the next untravelled changer (as the S09
+   travel fixture does), requests as player 1 and accepts as player 2
+   (synthesized intents), waits for the reload and the resume, logs
+   `fixture-sweep passage from= to= changer= result=` and goes on; with no
+   untravelled passage here, it takes the first hop of a BFS toward a level
+   that has one. One long session (about a minute a passage; clients'
+   `exit_after_seconds` is 1800 in their profile, raise it). Disabled
+   changers are listed as such. A compare tool lists every passage's result
+   against `passages.tsv`. Then S10-T03f, S10-T05a/c/d, S10-T06; stop at G10
+   with the decisions list and the bug list; S10-T07 (bugs) follows.
 
 ## Run names
 
-- Used: `campaign-334…383` (373, 374 failed to compile, 381 to link), `client-226…272`,
+- Used: `campaign-334…388` (373, 374, 384, 385 failed to compile, 381 to link), `client-226…275`,
   `proto-build-52` (unused), `proto-build-53`, `st-28`, `companion-1…4`,
-  `alife-1…6`, `squad-1`, `sleep-1…2`, `proto-build-54`, `st-29`, patch
-  checks 77–90; the rest in the snapshots.
-- Next: `campaign-384`, `client-273`, `proto-build-55`, `st-30`, patch
-  check 91.
+  `alife-1…6`, `squad-1`, `sleep-1…2`, `reloc-1…5`, `proto-build-54…55`,
+  `st-29…30`, patch checks 77–91; the rest in the snapshots.
+- Next: `campaign-389`, `client-276`, `proto-build-56`, `st-31`, patch
+  check 92.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T03d](../done/snapshot-before-S10-T03d.md).
+Previous snapshot: [before S10-T03e](../done/snapshot-before-S10-T03e.md).

@@ -247,3 +247,24 @@ restart (§1).
   combat". Hits in the last seconds could be added if play shows the need.
 - One-player travel while the partner is away: refused, pending the
   user's decision (§3).
+
+## 12. Travel to a point: guides, fast travel, the backpack (S10-T03d)
+
+Code: `CoopServerHost.cpp` "S10-T03d" (`relocate_propose`, `take_relocate`,
+`relocation_end`), `CoopClientLink.cpp` "S10-T03d", `CampaignScriptContext.cpp`
+(the `ChangeLevel` and fee wraps, `defer_game_time_change`),
+`level_script.cpp` (`change_game_time`), `script_game_object2.cpp`
+(`SetActorPosition`). Validation: [S10-T03d](validation/S10-T03d.md).
+
+A proposal can name a point (a game vertex, a level vertex, a position)
+instead of a level changer: the request is ActionIntent kind 26 from a
+client (its PDA's fast travel or backpack: the scripts' `ChangeLevel` or the
+own actor's `set_actor_position`) or a guide's `ChangeLevel` in a player's
+context on the server. The rules are §3–5's without the changer checks (no
+"at the changer", no "changer gone"); the answer is kind 12 and the
+presentation event 13 as for a changer. The trip's time skip, asked by the
+script just before, is held and applied once when the proposal is agreed
+(before the barrier, so the destination generation holds it); a guide's fee,
+paid by the script, is refunded to the requester if the proposal ends any
+other way. The executor (§9–10) carries it out, a same-level point included
+(the level is reloaded with both actors at the point).

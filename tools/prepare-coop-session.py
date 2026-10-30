@@ -243,6 +243,17 @@ def main():
                              "a refused and an agreed sleep, then a blackout for p2; fixture sleep_party)")
     parser.add_argument("--sleep-start", type=int, default=20,
                         help="with --sleep: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--relocate", default="",
+                        help="comma-separated client names present for the S10-T03d relocation fixture (server-driven; "
+                             "fixture relocate_party)")
+    parser.add_argument("--relocate-start", type=int, default=20,
+                        help="with --relocate: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--relocate-variant", type=int, default=0,
+                        help="with --relocate: 0 the guide rounds (refused, then agreed to another level); 1 client "
+                             "2's same-level fast travel (--relocate-test c2:N) agreed by p1")
+    parser.add_argument("--relocate-test", default="",
+                        help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
+                             "same-level fast travel does")
     parser.add_argument("--place-giver", type=int, default=0,
                         help="hands-on aid: seconds after both players are in the world until both actors are placed "
                              "in front of Sidorovich, once (profile place_giver; 0 off)")
@@ -333,13 +344,15 @@ def main():
     alife_fix = {n for n in args.alife.split(",") if n}
     squad_fix = {n for n in args.squad.split(",") if n}
     sleep_fix = {n for n in args.sleep.split(",") if n}
+    relocate_fix = {n for n in args.relocate.split(",") if n}
+    relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
                | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
-               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix)
+               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -444,6 +457,8 @@ def main():
                       f"alife_party = {args.alife_start if alife_fix else 0}",
                       f"squad_party = {args.squad_start if squad_fix else 0}",
                       f"sleep_party = {args.sleep_start if sleep_fix else 0}",
+                      f"relocate_party = {args.relocate_start if relocate_fix else 0}",
+                      f"relocate_variant = {args.relocate_variant}",
                       f"place_giver = {args.place_giver}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
@@ -459,7 +474,7 @@ def main():
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                                 "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                                 "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                                "sleep_party")
+                                "sleep_party", "relocate_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -472,7 +487,7 @@ def main():
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                             "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                             "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                            "sleep_party")
+                            "sleep_party", "relocate_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")
@@ -493,7 +508,8 @@ def main():
                       f"travel_ready_delay = {ready_delay.get(name, 0)}",
                       f"travel_ready_wrong = {1 if name in ready_wrong else 0}",
                       f"travel_rejoin_delay = {rejoin_delay.get(name, 0)}",
-                      f"travel_load_fail = {1 if name in load_fail else 0}"]
+                      f"travel_load_fail = {1 if name in load_fail else 0}",
+                      f"relocate_test = {relocate_test.get(name, 0)}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile

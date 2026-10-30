@@ -317,6 +317,10 @@
     {
       "path": "patches/engine/0077-squad-targets.patch",
       "sha256": "a544c9f1204983744e7f4c54fc54c2ac115e979b8eaa22fd102d1b91430ba27d"
+    },
+    {
+      "path": "patches/engine/0078-sleep.patch",
+      "sha256": "6a58ed7b7314527db11a1c27b23fb1465decc5f0756e4ec3d2759a01b48d45b1"
     }
   ],
   "submodules": [

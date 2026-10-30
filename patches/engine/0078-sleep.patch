@@ -1,0 +1,1072 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index bc88288..5623fd4 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "CampaignActorAccess.h"
+ #include "CoopServerHost.h" // S10-T02f: the companion hook
++#include "CoopClientLink.h" // S10-T03c: the sleep window's request
+ #include "Actor.h"
+ #include "GameTask.h"
+ #include "GametaskManager.h"
+@@ -1056,6 +1057,24 @@ int lua_nearest_participant_id(float x, float y, float z)
+ 	return id;
+ }
+ 
++// S10-T03c: the player in whose context the installed scripts pass out
++// (ui_sleep_dialog.sleep_forced, wrapped by the compat layer): its blackout
++bool lua_blackout(int hours)
++{
++	ScriptContext context;
++	if (!server_role() || !lua_context(context) || hours < 0 || hours > 24)
++		return false;
++	coop_server_blackout(context.action.actor.slot, u8(hours));
++	return true;
++}
++
++// S10-T03c: a co-op client's sleep window asks the server (and the partner);
++// false off a co-op client (the installed sleep goes on)
++bool lua_client_sleep(int hours)
++{
++	return hours >= 1 && hours <= 24 && coop_client_sleep_request(hours);
++}
++
+ int lua_slot_actor_id(int slot)
+ {
+ 	CActor* actor = slot >= 0 && slot <= 0xff ? slot_actor(u8(slot)) : nullptr;
+@@ -1363,6 +1382,19 @@ LPCSTR const compat_source =
+ 	"  S.alife_wrap = S.alife_wrap .. '+squad'\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// S10-T03c: passing out takes only that player's control: no time skip
++	// (decision T01-8); the caller's 5 % death chance stays the script's
++	"S.sleep_wrap = 'none'\n"
++	"S.blackouts = 0\n"
++	"local usd_ok, USD = pcall(function() return ui_sleep_dialog end)\n"
++	"if usd_ok and type(USD) == 'table' and type(USD.sleep_forced) == 'function' then\n"
++	"  USD.sleep_forced = function(hours)\n"
++	"    S.blackouts = S.blackouts + 1\n"
++	"    campaign.blackout(hours or math.random(3, 9))\n"
++	"  end\n"
++	"  S.sleep_wrap = 'forced'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
+ 	"S.installed = true\n";
+ 
+ bool install_compat(lua_State* L)
+@@ -1396,6 +1428,10 @@ bool install_compat(lua_State* L)
+ 	lua_pushstring(L, "alife_wrap");
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T03a compatibility layer ALife wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
++	lua_pushstring(L, "sleep_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T03c compatibility layer sleep wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 2);
+ 	++s_stats.compat_installs;
+ 	s_compat_state = L;
+@@ -1442,6 +1478,8 @@ void script_register_context(lua_State* L)
+ 		def("slot_actor_id", &lua_slot_actor_id),
+ 		def("nearest_participant_distance", &lua_nearest_participant_distance), // S10-T03a
+ 		def("nearest_participant_id", &lua_nearest_participant_id), // S10-T03b
++		def("blackout", &lua_blackout), // S10-T03c
++		def("client_sleep", &lua_client_sleep),
+ 		def("present", &lua_present)
+ 	];
+ }
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 1d6594d..8e40659 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -367,6 +367,14 @@ struct Link
+ 	};
+ 	xr_map<u64, TransferDup> transfer_dups; // same-id repeats sent after a step's first result
+ 	// S09-T01: party travel (docs/travel-contract.md)
++	// S10-T03c: party sleep (CampaignEvent 19)
++	struct Sleep
++	{
++		u64 live_id = 0, prev_id = 0;
++		u8 requester = 0, partner = 0, hours = 0;
++		u32 deadline_ms = 0, hud_ms = 0;
++		u64 events = 0, requests = 0, answers = 0, slept = 0, blackouts = 0, refused = 0;
++	} sleep;
+ 	struct Travel
+ 	{
+ 		u64 live_id = 0, prev_id = 0; // the proposal up now; the last one this client knew (ended or void)
+@@ -1031,6 +1039,9 @@ void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
+ void on_party_tasks(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_needs(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_travel(const coop::proto::CampaignEvent& event); // S09-T01
++void on_sleep(const coop::proto::CampaignEvent& event); // S10-T03c
++void sleep_frame();
++bool sleep_key_press(int key);
+ void on_talk(const coop::proto::CampaignEvent& event); // S10-T04a
+ void talk_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
+ void talk_session_reset(LPCSTR why);
+@@ -1125,7 +1136,17 @@ void world_frame()
+ 				// S08-T09: the use animations' settings (the installed first-update
+ 				// handler that reads them does not run on a replica's actor)
+ 				"if actor_effects and actor_effects.init_main_settings then pcall(actor_effects.init_main_settings) end "
+-				"__coop_animations = actor_effects and actor_effects.is_animations_on and actor_effects.is_animations_on()";
++				"__coop_animations = actor_effects and actor_effects.is_animations_on and actor_effects.is_animations_on() "
++				// S10-T03c: the sleep window's button asks the partner (the server
++				// skips the world's time once both agree); a forced sleep is the server's
++				"local ok, usd = pcall(function() return ui_sleep_dialog end) "
++				"if ok and type(usd) == 'table' and usd.UISleep and campaign and campaign.client_sleep then "
++				"usd.UISleep.OnButtonSleep = function(self) "
++				"if self.forced then return end "
++				"local hours = self.time_track and self.time_track:GetIValue() or 1 "
++				"if self:IsShown() then self:HideDialog() Unregister_UI('UISleep') end "
++				"disable_info('sleep_active') "
++				"campaign.client_sleep(hours) end end";
+ 			lua_State* L = ai().script_engine().lua();
+ 			if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_no_local_merge") == 0)
+ 			{
+@@ -1175,6 +1196,7 @@ void world_frame()
+ 		run_script();
+ 		respawn_frame(); // S07-T07
+ 		travel_frame(); // S09-T01
++		sleep_frame(); // S10-T03c
+ 		pickup_frame(); // S08-T01
+ 		layout_frame(); // S08-T07
+ 		amounts_frame(); // S08-T08
+@@ -2743,7 +2765,7 @@ void on_world_clock(const coop::proto::CampaignEvent& event)
+ 	{
+ 		clock.set_time_factor(factor);
+ 		clock.set_game_time(game_ms);
+-		if (++g_link->clock_steps <= 8)
++		if (++g_link->clock_steps <= 8 || _abs(apart) > 600000) // S10-T03c: and every jump of the world's time (a sleep)
+ 			g_link->log.line("clock-step apart_ms=%I64d factor=%.2f", apart, factor);
+ 		// S06-T08: a step backwards reads as a day forward to the weather
+ 		// effect (CEnvironment::SetGameTime subtracts TimeDiff, which wraps),
+@@ -3522,6 +3544,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 11: on_party_tasks(*event); break; // S08-T09
+ 			case 12: on_needs(*event); break; // S08-T09
+ 			case 13: on_travel(*event); break; // S09-T01
++			case 19: on_sleep(*event); break; // S10-T03c
+ 			case 14: on_talk(*event); break; // S10-T04a
+ 			case 15: on_trade_prices(*event); break; // S10-T04c
+ 			case 16: on_upgrade_table(*event); break; // S10-T04f
+@@ -3590,6 +3613,7 @@ void on_event(const coop::session::ClientEvent& e)
+ 		const coop::proto::Welcome& w = e.welcome;
+ 		++g_link->welcomes;
+ 		travel_session_reset(); // S09-T01: a proposal from the last connection is void
++		g_link->sleep.live_id = 0; // S10-T03c: likewise a sleep proposal
+ 		talk_session_reset("welcome"); // S10-T04a: a new connection holds no talk
+ 		g_link->log.line("welcomed slot=%u slot_generation=%u epoch=%I64u server_tick=%I64u tick_hz=%u snapshot_hz=%u "
+ 			"session=%s player=%s resumed=%d",
+@@ -3942,6 +3966,19 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 			if (p.action == coop::proto::kActionTravelRequest || p.action == coop::proto::kActionTravelAnswer ||
+ 				p.action == coop::proto::kActionTravelReady)
+ 				travel_result(p, result); // S09-T01, S09-T03
++			if ((p.action == coop::proto::kActionSleepRequest || p.action == coop::proto::kActionSleepAnswer) &&
++				result.outcome == coop::proto::ActionOutcome::Rejected)
++			{
++				// S10-T03c: a refused sleep request or answer, in plain words
++				++g_link->sleep.refused;
++				const u16 r = result.reason;
++				travel_hud(r == coop::proto::kReasonCannotSleep ? "You cannot sleep while bleeding or irradiated." :
++					r == coop::proto::kReasonPartnerUnavailable ? "Your partner is not here: you sleep together." :
++					r == coop::proto::kReasonInCombat ? "You cannot sleep in combat." :
++					r == coop::proto::kReasonTravelBusy ? "A travel or sleep request is already up." :
++					"The sleep request was refused.", 5);
++				g_link->log.line("sleep-refused kind=%u reason=%u", u32(p.action), u32(r));
++			}
+ 			const bool talk_action = p.action == coop::proto::kActionTalkStart || p.action == coop::proto::kActionTalkSay ||
+ 				p.action == coop::proto::kActionTalkEnd;
+ 			if (talk_action)
+@@ -5647,6 +5684,165 @@ bool travel_key_press(int key)
+ 	return true;
+ }
+ 
++// ------------------------------------------------------------ S10-T03c
++// Party sleep as a client sees it (decision T01-8): the installed sleep window's
++// button sends a request (kind 24) instead of skipping this client's time; the
++// partner is asked (USE sleeps too, DROP refuses; the requester's DROP cancels);
++// an agreed sleep fades both screens and names the hours (the world's time is
++// the server's, CampaignEvent 1); a blackout (passing out) fades this screen
++// for its seconds while the server holds the input.
++bool sleep_request(int hours)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || !g_actor)
++		return false;
++	xr_vector<u8> params;
++	params.push_back(u8(hours));
++	++g_link->sleep.requests;
++	request_ownership(coop::proto::kActionSleepRequest, coop::proto::EntityRef(), params, 0, 0xffffffff, 0, true,
++		"sleep-window");
++	string128 text;
++	xr_sprintf(text, "Asking your partner to sleep %d hours...", hours);
++	travel_hud(text, 4);
++	g_link->log.line("sleep-request-sent hours=%d", hours);
++	return true;
++}
++
++u64 answer_sleep(u64 id, u8 answer, LPCSTR why)
++{
++	xr_vector<u8> params;
++	for (int b = 0; b < 8; ++b)
++		params.push_back(u8(id >> (8 * b)));
++	params.push_back(answer);
++	++g_link->sleep.answers;
++	g_link->log.line("sleep-answer-sent id=%I64x answer=%u why=%s", id, u32(answer), why);
++	return request_ownership(coop::proto::kActionSleepAnswer, coop::proto::EntityRef(), params, 0, 0xffffffff, 0, true,
++		why);
++}
++
++void sleep_present(LPCSTR anim, LPCSTR text, int seconds)
++{
++	string512 chunk;
++	xr_sprintf(chunk, "level.add_pp_effector('surge_fade.ppe', 11, false) "
++		"level.add_cam_effector('camera_effects\\\\%s', 10, false, '') "
++		"if actor_menu then actor_menu.set_msg(1, \"%s\", %d) end", anim, text, seconds);
++	lua_State* L = ai().script_engine().lua();
++	if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_sleep_present") == 0)
++	{
++		if (lua_pcall(L, 0, 0, 0) != 0)
++		{
++			g_link->log.line("sleep-present-error %s", lua_tostring(L, -1));
++			lua_pop(L, 1);
++		}
++	}
++	else if (L)
++		lua_pop(L, 1);
++}
++
++void on_sleep(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.size() != 17)
++		return;
++	u64 id = 0;
++	for (int i = 0; i < 8; ++i)
++		id |= u64(b[i]) << (8 * i);
++	const u8 state = b[8], requester = b[9], partner = b[10], abort = b[11], hours = b[12];
++	u32 remaining = 0;
++	memcpy(&remaining, b.data() + 13, 4);
++	Link::Sleep& sl = g_link->sleep;
++	++sl.events;
++	g_link->log.line("sleep-event id=%I64x state=%u requester=%u partner=%u abort=%u hours=%u remaining_ms=%u me=%u",
++		id, u32(state), u32(requester), u32(partner), u32(abort), u32(hours), remaining, u32(g_link->local_slot));
++	string256 text;
++	if (state == 1)
++	{
++		sl.live_id = id;
++		sl.requester = requester;
++		sl.partner = partner;
++		sl.hours = hours;
++		sl.deadline_ms = g_link->wall.GetElapsed_ms() + remaining;
++		sl.hud_ms = g_link->wall.GetElapsed_ms();
++		if (g_link->local_slot == requester)
++			xr_sprintf(text, "Waiting for Player %u to agree to sleep %u hours (%u s). DROP cancels.", u32(partner) + 1,
++				u32(hours), remaining / 1000);
++		else
++			xr_sprintf(text, "Player %u wants to sleep %u hours. USE to sleep too, DROP to refuse.", u32(requester) + 1,
++				u32(hours));
++		travel_hud(text, int(remaining / 1000) + 1);
++		return;
++	}
++	if (state == 11)
++	{
++		++sl.blackouts;
++		sleep_present("surge_02.anm", "You passed out.", int(remaining / 1000));
++		g_link->log.line("sleep-blackout hours=%u seconds=%u", u32(hours), remaining / 1000);
++		return;
++	}
++	if (id == sl.live_id)
++	{
++		sl.prev_id = sl.live_id;
++		sl.live_id = 0;
++	}
++	if (state == 2)
++	{
++		++sl.slept;
++		xr_sprintf(text, "You slept %u hours.", u32(hours));
++		sleep_present("sleep.anm", text, 5);
++		g_link->log.line("sleep-slept id=%I64x hours=%u", id, u32(hours));
++		return;
++	}
++	LPCSTR what = state == 3 ? "refused" : state == 4 ? "expired" : state == 5 ? "cancelled" : "aborted";
++	LPCSTR why = abort == 1 || abort == 2 ? " (a player left)" : abort == 3 || abort == 4 ? " (a player died)" :
++		abort == 5 ? " (combat)" : "";
++	xr_sprintf(text, "Sleep %s%s.", what, why);
++	travel_hud(text, 5);
++}
++
++bool sleep_key_press(int key)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || !g_actor)
++		return false;
++	Link::Sleep& sl = g_link->sleep;
++	if (!sl.live_id)
++		return false;
++	const EGameActions action = get_binded_action(key);
++	if (action != kUSE && action != kDROP)
++		return false;
++	if (g_link->local_slot == sl.partner)
++	{
++		answer_sleep(sl.live_id, action == kUSE ? 1 : 2, action == kUSE ? "use-key" : "drop-key");
++		return true;
++	}
++	if (g_link->local_slot == sl.requester && action == kDROP)
++	{
++		answer_sleep(sl.live_id, 3, "drop-key");
++		return true;
++	}
++	return false;
++}
++
++void sleep_frame()
++{
++	Link::Sleep& sl = g_link->sleep;
++	if (!sl.live_id)
++		return;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (g_link->local_slot == sl.requester && now - sl.hud_ms >= 5000 && now < sl.deadline_ms)
++	{
++		sl.hud_ms = now;
++		string256 text;
++		xr_sprintf(text, "Waiting for Player %u to agree to sleep %u hours (%u s). DROP cancels.", u32(sl.partner) + 1,
++			u32(sl.hours), (sl.deadline_ms - now) / 1000);
++		travel_hud(text, 6);
++	}
++	if (now > sl.deadline_ms + 10000)
++	{
++		g_link->log.line("sleep-stale-proposal id=%I64x", sl.live_id);
++		sl.prev_id = sl.live_id;
++		sl.live_id = 0;
++	}
++}
++
+ u64 send_travel_ready(u64 id, LPCSTR level, LPCSTR why)
+ {
+ 	xr_vector<u8> params;
+@@ -6460,6 +6656,12 @@ static void upgrade_result(const Link::PickupPending& p, const coop::proto::Acti
+ namespace campaign
+ {
+ // S10-T04f: see the upgrade section above.
++// S10-T03c: the sleep window's button (the compat Lua's campaign.client_sleep)
++bool coop_client_sleep_request(int hours)
++{
++	return sleep_request(hours);
++}
++
+ bool coop_client_upgrade_open(CInventoryOwner* partner)
+ {
+ 	if (!g_link || !g_link->active)
+@@ -6669,7 +6871,7 @@ static void trade_result(const Link::PickupPending& p, const coop::proto::Action
+ namespace campaign
+ {
+ bool coop_client_active() { return g_link && g_link->active; }
+-bool coop_client_key_press(int key) { return travel_key_press(key) || respawn_key_press(key); } // S07-T07, S09-T01
++bool coop_client_key_press(int key) { return sleep_key_press(key) || travel_key_press(key) || respawn_key_press(key); } // S07-T07, S09-T01
+ void coop_client_level_changer(u16 changer, u16 actor, LPCSTR level, LPCSTR invite)
+ {
+ 	if (g_link && g_link->active)
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index bed4e2f..cff4003 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -78,6 +78,8 @@ void coop_client_trade_closed();
+ // here); an install or the repair button sends the intent (true: sent,
+ // nothing runs locally); closing the window tells the server.
+ bool coop_client_upgrade_open(CInventoryOwner* partner);
++// S10-T03c: the sleep window's request (the partner is asked); false off a co-op client
++bool coop_client_sleep_request(int hours);
+ bool coop_client_upgrade_active();
+ bool coop_client_upgrade_can(const CInventoryItem* item, bool& can);
+ bool coop_client_upgrade_state(const CInventoryItem* item, LPCSTR upgrade_id, u8& result);
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index ee5bb8d..bc30ad6 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -163,6 +163,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.companion_party = ini.line_exist("coop", "companion_party") ? ini.r_u32("coop", "companion_party") : 0; // S10-T02f
+ 		out.alife_party = ini.line_exist("coop", "alife_party") ? ini.r_u32("coop", "alife_party") : 0; // S10-T03a
+ 		out.squad_party = ini.line_exist("coop", "squad_party") ? ini.r_u32("coop", "squad_party") : 0; // S10-T03b
++		out.sleep_party = ini.line_exist("coop", "sleep_party") ? ini.r_u32("coop", "sleep_party") : 0; // S10-T03c
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index dbc5d53..93bb134 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -123,6 +123,7 @@ struct CoopConfig
+ 	u32 companion_party; // S10-T02f fixture: seconds after both attach until p2 recruits a companion (or a restored one is checked)
+ 	u32 alife_party; // S10-T03a fixture: seconds after both attach until the ALife identity fixture starts (or a restored one is checked)
+ 	u32 squad_party; // S10-T03b fixture: seconds after both attach until a squad is sent at the actor near p2
++	u32 sleep_party; // S10-T03c fixture: seconds after both attach until the sleep rounds start
+ 	u32 fauna_party; // S10-T02e fixture:seconds after both attach until each generic mutant class is spawned near p2
+ 	u32 mutant_party; // S10-T02d fixture:seconds after both attach until the bloodsucker, burer and poltergeist stages
+ 	u32 psy_party; // S10-T02c fixture:seconds after both attach until a controller is spawned near p2
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index b707e63..770a149 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -177,6 +177,10 @@ struct PlayerLink
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+ 	float needs_last[7] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f}; // S10-T04c: + money
+ 	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
++	u64 sleep_sent_id = 0; // S10-T03c: the live sleep proposal this player was told
++	u64 blackout_until_tick = 0; // S10-T03c: a passed-out player's input is held until then
++	u8 blackout_hours = 0; // its sleep, recovered when the blackout ends
++	u64 blackout_inputs_held = 0;
+ 	// S10-T04a: the open talk (one per player)
+ 	u16 talk_npc = 0xffff; // the partner (0xffff: no talk)
+ 	u16 trade_npc = 0xffff; // S10-T04c: the open trade, inside the talk (0xffff: none)
+@@ -564,6 +568,25 @@ struct Host
+ 		u64 waiting_since = 0;
+ 		Fvector waiting_at;
+ 	} pickup_fixture;
++	// S10-T03c: party sleep (decision T01-8): the travel consent's state machine
++	// (its destination is the hours), one skip of the world's time when agreed
++	struct Sleep
++	{
++		std::unique_ptr<coop::proto::TransitionCoordinator> coordinator;
++		u8 hours = 0; // the live proposal's
++		u64 last_check_tick = 0;
++		u64 requests = 0, answers = 0, proposals = 0, slept = 0, blackouts = 0;
++		struct Fixture
++		{
++			u64 both_since = 0;
++			u32 phase = 0;
++			u64 phase_tick = 0;
++			u64 operation = 0x5170000000000000ull;
++			u32 failures = 0;
++			double game_hours0 = 0.0;
++			float sleep0[2] = {0.f, 0.f};
++		} fixture;
++	} sleep;
+ 	// S09-T01: party travel (docs/travel-contract.md)
+ 	struct Travel
+ 	{
+@@ -1946,6 +1969,17 @@ void apply_inputs()
+ 			}
+ 			continue;
+ 		}
++		// S10-T03c: a passed-out player takes no input until its blackout ends
++		if (g_host->tick < link.blackout_until_tick)
++		{
++			++link.blackout_inputs_held;
++			if (link.fire_down)
++			{
++				actor_input_release(context, kWPN_FIRE);
++				link.fire_down = false;
++			}
++			continue;
++		}
+ 		// S10-T04a: a talking actor takes no movement or trigger, as single
+ 		// player gives it none (ActorInput.cpp:49,357); the input is consumed
+ 		if (actor->IsTalking())
+@@ -14409,6 +14443,8 @@ u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& inten
+ 		return coop::proto::kReasonTravelInProgress; // S09-T02
+ 	if (!intent.params.empty())
+ 		return coop::proto::kReasonMalformed;
++	if (g_host->sleep.coordinator && g_host->sleep.coordinator->live())
++		return coop::proto::kReasonTravelBusy; // S10-T03c: a sleep proposal is up
+ 	PartyId party;
+ 	party.hi = g_host->config.party_id.hi;
+ 	party.lo = g_host->config.party_id.lo;
+@@ -14634,6 +14670,534 @@ void travel_on_left(const PlayerLink& link)
+ 		travel_abort(coop::proto::TravelAbort::PartnerLeft);
+ }
+ 
++// ------------------------------------------------------------ S10-T03c
++// Party sleep (matrix F9, decision T01-8). The installed sleep window
++// (ui_sleep_dialog) runs on the client; its button sends a request (ActionIntent
++// kind 24, the hours) and the partner agrees or refuses (kind 25) under the
++// travel consent's rules: no partner, no sleep; 30 s to answer; combat, a
++// death or a disconnect aborts. Agreed: the world's time skips once
++// (level.change_game_time, as dream_callback does), the scripts' actor_on_sleep
++// runs once in the requester's context (the world's listeners and its own
++// survival values) and the per-player survival modules' handler in the
++// partner's, both actors' stamina is restored, a checkpoint is asked for, and
++// both clients present the sleep (CampaignEvent 19). Passing out
++// (ui_sleep_dialog.sleep_forced, from the per-player survival updates) skips
++// no time: it is that player's blackout (input held, its client fades out,
++// its sleep recovered when it wakes); the installed 5 % death chance after it
++// stays the script's.
++const u32 kBlackoutSeconds = 8;
++
++void sleep_event_to(PlayerLink& link, const coop::proto::Transition& t, u8 state, u8 hours, u32 remaining_ms)
++{
++	std::vector<u8> payload;
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(t.id >> (8 * b)));
++	put_u8(payload, state);
++	put_u8(payload, t.requester);
++	put_u8(payload, t.partner);
++	put_u8(payload, u8(t.abort));
++	put_u8(payload, hours);
++	put_u32(payload, remaining_ms);
++	queue_event(link, 19, payload);
++	link.sleep_sent_id = state == u8(coop::proto::TravelState::Proposed) ? t.id : 0;
++}
++
++void sleep_event(const coop::proto::Transition& t, u32 remaining_ms)
++{
++	for (PlayerLink& link : g_host->links)
++		if (client_in_world(link))
++			sleep_event_to(link, t, u8(t.state), u8(t.destination), remaining_ms);
++}
++
++// Runs a chunk in a player's script context (or none: slot 0xff).
++bool sleep_lua(CActor* actor, LPCSTR chunk, LPCSTR label)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return false;
++	const int top = lua_gettop(L);
++	bool ok = false;
++	if (luaL_loadstring(L, chunk) == 0)
++	{
++		if (actor)
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), label);
++			ok = lua_pcall(L, 0, 0, 0) == 0;
++		}
++		else
++			ok = lua_pcall(L, 0, 0, 0) == 0;
++		if (!ok)
++			g_host->log.line("sleep-lua-error label=%s error=%s", label, lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++	}
++	lua_settop(L, top);
++	return ok;
++}
++
++double sleep_game_hours()
++{
++	return double(ai().get_alife() ? ai().alife().time_manager().game_time() : 0) / 3600000.0;
++}
++
++// The agreed sleep: one skip of the world's time, both players rested.
++void sleep_apply(const coop::proto::Transition& t)
++{
++	const u8 hours = u8(t.destination);
++	const double before = sleep_game_hours();
++	CActor* requester = nullptr;
++	CActor* partner = nullptr;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot < 2)
++			if (CActor* a = participant_actor(l.ref))
++			{
++				if (l.ref.slot == t.requester)
++					requester = a;
++				else if (l.ref.slot == t.partner)
++					partner = a;
++			}
++	string256 chunk;
++	xr_sprintf(chunk, "level.change_game_time(0, %u, 0)", u32(hours));
++	const bool skipped = sleep_lua(nullptr, chunk, "sleep-skip");
++	xr_sprintf(chunk, "if db.actor then db.actor.power = 1 end SendScriptCallback('actor_on_sleep', %u)", u32(hours));
++	const bool req_ok = requester && sleep_lua(requester, chunk, "sleep-requester");
++	xr_sprintf(chunk, "if db.actor then db.actor.power = 1 end\n"
++		"for _, m in ipairs({'actor_status_sleep', 'actor_status_thirst', 'arszi_psy'}) do\n"
++		"  local mod = _G[m] if mod and mod.actor_on_sleep then mod.actor_on_sleep(%u) end\n"
++		"end", u32(hours));
++	const bool part_ok = partner && sleep_lua(partner, chunk, "sleep-partner");
++	++g_host->sleep.slept;
++	const bool published = request_publication("sleep");
++	g_host->log.line("sleep-slept id=%I64x hours=%u game_hours=%.3f->%.3f skipped=%d requester=%d partner=%d published=%d",
++		t.id, u32(hours), before, sleep_game_hours(), skipped ? 1 : 0, req_ok ? 1 : 0, part_ok ? 1 : 0, published ? 1 : 0);
++}
++
++void end_sleep(const coop::proto::Transition& t)
++{
++	const u64 now = g_host->wall.GetElapsed_ms();
++	g_host->log.line("sleep-end id=%I64x state=%s abort=%s requester=%u partner=%u hours=%u after_ms=%I64u", t.id,
++		coop::proto::to_string(t.state), coop::proto::to_string(t.abort), u32(t.requester), u32(t.partner),
++		u32(t.destination), now - t.proposed_ms);
++	if (t.state == coop::proto::TravelState::Agreed)
++		sleep_apply(t);
++	sleep_event(t, 0);
++}
++
++bool sleep_abort(coop::proto::TravelAbort why)
++{
++	coop::proto::Transition out;
++	if (!g_host->sleep.coordinator || !g_host->sleep.coordinator->abort(why, g_host->wall.GetElapsed_ms(), out))
++		return false;
++	end_sleep(out);
++	return true;
++}
++
++u16 take_sleep_request(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	u16 reason = 0;
++	if (travel_known(link, intent, result, reason))
++		return reason;
++	++g_host->sleep.requests;
++	if (!link.session || !g_host->sleep.coordinator)
++		return coop::proto::kReasonNoActor;
++	if (g_host->travel.exec)
++		return coop::proto::kReasonTravelInProgress;
++	if (intent.params.size() != 1 || intent.params[0] < 1 || intent.params[0] > 24)
++		return coop::proto::kReasonMalformed;
++	const u8 hours = intent.params[0];
++	CActor* actor = participant_actor(link.ref);
++	if (!actor || !actor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	// the installed window's rule (TestAndShow): no sleep while bleeding or irradiated; nor while passed out
++	const float bleeding = actor->conditions().BleedingSpeed();
++	const float radiation = actor->conditions().GetRadiation();
++	if (bleeding > 0.f || radiation > 0.f || g_host->tick < link.blackout_until_tick)
++	{
++		g_host->log.line("sleep-cannot slot=%u bleeding=%.4f radiation=%.4f blackout=%d", u32(link.ref.slot), bleeding,
++			radiation, g_host->tick < link.blackout_until_tick ? 1 : 0);
++		return coop::proto::kReasonCannotSleep;
++	}
++	if (g_host->travel.coordinator && g_host->travel.coordinator->live())
++		return coop::proto::kReasonTravelBusy;
++	PlayerLink* partner = travel_partner(link.ref.slot);
++	CActor* partner_actor = partner ? participant_actor(partner->ref) : nullptr;
++	if (!partner || !client_in_world(*partner) || !partner_actor || !partner_actor->g_Alive())
++	{
++		g_host->log.line("sleep-partner-unavailable slot=%u", u32(link.ref.slot));
++		return coop::proto::kReasonPartnerUnavailable;
++	}
++	string256 who;
++	if (party_in_combat(who))
++	{
++		g_host->log.line("sleep-in-combat slot=%u enemy=%s", u32(link.ref.slot), who);
++		return coop::proto::kReasonInCombat;
++	}
++	coop::proto::Transition t;
++	const coop::proto::TravelVerdict verdict = g_host->sleep.coordinator->propose(link.ref.slot, partner->ref.slot, hours,
++		g_host->wall.GetElapsed_ms(), t);
++	if (verdict == coop::proto::TravelVerdict::Busy)
++		return coop::proto::kReasonTravelBusy;
++	if (verdict != coop::proto::TravelVerdict::Ok)
++		return coop::proto::kReasonWrongParty;
++	++g_host->sleep.proposals;
++	g_host->log.line("sleep-proposed id=%I64x requester=%u partner=%u hours=%u deadline_ms=%I64u operation=%I64x", t.id,
++		u32(t.requester), u32(t.partner), u32(hours), t.deadline_ms - t.proposed_ms, intent.operation_id);
++	sleep_event(t, u32(t.deadline_ms - t.proposed_ms));
++	travel_remember(link, intent.operation_id, 0, t.id);
++	result.commit_id = 0;
++	result.revision = t.id;
++	return 0;
++}
++
++u16 take_sleep_answer(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	u16 reason = 0;
++	if (travel_known(link, intent, result, reason))
++		return reason;
++	++g_host->sleep.answers;
++	if (!link.session || !g_host->sleep.coordinator)
++		return coop::proto::kReasonNoActor;
++	if (intent.params.size() != 9)
++		return coop::proto::kReasonMalformed;
++	u64 id = 0;
++	for (int b = 0; b < 8; ++b)
++		id |= u64(intent.params[b]) << (8 * b);
++	const u8 answer = intent.params[8];
++	if (answer < 1 || answer > 3)
++		return coop::proto::kReasonMalformed;
++	coop::proto::TransitionCoordinator& c = *g_host->sleep.coordinator;
++	const coop::proto::Transition* live = c.live();
++	if (!live || live->id != id)
++	{
++		g_host->log.line("sleep-no-proposal slot=%u id=%I64x answer=%u live=%I64x", u32(link.ref.slot), id, u32(answer),
++			live ? live->id : 0ull);
++		return coop::proto::kReasonNoTransition;
++	}
++	if (answer == 1 && live->partner == link.ref.slot)
++	{
++		CActor* actor = participant_actor(link.ref);
++		if (!actor || !actor->g_Alive())
++			return coop::proto::kReasonNoActor;
++		string256 who;
++		if (party_in_combat(who))
++			return coop::proto::kReasonInCombat;
++	}
++	coop::proto::Transition out;
++	const coop::proto::TravelVerdict v =
++		c.answer(link.ref.slot, id, coop::proto::TravelAnswer(answer), g_host->wall.GetElapsed_ms(), out);
++	if (v == coop::proto::TravelVerdict::WrongParty)
++	{
++		g_host->log.line("sleep-wrong-party slot=%u id=%I64x answer=%u", u32(link.ref.slot), id, u32(answer));
++		return coop::proto::kReasonWrongParty;
++	}
++	if (v != coop::proto::TravelVerdict::Ok)
++		return coop::proto::kReasonNoTransition;
++	g_host->log.line("sleep-answer slot=%u id=%I64x answer=%s -> %s", u32(link.ref.slot), id,
++		answer == 1 ? "accept" : answer == 2 ? "refuse" : "cancel", coop::proto::to_string(out.state));
++	travel_remember(link, intent.operation_id, 0, id);
++	end_sleep(out);
++	result.commit_id = 0;
++	result.revision = id;
++	return 0;
++}
++
++// A player passed out (ui_sleep_dialog.sleep_forced in its context): its
++// blackout; no time skip
++void sleep_blackout(u8 slot, u8 hours)
++{
++	if (!g_host)
++		return;
++	for (PlayerLink& l : g_host->links)
++	{
++		if (!l.bound || l.ref.slot != slot)
++			continue;
++		if (g_host->tick < l.blackout_until_tick)
++			return;
++		l.blackout_until_tick = g_host->tick + kBlackoutSeconds * 50;
++		l.blackout_hours = hours;
++		++g_host->sleep.blackouts;
++		g_host->log.line("sleep-blackout slot=%u hours=%u seconds=%u game_hours=%.3f", u32(slot), u32(hours),
++			kBlackoutSeconds, sleep_game_hours());
++		if (client_in_world(l))
++		{
++			coop::proto::Transition t;
++			t.requester = t.partner = slot;
++			sleep_event_to(l, t, 11, hours, kBlackoutSeconds * 1000);
++		}
++		return;
++	}
++}
++
++void sleep_tick()
++{
++	// the blackouts that end: the player wakes, rested as the script's sleep would leave it
++	for (PlayerLink& l : g_host->links)
++		if (l.blackout_until_tick && g_host->tick >= l.blackout_until_tick)
++		{
++			l.blackout_until_tick = 0;
++			CActor* a = participant_actor(l.ref);
++			string256 chunk;
++			xr_sprintf(chunk, "if db.actor then db.actor.power = 1 end\n"
++				"for _, m in ipairs({'actor_status_sleep', 'actor_status_thirst', 'arszi_psy'}) do\n"
++				"  local mod = _G[m] if mod and mod.actor_on_sleep then mod.actor_on_sleep(%u) end\n"
++				"end", u32(l.blackout_hours));
++			const bool ok = a && a->g_Alive() && sleep_lua(a, chunk, "blackout-wake");
++			g_host->log.line("sleep-woke slot=%u hours=%u alive=%d rested=%d held=%I64u game_hours=%.3f", u32(l.ref.slot),
++				u32(l.blackout_hours), a && a->g_Alive() ? 1 : 0, ok ? 1 : 0, l.blackout_inputs_held, sleep_game_hours());
++		}
++	if (!g_host->sleep.coordinator)
++		return;
++	coop::proto::TransitionCoordinator& c = *g_host->sleep.coordinator;
++	const u64 now = g_host->wall.GetElapsed_ms();
++	coop::proto::Transition out;
++	if (c.expire(now, out))
++	{
++		end_sleep(out);
++		return;
++	}
++	const coop::proto::Transition* live = c.live();
++	if (!live)
++		return;
++	if (g_host->tick - g_host->sleep.last_check_tick >= 25)
++	{
++		g_host->sleep.last_check_tick = g_host->tick;
++		for (PlayerLink& l : g_host->links)
++		{
++			if (!l.bound || (l.ref.slot != live->requester && l.ref.slot != live->partner))
++				continue;
++			const bool requester = l.ref.slot == live->requester;
++			CActor* a = participant_actor(l.ref);
++			if (!client_in_world(l))
++			{
++				sleep_abort(requester ? coop::proto::TravelAbort::RequesterLeft : coop::proto::TravelAbort::PartnerLeft);
++				return;
++			}
++			if (!a || !a->g_Alive())
++			{
++				sleep_abort(requester ? coop::proto::TravelAbort::RequesterDead : coop::proto::TravelAbort::PartnerDead);
++				return;
++			}
++		}
++		string256 who;
++		if (party_in_combat(who))
++		{
++			g_host->log.line("sleep-combat-abort id=%I64x enemy=%s", live->id, who);
++			sleep_abort(coop::proto::TravelAbort::Combat);
++			return;
++		}
++	}
++	for (PlayerLink& l : g_host->links)
++		if (client_in_world(l) && l.sleep_sent_id != live->id)
++			sleep_event_to(l, *live, u8(live->state), u8(live->destination),
++				u32(live->deadline_ms > now ? live->deadline_ms - now : 0));
++}
++
++void sleep_on_left(const PlayerLink& link)
++{
++	if (!g_host->sleep.coordinator)
++		return;
++	const coop::proto::Transition* live = g_host->sleep.coordinator->live();
++	if (!live || !link.bound)
++		return;
++	if (link.ref.slot == live->requester)
++		sleep_abort(coop::proto::TravelAbort::RequesterLeft);
++	else if (link.ref.slot == live->partner)
++		sleep_abort(coop::proto::TravelAbort::PartnerLeft);
++}
++
++// The sleep fixture (profile sleep_party, server-driven; the intents are the
++// ones the clients' keys and window send, made on the server). Both players'
++// sleep need is set to 5000, p2's radiation cleared (the window's rule). Then:
++// a stale answer (28); p2 asks for 3 h; p2's own accept (29); a travel request
++// while it is up (23); p1 refuses: no time passes. p2 asks again, p1 accepts:
++// the world's time skips 3 h once, both players' need drops. Then p2 passes out
++// (ui_sleep_dialog.sleep_forced(4) in p2's context, as the survival update
++// calls it): no time skip, p2's input held, p1's not; when p2 wakes its need
++// drops, p1's does not. compare-coop-sleep.py checks the lines.
++void needs_set(u8 slot, LPCSTR module, LPCSTR name, float value)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L || !g_host->needs_adapter)
++		return;
++	const u8 was = g_host->needs_current;
++	needs_switch(slot);
++	const int top = lua_gettop(L);
++	const int at = campaign::script_module_upvalue(L, module, name);
++	if (at)
++	{
++		lua_pushnumber(L, value);
++		lua_setupvalue(L, -2, at);
++	}
++	lua_settop(L, top);
++	needs_switch(was);
++}
++
++u16 sleep_fixture_intent(PlayerLink& link, u16 kind, const std::vector<u8>& params, u64& revision)
++{
++	Host::Sleep::Fixture& f = g_host->sleep.fixture;
++	coop::proto::ActionIntent intent;
++	intent.operation_id = ++f.operation;
++	intent.kind = kind;
++	intent.params = params;
++	coop::proto::ActionResult result;
++	u16 reason = 0;
++	if (kind == coop::proto::kActionSleepRequest)
++		reason = take_sleep_request(link, intent, result);
++	else if (kind == coop::proto::kActionSleepAnswer)
++		reason = take_sleep_answer(link, intent, result);
++	else
++		reason = take_travel_request(link, intent, result);
++	revision = result.revision;
++	return reason;
++}
++
++std::vector<u8> sleep_answer_params(u64 id, u8 answer)
++{
++	std::vector<u8> p;
++	for (int b = 0; b < 8; ++b)
++		p.push_back(u8(id >> (8 * b)));
++	p.push_back(answer);
++	return p;
++}
++
++void sleep_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.sleep_party || !ai().get_alife())
++		return;
++	Host::Sleep::Fixture& f = g_host->sleep.fixture;
++	PlayerLink* links[2] = {nullptr, nullptr};
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				links[link.ref.slot] = &link;
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-sleep both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 999 || g_host->tick < f.both_since + u64(config.sleep_party) * 50)
++		return;
++	PlayerLink& l1 = *links[0];
++	PlayerLink& l2 = *links[1];
++	float n1[3], n2[3];
++	u64 rev = 0;
++	if (f.phase == 0)
++	{
++		actors[1]->conditions().ChangeRadiation(-actors[1]->conditions().GetRadiation());
++		needs_set(0, "actor_status_sleep", "last_sleep", 5000.f);
++		needs_set(1, "actor_status_sleep", "last_sleep", 5000.f);
++		needs_values(0, n1);
++		needs_values(1, n2);
++		f.game_hours0 = sleep_game_hours();
++		const u16 stale = sleep_fixture_intent(l1, coop::proto::kActionSleepAnswer, sleep_answer_params(0x1234, 1), rev);
++		u64 id = 0;
++		const u16 req = sleep_fixture_intent(l2, coop::proto::kActionSleepRequest, std::vector<u8>(1, 3), id);
++		const u16 own = sleep_fixture_intent(l2, coop::proto::kActionSleepAnswer, sleep_answer_params(id, 1), rev);
++		const u16 travel = sleep_fixture_intent(l1, coop::proto::kActionTravelRequest, std::vector<u8>(), rev);
++		const u16 refuse = sleep_fixture_intent(l1, coop::proto::kActionSleepAnswer, sleep_answer_params(id, 2), rev);
++		const bool pass = stale == coop::proto::kReasonNoTransition && req == 0 && id != 0 &&
++			own == coop::proto::kReasonWrongParty && travel == coop::proto::kReasonTravelBusy && refuse == 0;
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-sleep refused-round stale=%u request=%u id=%I64x own_accept=%u travel=%u refuse=%u "
++			"sleep_p1=%.1f sleep_p2=%.1f pass=%d", u32(stale), u32(req), id, u32(own), u32(travel), u32(refuse), n1[1], n2[1],
++			pass ? 1 : 0);
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 2 * 50)
++			return;
++		const double now = sleep_game_hours();
++		const bool pass = now - f.game_hours0 < 0.1;
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-sleep refused-time game_hours=%.3f->%.3f pass=%d", f.game_hours0, now, pass ? 1 : 0);
++		needs_values(0, n1);
++		needs_values(1, n2);
++		f.sleep0[0] = n1[1];
++		f.sleep0[1] = n2[1];
++		f.game_hours0 = now;
++		u64 id = 0;
++		const u16 req = sleep_fixture_intent(l2, coop::proto::kActionSleepRequest, std::vector<u8>(1, 3), id);
++		const u16 acc = sleep_fixture_intent(l1, coop::proto::kActionSleepAnswer, sleep_answer_params(id, 1), rev);
++		const bool ok = req == 0 && acc == 0;
++		if (!ok)
++			++f.failures;
++		g_host->log.line("fixture-sleep agreed-round request=%u id=%I64x accept=%u pass=%d", u32(req), id, u32(acc), ok ? 1 : 0);
++		f.phase = 2;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		if (g_host->tick - f.phase_tick < 3 * 50)
++			return;
++		const double now = sleep_game_hours();
++		needs_values(0, n1);
++		needs_values(1, n2);
++		const double skipped = now - f.game_hours0;
++		const bool pass = skipped >= 3.0 && skipped < 3.2 && n1[1] < f.sleep0[0] && n2[1] < f.sleep0[1];
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-sleep agreed-time game_hours=%.3f->%.3f skipped=%.3f sleep_p1=%.1f->%.1f sleep_p2=%.1f->%.1f "
++			"pass=%d", f.game_hours0, now, skipped, f.sleep0[0], n1[1], f.sleep0[1], n2[1], pass ? 1 : 0);
++		// the blackout: p2 passes out as its survival update would make it
++		needs_set(1, "actor_status_sleep", "last_sleep", 5000.f);
++		needs_values(0, n1);
++		needs_values(1, n2);
++		f.sleep0[0] = n1[1];
++		f.sleep0[1] = n2[1];
++		f.game_hours0 = now;
++		sleep_lua(actors[1], "ui_sleep_dialog.sleep_forced(4)", "fixture-forced");
++		f.phase = 3;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick - f.phase_tick < 2 * 50)
++			return;
++		const double now = sleep_game_hours();
++		const bool held = g_host->tick < l2.blackout_until_tick && l1.blackout_until_tick == 0;
++		const bool pass = held && now - f.game_hours0 < 0.1;
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-sleep blackout game_hours=%.3f->%.3f p2_held=%d p1_free=%d pass=%d", f.game_hours0, now,
++			g_host->tick < l2.blackout_until_tick ? 1 : 0, l1.blackout_until_tick == 0 ? 1 : 0, pass ? 1 : 0);
++		f.phase = 4;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 4)
++	{
++		if (g_host->tick - f.phase_tick < 9 * 50)
++			return;
++		needs_values(0, n1);
++		needs_values(1, n2);
++		const double now = sleep_game_hours();
++		const bool pass = l2.blackout_until_tick == 0 && n2[1] < f.sleep0[1] && n1[1] >= f.sleep0[0] && l2.blackout_inputs_held > 0 &&
++			l1.blackout_inputs_held == 0 && now - f.game_hours0 < 0.2;
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-sleep woke sleep_p1=%.1f->%.1f sleep_p2=%.1f->%.1f p2_inputs_held=%I64u p1_inputs_held=%I64u "
++			"game_hours=%.3f->%.3f pass=%d", f.sleep0[0], n1[1], f.sleep0[1], n2[1], l2.blackout_inputs_held,
++			l1.blackout_inputs_held, f.game_hours0, now, pass ? 1 : 0);
++		g_host->log.line("fixture-sleep done failures=%u slept=%I64u blackouts=%I64u", f.failures, g_host->sleep.slept,
++			g_host->sleep.blackouts);
++		f.phase = 999;
++	}
++}
++
+ // The travel fixture (profile travel_party, travel_variant): once both
+ // players are in the world, both actors are placed inside Cordon's first
+ // enabled level changer and rounds run through the transfer driver's steps
+@@ -15559,6 +16123,7 @@ void on_left(const coop::session::SessionEvent& e)
+ 		detached = g_campaign_identity->detach_session(g_campaign_identity->authority(), link->session, Device.dwFrame);
+ 	link->session = 0;
+ 	travel_on_left(*link); // S09-T01: a proposal it is party to is aborted
++	sleep_on_left(*link); // S10-T03c
+ 	talk_close(*link, "left", false); // S10-T04a: the NPC is free again
+ 	// Detached-actor policy: the actor stays, vulnerable, and moves only by
+ 	// input, which arrives only on an attached session.
+@@ -15631,6 +16196,10 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_travel_answer(*link, *intent, result); // S09-T01
+ 		else if (intent->kind == coop::proto::kActionTravelReady)
+ 			reason = take_travel_ready(*link, *intent, result); // S09-T03
++		else if (intent->kind == coop::proto::kActionSleepRequest)
++			reason = take_sleep_request(*link, *intent, result); // S10-T03c
++		else if (intent->kind == coop::proto::kActionSleepAnswer)
++			reason = take_sleep_answer(*link, *intent, result); // S10-T03c
+ 		else if (intent->kind == coop::proto::kActionTalkStart)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
+ 		else if (intent->kind == coop::proto::kActionUseObject)
+@@ -15974,6 +16543,13 @@ bool coop_server_dialogue_answer(CInventoryOwner* speaker, LPCSTR text)
+ 	return true; // the server has no talk window
+ }
+ 
++// S10-T03c: a player passed out (the compat layer's ui_sleep_dialog.sleep_forced)
++void coop_server_blackout(u8 slot, u8 hours)
++{
++	if (g_host && g_host->started)
++		sleep_blackout(slot, hours);
++}
++
+ // S10-T02d: see the mutant abilities (decision T02d-1)
+ void coop_server_companion_changed(u16 npc, int slot)
+ {
+@@ -16217,6 +16793,7 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 	config.authority_epoch = g_host->persistence->epoch(); // S07-T04: allocated durably at recovery
+ 	// S09-T01: transition ids are (epoch << 32) | serial: never repeated, never continued across a restart
+ 	g_host->travel.coordinator.reset(new coop::proto::TransitionCoordinator(config.authority_epoch));
++	g_host->sleep.coordinator.reset(new coop::proto::TransitionCoordinator(config.authority_epoch)); // S10-T03c
+ 	g_host->build = config.build;
+ 	config.tick_rate_hz = u16(_max(1u, 1000u / _max(1u, Device.dwTimeDelta ? Device.dwTimeDelta : 20u)));
+ 	config.snapshot_rate_hz = u16(_min<u32>(20u, config.tick_rate_hz));
+@@ -16737,11 +17314,13 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	companion_fixtures(); // S10-T02f
+ 	alife_fixtures(); // S10-T03a
+ 	squad_fixtures(); // S10-T03b
++	sleep_fixtures(); // S10-T03c
+ 
+ 
+ 
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
++	sleep_tick(); // S10-T03c: the sleep proposal's, and the blackouts
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+ 	travel_hold_tick(); // S09-T03: the resume once both clients are ready
+ 	travel_fixtures(); // S09-T01
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 665548e..8d69dbd 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -76,4 +76,6 @@ void coop_server_psy_hit(u16 controller, u16 target, u8 phase, float health);
+ void coop_server_monster_ability(u16 monster, u16 target, LPCSTR ability, float value);
+ // S10-T02f: a companion recruited (slot) or dismissed (-1): logged, and a checkpoint is asked for
+ void coop_server_companion_changed(u16 npc, int slot);
++// S10-T03c: the player in `slot` passed out (no time skip; its blackout)
++void coop_server_blackout(u8 slot, u8 hours);
+ } // namespace campaign

@@ -225,3 +225,16 @@ matrix rule F8 binds it. Awaiting the user's approval at G10.
 | T03b-1 | **A squad sent at "the actor" goes for the nearest player**, chosen again at every squad update (so it turns to whichever player is closer): Anomaly's bounty hit squads, the measuring task's escort and any squad whose script target is `"actor"` | matrix rule F8; the installed code sends every such squad at actor 0, player 1, even when player 2 is beside it | the player whose rank or task caused it (needs a per-squad owner) |
 | T03b-2 | ***(your call)* Bounty hit squads are triggered by player 1's rank and reputation**: the installed timer (`sim_squad_bounty.spawn_timer`) reads `db.actor`, which outside a player's context is player 1; player 2's rank and reputation (per player since S10-T04d) do not count. Proposed: trigger on either player (the worse of the two); not changed yet | the hunt itself is fixed by T03b-1; who *attracts* hunters is a gameplay choice | keep player 1's (the host's) values; or count both players' values together |
 | T03b-3 | *(scope)* Offline combat between squads is unchanged: `sim_offline_combat.script` never reads the actor; its results follow single player's rules by construction | no participant input to adapt | — |
+
+## S10-T03c — world time and sleep
+
+Taken 2026-10-30 while building the slice ([S10-T03c](validation/S10-T03c.md));
+T01-8 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03c-1 | **Sleeping follows the travel consent's rules**: the sleep window's button asks the partner (*"Player N wants to sleep N hours. USE to sleep too, DROP to refuse."*), 30 s to answer, the requester's DROP cancels; no partner in the world, no sleep; combat, a death or a disconnect cancels it | T01-8; one consent flow for both players to learn | a separate sleep vote window |
+| T03c-2 | **Only the player who asks must be fit and sheltered**: the installed window's shelter or tent check runs on that player's client, and the server refuses a request while that player bleeds, is irradiated or is passed out; the partner sleeps wherever it stands | the time skip is instant (no NPC acts during it); asking the partner to find shelter too would make sleeping awkward in co-op | both players must be sheltered and fit |
+| T03c-3 | **One sleep rests both players**: the world's time skips once by the asked hours; both players' sleep need and stamina recover as from that sleep; the world's sleep listeners (emission timers, Ironman's sleep count) run once | one world, one night | the partner does not recover (it only waited) |
+| T03c-4 | **Passing out is a blackout of 8 real seconds**: that player's screen fades and its input is held, its sleep need recovers by the hours it was out (3–9, the script's number), the world's time does not move; the installed 5 % death chance on passing out from thirst stays | T01-8; a forced per-player skip is impossible in one world | a longer blackout (the partner waits); or skip time for both |
+| T03c-5 | *(scope)* The sleep's save (`dream_callback2` saves "<name> - sleep") becomes the server's checkpoint after the skip | the server owns saving in co-op (S07) | — |

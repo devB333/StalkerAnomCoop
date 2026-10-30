@@ -39,6 +39,8 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // put on the ground), in the lifecycle order.
 // 1.6 + S10-T04a: the talk kinds (14 start, 15 say, 16 end) and reasons 33-36,
 // CampaignEvent kind 14 (the dialogue state); no wire layout change.
+// 1.8 + S10-T03c: the sleep kinds (24 request, 25 answer), reason 42 and
+// CampaignEvent kind 19 (sleep); no wire layout change.
 constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -408,6 +410,11 @@ enum ActionKind : std::uint16_t
                                // journaled as one `upgrade` record; CampaignEvent 17 tells the clients (40 no open
                                // upgrade session, 41 the upgrade or repair is refused, 38 not enough money)
     kActionUpgradeClose = 23,  // S10-T04f: target: the mechanic; params: none; the player closed the upgrade window
+    kActionSleepRequest = 24,  // S10-T03c: params: u8 hours (1..24); asks the partner to sleep: the world's time
+                               // skips once when the partner agrees (decision T01-8; the travel consent's rules,
+                               // docs/travel-contract.md §3-5); the result's revision is the proposal id
+    kActionSleepAnswer = 25,   // S10-T03c: params: u64 proposal id, u8 answer (1 accept, 2 refuse: the partner;
+                               // 3 cancel: the requester); refused unless the id is the live sleep proposal's
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -463,6 +470,8 @@ enum ActionReason : std::uint16_t
     kReasonNoMechanic = 40,       // S10-T04f: no open upgrade session with that NPC (or it is not a mechanic)
     kReasonUpgradeRefused = 41,   // S10-T04f: the upgrade cannot be installed (unknown, installed, locked by its
                                   // group or a precondition) or the item cannot be repaired
+    kReasonCannotSleep = 42,      // S10-T03c: the requester bleeds or is irradiated (the installed window's rule),
+                                  // or is passed out
 };
 
 struct Input

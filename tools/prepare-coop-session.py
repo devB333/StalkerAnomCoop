@@ -238,6 +238,11 @@ def main():
                              "beside it takes the target; fixture squad_party)")
     parser.add_argument("--squad-start", type=int, default=20,
                         help="with --squad: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--sleep", default="",
+                        help="comma-separated client names present for the S10-T03c sleep fixture (server-driven: "
+                             "a refused and an agreed sleep, then a blackout for p2; fixture sleep_party)")
+    parser.add_argument("--sleep-start", type=int, default=20,
+                        help="with --sleep: seconds after both players are in the world until the fixture starts")
     parser.add_argument("--place-giver", type=int, default=0,
                         help="hands-on aid: seconds after both players are in the world until both actors are placed "
                              "in front of Sidorovich, once (profile place_giver; 0 off)")
@@ -327,13 +332,14 @@ def main():
     companion_fix = {n for n in args.companion.split(",") if n}
     alife_fix = {n for n in args.alife.split(",") if n}
     squad_fix = {n for n in args.squad.split(",") if n}
+    sleep_fix = {n for n in args.sleep.split(",") if n}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
                | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
-               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix)
+               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -437,6 +443,7 @@ def main():
                       f"companion_party = {args.companion_start if companion_fix else 0}",
                       f"alife_party = {args.alife_start if alife_fix else 0}",
                       f"squad_party = {args.squad_start if squad_fix else 0}",
+                      f"sleep_party = {args.sleep_start if sleep_fix else 0}",
                       f"place_giver = {args.place_giver}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
@@ -451,7 +458,8 @@ def main():
                     fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                                 "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
-                                "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party")
+                                "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
+                                "sleep_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -463,7 +471,8 @@ def main():
                 fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                             "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
-                            "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party")
+                            "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
+                            "sleep_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")

@@ -535,6 +535,15 @@ returns 0) at the nearest player instead of actor 0
 (`campaign.nearest_participant_id`, the existing compat-layer wrap), and adds
 the squad-target fixture (`squad_party`). Single player is unchanged.
 
+`0078-sleep.patch` (S10-T03c) makes sleeping a party consent: the client's
+installed sleep window asks the server (ActionIntent 24) and the partner
+answers with USE or DROP (25) under the travel consent's rules; agreed, the
+server skips the world's time once and rests both players (CampaignEvent 19
+presents it); passing out (`ui_sleep_dialog.sleep_forced`, wrapped on the
+server) is that player's blackout with no time skip. A client logs every
+clock jump over 10 minutes. The sleep fixture (`sleep_party`). Single player
+is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

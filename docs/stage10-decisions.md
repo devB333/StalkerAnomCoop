@@ -203,3 +203,14 @@ T01-10 and T01-5 bind it. Awaiting the user's approval at G10.
 | T02f-3 | **A recruit or a dismissal asks for a checkpoint**, like a stash's spawn | the recruiter is kept in the save; a crash right after recruiting would otherwise lose it | journal it as its own record (a new journal kind) |
 | T02f-4 | **The companion cap is shared**: Anomaly's `max_actor_squad_size` (2 by default) counts every companion of both players together, because the installed script keeps one list | the scripts' own rule, unchanged | a cap per player (each player could have 2) |
 | T02f-5 | *(limit)* The companion hotkeys and the companion wheel (`axr_companions` `on_key_release`, `start_CW`: all-companion modes, per-squad settings, move-to-point) run in the pressing client's Lua and do not reach the server; orders through a companion's dialogue do | the keys and the wheel are client UI over server-owned companions | route them as an action intent to the server, applied to that player's own companions |
+
+## S10-T03a — ALife switching and respawn across travel, disconnect and restart
+
+Taken 2026-10-30 while building the slice ([S10-T03a](validation/S10-T03a.md));
+matrix rule F7 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03a-1 | **No squad respawns beside either player**: a smart terrain's respawn guard (no respawn while "the actor" is within its `respawn_radius`, 150 m by default) measures the nearest player, and so does a squad's `dist_to_actor` (task markers, survival help); the installed scripts measured actor 0, player 1, only | matrix rule F7 (the nearest participant, never actor 0); a squad must not appear out of thin air in front of player 2 | keep the single-player rule (player 2 unprotected) |
+| T03a-2 | **A disconnected player's area stays online**: its actor stays in the world (S09 detached-actor policy), so the ALife keeps the creatures around it online and running while the player is away | the actor is still there and vulnerable; switching its area offline would freeze NPCs that may be fighting it | take the area offline while the player is away (L53 would then not apply to a disconnect) |
+| T03a-3 | *(scope)* Respawn timing (`respawn_idle`, game time) and population are the world's, shared by both players; nothing about respawn is per player | one world, one clock (S10-T03c owns the clock) | — |

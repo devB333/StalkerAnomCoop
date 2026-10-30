@@ -309,6 +309,10 @@
     {
       "path": "patches/engine/0075-companions.patch",
       "sha256": "0c5e1c55e69126a02d9f92ed6ede527c11d6fe4dcd07cf8001702fbe8c7d742b"
+    },
+    {
+      "path": "patches/engine/0076-alife-respawn.patch",
+      "sha256": "9a7bd0db72b9baa6d87c1ab94a9a3ba71b550eabd1aef8715ef40c5ae9ca4c9c"
     }
   ],
   "submodules": [

@@ -521,6 +521,14 @@ planner (`Think`, `ProcessScripts`), where scheme actions such as `axr_beh`'s
 walk run. The companion fixture (`companion_party`). Single player is
 unchanged.
 
+`0076-alife-respawn.patch` (S10-T03a) makes the installed ALife scripts'
+distance to "the actor" the nearest participant's on the campaign server
+(`campaign.nearest_participant_distance`): a smart terrain's respawn guard
+(`se_smart_terrain.try_respawn`) and a squad's `dist_to_actor`
+(`sim_squad_scripted.check_invulnerability` wrap), so no squad respawns
+beside player 2; and adds the ALife identity fixture (`alife_party`).
+Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

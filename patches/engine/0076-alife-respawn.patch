@@ -1,0 +1,715 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 44ab0ed..8118d21 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1009,6 +1009,28 @@ int lua_companion_slot(int npc)
+ 	return npc < 0 || npc >= 0xffff ? -1 : companion_slot(u16(npc));
+ }
+ 
++// S10-T03a: the distance from a point to the nearest alive participant actor's
++// server entity, the same anchors the ALife switch uses (S03-T04); -1 when none
++// (a client, single player), so the installed rule stands
++float lua_nearest_participant_distance(float x, float y, float z)
++{
++	if (!server_role())
++		return -1.f;
++	xr_vector<CSE_ALifeCreatureActor*> actors;
++	participant_actor_entities(actors);
++	const Fvector at = {x, y, z};
++	float best = -1.f;
++	for (CSE_ALifeCreatureActor* actor : actors)
++	{
++		if (!actor->g_Alive())
++			continue;
++		const float d = actor->o_Position.distance_to(at);
++		if (best < 0.f || d < best)
++			best = d;
++	}
++	return best;
++}
++
+ int lua_slot_actor_id(int slot)
+ {
+ 	CActor* actor = slot >= 0 && slot <= 0xff ? slot_actor(u8(slot)) : nullptr;
+@@ -1262,6 +1284,52 @@ LPCSTR const compat_source =
+ 	"  S.companion_wrap = S.companion_wrap .. '+dialog'\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// S10-T03a: the ALife scripts' distance to "the actor" is to the nearest
++	// participant (matrix rule F7): a smart terrain's respawn guard
++	// (try_respawn skips while the actor is within respawn_radius) and a squad's
++	// dist_to_actor (task markers, survival help) read alife():actor(), actor 0,
++	// so a squad could respawn beside player 2. Both are set from the nearest
++	// alive participant before the installed code reads them.
++	"S.alife_wrap = 'none'\n"
++	"S.respawn_guarded = 0\n"
++	"S.squad_dist = 0\n"
++	"local function nearest_player(pos)\n"
++	"  if not pos then return nil end\n"
++	"  local d = campaign.nearest_participant_distance(pos.x, pos.y, pos.z)\n"
++	"  if d and d >= 0 then return d end\n"
++	"end\n"
++	"local st_ok, STM = pcall(function() return smart_terrain end)\n"
++	"if not st_ok then STM = nil end\n"
++	"local STC = type(STM) == 'table' and rawget(STM, 'se_smart_terrain') or rawget(_G, 'se_smart_terrain')\n"
++	"if STC and STC.try_respawn then\n"
++	"  local orig_respawn = STC.try_respawn\n"
++	"  STC.try_respawn = function(self, ...)\n"
++	"    if self.online then\n"
++	"      local d = nearest_player(self.position)\n"
++	"      if d and (not self.dist_to_actor or d < self.dist_to_actor) then\n"
++	"        local r = self.respawn_radius or 150\n"
++	"        if (not self.dist_to_actor or self.dist_to_actor >= r) and d < r then S.respawn_guarded = S.respawn_guarded + 1 end\n"
++	"        self.dist_to_actor = d\n"
++	"      end\n"
++	"    end\n"
++	"    return orig_respawn(self, ...)\n"
++	"  end\n"
++	"  S.alife_wrap = 'respawn'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	"if SSS and SSS.check_invulnerability then\n"
++	"  local orig_inv = SSS.check_invulnerability\n"
++	"  SSS.check_invulnerability = function(self, ...)\n"
++	"    local d = nearest_player(self.position)\n"
++	"    if d and self.dist_to_actor and d < self.dist_to_actor then\n"
++	"      self.dist_to_actor = d\n"
++	"      S.squad_dist = S.squad_dist + 1\n"
++	"    end\n"
++	"    return orig_inv(self, ...)\n"
++	"  end\n"
++	"  S.alife_wrap = S.alife_wrap .. '+squad'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
+ 	"S.installed = true\n";
+ 
+ bool install_compat(lua_State* L)
+@@ -1291,6 +1359,10 @@ bool install_compat(lua_State* L)
+ 	lua_pushstring(L, "companion_wrap");
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T02f compatibility layer companion wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
++	lua_pushstring(L, "alife_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T03a compatibility layer ALife wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 2);
+ 	++s_stats.compat_installs;
+ 	s_compat_state = L;
+@@ -1335,6 +1407,7 @@ void script_register_context(lua_State* L)
+ 		def("clear_companion", &lua_clear_companion),
+ 		def("companion_slot", &lua_companion_slot),
+ 		def("slot_actor_id", &lua_slot_actor_id),
++		def("nearest_participant_distance", &lua_nearest_participant_distance), // S10-T03a
+ 		def("present", &lua_present)
+ 	];
+ }
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index dd78925..0a5d1f1 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -161,6 +161,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.mutant_party = ini.line_exist("coop", "mutant_party") ? ini.r_u32("coop", "mutant_party") : 0; // S10-T02d
+ 		out.fauna_party = ini.line_exist("coop", "fauna_party") ? ini.r_u32("coop", "fauna_party") : 0; // S10-T02e
+ 		out.companion_party = ini.line_exist("coop", "companion_party") ? ini.r_u32("coop", "companion_party") : 0; // S10-T02f
++		out.alife_party = ini.line_exist("coop", "alife_party") ? ini.r_u32("coop", "alife_party") : 0; // S10-T03a
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index e523d4d..d49de87 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -121,6 +121,7 @@ struct CoopConfig
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
+ 	u32 companion_party; // S10-T02f fixture: seconds after both attach until p2 recruits a companion (or a restored one is checked)
++	u32 alife_party; // S10-T03a fixture: seconds after both attach until the ALife identity fixture starts (or a restored one is checked)
+ 	u32 fauna_party; // S10-T02e fixture:seconds after both attach until each generic mutant class is spawned near p2
+ 	u32 mutant_party; // S10-T02d fixture:seconds after both attach until the bloodsucker, burer and poltergeist stages
+ 	u32 psy_party; // S10-T02c fixture:seconds after both attach until a controller is spawned near p2
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 5ffa7dd..dcaa239 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -779,6 +779,25 @@ struct Host
+ 		u32 failures = 0;
+ 	} companion_fixture;
+ 	u32 companion_changes = 0; // S10-T02f: recruits and dismissals seen
++	// S10-T03a: the ALife identity fixture (profile alife_party)
++	struct AlifeFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		bool restored = false;
++		u32 failures = 0;
++		int near_id = -1, dest = -1, far_id = -1, squad = -1, members = 0, src = 0;
++		u16 victim = 0xffff;
++		Fvector dest_pos = {0.f, 0.f, 0.f};
++		u64 cpu0 = 0, wall0 = 0;
++		u32 near_p2_before = 0;
++		u64 absent_since = 0;
++		bool absent_logged = false, back_logged = false;
++		string64 level = ""; // the level when the subjects were marked
++		u64 travel_since = 0; // both back in the world on another level (a travel)
++		xr_map<u16, shared_str> dead; // dead creatures at the baseline: id -> name
++	} alife_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -12706,6 +12725,547 @@ void companion_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T03a
++// The ALife identity fixture (profile alife_party, server-driven; with
++// -ServerKill / -ServerRestartAfter and a client 2 -Restart in the run).
++// Fresh: a baseline identity scan (squads, members, alive/dead creatures, a
++// member in two squads, a member whose group is not its squad, two alive
++// creatures with one name, two objects with one story id) and the server's CPU
++// with the players together; the respawn smart terrain nearest p2 (within its
++// respawn radius) is "near", p1 moves to a smart terrain 300+ m from p2 and
++// clear of near's radius ("dest", p1 only, L58), the respawn point nearest p2
++// clear of both players' radius is "far"; CPU apart. Guard: near's respawn is
++// forced (its timer and counts cleared, try_respawn called): no squad may be
++// created, the installed rule measured actor 0 (p1, now far away) and only the
++// nearest-participant distance (the compat layer) holds it. Respawn: far's is
++// forced: one new squad. Then a non-story stalker near p2 is killed, the scan
++// repeats (no resurrection of the baseline's dead), the subjects are written
++// into the scripts' saved state (alife_storage_manager coop_alife_fixture) and a
++// checkpoint is asked for. While p2's client is away its actor keeps its area
++// online. Restored (the marker found after the restart): the victim is still
++// dead under its name, the respawned squad exists once with its members, no
++// other squad from that point appeared, the scan is clean, and the guard holds
++// again. compare-coop-alife.py checks the lines.
++static int alife_lua(LPCSTR chunk, double* out, int count, LPCSTR label)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return -1;
++	const int top = lua_gettop(L);
++	int read = -1;
++	if (luaL_loadstring(L, chunk) == 0)
++	{
++		if (lua_pcall(L, 0, count, 0) == 0)
++		{
++			for (int i = 0; i < count; ++i)
++				out[i] = lua_isnumber(L, top + 1 + i) ? lua_tonumber(L, top + 1 + i) : -9.0;
++			read = count;
++		}
++		else
++			g_host->log.line("fixture-alife lua-error label=%s error=%s", label, lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++	}
++	else
++		g_host->log.line("fixture-alife lua-load-error label=%s error=%s", label, lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_settop(L, top);
++	return read;
++}
++
++struct AlifeScan
++{
++	u32 squads = 0, members = 0, alive = 0, dead = 0, online = 0;
++	u32 bad_group = 0, dup_member = 0, dup_name = 0, dup_story = 0, resurrected = 0;
++	bool clean() const { return !bad_group && !dup_member && !dup_name && !dup_story && !resurrected; }
++};
++
++static AlifeScan alife_scan(xr_map<u16, shared_str>* dead_out, const xr_map<u16, shared_str>* dead_before)
++{
++	AlifeScan s;
++	xr_map<u16, u16> owner;
++	xr_set<shared_str> names;
++	xr_set<u32> stories;
++	const CALifeObjectRegistry::OBJECT_REGISTRY& objects = ai().alife().objects().objects();
++	for (CALifeObjectRegistry::OBJECT_REGISTRY::const_iterator it = objects.begin(); it != objects.end(); ++it)
++	{
++		CSE_ALifeDynamicObject* o = it->second;
++		if (!o)
++			continue;
++		if (CSE_ALifeOnlineOfflineGroup* g = smart_cast<CSE_ALifeOnlineOfflineGroup*>(o))
++		{
++			++s.squads;
++			const CSE_ALifeOnlineOfflineGroup::MEMBERS& members = g->squad_members();
++			for (CSE_ALifeOnlineOfflineGroup::MEMBERS::const_iterator m = members.begin(); m != members.end(); ++m)
++			{
++				++s.members;
++				if (!owner.insert(std::make_pair(m->first, g->ID)).second)
++					++s.dup_member;
++				if (m->second && m->second->m_group_id != g->ID)
++					++s.bad_group;
++			}
++			continue;
++		}
++		CSE_ALifeCreatureAbstract* c = smart_cast<CSE_ALifeCreatureAbstract*>(o);
++		if (!c || smart_cast<CSE_ALifeCreatureActor*>(o))
++			continue;
++		if (o->m_story_id != INVALID_STORY_ID && !stories.insert(u32(o->m_story_id)).second)
++			++s.dup_story;
++		const shared_str name = o->name_replace();
++		if (c->g_Alive())
++		{
++			++s.alive;
++			if (o->m_bOnline)
++				++s.online;
++			if (!names.insert(name).second)
++				++s.dup_name;
++			if (dead_before)
++			{
++				xr_map<u16, shared_str>::const_iterator d = dead_before->find(o->ID);
++				if (d != dead_before->end() && d->second == name)
++					++s.resurrected;
++			}
++		}
++		else
++		{
++			++s.dead;
++			if (dead_out)
++				(*dead_out)[o->ID] = name;
++		}
++	}
++	return s;
++}
++
++static void alife_scan_log(LPCSTR phase, const AlifeScan& s)
++{
++	g_host->log.line("fixture-alife scan phase=%s squads=%u members=%u alive=%u dead=%u online=%u bad_group=%u dup_member=%u "
++		"dup_name=%u dup_story=%u resurrected=%u clean=%d", phase, s.squads, s.members, s.alive, s.dead, s.online, s.bad_group,
++		s.dup_member, s.dup_name, s.dup_story, s.resurrected, s.clean() ? 1 : 0);
++}
++
++static u64 alife_process_cpu()
++{
++	FILETIME created, exited, kernel, user;
++	if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
++		return 0;
++	ULARGE_INTEGER k, u;
++	k.LowPart = kernel.dwLowDateTime;
++	k.HighPart = kernel.dwHighDateTime;
++	u.LowPart = user.dwLowDateTime;
++	u.HighPart = user.dwHighDateTime;
++	return k.QuadPart + u.QuadPart; // 100 ns units
++}
++
++static void alife_cost_begin(Host::AlifeFixture& f)
++{
++	f.cpu0 = alife_process_cpu();
++	f.wall0 = GetTickCount64();
++}
++
++static void alife_cost_log(Host::AlifeFixture& f, LPCSTR phase, const Fvector& p1, const Fvector& p2)
++{
++	const u64 cpu = alife_process_cpu() - f.cpu0;
++	const u64 wall = GetTickCount64() - f.wall0;
++	const AlifeScan s = alife_scan(nullptr, nullptr);
++	g_host->log.line("fixture-alife cost phase=%s cpu_pct=%.1f wall_ms=%I64u online_creatures=%u d_p1_p2=%.1f", phase,
++		wall ? float(cpu) / 100.f / float(wall) : 0.f, wall, s.online, p1.distance_to(p2));
++}
++
++// the online alive creatures within 100 m of a point
++static u32 alife_online_near(const Fvector& at)
++{
++	u32 n = 0;
++	const CALifeObjectRegistry::OBJECT_REGISTRY& objects = ai().alife().objects().objects();
++	for (CALifeObjectRegistry::OBJECT_REGISTRY::const_iterator it = objects.begin(); it != objects.end(); ++it)
++	{
++		CSE_ALifeCreatureAbstract* c = smart_cast<CSE_ALifeCreatureAbstract*>(it->second);
++		if (c && !smart_cast<CSE_ALifeCreatureActor*>(it->second) && c->g_Alive() && c->m_bOnline &&
++			c->o_Position.distance_to(at) < 100.f)
++			++n;
++	}
++	return n;
++}
++
++// forces a smart terrain's respawn: n0/n1 squads from it before/after, the new
++// squad and its members, the guard counter's change, the distance to actor 0,
++// the distance try_respawn used and the radius
++static int alife_force_respawn(int smart, double* v)
++{
++	string2048 chunk;
++	xr_sprintf(chunk,
++		"local e = SIMBOARD.smarts[%d] local s = e and e.smrt\n"
++		"if not s then return -1, -1, -1, 0, 0, -1, -1, -1 end\n"
++		"local before, n0 = {}, 0\n"
++		"for id in pairs(SIMBOARD.squads) do local sq = alife_object(id) if sq then if sq.respawn_point_id == s.id then before[id] = true n0 = n0 + 1 end end end\n"
++		"local saved = {}\n"
++		"for k, c in pairs(s.already_spawned) do saved[k] = c.num c.num = 0 end\n"
++		"s.last_respawn_update = nil\n"
++		"local d0 = s.position:distance_to(alife():actor().position)\n"
++		"s:try_respawn()\n"
++		"local new_id, members, n1 = -1, 0, 0\n"
++		"for id in pairs(SIMBOARD.squads) do local sq = alife_object(id) if sq then if sq.respawn_point_id == s.id then n1 = n1 + 1\n"
++		"  if not before[id] then new_id = id members = 0 for m in sq:squad_members() do members = members + 1 end end end end end\n"
++		"for k, c in pairs(s.already_spawned) do if saved[k] then c.num = saved[k] + c.num end end\n"
++		"return n0, n1, new_id, members, __campaign_ctx.respawn_guarded or 0, d0, s.dist_to_actor or -1, s.respawn_radius or 150\n",
++		smart);
++	return alife_lua(chunk, v, 8, "force-respawn");
++}
++
++static bool alife_guard(Host::AlifeFixture& f)
++{
++	double v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++	if (f.near_id < 0 || alife_force_respawn(f.near_id, v) != 8 || v[0] < 0)
++	{
++		g_host->log.line("fixture-alife guard smart=%d skipped=1 pass=0 restored=%d", f.near_id, f.restored ? 1 : 0);
++		return false;
++	}
++	// held (no new squad) by the distance try_respawn used, the nearest
++	// participant's, inside the radius, while the installed distance to actor 0
++	// was beyond it; guarded_total counts the wrapper's corrections so far (the
++	// smart terrain's own updates make them, before the fixture's call)
++	const bool pass = v[1] == v[0] && v[2] < 0 && v[5] >= v[7] && v[6] >= 0.f && v[6] < v[7];
++	g_host->log.line("fixture-alife guard smart=%d before=%d after=%d new_squad=%d guarded_total=%d d_actor0=%.1f d_used=%.1f "
++		"radius=%.1f pass=%d restored=%d", f.near_id, int(v[0]), int(v[1]), int(v[2]), int(v[4]), v[5], v[6], v[7], pass ? 1 : 0,
++		f.restored ? 1 : 0);
++	return pass;
++}
++
++// the marked subjects (the scripts' saved state): the victim exists, is alive,
++// keeps its name; the squad is found, its members; the squads from its respawn
++// point
++static bool alife_subject_check(double* v)
++{
++	return alife_lua("local m = alife_storage_manager.get_state().coop_alife_fixture\n"
++		"local o = alife_object(m.victim)\n"
++		"local found, members, src = 0, 0, 0\n"
++		"for id in pairs(SIMBOARD.squads) do local sq = alife_object(id) if sq then\n"
++		"  if sq.respawn_point_id == m.smart then src = src + 1 end\n"
++		"  if id == m.squad then found = found + 1 for _ in sq:squad_members() do members = members + 1 end end\n"
++		"end end\n"
++		"return o and 1 or 0, (o and o.alive and o:alive()) and 1 or 0, (o and o:name() == m.victim_name) and 1 or 0, found, members, src\n",
++		v, 6, "subject-check") == 6;
++}
++
++void alife_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.alife_party || !ai().get_alife())
++		return;
++	Host::AlifeFixture& f = g_host->alife_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-alife both-attached tick=%I64u", g_host->tick);
++	}
++	if (f.phase >= 999 || g_host->tick < f.both_since + u64(config.alife_party) * 50)
++		return;
++	// while p2's client is away (after the subjects are marked): its actor stays
++	// an anchor and keeps its area online (S03-T04, decision T03a-2)
++	// a travel since the subjects were marked: the same checks on the new level
++	if (f.phase == 20 && f.level[0] && xr_strcmp(f.level, *Level().name()))
++	{
++		if (attached < 2)
++		{
++			f.travel_since = 0;
++			return;
++		}
++		if (!f.travel_since)
++			f.travel_since = g_host->tick;
++		if (g_host->tick - f.travel_since < 20 * 50)
++			return;
++		const AlifeScan s = alife_scan(nullptr, &f.dead);
++		alife_scan_log("travelled", s);
++		double c[6] = {-9, -9, -9, -9, -9, -9};
++		const bool read = alife_subject_check(c);
++		const bool pass = read && c[1] == 0 && (c[0] == 0 || c[2] == 1) && c[3] == 1 && int(c[4]) == f.members &&
++			int(c[5]) == f.src && s.clean();
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-alife travelled from=%s to=%s victim=%u victim_exists=%d victim_alive=%d victim_same=%d squad=%d "
++			"squad_found=%d members=%d/%d src_squads=%d/%d pass=%d", f.level, *Level().name(), u32(f.victim), int(c[0]), int(c[1]),
++			int(c[2]), f.squad, int(c[3]), int(c[4]), f.members, int(c[5]), f.src, pass ? 1 : 0);
++		g_host->log.line("fixture-alife done phase=travelled restored=0 failures=%u", f.failures);
++		f.phase = 999;
++		return;
++	}
++	if (f.phase == 20)
++	{
++		for (PlayerLink& link : g_host->links)
++		{
++			if (!link.bound || link.ref.slot != 1)
++				continue;
++			CActor* p2 = participant_actor(link.ref);
++			if (!client_in_world(link))
++			{
++				if (!f.absent_since)
++					f.absent_since = g_host->tick;
++				if (!f.absent_logged && p2 && g_host->tick - f.absent_since >= 10 * 50)
++				{
++					const u32 now = alife_online_near(p2->Position());
++					g_host->log.line("fixture-alife absent near_p2_online=%u before=%u actor=%d pass=%d", now, f.near_p2_before,
++						p2 ? 1 : 0, now >= f.near_p2_before ? 1 : 0);
++					f.absent_logged = true;
++				}
++			}
++			else if (f.absent_logged && !f.back_logged)
++			{
++				g_host->log.line("fixture-alife back near_p2_online=%u", p2 ? alife_online_near(p2->Position()) : 0);
++				f.back_logged = true;
++				g_host->log.line("fixture-alife done phase=marked restored=0 failures=%u", f.failures);
++				f.phase = 999;
++			}
++		}
++		return;
++	}
++	if (attached < 2)
++		return;
++	CActor* p1 = actors[0];
++	CActor* p2 = actors[1];
++	double v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++	string2048 chunk;
++	if (f.phase == 0)
++	{
++		alife_lua("local m = alife_storage_manager.get_state().coop_alife_fixture\n"
++			"if type(m) ~= 'table' then return 0, 0, 0, 0, 0, 0, 0, 0 end\n"
++			"return 1, m.victim or -1, m.squad or -1, m.members or -1, m.smart or -1, m.near or -1, m.src or -1, m.dest or -1\n",
++			v, 8, "marker");
++		if (v[0] == 1)
++		{
++			f.restored = true;
++			f.victim = u16(int(v[1]));
++			f.squad = int(v[2]);
++			f.members = int(v[3]);
++			f.far_id = int(v[4]);
++			f.near_id = int(v[5]);
++			f.src = int(v[6]);
++			f.dest = int(v[7]);
++			const AlifeScan s = alife_scan(nullptr, nullptr);
++			alife_scan_log("restored", s);
++			const bool read = alife_subject_check(v);
++			const bool pass = read && v[1] == 0 && (v[0] == 0 || v[2] == 1) && v[3] == 1 && int(v[4]) == f.members && int(v[5]) == f.src &&
++				s.clean();
++			if (!pass)
++				++f.failures;
++			g_host->log.line("fixture-alife restored victim=%u victim_exists=%d victim_alive=%d victim_same=%d squad=%d squad_found=%d "
++				"members=%d/%d src_squads=%d/%d pass=%d", u32(f.victim), int(v[0]), int(v[1]), int(v[2]), f.squad, int(v[3]),
++				int(v[4]), f.members, int(v[5]), f.src, pass ? 1 : 0);
++			f.phase = 40;
++			f.phase_tick = g_host->tick;
++			return;
++		}
++		const AlifeScan s = alife_scan(&f.dead, nullptr);
++		alife_scan_log("baseline", s);
++		if (!s.clean())
++			++f.failures;
++		alife_cost_begin(f);
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		alife_cost_log(f, "together", p1->Position(), p2->Position());
++		const Fvector& a = p2->Position();
++		xr_sprintf(chunk,
++			"local p2 = vector():set(%f, %f, %f)\n"
++			"local gg = game_graph() local lvl = gg:vertex(alife():actor().m_game_vertex_id):level_id()\n"
++			"local resp, all = {}, {}\n"
++			"for id, e in pairs(SIMBOARD.smarts) do local s = e.smrt\n"
++			"  if s and gg:valid_vertex_id(s.m_game_vertex_id) and gg:vertex(s.m_game_vertex_id):level_id() == lvl then\n"
++			"    all[#all + 1] = s\n"
++			"    if s.respawn_params and s.already_spawned and not s.disabled and simulation_objects.available_by_id[s.id] ~= false then resp[#resp + 1] = s end\n"
++			"  end\n"
++			"end\n"
++			"local near, dn = nil, 1e9\n"
++			"for _, s in ipairs(resp) do local d = s.position:distance_to(p2) if d < dn then near, dn = s, d end end\n"
++			"local r = near and (near.respawn_radius or 150) or 150\n"
++			"if near and dn > r - 10 then near = nil end\n"
++			"local dest, dd = nil, 1e9\n"
++			"for _, s in ipairs(all) do local d = s.position:distance_to(p2)\n"
++			"  if d >= 300 and d < dd and (not near or s.position:distance_to(near.position) > r + 30) then dest, dd = s, d end end\n"
++			"if not dest then return near and near.id or -1, -1, -1, 0, 0, 0, dn, -1 end\n"
++			"local far, df = nil, 1e9\n"
++			"for _, s in ipairs(resp) do if not near or s.id ~= near.id then local rr = s.respawn_radius or 150\n"
++			"  local d2, d1 = s.position:distance_to(p2), s.position:distance_to(dest.position)\n"
++			"  if d2 > rr + 30 and d1 > rr + 30 and d2 < df then far, df = s, d2 end end end\n"
++			"local at = level.vertex_position(dest.m_level_vertex_id)\n"
++			"return near and near.id or -1, dest.id, far and far.id or -1, at.x, at.y, at.z, dn, far and df or -1\n",
++			a.x, a.y, a.z);
++		if (alife_lua(chunk, v, 8, "select") != 8 || v[1] < 0)
++		{
++			++f.failures;
++			g_host->log.line("fixture-alife done phase=no-subject near=%d failures=%u", int(v[0]), f.failures);
++			f.phase = 999;
++			return;
++		}
++		f.near_id = int(v[0]);
++		f.dest = int(v[1]);
++		f.far_id = int(v[2]);
++		f.dest_pos.set(float(v[3]), float(v[4]), float(v[5]));
++		g_host->log.line("fixture-alife select near=%d near_d=%.1f dest=%d dest_d=%.1f far=%d far_d=%.1f", f.near_id, v[6], f.dest,
++			f.dest_pos.distance_to(p2->Position()), f.far_id, v[7]);
++		place_beside(p1, Fvector().add(f.dest_pos, Fvector().set(0.f, 0.3f, 0.f)));
++		f.phase = 2;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		// the switch settles around the new anchor
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		g_host->log.line("fixture-alife moved d_p1_p2=%.1f d_p1_dest=%.1f", p1->Position().distance_to(p2->Position()),
++			p1->Position().distance_to(f.dest_pos));
++		alife_cost_begin(f);
++		f.phase = 3;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		alife_cost_log(f, "apart", p1->Position(), p2->Position());
++		if (!alife_guard(f))
++			++f.failures;
++		// the forced respawn far from both
++		bool spawned = false;
++		if (f.far_id >= 0 && alife_force_respawn(f.far_id, v) == 8 && v[0] >= 0)
++		{
++			spawned = v[1] == v[0] + 1 && v[2] >= 0 && v[3] > 0;
++			f.squad = int(v[2]);
++			f.members = int(v[3]);
++			f.src = int(v[1]);
++			g_host->log.line("fixture-alife respawn smart=%d before=%d after=%d squad=%d members=%d d_actor0=%.1f d_used=%.1f "
++				"radius=%.1f pass=%d", f.far_id, int(v[0]), int(v[1]), f.squad, f.members, v[5], v[6], v[7], spawned ? 1 : 0);
++		}
++		else
++			g_host->log.line("fixture-alife respawn smart=%d skipped=1 pass=0", f.far_id);
++		if (!spawned)
++			++f.failures;
++		// the victim: a non-story stalker of a sim squad near p2
++		const Fvector& a = p2->Position();
++		xr_sprintf(chunk,
++			"local p2 = vector():set(%f, %f, %f)\n"
++			"local best, bd = nil, 1e9\n"
++			"local cs = axr_companions and axr_companions.companion_squads or {}\n"
++			"for id in pairs(SIMBOARD.squads) do local sq = alife_object(id) if sq then\n"
++			"  if not cs[id] and not get_object_story_id(id) and sq.id ~= %d then\n"
++			"    for m in sq:squad_members() do\n"
++			"      local o = level.object_by_id(m.id)\n"
++			"      if o and IsStalker(o) and o:alive() and not get_object_story_id(m.id) then\n"
++			"        local d = o:position():distance_to(p2)\n"
++			"        if d > 8 and d < bd then best, bd = o, d end\n"
++			"      end\n"
++			"    end\n"
++			"  end\n"
++			"end end\n"
++			"return best and best:id() or -1, bd\n",
++			a.x, a.y, a.z, f.squad);
++		v[0] = -1;
++		CAI_Stalker* victim = nullptr;
++		if (alife_lua(chunk, v, 2, "victim") == 2 && v[0] > 0)
++			victim = smart_cast<CAI_Stalker*>(Level().Objects.net_Find(u16(int(v[0])))); // never an actor
++		if (!victim || !victim->g_Alive())
++		{
++			++f.failures;
++			g_host->log.line("fixture-alife done phase=no-victim failures=%u", f.failures);
++			f.phase = 999;
++			return;
++		}
++		f.victim = u16(victim->ID());
++		g_host->log.line("fixture-alife kill victim=%u name=%s section=%s d_p2=%.1f", u32(f.victim), victim->cName().c_str(),
++			victim->cNameSect().c_str(), v[1]);
++		victim->KillEntity(victim->ID(), TRUE);
++		f.phase = 4;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 4)
++	{
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		const AlifeScan s = alife_scan(nullptr, &f.dead);
++		alife_scan_log("after", s);
++		CSE_ALifeCreatureAbstract* se_victim = smart_cast<CSE_ALifeCreatureAbstract*>(ai().alife().objects().object(f.victim, true));
++		xr_sprintf(chunk,
++			"local sq = alife_object(%d) local n, on, ids = 0, 0, ''\n"
++			"if sq then for m in sq:squad_members() do n = n + 1 local o = alife_object(m.id)\n"
++			"  if o and o.online then on = on + 1 end ids = ids .. (ids == '' and '' or ',') .. m.id end end\n"
++			"campaign_alife_fixture_ids = ids\n"
++			"return n, on\n", f.squad);
++		alife_lua(chunk, v, 2, "squad-online");
++		lua_State* L = ai().script_engine().lua();
++		string256 ids = "";
++		if (L)
++		{
++			lua_getglobal(L, "campaign_alife_fixture_ids");
++			if (lua_isstring(L, -1))
++				xr_strcpy(ids, lua_tostring(L, -1));
++			lua_pop(L, 1);
++		}
++		const bool dead = se_victim && !se_victim->g_Alive();
++		const bool pass = dead && int(v[0]) == f.members && s.clean();
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-alife check victim_dead=%d squad=%d members=%d online=%d member_ids=%s pass=%d", dead ? 1 : 0,
++			f.squad, int(v[0]), int(v[1]), ids, pass ? 1 : 0);
++		// the subjects into the scripts' saved state, then a checkpoint holds them
++		xr_sprintf(chunk,
++			"local o = alife_object(%u)\n"
++			"alife_storage_manager.get_state().coop_alife_fixture = {victim = %u, victim_name = o and o:name() or '', squad = %d,\n"
++			"  members = %d, smart = %d, near = %d, src = %d, dest = %d}\n"
++			"return 1\n", u32(f.victim), u32(f.victim), f.squad, f.members, f.far_id, f.near_id, f.src, f.dest);
++		alife_lua(chunk, v, 1, "mark");
++		xr_strcpy(f.level, *Level().name());
++		const bool published = request_publication("alife-fixture");
++		f.near_p2_before = alife_online_near(p2->Position());
++		g_host->log.line("fixture-alife marked published=%d near_p2_online=%u failures=%u", published ? 1 : 0, f.near_p2_before,
++			f.failures);
++		f.phase = 20;
++		return;
++	}
++	if (f.phase == 40)
++	{
++		// restored: the guard again, after the load (p1 back at dest when the
++		// restored positions put it near p2)
++		if (g_host->tick - f.phase_tick < 5 * 50)
++			return;
++		if (f.near_id >= 0 && f.dest >= 0 && p1->Position().distance_to(p2->Position()) < 200.f)
++		{
++			xr_sprintf(chunk, "local e = SIMBOARD.smarts[%d] local at = e and level.vertex_position(e.smrt.m_level_vertex_id)\n"
++				"if not at then return 0, 0, 0 end return at.x, at.y, at.z\n", f.dest);
++			alife_lua(chunk, v, 3, "dest");
++			f.dest_pos.set(float(v[0]), float(v[1]), float(v[2]));
++			place_beside(p1, Fvector().add(f.dest_pos, Fvector().set(0.f, 0.3f, 0.f)));
++			f.phase = 41;
++			f.phase_tick = g_host->tick;
++			return;
++		}
++		f.phase = 41;
++		f.phase_tick = g_host->tick - 10 * 50;
++	}
++	if (f.phase == 41)
++	{
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		if (!alife_guard(f))
++			++f.failures;
++		g_host->log.line("fixture-alife done phase=restored restored=1 failures=%u", f.failures);
++		f.phase = 999;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -15975,6 +16535,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	mutant_fixtures(); // S10-T02d
+ 	fauna_fixtures(); // S10-T02e
+ 	companion_fixtures(); // S10-T02f
++	alife_fixtures(); // S10-T03a
+ 
+ 
+ 

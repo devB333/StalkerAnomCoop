@@ -27,6 +27,7 @@ rows as they are found; mark a row fixed with the patch and run.
 | B10 | S10-T02d report | The bloodsucker's grab does not freeze the grabbed player or turn its camera toward the bloodsucker (T02d-3) | present the steering and an input hold to the grabbed client | open |
 | B11 | S10-T02e fauna-1 | A psy dog phantom's spawn failed on both clients once (the clients crashed then; now they survive it and log the refusing part); fauna-4's phantoms spawned cleanly | read `S10-T02e custom-monster spawn refused by …` in a client log when it recurs | open (crash fixed, patch 0074) |
 | B9 | S10-T04f report | The Lua windows show a bought, sold or taken item in its old list for a moment until the server's move arrives | expected latency; a local "pending" mark would hide it | open |
+| B12 | S10-T02f report (T02f-5) | The companion hotkeys and the companion wheel (all-companion orders, per-squad settings, move-to-point) do nothing in co-op; orders through a companion's dialogue work | `axr_companions` `on_key_release` / `start_CW` run in the client's own Lua; route them as a server action in the presser's context, as the talk window does (S10-T04a) | open |
 
 ## Open
 

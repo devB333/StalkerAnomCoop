@@ -305,6 +305,10 @@
     {
       "path": "patches/engine/0074-fauna.patch",
       "sha256": "cc3a405f859ef456ff3b9e7025597d215a19f9ec12ee45d423e6e6c5fa922a2a"
+    },
+    {
+      "path": "patches/engine/0075-companions.patch",
+      "sha256": "0c5e1c55e69126a02d9f92ed6ede527c11d6fe4dcd07cf8001702fbe8c7d742b"
     }
   ],
   "submodules": [

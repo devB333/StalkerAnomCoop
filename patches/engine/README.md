@@ -509,6 +509,18 @@ fails (its particle names were uninitialized), logs which part of a custom
 monster's spawn refused, and adds the fauna fixture (`fauna_party`). Single
 player is unchanged.
 
+`0075-companions.patch` (S10-T02f) gives each companion to the player who
+recruited it: a companion registry (`campaign.set_companion`,
+`clear_companion`, `companion_slot`, `slot_actor_id`) filled by compat-layer
+wrappers of `axr_companions.add_to_actor_squad` / `remove_from_actor_squad`
+(saved in the NPC's script vars), its squad's target and its `db.actor` /
+story `actor` answer for the recruiter, the companion command dialogue is
+refused to the other player, and a recruit asks for a checkpoint. The NPC
+evaluation scope (S10-T02a) now also covers a stalker's and a monster's
+planner (`Think`, `ProcessScripts`), where scheme actions such as `axr_beh`'s
+walk run. The companion fixture (`companion_party`). Single player is
+unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

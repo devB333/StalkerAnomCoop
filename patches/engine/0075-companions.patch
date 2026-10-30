@@ -1,0 +1,633 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index c95619a..44ab0ed 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -5,6 +5,7 @@
+ // S03-T05: see CampaignScriptContext.h.
+ 
+ #include "CampaignActorAccess.h"
++#include "CoopServerHost.h" // S10-T02f: the companion hook
+ #include "Actor.h"
+ #include "GameTask.h"
+ #include "GametaskManager.h"
+@@ -459,6 +460,30 @@ CGameObject* npc_under_evaluation()
+ 	return s_npc_eval;
+ }
+ 
++// S10-T02f: companions -> their recruiter's slot (axr_companions.add_to_actor_squad
++// in a participant context; persisted by the scripts' se_save_var "coop_recruiter"
++// and registered again from it after a load, see the compat layer)
++static xr_map<u16, u8> s_companions;
++
++CActor* slot_actor(u8 slot)
++{
++	xr_vector<CActor*> actors;
++	participant_actors(actors);
++	for (CActor* actor : actors)
++	{
++		ParticipantRef ref;
++		if (participant_of(actor, ref) == Refusal::None && ref.slot == slot)
++			return actor;
++	}
++	return nullptr;
++}
++
++int companion_slot(u16 npc)
++{
++	xr_map<u16, u8>::const_iterator it = s_companions.find(npc);
++	return it == s_companions.end() ? -1 : int(it->second);
++}
++
+ CActor* npc_evaluation_actor()
+ {
+ 	if (!s_npc_eval)
+@@ -466,6 +491,15 @@ CActor* npc_evaluation_actor()
+ 	ScriptContext context;
+ 	if (current_script_context(context) == Refusal::None)
+ 		return nullptr; // a participant context wins
++	// S10-T02f: a companion answers for its recruiter while that player is alive and present
++	const int slot = companion_slot(u16(s_npc_eval->ID()));
++	if (slot >= 0)
++		if (CActor* recruiter = slot_actor(u8(slot)))
++			if (recruiter->g_Alive())
++			{
++				++s_stats.companion_reads;
++				return recruiter;
++			}
+ 	CActor* actor = nearest_participant_actor(s_npc_eval->Position());
+ 	return actor && actor->g_Alive() ? actor : nullptr;
+ }
+@@ -944,6 +978,43 @@ bool lua_is_participant_actor(CScriptGameObject* object)
+ 	return object && is_participant_actor(&object->object());
+ }
+ 
++// S10-T02f: the companion registry (see s_companions)
++void lua_set_companion(int npc, int slot)
++{
++	if (npc < 0 || npc >= 0xffff || slot < 0 || slot > 0xff)
++		return;
++	const bool fresh = companion_slot(u16(npc)) != slot;
++	s_companions[u16(npc)] = u8(slot);
++	if (fresh)
++	{
++		++s_stats.companion_sets;
++		Msg("S10-T02f companion npc=%d slot=%d", npc, slot);
++		if (coop_server_prepared())
++			coop_server_companion_changed(u16(npc), slot);
++	}
++}
++
++void lua_clear_companion(int npc)
++{
++	if (npc < 0 || npc >= 0xffff || !s_companions.erase(u16(npc)))
++		return;
++	++s_stats.companion_clears;
++	Msg("S10-T02f companion-cleared npc=%d", npc);
++	if (coop_server_prepared())
++		coop_server_companion_changed(u16(npc), -1);
++}
++
++int lua_companion_slot(int npc)
++{
++	return npc < 0 || npc >= 0xffff ? -1 : companion_slot(u16(npc));
++}
++
++int lua_slot_actor_id(int slot)
++{
++	CActor* actor = slot >= 0 && slot <= 0xff ? slot_actor(u8(slot)) : nullptr;
++	return actor ? int(actor->ID()) : -1;
++}
++
+ int lua_participant_slot_of(CScriptGameObject* object)
+ {
+ 	ParticipantRef ref;
+@@ -1085,6 +1156,112 @@ LPCSTR const compat_source =
+ 	"  end\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// S10-T02f: a companion follows and obeys the player who recruited it.
++	// The recruit (in that player's dialogue context) records the slot in the
++	// NPC's script vars (saved with the game) and in the engine registry; the
++	// squad's target "actor" (id 0, the host's actor on the server) becomes the
++	// recruiter's actor; the companion command dialogues are the recruiter's.
++	"S.companion_wrap = 'none'\n"
++	"S.companion_recruits = 0\n"
++	"S.companion_targets = 0\n"
++	"S.companion_refused = 0\n"
++	"local function recruiter_of(id, name)\n"
++	"  local slot = campaign.companion_slot(id)\n"
++	"  if slot >= 0 then return slot end\n"
++	"  local v = name and se_load_var(id, name, 'coop_recruiter')\n"
++	"  if type(v) == 'number' then campaign.set_companion(id, v) return v end\n"
++	"  return -1\n"
++	"end\n"
++	"S.recruiter_of = recruiter_of\n"
++	"local ac = axr_companions\n"
++	"if type(ac) == 'table' and type(ac.add_to_actor_squad) == 'function' and type(ac.remove_from_actor_squad) == 'function' then\n"
++	"  local orig_add, orig_remove = ac.add_to_actor_squad, ac.remove_from_actor_squad\n"
++	"  ac.add_to_actor_squad = function(npc, ...)\n"
++	"    local r = pack(orig_add(npc, ...))\n"
++	"    local slot = campaign.slot()\n"
++	"    if npc and slot >= 0 then\n"
++	"      se_save_var(npc:id(), npc:name(), 'coop_recruiter', slot)\n"
++	"      campaign.set_companion(npc:id(), slot)\n"
++	"      S.companion_recruits = S.companion_recruits + 1\n"
++	"    end\n"
++	"    return unpack(r, 1, r.n)\n"
++	"  end\n"
++	"  ac.remove_from_actor_squad = function(npc, ...)\n"
++	"    if npc then\n"
++	"      campaign.clear_companion(npc:id())\n"
++	"      se_save_var(npc:id(), npc:name(), 'coop_recruiter', nil)\n"
++	"    end\n"
++	"    return orig_remove(npc, ...)\n"
++	"  end\n"
++	"  S.companion_wrap = 'squad'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	"local SSS = rawget(_G, 'sim_squad_scripted')\n"
++	"if type(SSS) == 'table' and not SSS.get_script_target then SSS = rawget(SSS, 'sim_squad_scripted') end\n"
++	"if SSS and SSS.get_script_target and type(ac) == 'table' then\n"
++	"  local orig_target = SSS.get_script_target\n"
++	"  SSS.get_script_target = function(self, ...)\n"
++	"    local t = orig_target(self, ...)\n"
++	"    if t == 0 and ac.companion_squads and ac.companion_squads[self.id] then\n"
++	"      local slot = -1\n"
++	"      for k in self:squad_members() do\n"
++	"        slot = recruiter_of(k.id, k.object and k.object:name())\n"
++	"        if slot >= 0 then break end\n"
++	"      end\n"
++	"      if slot >= 0 then\n"
++	"        local id = campaign.slot_actor_id(slot)\n"
++	"        S.companion_targets = S.companion_targets + 1\n"
++	"        if id >= 0 then return id end\n"
++	"        return self.id\n" // the recruiter is away: the squad holds where it is
++	"      end\n"
++	"    end\n"
++	"    return t\n"
++	"  end\n"
++	"  S.companion_wrap = S.companion_wrap .. '+target'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	// The story object "actor" (get_story_object, the installed scripts' way to
++	// reach the actor by its story id, registered for actor 0, the host's) means
++	// the same player as db.actor: the NPC under evaluation's (S10-T02a, a
++	// companion's recruiter) or the open context's.
++	"S.story_actor = 0\n"
++	"local orig_gso, orig_gsoid = rawget(_G, 'get_story_object'), rawget(_G, 'get_story_object_id')\n"
++	"local function story_actor()\n"
++	"  local a = campaign.npc_actor()\n"
++	"  if not a and campaign.in_context() then a = campaign.actor() end\n"
++	"  if a then S.story_actor = S.story_actor + 1 end\n"
++	"  return a\n"
++	"end\n"
++	"if type(orig_gso) == 'function' then\n"
++	"  _G.get_story_object = function(story_id, ...)\n"
++	"    if story_id == 'actor' then local a = story_actor() if a then return a end end\n"
++	"    return orig_gso(story_id, ...)\n"
++	"  end\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	"if type(orig_gsoid) == 'function' then\n"
++	"  _G.get_story_object_id = function(story_id, ...)\n"
++	"    if story_id == 'actor' then local a = story_actor() if a then return a:id() end end\n"
++	"    return orig_gsoid(story_id, ...)\n"
++	"  end\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	"local dac = dialogs_axr_companion\n"
++	"if type(dac) == 'table' and type(dac.is_actor_companion) == 'function' then\n"
++	"  local orig_is = dac.is_actor_companion\n"
++	"  dac.is_actor_companion = function(actor, npc, ...)\n"
++	"    if not orig_is(actor, npc, ...) then return false end\n"
++	"    local slot = campaign.slot()\n"
++	"    local who = npc and recruiter_of(npc:id(), npc:name()) or -1\n"
++	"    if slot >= 0 and who >= 0 and who ~= slot then\n"
++	"      S.companion_refused = S.companion_refused + 1\n"
++	"      return false\n"
++	"    end\n"
++	"    return true\n"
++	"  end\n"
++	"  S.companion_wrap = S.companion_wrap .. '+dialog'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
+ 	"S.installed = true\n";
+ 
+ bool install_compat(lua_State* L)
+@@ -1110,6 +1287,10 @@ bool install_compat(lua_State* L)
+ 	lua_rawget(L, -2);
+ 	const char* check_wrap = lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
+ 	Msg("S03-T05 compatibility layer CGeneralTask.check_task wrap: %s", check_wrap);
++	lua_pop(L, 1);
++	lua_pushstring(L, "companion_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T02f compatibility layer companion wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 2);
+ 	++s_stats.compat_installs;
+ 	s_compat_state = L;
+@@ -1150,6 +1331,10 @@ void script_register_context(lua_State* L)
+ 		def("leave", &lua_leave),
+ 		def("is_participant_actor", &lua_is_participant_actor),
+ 		def("participant_slot_of", &lua_participant_slot_of),
++		def("set_companion", &lua_set_companion), // S10-T02f
++		def("clear_companion", &lua_clear_companion),
++		def("companion_slot", &lua_companion_slot),
++		def("slot_actor_id", &lua_slot_actor_id),
+ 		def("present", &lua_present)
+ 	];
+ }
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 235e08c..eff3fa9 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -367,6 +367,9 @@ struct ScriptContextStats
+ 	u64 info_redirected; // S10-T04b: has_info(0, ...) reads sent to the context's player
+ 	u64 npc_scope_enters; // S10-T02a: NPC binder updates run with the nearest-participant rule
+ 	u64 npc_scope_reads; // S10-T02a: db.actor / AC_ID reads answered by that rule
++	u64 companion_reads; // S10-T02f: ...answered with a companion's recruiter
++	u64 companion_sets; // S10-T02f: companions registered (recruits and loads)
++	u64 companion_clears; // S10-T02f: companions dismissed
+ 	u64 gameplay_compat; // ...from the compatibility accessor
+ };
+ 
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 177796b..dd78925 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -160,6 +160,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.psy_party = ini.line_exist("coop", "psy_party") ? ini.r_u32("coop", "psy_party") : 0; // S10-T02c
+ 		out.mutant_party = ini.line_exist("coop", "mutant_party") ? ini.r_u32("coop", "mutant_party") : 0; // S10-T02d
+ 		out.fauna_party = ini.line_exist("coop", "fauna_party") ? ini.r_u32("coop", "fauna_party") : 0; // S10-T02e
++		out.companion_party = ini.line_exist("coop", "companion_party") ? ini.r_u32("coop", "companion_party") : 0; // S10-T02f
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index e6d23df..e523d4d 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,7 +120,8 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
+-	u32 fauna_party; // S10-T02e fixture: seconds after both attach until each generic mutant class is spawned near p2
++	u32 companion_party; // S10-T02f fixture: seconds after both attach until p2 recruits a companion (or a restored one is checked)
++	u32 fauna_party; // S10-T02e fixture:seconds after both attach until each generic mutant class is spawned near p2
+ 	u32 mutant_party; // S10-T02d fixture:seconds after both attach until the bloodsucker, burer and poltergeist stages
+ 	u32 psy_party; // S10-T02c fixture:seconds after both attach until a controller is spawned near p2
+ 	u32 loot_party; // S10-T02b fixture: seconds after both attach until the NPC loot rounds
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index b350224..5ffa7dd 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -58,6 +58,7 @@
+ #include "ai/monsters/bloodsucker/bloodsucker.h" // S10-T02d: the mutant fixture
+ #include "ai/monsters/poltergeist/poltergeist.h"
+ #include "ai/monsters/anti_aim_ability.h"
++#include "ai/stalker/ai_stalker.h" // S10-T02f
+ #include "ai/monsters/pseudodog/psy_dog.h" // S10-T02e: the fauna fixture
+ #include "CampaignServerLighting.h" // S10-T02e: the lighting counters
+ #include "ai/monsters/basemonster/base_monster.h"
+@@ -766,6 +767,18 @@ struct Host
+ 		u64 phantom_tick = 0; // when its first phantom was seen
+ 		u32 failures = 0, passed = 0;
+ 	} fauna_fixture;
++	// S10-T02f: the companion fixture (profile companion_party)
++	struct CompanionFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u16 npc = 0xffff;
++		bool restored = false;
++		float d0 = 0.f;
++		u32 failures = 0;
++	} companion_fixture;
++	u32 companion_changes = 0; // S10-T02f: recruits and dismissals seen
+ };
+ 
+ Host* g_host = nullptr;
+@@ -12454,6 +12467,245 @@ void fauna_fixtures()
+ 	++f.phase;
+ }
+ 
++// ------------------------------------------------------------ S10-T02f
++// Runs a Lua chunk returning up to 4 numbers; in p's context when p is given,
++// in npc's evaluation scope when npc is given. Returns the count read.
++static int companion_lua(LPCSTR chunk, double* out, int count, CActor* p, CGameObject* npc, LPCSTR label)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return -1;
++	const int top = lua_gettop(L);
++	int read = -1;
++	if (luaL_loadstring(L, chunk) == 0)
++	{
++		int rc;
++		if (p)
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(p), label);
++			campaign::NpcEvaluationScope eval(npc);
++			rc = lua_pcall(L, 0, count, 0);
++		}
++		else
++		{
++			campaign::NpcEvaluationScope eval(npc);
++			rc = lua_pcall(L, 0, count, 0);
++		}
++		if (rc == 0)
++		{
++			for(int i = 0; i < count; ++i)
++				out[i] = lua_isnumber(L, top + 1 + i) ? lua_tonumber(L, top + 1 + i) : -9.0;
++			read = count;
++		}
++		else
++			g_host->log.line("fixture-companion lua-error label=%s error=%s", label, lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++	}
++	else
++		g_host->log.line("fixture-companion lua-load-error label=%s error=%s", label, lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_settop(L, top);
++	return read;
++}
++
++// The companion fixture (profile companion_party, server-driven). Fresh: the
++// nearest alive stalker to p2 with a squad, not an enemy of p2's, is recruited
++// in p2's context through the installed dialogue action
++// (dialogs_axr_companion.become_actor_companion); after a server restart the
++// companion found in the companion squads with a recorded recruiter is the
++// subject ("restored"). Both paths check: its recruiter slot is p2's; p1 is put
++// 4 m from it (p1 only, L58) and inside its evaluation scope db.actor is still
++// p2; the companion command dialogue's precondition is false in p1's context and
++// true in p2's; its squad's script target is p2's actor; then it walks to p2
++// (within 8 m in 120 s). compare-coop-companion.py checks the lines.
++void companion_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.companion_party || !ai().get_alife())
++		return;
++	Host::CompanionFixture& f = g_host->companion_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-companion both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 999 || g_host->tick < f.both_since + u64(config.companion_party) * 50)
++		return;
++	if (slots[0] != 0)
++	{
++		std::swap(actors[0], actors[1]);
++		std::swap(slots[0], slots[1]);
++	}
++	CActor* p1 = actors[0];
++	CActor* p2 = actors[1];
++	double v[6] = {0, 0, 0, 0, 0, 0};
++	if (f.phase == 0)
++	{
++		// a companion with a recorded recruiter already (a restart)?
++		companion_lua("for sid, sq in pairs(axr_companions.companion_squads) do\n"
++			"  if sq and sq.squad_members then for k in sq:squad_members() do\n"
++			"    local v = se_load_var(k.id, k.object and k.object:name(), 'coop_recruiter')\n"
++			"    if type(v) == 'number' then return k.id, v end\n"
++			"  end end\n"
++			"end\n"
++			"return -1, -1", v, 2, nullptr, nullptr, "restored");
++		if (v[0] >= 0 && Level().Objects.net_Find(u16(v[0])))
++		{
++			f.npc = u16(v[0]);
++			f.restored = true;
++			g_host->log.line("fixture-companion restored npc=%u saved_slot=%d", u32(f.npc), int(v[1]));
++			f.phase = 2;
++			f.phase_tick = g_host->tick;
++			return;
++		}
++		// the nearest candidates to p2
++		xr_vector<std::pair<float, u16>> candidates;
++		for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		{
++			CObject* o = Level().Objects.o_get_by_iterator(i);
++			CEntityAlive* alive = o ? smart_cast<CEntityAlive*>(o) : nullptr;
++			if (!alive || !alive->g_Alive() || smart_cast<CActor*>(o) || !smart_cast<CAI_Stalker*>(o))
++				continue;
++			candidates.push_back(std::make_pair(o->Position().distance_to(p2->Position()), u16(o->ID())));
++		}
++		std::sort(candidates.begin(), candidates.end());
++		for (u32 i = 0; i < candidates.size() && i < 20 && f.npc == 0xffff; ++i)
++		{
++			string512 chunk;
++			xr_sprintf(chunk, "local n = level.object_by_id(%u)\n"
++				"if not n or not n:alive() or not get_object_squad(n) then return 0 end\n"
++				"if get_object_story_id and get_object_story_id(n:id()) then return 0 end\n"
++				"if n:has_info('npcx_is_companion') then return 0 end\n"
++				"if n:relation(db.actor) == game_object.enemy then return 0 end\n"
++				"return 1", u32(candidates[i].second));
++			if (companion_lua(chunk, v, 1, p2, nullptr, "candidate") == 1 && v[0] == 1)
++				f.npc = candidates[i].second;
++		}
++		CGameObject* npc = f.npc != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(f.npc)) : nullptr;
++		if (!npc)
++		{
++			++f.failures;
++			g_host->log.line("fixture-companion done phase=no-subject failures=%u", f.failures);
++			f.phase = 999;
++			return;
++		}
++		string256 chunk;
++		xr_sprintf(chunk, "dialogs_axr_companion.become_actor_companion(db.actor, level.object_by_id(%u))\n"
++			"return campaign.companion_slot(%u)", u32(f.npc), u32(f.npc));
++		companion_lua(chunk, v, 1, p2, nullptr, "companion-recruit");
++		g_host->log.line("fixture-companion recruited npc=%u section=%s d_p2=%.1f d_p1=%.1f slot=%d", u32(f.npc), *npc->cNameSect(),
++			npc->Position().distance_to(p2->Position()), npc->Position().distance_to(p1->Position()), int(v[0]));
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	CGameObject* npc = smart_cast<CGameObject*>(Level().Objects.net_Find(f.npc));
++	CEntityAlive* alive = smart_cast<CEntityAlive*>(npc);
++	if (!npc || !alive || !alive->g_Alive())
++	{
++		++f.failures;
++		g_host->log.line("fixture-companion done phase=subject-lost restored=%d failures=%u", f.restored ? 1 : 0, f.failures);
++		f.phase = 999;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 2 * 50)
++			return;
++		f.phase = 2;
++	}
++	if (f.phase == 2)
++	{
++		// p1 beside the companion: it must still answer for p2
++		Fvector side;
++		side.sub(p1->Position(), npc->Position());
++		side.y = 0.f;
++		if (side.square_magnitude() < 0.01f)
++			side.set(1.f, 0.f, 0.f);
++		side.normalize();
++		place_beside(p1, Fvector().mad(npc->Position(), side, 4.f));
++		string512 chunk;
++		xr_sprintf(chunk, "return campaign.companion_slot(%u)", u32(f.npc));
++		companion_lua(chunk, v, 1, nullptr, nullptr, "slot");
++		const int slot = int(v[0]);
++		companion_lua("return db.actor and db.actor:id() or -1", v, 1, nullptr, npc, "evaluation");
++		const int eval = int(v[0]);
++		xr_sprintf(chunk, "local n = level.object_by_id(%u)\n"
++			"return n and dialogs_axr_companion.is_actor_companion(db.actor, n) and 1 or 0", u32(f.npc));
++		companion_lua(chunk, v, 1, p1, nullptr, "dialog-p1");
++		const int dialog_p1 = int(v[0]);
++		companion_lua(chunk, v, 1, p2, nullptr, "dialog-p2");
++		const int dialog_p2 = int(v[0]);
++		xr_sprintf(chunk, "local n = level.object_by_id(%u)\n"
++			"local sq = n and get_object_squad(n)\n"
++			"return sq and sq:get_script_target() or -2", u32(f.npc));
++		companion_lua(chunk, v, 1, nullptr, nullptr, "target");
++		const int target = int(v[0]);
++		const int p2id = int(p2->ID());
++		u32 bad = 0;
++		bad += slot != int(slots[1]);
++		bad += eval != p2id;
++		bad += dialog_p1 != 0;
++		bad += dialog_p2 != 1;
++		bad += target != p2id;
++		f.failures += bad;
++		f.d0 = npc->Position().distance_to(p2->Position());
++		g_host->log.line("fixture-companion checks restored=%d npc=%u slot=%d p2_slot=%u eval=%d p1=%u p2=%d dialog_p1=%d dialog_p2=%d "
++			"target=%d d_p1=%.1f d_p2=%.1f bad=%u", f.restored ? 1 : 0, u32(f.npc), slot, u32(slots[1]), eval, u32(p1->ID()), p2id,
++			dialog_p1, dialog_p2, target, npc->Position().distance_to(p1->Position()), f.d0, bad);
++		f.phase = 3;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		const float d2 = npc->Position().distance_to(p2->Position());
++		const bool reached = d2 < 8.f;
++		if (!reached && g_host->tick - f.phase_tick < 120 * 50)
++		{
++			if ((g_host->tick - f.phase_tick) % (10 * 50) == 0)
++			{
++				// what its companion logic sees, inside its evaluation scope
++				string1024 chunk;
++				xr_sprintf(chunk, "local id = %u\n"
++					"local n = level.object_by_id(id)\n"
++					"local st = db.storage[id]\n"
++					"local b = st and st.beh\n"
++					"local so = get_story_object('actor')\n"
++					"local sq = n and get_object_squad(n)\n"
++					"local dt = b and b.desired_target\n"
++					"return n and n:has_info('npcx_beh_wait') and 1 or 0, st and st.active_scheme == 'beh' and 1 or 0,\n"
++					"  dt and dt.object and dt.object:id() or -1, so and so:id() or -1, sq and sq:commander_id() or -1,\n"
++					"  dt and dt.position and dt.position:distance_to(n:position()) or -1", u32(f.npc));
++				companion_lua(chunk, v, 6, nullptr, npc, "follow-state");
++				g_host->log.line("fixture-companion follow-state d_p2=%.1f d_p1=%.1f wait=%d beh=%d target=%d story_actor=%d commander=%d "
++					"target_distance=%.1f", d2, npc->Position().distance_to(p1->Position()), int(v[0]), int(v[1]), int(v[2]), int(v[3]),
++					int(v[4]), v[5]);
++			}
++			return;
++		}
++		if (!reached)
++			++f.failures;
++		const campaign::ScriptContextStats& st = campaign::script_context_stats();
++		g_host->log.line("fixture-companion follow restored=%d d0=%.1f d_p2=%.1f d_p1=%.1f reached=%d seconds=%.1f companion_reads=%I64u",
++			f.restored ? 1 : 0, f.d0, d2, npc->Position().distance_to(p1->Position()), reached ? 1 : 0,
++			float(g_host->tick - f.phase_tick) / 50.f, st.companion_reads);
++		g_host->log.line("fixture-companion done phase=followed restored=%d failures=%u changes=%u", f.restored ? 1 : 0, f.failures,
++			g_host->companion_changes);
++		f.phase = 999;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -14963,6 +15215,16 @@ bool coop_server_dialogue_answer(CInventoryOwner* speaker, LPCSTR text)
+ }
+ 
+ // S10-T02d: see the mutant abilities (decision T02d-1)
++void coop_server_companion_changed(u16 npc, int slot)
++{
++	if (!g_host || !g_host->started)
++		return;
++	++g_host->companion_changes;
++	// a recruit or a dismissal is durable state kept in the save: a checkpoint keeps it
++	const bool published = request_publication(slot >= 0 ? "companion-recruited" : "companion-dismissed");
++	g_host->log.line("companion-changed npc=%u slot=%d published=%d", u32(npc), slot, published ? 1 : 0);
++}
++
+ void coop_server_monster_ability(u16 monster, u16 target, LPCSTR ability, float value)
+ {
+ 	if (!g_host || !g_host->started || !ability)
+@@ -15712,6 +15974,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	psy_fixtures(); // S10-T02c
+ 	mutant_fixtures(); // S10-T02d
+ 	fauna_fixtures(); // S10-T02e
++	companion_fixtures(); // S10-T02f
++
+ 
+ 
+ 	demo_place_tick(); // the hands-on aid
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index b5be385..665548e 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -74,4 +74,6 @@ void coop_server_psy_hit(u16 controller, u16 target, u8 phase, float health);
+ // stamina, tele, detection): logged and counted per player for the mutant
+ // fixture. No-op off the campaign server.
+ void coop_server_monster_ability(u16 monster, u16 target, LPCSTR ability, float value);
++// S10-T02f: a companion recruited (slot) or dismissed (-1): logged, and a checkpoint is asked for
++void coop_server_companion_changed(u16 npc, int slot);
+ } // namespace campaign
+diff --git a/src/xrGame/CustomMonster.cpp b/src/xrGame/CustomMonster.cpp
+index 4efbb75..9581052 100644
+--- a/src/xrGame/CustomMonster.cpp
++++ b/src/xrGame/CustomMonster.cpp
+@@ -5,6 +5,7 @@
+ #include "pch_script.h"
+ #include "ai_debug.h"
+ #include "CustomMonster.h"
++#include "CampaignScriptContext.h" // S10-T02f: NpcEvaluationScope
+ #include "ai_space.h"
+ #include "ai/monsters/BaseMonster/base_monster.h"
+ #include "xrserver_objects_alife_monsters.h"
+@@ -366,6 +367,7 @@ void CCustomMonster::shedule_Update(u32 DT)
+ 		m_fTimeUpdateDelta = dt;
+ 		Device.Statistic->AI_Think.Begin();
+ 		Device.Statistic->TEST1.Begin();
++		campaign::NpcEvaluationScope npc_scope(this); // S10-T02f: script actions see the NPC's own db.actor
+ 		if (GetScriptControl())
+ 			ProcessScripts();
+ 		else
+diff --git a/src/xrGame/ai/stalker/ai_stalker.cpp b/src/xrGame/ai/stalker/ai_stalker.cpp
+index d47acf4..3b235c7 100644
+--- a/src/xrGame/ai/stalker/ai_stalker.cpp
++++ b/src/xrGame/ai/stalker/ai_stalker.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "pch_script.h"
+ #include "../../CampaignActorAccess.h"
++#include "../../CampaignScriptContext.h" // S10-T02f: NpcEvaluationScope
+ #include "ai_stalker.h"
+ #include "../ai_monsters_misc.h"
+ #include "../../weapon.h"
+@@ -1214,6 +1215,8 @@ void CAI_Stalker::shedule_Update(u32 DT)
+ 				VERIFY(_valid(Position()));
+ 				m_fTimeUpdateDelta = dt;
+ 				Device.Statistic->AI_Think.Begin();
++				// S10-T02f: the planner's script actions (axr_beh, xr_walker, ...) see the NPC's own db.actor too
++				campaign::NpcEvaluationScope npc_scope(this);
+ 				if (GetScriptControl())
+ 					ProcessScripts();
+ 				else

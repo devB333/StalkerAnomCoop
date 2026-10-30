@@ -486,6 +486,12 @@ fixture (`npc_party`). Single player is unchanged.
 the installed release manager's ALife release while the nearest participant is
 within 75 m (`CALifeSimulator__release`), and adds the NPC loot fixture
 (`loot_party`). Single player is unchanged.
+`0072-controller-psy.patch` (S10-T02c) makes the controller's tube attack and
+control hit target the controller's participant enemy on the campaign server
+and present their camera, HUD and sound effects to that player's client (a new
+presentation kind, `ControllerPsyHit`, applied by the client with the
+controller replica's own sounds and particles); logs each viewer's aura
+post-process; adds the psy fixture (`psy_party`). Single player is unchanged.
 
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending

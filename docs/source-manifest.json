@@ -293,6 +293,10 @@
     {
       "path": "patches/engine/0071-npc-loot.patch",
       "sha256": "70124230317c3bd67c75eb9e083a03e060db4c31c0f4146c2906be332e61a0ba"
+    },
+    {
+      "path": "patches/engine/0072-controller-psy.patch",
+      "sha256": "7ca8bc53b2bfe703272b47e3770626a686c51d25c4e8114290ef4be37a04c19c"
     }
   ],
   "submodules": [

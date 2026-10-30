@@ -7,6 +7,25 @@ gate are in [carried limits](carried-limits.md); this list is for defects.
 
 When an issue is fixed, move it to "Fixed" with the report and run names.
 
+## Bug-squashing list (started 2026-10-30)
+
+The user asked for a running list for a dedicated bug-fixing session. Each
+row is a defect or a visible gap seen in a hands-on demo or a run; the
+detailed entries (K…) below hold the evidence where there is more. Add new
+rows as they are found; mark a row fixed with the patch and run.
+
+| # | Seen | What | First lead | Status |
+|---|---|---|---|---|
+| B1 | user, demo-2 of S10-T04e (2026-10-30) | **The trader's portrait and name are missing in the trade window** (Sidorovich; the trade itself works) | the window is the installed Lua UI (`ui_inventory.script` `TMode_InitProfile` / `Reset(npc)`), which reads the NPC's `character_icon()` and `character_name()` on the client's replica trader; check what the replica's `CharacterInfo` holds (the specific character from the spawn state) and whether the talk window shows them | open |
+| B2 | user, demo-2 of S10-T04e (2026-10-30) | **A PDA glitch** (details to confirm with the user: the partner's PDA on your screen, or your own?) | the engine has third-person PDA animations (`ActorAnimation.cpp:623-636`: draw, holster, idle, and a reading pose while zoomed); patch 0066 routes the server's state to weapons and grenades only, so a partner's PDA gets none of them, and the PDA's zoomed reading pose (`CPda::m_bZoomed`) is not sent at all; K1 (the other player's item driving the shared first-person hands) is the other suspect | open |
+| B3 | every demo since S06-T08 | A `sound-volume` presentation flood (about 6 per tick per client) for sounds the clients do not have | the server presents volume changes for sounds a client never created; drop them on the server when the sound was never presented, or on the client quietly | open |
+| B4 | user, 2026-10-22 and S10-T04a demos | NPCs slide in their idle pose while moving (K2, L57) | NPC movement type, body state and aim are not replicated (S10-T05d) | open |
+| B5 | upgrade-6, relations-1, stash-2 | A client's process sometimes exits with an access violation after its clean stop (L59) | teardown order on a co-op client; the logs are complete, no gameplay effect | open |
+| B6 | upgrade-5 | A long server-side move of a client's own actor (534 m) crashed that client (L58) | the client's prediction snap or a level-streaming step on a huge jump | open |
+| B7 | S10-T04c, S10-T02c reports | The partner's zoom (aim-down-sights) pose is not shown; a controller's camera pull during its psy attack is not shown (T02c-3) | replicate the zoom flag in the snapshot; present the controller's steering per frame | open |
+| B8 | S10-T04f report | The upgrade window's tooltip shows the base price; the server charges the mechanic's discounted price (T04f-4) | send the discount in the upgrade table and use it in the tooltip | open |
+| B9 | S10-T04f report | The Lua windows show a bought, sold or taken item in its old list for a moment until the server's move arrives | expected latency; a local "pending" mark would hide it | open |
+
 ## Open
 
 ### K1. The other player's knife bends your own first-person pistol

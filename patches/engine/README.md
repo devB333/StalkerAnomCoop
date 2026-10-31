@@ -554,6 +554,16 @@ time skips once when agreed and a guide's fee is refunded otherwise. The
 relocation fixture (`relocate_party`) and its client driver (`relocate_test`).
 Single player is unchanged.
 
+`0080-passage-sweep.patch` (S10-T03e) adds the passage sweep fixture
+(`sweep_party`): the server reads every level changer of the spawn data and
+travels the party through each passage by the S09 consent path and executor
+(its own requests skip the changer and combat checks, god mode on). It guards
+a monster's squad cleanup when its spawn failed (a psy dog phantom on a
+client), logs whether a refused monster's replica is in the client's ALife,
+skips destroy-pending objects in the identity check and retries the check
+after 10 more ticks up to 3 times, and reads the level's objects in the stop
+status only while there is a level. Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

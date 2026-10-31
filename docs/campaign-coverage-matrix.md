@@ -60,8 +60,13 @@ not parse and is inferred from their names (`mar_level_changer_to_agroprom_1`,
 `agru_level_changer_to_agroprom_6`), which add 3 passages: **98 directed
 passages** in all (string scan by `tools/list-passages.py`; two binary-named
 entries and the marsh `fake_level_changer` are not passages).
-The full table is in `builds/logs/S10-T01/passages.tsv`. Travelled so far:
-Cordon → Darkscape and Cordon → Garbage (S09-T02/T04). Beside the changers,
+The full table is in `builds/logs/S10-T01/passages.tsv`. **S10-T03e
+(2026-10-31):** the server's own graph (the spawn data's level changers) has
+**99 directed passages**: the scan misnamed two levels (`pripyat`,
+`l12_stancia`) and skipped the two binary-named Monolith-control changers
+([S10-T03e](validation/S10-T03e.md#the-graph-against-the-s10-t01-table));
+**all 99 were travelled** by the passage sweep (sweep-7, T03e-2). Before
+that: Cordon → Darkscape and Cordon → Garbage (S09-T02/T04). Beside the changers,
 four script paths call `ChangeLevel` and skip game time: guides
 (`ka_travel.script:62`), fast travel (`game_fast_travel.script:121`), the
 backpack travel (`game_backpack_travel.script:93`) and the MLR utilities
@@ -156,7 +161,7 @@ child's validation report must show for the family to count as covered.
 | F8 | Offline combat, squad targets and relationship condlists | world; `assigned_target = actor` means the nearest participant; condlists per rule 2 | a squad sent against "the actor"; offline combat between squads near one player | the squad finds either player; offline combat results match single player's rules | S10-T03b | Required |
 | F9 | World time and sleep | the server owns the clock; sleep is a party consent (T01-8); forced blackout per player, no skip | both sleep; one declines; one passes out from exhaustion | one time skip for the world after both agree; emission and weather follow; a blackout takes one player's control only | S10-T03c | Required (L49) |
 | F10 | Guides, fast travel, backpack travel, MLR teleports | party travel under the S09 contract (T01-9); fee from the requester; same-level teleport moves both | a guide dialogue; a fast-travel marker; the backpack | both consent, both arrive, time skipped once, fee paid once; refusals as in S09 | S10-T03d | Required |
-| F11 | Passages: 98 directed, 33 levels | the S09 travel contract | the travel harness driven over every passage both ways from a scripted party position at each changer | every passage travelled headless with both clients rejoining; every destination level loads; failures listed by passage | S10-T03e | Required (L50) |
+| F11 | Passages: 99 directed (the spawn data's graph, S10-T03e; the scan said 98), 33 levels | the S09 travel contract | the travel harness driven over every passage both ways from a scripted party position at each changer | every passage travelled headless with both clients rejoining; every destination level loads; failures listed by passage | S10-T03e | Required (L50) |
 | F12 | New game | the server starts the native new game for the party faction (T01-2/T01-3); each player's loadout per player | start a new game as two factions' starts | both actors spawn at the start with their loadouts; the first checkpoint publishes; the first quest giver works | S10-T03f | Required (T01-2) |
 | F13 | The talk window | the client's talk UI drives the server's `PhraseDialog`; one speaker per NPC at a time (T01-15) | both players at Sidorovich; both press talk | the second gets "busy"; accept and turn-in of the S08 party quest by talking; dialogue commits once | S10-T04a | Required (L43, L01) |
 | F14 | Info portions and actor-2 script state | story portions party-shared, personal list per player (T01-4); actor 2's pstor and binder state persisted (L32, L44) | a story portion given to one player; a personal one; restart; participant 1 dead | `has_alife_info` answers the same for both players for story portions and per player for personal ones; actor 2's pstor survives a restart | S10-T04b | Required (L11, L32, L44) |

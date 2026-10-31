@@ -325,6 +325,10 @@
     {
       "path": "patches/engine/0079-relocate.patch",
       "sha256": "71e8c0c3943ac03cab5e75d8c07bf6f06cffbd58fa5dae065a53893edaec9b21"
+    },
+    {
+      "path": "patches/engine/0080-passage-sweep.patch",
+      "sha256": "a569f7cb1f1f6c23a2730bcd678c13cf077c97ca669b5a25660a9b185e03bc95"
     }
   ],
   "submodules": [

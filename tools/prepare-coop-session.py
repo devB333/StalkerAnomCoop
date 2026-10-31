@@ -251,6 +251,26 @@ def main():
     parser.add_argument("--relocate-variant", type=int, default=0,
                         help="with --relocate: 0 the guide rounds (refused, then agreed to another level); 1 client "
                              "2's same-level fast travel (--relocate-test c2:N) agreed by p1")
+    parser.add_argument("--sweep", default="",
+                        help="comma-separated client names present for the S10-T03e passage sweep (server-driven: "
+                             "the party travels every passage it can reach; fixture sweep_party)")
+    parser.add_argument("--sweep-start", type=int, default=20,
+                        help="with --sweep: seconds after both players are in the world until the sweep starts")
+    parser.add_argument("--new-game", default="",
+                        help="S10-T03f: <faction>:<start location> (new_game_start_locations.ltx): the server starts a "
+                             "new game (all.spawn) with the creator's choices in its axr_options.ltx "
+                             "[character_creation] instead of loading the fixture save")
+    parser.add_argument("--new-game-loadout", default="",
+                        help="with --new-game: player 1's loadout (comma-separated sections, as the creation screen "
+                             "writes it); default: the faction's kit")
+    parser.add_argument("--new-game-loadout2", default="",
+                        help="with --new-game: player 2's loadout (T01-3: each player picks their own); default: the "
+                             "faction's kit")
+    parser.add_argument("--new-game-money", type=int, default=2000,
+                        help="with --new-game: each player's starting money")
+    parser.add_argument("--client-exit-after", type=int, default=1800,
+                        help="a client's own limit on its run in seconds (exit_after_seconds; raise it for a long "
+                             "sweep; the server's serve_seconds follows it)")
     parser.add_argument("--relocate-test", default="",
                         help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
                              "same-level fast travel does")
@@ -345,6 +365,7 @@ def main():
     squad_fix = {n for n in args.squad.split(",") if n}
     sleep_fix = {n for n in args.sleep.split(",") if n}
     relocate_fix = {n for n in args.relocate.split(",") if n}
+    sweep_fix = {n for n in args.sweep.split(",") if n}
     relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
@@ -352,7 +373,7 @@ def main():
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
                | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
-               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix)
+               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix | sweep_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -382,6 +403,20 @@ def main():
         if not source.exists():
             raise SystemExit(f"No saved game {source}")
         shutil.copyfile(source, saves / ("coop-campaign" + extension))
+
+    if args.new_game:
+        # S10-T03f: what the creation screen (ui_mm_faction_select.script OnStartGame) writes to axr_main.config before
+        # it starts a new game; the server's on_game_load reads it as single player's does
+        faction, _, location = args.new_game.partition(":")
+        if not faction or not location:
+            raise SystemExit("--new-game <faction>:<start location>")
+        creation = ["[character_creation]", "new_game_difficulty = 1", "new_game_economy = 1",
+                    "new_game_economy_treasure = 1", "new_game_story_mode = true", "new_game_character_name = Player_1",
+                    f"new_game_faction = {faction}", f"new_game_map = {location}",
+                    f"new_game_money = {args.new_game_money}"]
+        if args.new_game_loadout:
+            creation.append(f"new_game_loadout = {args.new_game_loadout}")
+        (runtimes["server"] / "appdata/axr_options.ltx").write_text("\n".join(creation) + "\n")
 
     # Players: keys (DPAPI, this Windows user) and the public roster.
     roster_lines = []
@@ -424,7 +459,8 @@ def main():
             lines += [f"net_loss = {args.net_loss}", f"net_lag = {args.net_lag}"]
         if name == "server":
             lines += ["role = server", f"listen = 0.0.0.0:{args.port}", f"roster = {winpath(roster)}",
-                      f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600",
+                      f"party_id = {party_id}", "save = coop-campaign",
+                      f"serve_seconds = {max(3600, args.client_exit_after + 600)}",
                       f"churn = {args.churn}", f"drop = {args.drop}",
                       f"arm = {1 if combat or encounter else 0}", f"combat_heal = {1 if combat else 0}",
                       f"encounter = {20 if encounter else 0}", f"lethal = {8 if encounter else 0}",
@@ -459,7 +495,13 @@ def main():
                       f"sleep_party = {args.sleep_start if sleep_fix else 0}",
                       f"relocate_party = {args.relocate_start if relocate_fix else 0}",
                       f"relocate_variant = {args.relocate_variant}",
+                      f"sweep_party = {args.sweep_start if sweep_fix else 0}",
                       f"place_giver = {args.place_giver}"]
+            if args.new_game:
+                # S10-T03f: the second player's own choices (T01-3: the creator's faction)
+                faction, _, _ = args.new_game.partition(":")
+                lines += ["new_game = 1", f"new_game_faction = {faction}",
+                          f"new_game_loadout_2 = {args.new_game_loadout2}", f"new_game_money_2 = {args.new_game_money}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -474,7 +516,7 @@ def main():
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                                 "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                                 "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                                "sleep_party", "relocate_party")
+                                "sleep_party", "relocate_party", "sweep_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -487,7 +529,7 @@ def main():
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                             "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                             "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                            "sleep_party", "relocate_party")
+                            "sleep_party", "relocate_party", "sweep_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")
@@ -500,7 +542,7 @@ def main():
                        else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
-                      f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",
+                      f"name = {players[name]['display_name']}", f"exit_after_seconds = {args.client_exit_after}",
                       f"inject = {1 if name in inject else 0}",
                       f"script = {program}",
                       f"predict = {0 if name in no_predict else 1}",

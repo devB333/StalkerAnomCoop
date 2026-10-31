@@ -1,7 +1,19 @@
-# Session handoff — S10-T02 complete, S10-T03a…d complete; next S10-T03e
+# Session handoff — S10-T02 complete, S10-T03a…e complete; next S10-T03f
 
-## State (2026-10-30)
+## State (2026-10-31)
 
+- **Completed and committed: S10-T03e passage sweep**
+  ([S10-T03e](../../validation/S10-T03e.md), patch 0080 `passage-sweep`, patch
+  check 92; proto-build-55; builds **campaign-394 / client-281**; **sweep-7
+  PASS: all 99 directed passages ok in 114 trips**, both clients rejoining,
+  exits 0; **L50 closed**). Fixture `--sweep c1,c2 --client-exit-after 10800`
+  (`sweep_party`), `tools/compare-coop-sweep.py`; about 71 min a run. The
+  spawn data has 99 passages, not the scan's 98 (T03e-2). Fixes on the way:
+  B11's phantom cleanup crash, B15's identity-check stop after a reload
+  (now retried 3×10 ticks, T03e-3) and the stop's `log_status` crash. New
+  bugs B14 (post-process spam), B16 (clients wait forever on the loading
+  screen when the server dies). Decisions T03e-1…3 (T03e-1 test-only god
+  mode and check bypass).
 - **Completed and committed: S10-T03d guides, fast travel, backpack travel**
   ([S10-T03d](../../validation/S10-T03d.md), patch 0079 `relocate`, patch
   check 91; protocol kind 26, **proto-build-55** (st-30 pass); builds
@@ -81,36 +93,42 @@
 - **Decisions awaiting the user at G10** ([Stage 10
   decisions](../../stage10-decisions.md)): T04a-1…4, T04b-1…3, T05b-1…5,
   T04c-1…8, T04f-1…6, T04d-1…4, T04e-1…3, T02a-1…2, T02b-1…2, T02c-1…3,
-  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, T03b-1…3 (T03b-2 open), T03c-1…5, **T03d-1…5**. Open question: T05b-4 (who pays a
+  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, T03b-1…3 (T03b-2 open), T03c-1…5, T03d-1…5, **T03e-1…3**. Open question: T05b-4 (who pays a
   task's money cost).
 
 ## Next
 
-1. **S10-T03e passage sweep over every level changer** (matrix F11, L50,
-   T01-1: 98 directed passages, `builds/logs/S10-T01/passages.tsv`). Plan: a
-   server fixture (`sweep_party`) that builds the passage graph from the
-   ALife registry's `CSE_ALifeLevelChanger` objects (source level from the
-   changer's game vertex, destination from `m_tNextGraphID`), and on each
-   level places both actors in the next untravelled changer (as the S09
-   travel fixture does), requests as player 1 and accepts as player 2
-   (synthesized intents), waits for the reload and the resume, logs
-   `fixture-sweep passage from= to= changer= result=` and goes on; with no
-   untravelled passage here, it takes the first hop of a BFS toward a level
-   that has one. One long session (about a minute a passage; clients'
-   `exit_after_seconds` is 1800 in their profile, raise it). Disabled
-   changers are listed as such. A compare tool lists every passage's result
-   against `passages.tsv`. Then S10-T03f, S10-T05a/c/d, S10-T06; stop at G10
-   with the decisions list and the bug list; S10-T07 (bugs) follows.
+1. **S10-T03f new game on the campaign server** (matrix F12, L51, T01-2/3).
+   The engine edit is drafted, not applied: a scratch script from the last
+   session (`t03f_edit.py`; if it is gone, redo from this plan). The server
+   starts `alife/new` when the profile says `new_game = 1`; the creator's
+   choices are the server's `axr_options.ltx` [character_creation]
+   (`prepare-coop-session.py --new-game <faction>:<start location>
+   [--new-game-loadout …] [--new-game-loadout2 …] [--new-game-money 2000]`,
+   already in the tool); the installed new-game script's `ChangeLevel` to
+   the start location is taken as the start move (a party travel that needs
+   no consent, `new_game_request` / `new_game_tick` in `coop_server_relocate`
+   and the `M_CHANGE_LEVEL` hook in `xrServer.cpp`); player 2's actor copies
+   the creator's community and gets its own name, money and loadout
+   (`give_new_game_loadout`). Check with `tools/compare-coop-newgame.py
+   <logs> --faction stalker --level zaton --pos 111.96,-3.00,176.75` (the
+   `skadovsk_shipwreck` start: zaton, lvid 1158843, gvid 4453). Decisions to
+   record: T03f-1 creating the game is the consent for the start move;
+   T03f-2 player 2's loadout and money come from the server profile until
+   S10-T06's menu. Close L51 with the run.
+2. Then S10-T05a, S10-T05c, S10-T05d, S10-T06; stop at G10 with the
+   decisions list and the bug list (B1…B16) for item-by-item approval;
+   S10-T07 (bugs) follows.
 
 ## Run names
 
-- Used: `campaign-334…388` (373, 374, 384, 385 failed to compile, 381 to link), `client-226…275`,
+- Used: `campaign-334…394` (373, 374, 384, 385 failed to compile, 381 to link), `client-226…281`,
   `proto-build-52` (unused), `proto-build-53`, `st-28`, `companion-1…4`,
   `alife-1…6`, `squad-1`, `sleep-1…2`, `reloc-1…5`, `proto-build-54…55`,
-  `st-29…30`, patch checks 77–91; the rest in the snapshots.
-- Next: `campaign-389`, `client-276`, `proto-build-56`, `st-31`, patch
-  check 92.
+  `st-29…30`, `sweep-1…7`, patch checks 77–92; the rest in the snapshots.
+- Next: `campaign-395`, `client-282`, `proto-build-56`, `st-31`,
+  `newgame-1`, patch check 93.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T03e](../done/snapshot-before-S10-T03e.md).
+Previous snapshot: [before S10-T03f](../done/snapshot-before-S10-T03f.md).

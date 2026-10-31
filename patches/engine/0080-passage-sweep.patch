@@ -1,0 +1,445 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 66a3475..d31e2d1 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1891,7 +1891,20 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 // S03-T01: every online object and ALife object holds a current
+                 // engine-id binding, no binding is orphaned, and the saved actor
+                 // is held by a participant reference.
+-                if (xrCampaignLevel_IdentityCheck())
++                bool identity = xrCampaignLevel_IdentityCheck();
++                // S10-T03e: an object ALife released in the last tick keeps its level object until its destroy
++                // event is processed (sweep-4/6: one monster after a travel reload); a few more ticks settle it,
++                // a real mismatch stays
++                for (int retry = 0; !identity && retry < 3; ++retry)
++                {
++                    Msg("! S10-T03e identity check: retry %d after 10 more ticks", retry + 1);
++                    const u64 at = g_campaign_clock->Stats().ticks;
++                    g_campaign_clock->Resume(g_campaign_wall.GetElapsed_ms());
++                    RunCampaignTicksTo(at + 10);
++                    g_campaign_clock->Pause(g_campaign_wall.GetElapsed_ms());
++                    identity = xrCampaignLevel_IdentityCheck();
++                }
++                if (identity)
+                     stage("campaign-identity-passed");
+                 else
+                 {
+diff --git a/src/xrGame/CampaignIdentityFixture.cpp b/src/xrGame/CampaignIdentityFixture.cpp
+index 68d7c90..58d6df9 100644
+--- a/src/xrGame/CampaignIdentityFixture.cpp
++++ b/src/xrGame/CampaignIdentityFixture.cpp
+@@ -520,8 +520,14 @@ extern "C" bool __cdecl xrCampaignLevel_IdentityCheck()
+ 			if (missing_online <= 5)
+ 				Msg("! S03-T01 online object %u (%s) has no live binding", u32(object->ID()), object->cName().c_str());
+ 		}
+-		if (!level.Server->ID_to_entity(object->ID()))
++		// S10-T03e: an object the server already destroyed is queued for its destroy on the next frame (sweep-4:
++		// one such object after a travel reload stopped the server); every other one is a missing entity
++		if (!level.Server->ID_to_entity(object->ID()) && !object->getDestroy())
++		{
+ 			++missing_entity;
++			if (missing_entity <= 5)
++				Msg("! S03-T01 online object %u (%s) has no server entity", u32(object->ID()), object->cName().c_str());
++		}
+ 	}
+ 	u32 mismatched = 0;
+ 	EntityId entity;
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 18814f7..7ede640 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -166,6 +166,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.sleep_party = ini.line_exist("coop", "sleep_party") ? ini.r_u32("coop", "sleep_party") : 0; // S10-T03c
+ 		out.relocate_party = ini.line_exist("coop", "relocate_party") ? ini.r_u32("coop", "relocate_party") : 0; // S10-T03d
+ 		out.relocate_variant = ini.line_exist("coop", "relocate_variant") ? ini.r_u32("coop", "relocate_variant") : 0;
++		out.sweep_party = ini.line_exist("coop", "sweep_party") ? ini.r_u32("coop", "sweep_party") : 0; // S10-T03e
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index ac54454..1d46edc 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -127,6 +127,7 @@ struct CoopConfig
+ 	u32 relocate_party; // S10-T03d fixture: seconds after both attach until the relocation rounds start
+ 	u32 relocate_variant; // S10-T03d fixture: 0 the guide rounds (refused, then agreed to another level); 1 a
+ 	                      // client's fast travel (client 2's relocate_test) agreed by p1
++	u32 sweep_party; // S10-T03e fixture: seconds after both attach until the passage sweep starts
+ 	u32 fauna_party; // S10-T02e fixture:seconds after both attach until each generic mutant class is spawned near p2
+ 	u32 mutant_party; // S10-T02d fixture:seconds after both attach until the bloodsucker, burer and poltergeist stages
+ 	u32 psy_party; // S10-T02c fixture:seconds after both attach until a controller is spawned near p2
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 09082d9..cfac1d5 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -14,6 +14,7 @@
+ #include "PHMovementControl.h"
+ #include "Level.h"
+ #include "Actor.h"
++#include "Actor_Flags.h" // S10-T03e: the sweep's god mode
+ #include "ai_space.h"
+ #include "alife_simulator.h"
+ #include "alife_object_registry.h"
+@@ -843,6 +844,30 @@ struct Host
+ 		float d0 = 0.f;
+ 		u32 failures = 0;
+ 	} squad_fixture;
++	// S10-T03e: the passage sweep (profile sweep_party)
++	struct SweepFixture
++	{
++		u64 since = 0; // both in the world, nothing executing, on this level
++		xr_string level; // the level `since` counts on
++		u32 phase = 0; // 0 graph, 1 choose, 2 travelling, 999 done
++		u64 phase_tick = 0;
++		u64 operation = 0x5190000000000000ull;
++		struct Edge
++		{
++			xr_string from, to, changer;
++			u16 id;
++		};
++		xr_vector<Edge> edges; // every level changer: its level, its destination
++		xr_map<xr_string, xr_string> result; // "from>to" -> ok / refused-<reason> / failed / timeout
++		xr_set<u16> bad_changers; // refused here (disabled): not tried again
++		xr_map<u16, u32> retries; // passing refusals per changer
++		u64 reloads0 = 0, failed0 = 0;
++		xr_string going_to, via, changer_name;
++		u16 changer = 0xffff;
++		u32 travels = 0, ok = 0, refused = 0, failed = 0;
++		bool sweeping = false; // the current trip covers an untravelled passage
++	} sweep_fixture;
++	bool sweep_bypass = false; // S10-T03e: the sweep's requests skip the "at the changer" check
+ 	// S10-T03d: the relocation fixture (profile relocate_party)
+ 	struct RelocateFixture
+ 	{
+@@ -14497,7 +14522,7 @@ u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& inten
+ 		return coop::proto::kReasonNoChanger;
+ 	}
+ 	float distance = 0.f;
+-	if (!actor_at_changer(actor, changer, distance))
++	if (!g_host->sweep_bypass && !actor_at_changer(actor, changer, distance)) // S10-T03e: the sweep travels from where it is
+ 	{
+ 		g_host->log.line("travel-not-at-changer slot=%u changer=%u distance=%.2f radius=%.2f", u32(link.ref.slot),
+ 			u32(changer_id), distance, changer->Radius());
+@@ -14515,7 +14540,7 @@ u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& inten
+ 		return kTravelPartnerUnavailable;
+ 	}
+ 	string256 who;
+-	if (party_in_combat(who))
++	if (!g_host->sweep_bypass && party_in_combat(who)) // S10-T03e: the sweep travels from among monsters (god mode)
+ 	{
+ 		g_host->log.line("travel-in-combat slot=%u enemy=%s", u32(link.ref.slot), who);
+ 		return coop::proto::kReasonInCombat;
+@@ -14602,7 +14627,7 @@ u16 take_travel_answer(PlayerLink& link, const coop::proto::ActionIntent& intent
+ 		if (live->partner == link.ref.slot && (!actor || !actor->g_Alive()))
+ 			return coop::proto::kReasonNoActor;
+ 		string256 who;
+-		if (live->partner == link.ref.slot && party_in_combat(who))
++		if (!g_host->sweep_bypass && live->partner == link.ref.slot && party_in_combat(who))
+ 		{
+ 			g_host->log.line("travel-in-combat slot=%u enemy=%s (accept refused; the proposal stands)",
+ 				u32(link.ref.slot), who);
+@@ -15633,6 +15658,253 @@ void relocate_fixtures()
+ 	}
+ }
+ 
++// The passage sweep (profile sweep_party, server-driven; matrix F11, L50).
++// The graph is every CSE_ALifeLevelChanger in the ALife registry (its level
++// from its game vertex, its destination from m_tNextGraphID). On each level,
++// once both players are in the world and nothing is executing for 5 s, the
++// fixture asks (player 1) and agrees (player 2) to travel through a changer
++// of an untravelled passage of this level; with none left here, through the
++// first hop of the shortest way to a level that has one. The request skips
++// the "inside the changer" check (S09 proved it; walking player 2's actor
++// hundreds of metres server-side crashed a client, L58): what the sweep checks
++// is that every passage carries the party to its level and both clients rejoin
++// there. Each trip logs fixture-sweep passage; a changer refused here (24: a
++// story-disabled one) is not tried again. compare-coop-sweep.py.
++u16 sweep_request(PlayerLink& p1, PlayerLink& p2, u16 changer)
++{
++	Host::SweepFixture& f = g_host->sweep_fixture;
++	coop::proto::ActionIntent intent;
++	intent.operation_id = ++f.operation;
++	intent.kind = coop::proto::kActionTravelRequest;
++	coop::proto::EntityRef ref;
++	if (!entity_ref_of(changer, ref))
++		return coop::proto::kReasonNoChanger;
++	intent.target = ref;
++	coop::proto::ActionResult result;
++	g_host->sweep_bypass = true;
++	const u16 reason = take_travel_request(p1, intent, result);
++	g_host->sweep_bypass = false;
++	if (reason)
++		return reason;
++	coop::proto::ActionIntent answer;
++	answer.operation_id = ++f.operation;
++	answer.kind = coop::proto::kActionTravelAnswer;
++	for (int b = 0; b < 8; ++b)
++		answer.params.push_back(u8(result.revision >> (8 * b)));
++	answer.params.push_back(1);
++	coop::proto::ActionResult r2;
++	g_host->sweep_bypass = true;
++	const u16 r = take_travel_answer(p2, answer, r2);
++	g_host->sweep_bypass = false;
++	return r;
++}
++
++// The first hop of the shortest way from `from` to a level with an untravelled
++// passage (over changers not refused): its changer's name, else empty.
++xr_string sweep_next_hop(const xr_string& from, xr_string& target)
++{
++	Host::SweepFixture& f = g_host->sweep_fixture;
++	xr_map<xr_string, xr_string> first; // level -> the first hop's changer name from `from`
++	xr_vector<xr_string> queue;
++	queue.push_back(from);
++	first[from] = "";
++	for (u32 i = 0; i < queue.size(); ++i)
++	{
++		const xr_string level = queue[i];
++		for (const Host::SweepFixture::Edge& e : f.edges)
++		{
++			if (e.from != level || f.bad_changers.count(e.id))
++				continue;
++			if (level != from && !f.result.count(e.from + ">" + e.to))
++			{
++				target = level;
++				return first[level];
++			}
++			if (!first.count(e.to))
++			{
++				first[e.to] = level == from ? e.changer : first[level];
++				queue.push_back(e.to);
++			}
++		}
++	}
++	return "";
++}
++
++void sweep_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.sweep_party || !ai().get_alife())
++		return;
++	Host::SweepFixture& f = g_host->sweep_fixture;
++	Host::Travel& tv = g_host->travel;
++	if (f.phase >= 999)
++		return;
++	// the party stands idle at every arrival point: god mode for the sweep (as
++	// the S03-T04 activation fixture), so an arrival among monsters is not a death
++	if (!psActorFlags.test(AF_GODMODE))
++	{
++		psActorFlags.set(AF_GODMODE, TRUE);
++		psActorFlags.set(AF_GODMODE_RT, TRUE);
++		g_host->log.line("fixture-sweep godmode on");
++	}
++	PlayerLink* links[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* a = participant_actor(link.ref))
++				if (a->g_Alive())
++				{
++					links[link.ref.slot] = &link;
++					++attached;
++				}
++	const xr_string here = Level().name().c_str();
++	const bool quiet = attached == 2 && !travel_executing() && !(tv.coordinator && tv.coordinator->live());
++	if (!quiet || here != f.level)
++	{
++		f.since = quiet ? g_host->tick : 0;
++		f.level = here;
++	}
++	if (!quiet)
++	{
++		// a trip that ends with no reload (the executor failed and rolled back)
++		if (f.phase == 2 && g_host->tick - f.phase_tick > 300 * 50)
++		{
++			f.result[f.via] = "timeout";
++			++f.failed;
++			g_host->log.line("fixture-sweep passage n=%u key=%s changer=%s result=timeout", f.travels, f.via.c_str(),
++				f.changer_name.c_str());
++			f.phase = 1;
++		}
++		return;
++	}
++	if (f.phase == 0)
++	{
++		const CALifeObjectRegistry::OBJECT_REGISTRY& objects = ai().alife().objects().objects();
++		for (CALifeObjectRegistry::OBJECT_REGISTRY::const_iterator it = objects.begin(); it != objects.end(); ++it)
++		{
++			const CSE_ALifeLevelChanger* lc = smart_cast<const CSE_ALifeLevelChanger*>(it->second);
++			if (!lc || !ai().game_graph().valid_vertex_id(lc->m_tGraphID) || !ai().game_graph().valid_vertex_id(lc->m_tNextGraphID))
++				continue;
++			Host::SweepFixture::Edge e;
++			e.from = *ai().game_graph().header().level(ai().game_graph().vertex(lc->m_tGraphID)->level_id()).name();
++			e.to = *ai().game_graph().header().level(ai().game_graph().vertex(lc->m_tNextGraphID)->level_id()).name();
++			e.changer = lc->name_replace();
++			e.id = lc->ID;
++			if (e.from != e.to && e.from != "fake_start") // the marsh's start changer is not a passage
++				f.edges.push_back(e);
++		}
++		xr_set<xr_string> pairs, levels;
++		for (const Host::SweepFixture::Edge& e : f.edges)
++		{
++			pairs.insert(e.from + ">" + e.to);
++			levels.insert(e.from);
++			g_host->log.line("fixture-sweep edge from=%s to=%s changer=%s id=%u", e.from.c_str(), e.to.c_str(), e.changer.c_str(),
++				u32(e.id));
++		}
++		g_host->log.line("fixture-sweep graph levels=%u changers=%u passages=%u start=%s", u32(levels.size()), u32(f.edges.size()),
++			u32(pairs.size()), here.c_str());
++		f.phase = 1;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		// back in the world after the trip, or still here (refused, failed)
++		const bool reloaded = tv.reloads != f.reloads0;
++		const bool arrived = reloaded && here == f.going_to;
++		LPCSTR result = arrived ? "ok" : reloaded ? "wrong-level" : tv.exec_failed != f.failed0 ? "failed" : "no-travel";
++		if (f.sweeping || !arrived)
++			f.result[f.via] = result;
++		if (arrived)
++			++f.ok;
++		else
++			++f.failed;
++		g_host->log.line("fixture-sweep passage n=%u key=%s changer=%s result=%s sweeping=%d level=%s seconds=%.1f", f.travels,
++			f.via.c_str(), f.changer_name.c_str(), result, f.sweeping ? 1 : 0, here.c_str(),
++			float(g_host->tick - f.phase_tick) / 50.f);
++		f.phase = 1;
++		f.since = g_host->tick;
++		return;
++	}
++	if (g_host->tick - f.since < 5 * 50)
++		return;
++	// choose: an untravelled passage from here; else the first hop toward one
++	const Host::SweepFixture::Edge* pick = nullptr;
++	for (const Host::SweepFixture::Edge& e : f.edges)
++		if (e.from == here && !f.bad_changers.count(e.id) && !f.result.count(e.from + ">" + e.to))
++		{
++			pick = &e;
++			break;
++		}
++	bool sweeping = pick != nullptr;
++	if (!pick)
++	{
++		xr_string target;
++		const xr_string hop = sweep_next_hop(here, target);
++		for (const Host::SweepFixture::Edge& e : f.edges)
++			if (e.from == here && e.changer == hop)
++				pick = &e;
++		if (!pick)
++		{
++			u32 remaining = 0;
++			xr_set<xr_string> pairs;
++			for (const Host::SweepFixture::Edge& e : f.edges)
++				pairs.insert(e.from + ">" + e.to);
++			for (const xr_string& k : pairs)
++				if (!f.result.count(k))
++				{
++					++remaining;
++					g_host->log.line("fixture-sweep unreached key=%s", k.c_str());
++				}
++			g_host->log.line("fixture-sweep done travels=%u ok=%u refused=%u failed=%u passages=%u covered=%u remaining=%u level=%s",
++				f.travels, f.ok, f.refused, f.failed, u32(pairs.size()), u32(f.result.size()), remaining, here.c_str());
++			f.phase = 999;
++			return;
++		}
++		g_host->log.line("fixture-sweep hop from=%s toward=%s changer=%s", here.c_str(), target.c_str(), hop.c_str());
++	}
++	f.via = pick->from + ">" + pick->to;
++	f.going_to = pick->to;
++	f.changer = pick->id;
++	f.changer_name = pick->changer;
++	f.sweeping = sweeping || !f.result.count(f.via);
++	f.reloads0 = tv.reloads;
++	f.failed0 = tv.exec_failed;
++	++f.travels;
++	const u16 reason = sweep_request(*links[0], *links[1], pick->id);
++	if (reason && reason != coop::proto::kReasonNoChanger && ++f.retries[pick->id] < 3)
++	{
++		// a passing refusal (busy, a travel being carried out): again in 10 s
++		g_host->log.line("fixture-sweep retry n=%u key=%s changer=%s reason=%u", f.travels, f.via.c_str(), pick->changer.c_str(),
++			u32(reason));
++		--f.travels;
++		f.since = g_host->tick; // the 5 s wait again
++		return;
++	}
++	if (reason)
++	{
++		// refused here (24: disabled; or three times): this changer is not tried
++		// again; the passage counts as refused unless another changer of it works
++		f.bad_changers.insert(pick->id);
++		++f.refused;
++		string32 r;
++		xr_sprintf(r, "refused-%u", u32(reason));
++		bool other = false;
++		for (const Host::SweepFixture::Edge& e : f.edges)
++			if (e.from == pick->from && e.to == pick->to && !f.bad_changers.count(e.id))
++				other = true;
++		if (!other)
++			f.result[f.via] = r;
++		g_host->log.line("fixture-sweep passage n=%u key=%s changer=%s result=%s other_changer=%d", f.travels, f.via.c_str(),
++			pick->changer.c_str(), r, other ? 1 : 0);
++		f.since = g_host->tick;
++		return;
++	}
++	g_host->log.line("fixture-sweep travel n=%u key=%s changer=%s sweeping=%d", f.travels, f.via.c_str(), pick->changer.c_str(),
++		f.sweeping ? 1 : 0);
++	f.phase = 2;
++	f.phase_tick = g_host->tick;
++}
++
+ // The travel fixture (profile travel_party, travel_variant): once both
+ // players are in the world, both actors are placed inside Cordon's first
+ // enabled level changer and rounds run through the transfer driver's steps
+@@ -16848,7 +17120,7 @@ void log_status(LPCSTR tag)
+ 		tag, g_host->tick, Device.dwFrame,
+ 		g_pGamePersistent && g_pGamePersistent->Environment().CurrentWeatherName.size() ?
+ 			*g_pGamePersistent->Environment().CurrentWeatherName : "-",
+-		game_ms, alife_objects, u32(Level().Objects.o_count()), participants,
++		game_ms, alife_objects, g_pGameLevel ? u32(Level().Objects.o_count()) : 0u, participants, // S10-T03e: a stop after a failed level start
+ 		c.joins, c.violations, c.rejected_auth, c.rejected_build, c.rejected_content, g_host->intents_refused,
+ 		g_host->inputs_ignored, c.rate_limited_drops, g_host->acks, g_host->commit, u32(g_host->published.size()), g_host->spawns,
+ 		g_host->despawns_range, g_host->despawns_destroyed, g_host->spawn_oversize, g_host->churn_spawned,
+@@ -17816,6 +18088,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	squad_fixtures(); // S10-T03b
+ 	sleep_fixtures(); // S10-T03c
+ 	relocate_fixtures(); // S10-T03d
++	sweep_fixtures(); // S10-T03e
+ 
+ 
+ 
+diff --git a/src/xrGame/CustomMonster.cpp b/src/xrGame/CustomMonster.cpp
+index 9581052..9707d6b 100644
+--- a/src/xrGame/CustomMonster.cpp
++++ b/src/xrGame/CustomMonster.cpp
+@@ -796,7 +796,9 @@ BOOL CCustomMonster::net_Spawn(CSE_Abstract* DC)
+ 	}
+ 	if (!inherited::net_Spawn(DC))
+ 	{
+-		Msg("! S10-T02e custom-monster spawn refused by the entity: %s id=%u", *DC->s_name, u32(DC->ID));
++		// S10-T03e: whether the replica's ALife holds it (bind_monster refuses an object alife_object misses)
++		Msg("! S10-T02e custom-monster spawn refused by the entity: %s id=%u alife=%d", *DC->s_name, u32(DC->ID),
++		    ai().get_alife() && ai().alife().objects().object(DC->ID, true) ? 1 : 0);
+ 		return (FALSE);
+ 	}
+ 	if (!CScriptEntity::net_Spawn(DC))
+diff --git a/src/xrGame/ai/monsters/ai_monster_squad_manager.cpp b/src/xrGame/ai/monsters/ai_monster_squad_manager.cpp
+index 36cdab5..71e7a97 100644
+--- a/src/xrGame/ai/monsters/ai_monster_squad_manager.cpp
++++ b/src/xrGame/ai/monsters/ai_monster_squad_manager.cpp
+@@ -88,7 +88,13 @@ void CMonsterSquadManager::register_member(u8 team_id, u8 squad_id, u8 group_id,
+ 
+ void CMonsterSquadManager::remove_member(u8 team_id, u8 squad_id, u8 group_id, CEntity* e)
+ {
+-	get_squad(team_id, squad_id, group_id)->RemoveMember(e);
++	// S10-T03e: a monster whose spawn failed (a psy dog phantom's replica on a co-op client) is destroyed before
++	// net_Spawn registered it, so its squad may not exist
++	if (team_id >= team.size() || squad_id >= team[team_id].size() || group_id >= team[team_id][squad_id].size())
++		return;
++	CMonsterSquad* squad = team[team_id][squad_id][group_id];
++	if (squad)
++		squad->RemoveMember(e);
+ }
+ 
+ CMonsterSquad* CMonsterSquadManager::get_squad(u8 team_id, u8 squad_id, u8 group_id)

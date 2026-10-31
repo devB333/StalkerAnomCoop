@@ -251,3 +251,14 @@ T01-9 binds it. Awaiting the user's approval at G10.
 | T03d-3 | **A guide's fee is paid by the player who asks, once; it comes back if the partner refuses** (or the request is refused) | T01-9 (requester pays); paying for a trip that did not happen would feel like a bug | no refund (the guide keeps it) |
 | T03d-4 | *(trust)* **A fast travel's or backpack's destination comes from the asking player's client** (its PDA's discovered markers and backpack stashes are client-side map spots); the server checks it is a real place in the game graph and that the party may travel (partner present, no combat), not that the marker was discovered | the markers live in the client's PDA; moving them to the server is S10-T05d's presentation work | refuse fast travel in co-op until the markers are the server's |
 | T03d-5 | *(scope)* **A script's time skip in a player's context that no travel follows** (an anabiotic, a script's own skip) is applied one tick late, as the script asked, for the whole world | the world has one clock; deciding which skips are personal is per item and not this slice's | — |
+
+## S10-T03e — passage sweep over every level changer
+
+Taken 2026-10-31 while building the slice ([S10-T03e](validation/S10-T03e.md));
+T01-1 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03e-1 | *(test only)* **The sweep's own travel requests skip the "at the changer" and combat checks, and the sweep turns on god mode for the party**; a player's request keeps every check | the fixture cannot walk the party to each of 99 changers or fight its way out; the checks are S09's and tested there (tv-1…tv-26) | walk the party to every changer (a pathing fixture per level; slower and fragile) |
+| T03e-2 | **The passage scope is the spawn data's own graph: 99 directed passages** between the 33 levels (T01-1 said 98, from a string scan) | the server's level changers are what the players can use; the scan misnamed two levels and skipped two changers | keep the scan's table as the list |
+| T03e-3 | **A failed identity check after a load is retried after 10 more ticks, up to 3 times, before the server stops** | an object ALife has just released keeps its level object until its destroy event is processed (one frame); a real mismatch is still there after 30 ticks and still stops the server | stop at once (sweep-4 and sweep-6 stopped on a harmless timing gap) |

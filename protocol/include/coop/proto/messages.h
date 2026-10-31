@@ -44,6 +44,7 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.8 + S10-T03d: the relocate kind (26); no wire layout change.
 // 1.8 + S10-T06: the session kind (27), reasons 43-46 and CampaignEvent kind 20
 // (the campaign list, a campaign switch); no wire layout change.
+// 1.8 + S10-T07: the companion order kind (28); no wire layout change.
 constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -431,6 +432,12 @@ enum ActionKind : std::uint16_t
                                // partner's is kept as its loadout for the owner's next new game (revision 2);
                                // 3 load: 16 bytes, the campaign id (revision 1). A switch is announced to every
                                // client as CampaignEvent 20 before the server stops and is relaunched on it
+    kActionCompanion = 28,     // S10-T07 (B12): a companion order from the hotkeys or the companion wheel; target:
+                               // one companion (scope 1) or none; params: u8 command (1 combat, 2 move, 3 stealth,
+                               // 4 loot, 5 distance: set to the mode; 6 move to the point), u8 mode (1..4; 0: the
+                               // server's next), u8 scope (0 all the player's companions, 1 the target's squad), u32
+                               // level vertex (command 6); carried out on the server in the player's context, on
+                               // that player's own companions only (decision T02f-1; 4 when it has none there)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the

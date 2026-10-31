@@ -7,8 +7,9 @@ presentation-stop) and server/xray-campaign-server_*.log (the script-context sto
 Checks (S10-T05d1):
   orphans   a client got almost no record for a sound or effector it does not have: "absent" records are under
             1 % of the run's records (before: a volume for every loop every update, a remove for effects never on)
-  loops     every client entering the world got the looped sounds already playing (loops-joined loops > 0) and
-            applied them: as many looped plays (flags bit 1) applied within 10 s of each join as the join replayed
+  loops     every client entering the world got the looped sounds already playing: at least as many looped plays
+            (flags bit 1) applied within 10 s of each join as the join replayed, and at least one (since S10-T07 the
+            ambient loops are each player's own, started in its context, and the replay may have none)
   passloops when the run has a surge, each player's pass played its own looped sounds (emission surge-pass-loop
             lines for every slot with a pass) and that player's client applied looped plays during the surge
   dropped   the server's outboxes evicted fewer records than the baseline (when one is given)
@@ -87,9 +88,8 @@ def main():
     for ln, j in zip([ln for ln in log if " loops-joined " in ln], joins, strict=True):
         at = int(ln.split(" ", 1)[0])
         j["applied"] = str(sum(1 for t in plays.get(j.get("to"), []) if at <= t <= at + 10000))
-    checks["loops"] = {"pass": bool(joins) and all(int(j.get("loops", "0")) > 0 for j in joins)
-                       and {j.get("to") for j in joins} >= {"0", "1"}
-                       and all(int(j["applied"]) >= int(j["loops"]) for j in joins),
+    checks["loops"] = {"pass": bool(joins) and {j.get("to") for j in joins} >= {"0", "1"}
+                       and all(int(j["applied"]) >= max(int(j["loops"]), 1) for j in joins),
                        "joins": joins, "sounds_applied": applied,
                        "stop": [ln.split(" ", 1)[1] for ln in log if " presentation-stop " in ln]}
     starts = [dict(re.findall(r"(\w+)=(\S+)", ln)) | {"at": ln.split(" ", 1)[0]}

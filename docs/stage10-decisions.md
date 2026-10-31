@@ -324,3 +324,15 @@ T01-17…T01-19 bind it. Awaiting the user's approval at G10.
 | T06-4 | **Joining is the client's start**: a co-op client connects to its configured server when it starts; there is no server browser | the session layer already admits only the roster's two players | a join button with an address field |
 | T06-5 | **Load lists the server's campaigns (the 8 newest) in the standard load window**; a client cannot delete a campaign | the window the players know; deleting a world is the operator's | delete from the client (owner only) |
 | T06-6 | **The owner is the first player key the server ever accepted** and stays the owner for every campaign that server runs; the operator deletes `coop-owner.txt` to change it | T01-18; one accountable key | the owner per campaign |
+
+## S10-T07 — the bug pass (part 1)
+
+Taken 2026-10-31 while fixing the bug list ([S10-T07](validation/S10-T07.md)).
+Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T07-1 | **The companion hotkeys and the wheel order only the presser's own companions** (all of them, one squad, or move to a point) | each companion follows its recruiter (T02f-1) | one order for every companion of the party |
+| T07-2 | **The combat music is each player's own**: it starts when a stalker fights that player, whatever the partner does | the music follows "the actor"; shared, it played on player 1's fights for both | one shared music (either player's fight) |
+| T07-3 | **The ambient wind, drone and rain on the helmet are each player's own** (its own cover; for player 2 "mask on" is a helmet in the helmet slot) | they follow "the actor"; shared, player 2 indoors heard player 1's outdoor wind | keep them player 1's for both |
+| T07-4 | **When the server is gone for a minute, a client goes back to the main menu with a message and keeps trying** (two and a half minutes after a campaign switch) | B16: the clients sat on the loading screen for good | quit the client; or wait silently |

@@ -288,6 +288,12 @@ def main():
                         help="comma-separated client names present for the S10-T05c story fixture (server-driven: "
                              "DoctorX and Living Legend steps in each player's context, a travel to Garbage; with "
                              "Run-CoopSession -ServerKill the restart verifies; fixture story_party)")
+    parser.add_argument("--music", default="",
+                        help="comma-separated client names present for the S10-T07 combat-music fixture "
+                             "(server-driven: p1 moved away, a hostile stalker fights p2 for 60 s, then p2 jumps "
+                             "about 500 m (B6); fixture music_party)")
+    parser.add_argument("--music-start", type=int, default=20,
+                        help="with --music: seconds after both players are in the world until it acts")
     parser.add_argument("--story-start", type=int, default=20,
                         help="with --story: seconds after both players are in the world (on each level) until it acts")
     parser.add_argument("--new-game", default="",
@@ -308,6 +314,9 @@ def main():
     parser.add_argument("--relocate-test", default="",
                         help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
                              "same-level fast travel does")
+    parser.add_argument("--companion-test", default="",
+                        help="S10-T07 driver: <client>:<seconds> after its world goes live the client presses the "
+                             "companion hotkeys (move, then combat), e.g. c2:60,c1:60")
     parser.add_argument("--session", default="",
                         help="S10-T06 driver: <client>:<script> (1 the owner: a refused create, a new game, the first "
                              "campaign loaded back; 2 the partner: its loadout, a refused load), e.g. c1:1,c2:2")
@@ -405,8 +414,10 @@ def main():
     sweep_fix = {n for n in args.sweep.split(",") if n}
     emission_fix = {n for n in args.emission.split(",") if n}
     story_fix = {n for n in args.story.split(",") if n}
+    music_fix = {n for n in args.music.split(",") if n}
     relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
     session_script = {e.split(':')[0]: int(e.split(':')[1]) for e in args.session.split(',') if e}
+    companion_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.companion_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
@@ -414,7 +425,7 @@ def main():
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
                | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
                | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix | sweep_fix
-               | emission_fix | story_fix)
+               | emission_fix | story_fix | music_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -540,6 +551,7 @@ def main():
                       f"emission_party = {args.emission_start if emission_fix else 0}",
                       f"emission_variant = {args.emission_variant}",
                       f"story_party = {args.story_start if story_fix else 0}",
+                      f"music_party = {args.music_start if music_fix else 0}",
                       f"place_giver = {args.place_giver}"]
             if args.new_game:
                 # S10-T03f: the second player's own choices (T01-3: the creator's faction)
@@ -560,7 +572,8 @@ def main():
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                                 "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                                 "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                                "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party")
+                                "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party",
+                            "music_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -573,7 +586,8 @@ def main():
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                             "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                             "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                            "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party")
+                            "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party",
+                            "music_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")
@@ -596,7 +610,8 @@ def main():
                       f"travel_rejoin_delay = {rejoin_delay.get(name, 0)}",
                       f"travel_load_fail = {1 if name in load_fail else 0}",
                       f"relocate_test = {relocate_test.get(name, 0)}",
-                      f"session_script = {session_script.get(name, 0)}"]
+                      f"session_script = {session_script.get(name, 0)}",
+                      f"companion_test = {companion_test.get(name, 0)}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile

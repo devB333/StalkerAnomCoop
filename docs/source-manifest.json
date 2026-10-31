@@ -353,6 +353,10 @@
     {
       "path": "patches/engine/0086-session-control.patch",
       "sha256": "00d14a9aadf05a0fcebb81c5320934da355910d608d12581113a05dd31798fdb"
+    },
+    {
+      "path": "patches/engine/0087-bug-pass-1.patch",
+      "sha256": "1c8f10c75448f33385583ab448b75a7669b7ab9abe2a0c2ed2fc5e4ce190f02c"
     }
   ],
   "submodules": [

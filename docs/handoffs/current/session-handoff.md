@@ -1,93 +1,65 @@
-# Session handoff — S10-T06 complete; next S10-T07 bug fixes, then the G10 review
+# Session handoff — stopped at the G10 review (S10-T07 part 1 done)
 
 ## State (2026-10-31)
 
-- **S10-T05d presentation split: Completed and committed**
-  ([S10-T05d](../../validation/S10-T05d.md); proto-build-55). With it,
-  **S10-T05 is complete** (a…d).
-  - **d1** traffic (patch 0084, campaign-406 / client-292,
-    **presentation-4 pass 4/4**). 0 absent records (was 672) and 1,872
-    records per run (was 243,142). Changes:
-    - the level's ambient loops are played to a joining client once its
-      presentation starts;
-    - a muted play is not routed;
-    - each surge pass has its own looped sounds.
-  - **d2** HUD statics (patch 0085, campaign-408 / client-294,
-    **presentation-5 pass 5/5, emission 6/6**). Inside a player's context,
-    `Add/Get/RemoveCustomStatic` work on that player's own set on the
-    server and are shown on its HUD with their text. The exposed player saw
-    the psi indicator change colour (5 adds / 5 removes); the covered player
-    saw none. Statistics stay the party's (T05d-5). **Not exercised by a
-    run:** the statics replay at a join and the text update. A hands-on
-    `sr_timer` or disguise message would show them.
-  - **d3**: B4/L57, B7 and L47 recorded as not shown, routed to S10-T07.
-  - B3 and B14 fixed. New bugs B17 (ambient loops follow player 1) and B18
-    (combat music follows player 1, heard by both). L05 and L28 narrowed.
-    Decisions **T05d-1…5**.
-- The installed scripts are packed in `scripts.db0`. Extract them with
-  `python3 tools/xray-db-extract.py -q extract -o <scratch>/scripts -g '*.script' builds/build_2/test-install/source-client/db/configs/scripts.db0`
-  and grep with `grep -a`. `engine/xray-monolith/gamedata/scripts` holds
-  only the Monolith's own 70 scripts.
-- **Bug-fixing stage S10-T07** (user, 2026-10-30) runs after S10-T06 and the
-  G10 decision review. The [bug-squashing list](../../known-issues.md) has
-  B1…B18 (B3, B14, B15 fixed).
-- **Findings that bind later work:**
-  - Anomaly's windows are the installed Lua UI (T04f-5/6, T04e-1).
-  - The engine does not save the faction table (T04d-4).
-  - NPC script logic decides against the nearest participant (T02a-1); a
-    companion decides against its recruiter (T02f-1).
-  - A remote creature on a client runs neither its scheduled update nor
-    `UpdateCL`.
-  - A sound theme holds one `sound_object` shared by everyone, and the
-    server has one HUD for everyone. Per-player script runs need their own
-    objects (S10-T05d).
-  - Inside a context, `AC_ID` and `db.actor` are that player's.
-  - luabind: never assign a call proxy into, or call `type()` on, a
-    default-constructed `luabind::object`; no `luabind::iterator`.
-  - `xr_sprintf` is `sprintf_s`, which aborts on overflow: use
-    `_snprintf_s(..., _TRUNCATE)` for text from scripts.
-  - Use `campaign::coop_server_prepared()`, not the file-local
-    `server_role()`.
-  - Fixtures move player 1 only (L58).
-- **Hands-on by the user, pending for G10:** unchanged from the
-  [S10-T05d2 snapshot](../done/snapshot-before-S10-T05d2.md). Add:
-  - the emission's rumble building up for each player;
-  - the wind on joining;
-  - the psi indicator on the exposed player's HUD only.
-- **Decisions awaiting the user at G10** ([Stage 10
-  decisions](../../stage10-decisions.md)): T04a-1…T05c-3 as before, plus
-  **T05d-1…5**. Open question: T05b-4.
+- **Stopped for the user** (direction 2026-10-31: "finish the rest of G10
+  until you get to the bug fixes that require my input"). The review record
+  is [G10](../../validation/G10.md). It has two open questions (T05b-4 who
+  pays a fee inside a task, T03b-2 what attracts bounty squads), the decision
+  list ([Stage 10 decisions](../../stage10-decisions.md), up to T07-4), the
+  bug rows waiting for the user, the hands-on checks and the limits to add.
+- **Completed and committed this session:**
+  - S10-T05d: presentation split, patches 0084–0085.
+  - S10-T06: co-op menu and session control, patch 0086, proto-build-56,
+    session-2 8/8.
+  - **S10-T07 part 1**: [S10-T07](../../validation/S10-T07.md), patch 0087,
+    proto-build-57 st-32, campaign-415 / client-301. Fixed: B6, B8, B10,
+    B12, B13, B16, B17, B18 and the new B19. Runs bugfix-1…11:
+    - bugfix-10: emission 6/6, presentation 5/5, clock 5/1 steps.
+    - bugfix-5: music for player 2 only, a 525 m jump survived.
+    - bugfix-6: the grab hold works.
+    - bugfix-7: the tooltip percent matches the server's.
+    - bugfix-4: companion orders reach the player's own companions.
+
+    L58 closed, L28 narrowed. Decisions T07-1…4.
+- **Waiting on the user:**
+  - B1: a hands-on trade (client 2 logs `trade-open-sent … icon= name=`).
+  - B2: details.
+  - B4, B7: body animation now or in Stage 11.
+  - B5 and B20: permission for crash dumps. B20 is a client hung once at
+    level load in bugfix-8 and has not repeated.
+  - B9: a "pending" mark, or waive.
+  - B11: waiting for it to recur.
+- The music fixture (`--music`) sometimes does not get the stalker to
+  engage (bugfix-11). If it is used again, re-set the enemy relation every
+  few seconds until it fights.
+- Tools added this session:
+  - `tools/compare-coop-session.py`
+  - `tools/compare-coop-bugfix.py`
+  - `tools/Start-CoopServer.ps1` (the dedicated server's launcher: it
+    relaunches on exit 75)
+  - `prepare-coop-session.py` options `--session`, `--music`,
+    `--companion-test`
+- The installed scripts are packed in `scripts.db0` and `configs.db0`.
+  Extract them with `tools/xray-db-extract.py`; grep them with `grep -a`.
 
 ## Next
 
-1. **S10-T06 co-op menu and session control: Completed and committed**
-   ([S10-T06](../../validation/S10-T06.md), patch 0086, proto-build-56 st-31
-   115/115, campaign-410 / client-296, **session-2 pass 8/8**). The owner (the
-   first key the server accepted) creates a new game with the standard
-   creation screen or loads a campaign of the server's library in the
-   standard load window. The server checks the choices by the screen's rules,
-   checkpoints, tells both clients and exits 75. Its launcher
-   (`tools/Run-CoopSession.ps1`, new `tools/Start-CoopServer.ps1`) relaunches
-   it on that campaign. The partner's creation screen keeps only its loadout.
-   Decisions **T06-1…6**.
-2. **S10-T07 bug fixes** (user, 2026-10-31: "keep going and finish the rest of
-   G10 until you get to the bug fixes that require my input"). Fix the rows of
-   the [bug list](../../known-issues.md) that need no input from the user.
-   Then stop with the G10 decisions list (T04a-1…T06-6), the bug list, and
-   the rows that need the user (B2 details, hands-on checks).
+1. The user's G10 review. Implement the revisions they ask for.
+2. Do the bug rows the user answers (S10-T07 part 2). Carry or waive the
+   rest. Add the new limits (L60…).
+3. Close G10, then Stage 11.
 
 ## Run names
 
-- Used: `campaign-334…408` (373, 374, 384, 385, 395, 407 failed to compile;
-  381 failed to link), `client-226…294` (293 failed to compile),
-  `proto-build-52` (unused), `proto-build-53…55`, `st-28…30`,
-  `sweep-1…7`, `newgame-1…4`, `emission-1…5`, `story-1…2`,
-  `presentation-1…5`, patch checks 77–97.
-- Also used: `campaign-409…410`, `client-295…296`, `proto-build-56`, `st-31`,
-  `session-1…2`, patch check 98.
-- Next: `campaign-411`, `client-297`, `proto-build-57`, `st-32`, patch
-  check 99.
+- Used: `campaign-334…415` (373, 374, 384, 385, 395, 407 failed to compile;
+  381 failed to link), `client-226…301` (293 failed to compile),
+  `proto-build-52` (unused), `proto-build-53…57`, `st-28…32`, `sweep-1…7`,
+  `newgame-1…4`, `emission-1…5`, `story-1…2`, `presentation-1…5`,
+  `session-1…2`, `bugfix-1…11`, patch checks 77–99.
+- Next: `campaign-416`, `client-302`, `proto-build-58`, `st-33`,
+  `bugfix-12`, patch check 100.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T07](../done/snapshot-before-S10-T07.md).
+Previous snapshot: [before the G10 review](../done/snapshot-before-G10-review.md).

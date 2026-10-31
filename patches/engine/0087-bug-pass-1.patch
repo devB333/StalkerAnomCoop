@@ -1,0 +1,1247 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 1bc2912..9a77e70 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -677,6 +677,7 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::HudStaticAdd: return "hud-static-add"; // S10-T05d2
+ 	case Presentation::HudStaticRemove: return "hud-static-remove";
+ 	case Presentation::HudStaticText: return "hud-static-text";
++	case Presentation::SoundTail: return "sound-tail"; // S10-T07
+ 	default: return "?";
+ 	}
+ }
+@@ -1575,6 +1576,99 @@ LPCSTR const compat_source =
+ 	"  local ok, text = pcall(string.format, fmt, ...)\n"
+ 	"  if ok then campaign.note(text) end\n"
+ 	"end\n"
++	// S10-T05d1, S10-T07 (B17): a looped sound (xr_sound's looped themes)
++	// played in a player's context is that player's own sound object at its
++	// actor: a surge pass's (the rumble, the wave, the earthquake) or, in any
++	// other player context, the slot's (the ambient wind and drone, the rain
++	// on the helmet). A sound theme holds one sound object for everyone: shared,
++	// one player's run played it and the other's only set volumes of a sound
++	// its client never had.
++	"local loop_pass = nil\n"
++	"local slot_loops = {}\n"
++	"local function loops_for(id)\n"
++	"  if id ~= AC_ID then return nil end\n"
++	"  if loop_pass then return loop_pass.loops, loop_pass.slot, 'surge-pass-loop' end\n"
++	"  if S.depth > 0 then\n"
++	"    local sl = campaign.slot()\n"
++	"    if sl and sl >= 0 then slot_loops[sl] = slot_loops[sl] or {} return slot_loops[sl], sl, 'slot-loop' end\n"
++	"  end\n"
++	"  return nil\n"
++	"end\n"
++	"local xs_ok, XS = pcall(function() return xr_sound end)\n"
++	"local th_ok, THM = pcall(function() return sound_theme end)\n"
++	"if xs_ok and type(XS) == 'table' and th_ok and type(THM) == 'table' and XS.play_sound_looped\n"
++	"   and XS.stop_sound_looped and XS.set_volume_sound_looped then\n"
++	"  local o_play, o_stop, o_vol = XS.play_sound_looped, XS.stop_sound_looped, XS.set_volume_sound_looped\n"
++	"  XS.play_sound_looped = function(id, snd, ...)\n"
++	"    local loops, sl, what = loops_for(id)\n"
++	"    if not (loops and snd) then return o_play(id, snd, ...) end\n"
++	"    local th = THM.theme and THM.theme[snd]\n"
++	"    local a = db.actor\n"
++	"    if not (th and th.class_id == 'looped_sound' and th.sound and a) then return end\n"
++	"    local s = loops[snd]\n"
++	"    if s and s:playing() then return end\n"
++	"    s = s or sound_object(th.sound)\n"
++	"    loops[snd] = s\n"
++	"    s:play_at_pos(a, a:position(), 0, sound_object.s3d + sound_object.looped)\n"
++	"    note('%s slot=%d sound=%s', what, sl, tostring(snd))\n"
++	"  end\n"
++	"  XS.set_volume_sound_looped = function(id, snd, v, ...)\n"
++	"    local loops = loops_for(id)\n"
++	"    if not (loops and snd) then return o_vol(id, snd, v, ...) end\n"
++	"    local s = loops[snd]\n"
++	"    if s and s:playing() then s.volume = v end\n"
++	"  end\n"
++	"  XS.stop_sound_looped = function(id, snd, ...)\n"
++	"    local loops = loops_for(id)\n"
++	"    if not loops then return o_stop(id, snd, ...) end\n"
++	"    for k, s in pairs(loops) do\n"
++	"      if (snd == nil or k == snd) and s:playing() then s:stop() end\n"
++	"    end\n"
++	"  end\n"
++	"  S.emission_wrap_loops = true\n"
++	"end\n"
++	// a player out of the world: its loops stop on the server only, muted (its
++	// client has none; they start again when it is back)
++	"local function stop_slot_loops(sl)\n"
++	"  local loops = slot_loops[sl]\n"
++	"  if not (loops and next(loops)) then return end\n"
++	"  campaign.mute(true)\n"
++	"  for _, s in pairs(loops) do if s:playing() then pcall(s.stop, s) end end\n"
++	"  campaign.mute(false)\n"
++	"  slot_loops[sl] = {}\n"
++	"end\n"
++	// S10-T07 (B17): the ambient wind, drone and rain on the helmet
++	// (sound_ambient.script, from actor 0's update) run for each player in the
++	// world, in its context, with its own cover; a player's mask is its helmet
++	// slot (actor_effects follows actor 0's)
++	"S.ambient_wrap = 'none'\n"
++	"local sa_ok, SAM = pcall(function() return sound_ambient end)\n"
++	"if sa_ok and type(SAM) == 'table' and SAM.update_wind and SAM.update_rain_helm_sound then\n"
++	"  local o_wind, o_rain = SAM.update_wind, SAM.update_rain_helm_sound\n"
++	"  local ae_ok, AEM = pcall(function() return actor_effects end)\n"
++	"  local function per_player(rain, a1, a2, a3, a4)\n"
++	"    if campaign.slot_actor_id(0) < 0 then if rain then return o_rain(a1, a2, a3, a4) end return o_wind(a1, a2, a3) end\n"
++	"    for sl = 0, 1 do\n"
++	"      if campaign.slot_actor_id(sl) >= 0 and campaign.slot_in_world(sl) then\n"
++	"        local tok = campaign.enter_slot(sl)\n"
++	"        if tok ~= 0 then\n"
++	"          local inside = context_cover() and true or false\n"
++	"          local o_mask = ae_ok and type(AEM) == 'table' and rawget(AEM, 'is_mask_on')\n"
++	"          if sl > 0 and o_mask then rawset(AEM, 'is_mask_on', function() return db.actor and db.actor:item_in_slot(12) ~= nil end) end\n"
++	"          if rain then pcall(o_rain, a1, a2, inside, a4) else pcall(o_wind, a1, inside, a3) end\n"
++	"          if sl > 0 and o_mask then rawset(AEM, 'is_mask_on', o_mask) end\n"
++	"          campaign.leave(tok)\n"
++	"        end\n"
++	"      else\n"
++	"        stop_slot_loops(sl)\n"
++	"      end\n"
++	"    end\n"
++	"  end\n"
++	"  SAM.update_wind = function(rv, inside, under) per_player(false, rv, inside, under) end\n"
++	"  SAM.update_rain_helm_sound = function(rf, rv, inside, under) per_player(true, rf, rv, inside, under) end\n"
++	"  S.ambient_wrap = 'per-player'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
+ 	"local lvl = level\n"
+ 	"local orig_swfx = lvl and lvl.set_weather_fx\n"
+ 	"local function noop() end\n"
+@@ -1660,41 +1754,6 @@ LPCSTR const compat_source =
+ 	"      rawset(SMM, 'currentIndik', saved.indik)\n"
+ 	"      lvl.set_weather_fx = orig_swfx\n"
+ 	"    end\n"
+-	// S10-T05d1: a pass's looped sounds (the rumble, the wave, the earthquake)
+-	// are its own sound objects at its player. A sound theme holds one sound
+-	// object for everyone: the world's muted run played it first, so a pass
+-	// found it playing and only set the volume of a sound its client never had.
+-	"    local cur_pass = nil\n"
+-	"    local xs_ok, XS = pcall(function() return xr_sound end)\n"
+-	"    local th_ok, THM = pcall(function() return sound_theme end)\n"
+-	"    if xs_ok and type(XS) == 'table' and th_ok and type(THM) == 'table' and XS.play_sound_looped\n"
+-	"       and XS.stop_sound_looped and XS.set_volume_sound_looped then\n"
+-	"      local o_play, o_stop, o_vol = XS.play_sound_looped, XS.stop_sound_looped, XS.set_volume_sound_looped\n"
+-	"      XS.play_sound_looped = function(id, snd, ...)\n"
+-	"        if not (cur_pass and id == AC_ID and snd) then return o_play(id, snd, ...) end\n"
+-	"        local th = THM.theme and THM.theme[snd]\n"
+-	"        local a = db.actor\n"
+-	"        if not (th and th.class_id == 'looped_sound' and th.sound and a) then return end\n"
+-	"        local s = cur_pass.loops[snd]\n"
+-	"        if s and s:playing() then return end\n"
+-	"        s = s or sound_object(th.sound)\n"
+-	"        cur_pass.loops[snd] = s\n"
+-	"        s:play_at_pos(a, a:position(), 0, sound_object.s3d + sound_object.looped)\n"
+-	"        note('surge-pass-loop slot=%d sound=%s', cur_pass.slot, tostring(snd))\n"
+-	"      end\n"
+-	"      XS.set_volume_sound_looped = function(id, snd, v, ...)\n"
+-	"        if not (cur_pass and id == AC_ID and snd) then return o_vol(id, snd, v, ...) end\n"
+-	"        local s = cur_pass.loops[snd]\n"
+-	"        if s and s:playing() then s.volume = v end\n"
+-	"      end\n"
+-	"      XS.stop_sound_looped = function(id, snd, ...)\n"
+-	"        if not (cur_pass and id == AC_ID) then return o_stop(id, snd, ...) end\n"
+-	"        for k, s in pairs(cur_pass.loops) do\n"
+-	"          if (snd == nil or k == snd) and s:playing() then s:stop() end\n"
+-	"        end\n"
+-	"      end\n"
+-	"      S.emission_wrap_loops = true\n"
+-	"    end\n"
+ 	// a pass replaced while its loops play (a rejoin: the client that came
+ 	// back never had them): they stop on the server only, muted
+ 	"    local function stop_loops(p)\n"
+@@ -1726,9 +1785,9 @@ LPCSTR const compat_source =
+ 	"      local saved = swap_in(p)\n"
+ 	"      local hp0 = db.actor and db.actor.health or -1\n"
+ 	"      local ok, err\n"
+-	"      cur_pass = p\n"
++	"      loop_pass = p\n"
+ 	"      if ended then ok, err = pcall(pass_end, p, mgr) else ok, err = pcall(orig_update, p) end\n"
+-	"      cur_pass = nil\n"
++	"      loop_pass = nil\n"
+ 	"      local hp1 = db.actor and db.actor.health or -1\n"
+ 	"      local alive = db.actor and db.actor:alive()\n"
+ 	"      swap_out(p, saved)\n"
+@@ -1797,6 +1856,147 @@ LPCSTR const compat_source =
+ 	"    S.emission_wrap = 'surge-no-upvalues'\n"
+ 	"  end\n"
+ 	"end\n"
++	// S10-T07: an NPC's enemy and hit callbacks (xr_combat_ignore) run from the
++	// engine outside any context, where AC_ID is player 1's: a stalker fighting
++	// player 2 was never counted as fighting "the actor" (the combat music, the
++	// fast-travel and backpack checks read that table), and player 2's hits did
++	// not end an NPC's combat ignore. When the enemy (or the hitter) is another
++	// player, the callback runs in that player's context.
++	"S.combat_wrap = 'none'\n"
++	"local ci_ok, CIM = pcall(function() return xr_combat_ignore end)\n"
++	"if ci_ok and type(CIM) == 'table' and rawget(CIM, 'action_process_enemy') then\n"
++	"  local C = CIM.action_process_enemy\n"
++	"  local function as_player(obj, f, ...)\n"
++	"    local sl = obj and S.depth == 0 and campaign.participant_slot_of(obj) or -1\n"
++	"    if not (sl and sl > 0) then return f(...) end\n"
++	"    local tok = campaign.enter_slot(sl)\n"
++	"    if tok == 0 then return f(...) end\n"
++	"    local r = pack(pcall(f, ...))\n"
++	"    campaign.leave(tok)\n"
++	"    if not r[1] then error(r[2], 0) end\n"
++	"    return unpack(r, 2, r.n)\n"
++	"  end\n"
++	"  local ok_e, o_enemy = pcall(function() return C.enemy_callback end)\n"
++	"  local ok_h, o_hit = pcall(function() return C.hit_callback end)\n"
++	"  if ok_e and type(o_enemy) == 'function' then\n"
++	"    C.enemy_callback = function(self, npc, enemy) return as_player(enemy, o_enemy, self, npc, enemy) end\n"
++	"  end\n"
++	"  if ok_h and type(o_hit) == 'function' then\n"
++	"    C.hit_callback = function(self, obj, amount, dir, who, bone) return as_player(who, o_hit, self, obj, amount, dir, who, bone) end\n"
++	"  end\n"
++	"  S.combat_wrap = 'per-player'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
++	// S10-T07 (B18): the dynamic combat music (xrs_dyn_music.script, a 1 Hz
++	// unique call reading "the actor") runs once for each player in the
++	// world, in its context, with that player's own module state (its theme
++	// sound, volumes, track timers): each player hears the music of its own
++	// fights. A theme's next part is chained by attach_tail (routed, S10-T07).
++	"S.music_wrap = 'none'\n"
++	"local dm_ok, DMM = pcall(function() return xrs_dyn_music end)\n"
++	"if dm_ok and type(DMM) == 'table' and type(rawget(DMM, 'activate_feature')) == 'function' and getup and setup then\n"
++	"  local main_loop = nil\n"
++	"  for i = 1, 255 do\n"
++	"    local n, v = getup(DMM.activate_feature, i)\n"
++	"    if n == nil then break end\n"
++	"    if n == 'main_loop' then main_loop = v end\n"
++	"  end\n"
++	"  local STATE = { _tmr = true, init_failed = true, themes_inited = true, prev_fade_time = true, force_fade = true,\n"
++	"                  was_in_silence = true }\n"
++	"  local GLOB = { 'm_ambient_vol', 'FadeTo_ambient', 'm_theme_volume', 'FadeTo_theme', 'cur_theme_number',\n"
++	"                 'cur_track_number', 'next_track_start_time', 'theme', 'VOLUME_DELTA' }\n"
++	"  local cells = {}\n"
++	"  local fns = { main_loop }\n"
++	"  for _, f in pairs(DMM) do if type(f) == 'function' then fns[#fns + 1] = f end end\n"
++	"  for _, f in ipairs(fns) do\n"
++	"    for i = 1, 255 do\n"
++	"      local n = getup(f, i)\n"
++	"      if n == nil then break end\n"
++	"      if STATE[n] and not cells[n] then cells[n] = { f, i } end\n"
++	"    end\n"
++	"  end\n"
++	"  if type(main_loop) == 'function' and cells._tmr then\n"
++	"    local music = {}\n"
++	"    local xci_ok, XCI = pcall(function() return xr_combat_ignore end)\n"
++	"    local function snapshot()\n"
++	"      local st = { g = {}, u = {} }\n"
++	"      for _, k in ipairs(GLOB) do st.g[k] = rawget(DMM, k) end\n"
++	"      for n, c in pairs(cells) do local _, v = getup(c[1], c[2]) st.u[n] = v end\n"
++	"      return st\n"
++	"    end\n"
++	"    local function restore(st)\n"
++	"      for _, k in ipairs(GLOB) do rawset(DMM, k, st.g[k]) end\n"
++	"      for n, c in pairs(cells) do setup(c[1], c[2], st.u[n]) end\n"
++	"    end\n"
++	"    local function per_player_music()\n"
++	"      if campaign.slot_actor_id(0) < 0 then return main_loop() end\n"
++	"      for sl = 0, 1 do\n"
++	"        if campaign.slot_actor_id(sl) >= 0 and campaign.slot_in_world(sl) then\n"
++	"          if not music[sl] then\n"
++	"            local st = snapshot()\n"
++	"            st.g.theme = nil\n"
++	"            st.u._tmr = nil\n"
++	"            st.u.themes_inited = false\n"
++	"            st.u.init_failed = false\n"
++	"            music[sl] = st\n"
++	"          end\n"
++	"          local tok = campaign.enter_slot(sl)\n"
++	"          if tok ~= 0 then\n"
++	"            local saved = snapshot()\n"
++	"            restore(music[sl])\n"
++	// the stalkers fighting this player only (the installed table is every participant's)
++	"            local all = xci_ok and type(XCI) == 'table' and rawget(XCI, 'fighting_with_actor_npcs')\n"
++	"            if type(all) == 'table' then\n"
++	"              local mine, me = {}, db.actor and db.actor:id()\n"
++	"              for id, v in pairs(all) do\n"
++	"                local o = db.storage[id] and db.storage[id].object\n"
++	"                local ok_e, e = pcall(function() return o and o:best_enemy() end)\n"
++	"                if ok_e and e and e:id() == me then mine[id] = v end\n"
++	"              end\n"
++	"              rawset(XCI, 'fighting_with_actor_npcs', mine)\n"
++	"            end\n"
++	"            local had = music[sl].g.theme ~= nil and music[sl].g.theme:playing()\n"
++	"            local ok, err = pcall(main_loop)\n"
++	"            if type(all) == 'table' then rawset(XCI, 'fighting_with_actor_npcs', all) end\n"
++	"            music[sl] = snapshot()\n"
++	"            local has = music[sl].g.theme ~= nil and music[sl].g.theme:playing()\n"
++	"            restore(saved)\n"
++	"            campaign.leave(tok)\n"
++	"            if has ~= had then note('music-%s slot=%d', has and 'start' or 'stop', sl) end\n"
++	"            if not ok then\n"
++	"              S.music_errors = (S.music_errors or 0) + 1\n"
++	"              if S.music_errors <= 5 then note('music-error slot=%d error=%s', sl, tostring(err)) end\n"
++	"            end\n"
++	"          end\n"
++	"        elseif music[sl] then\n"
++	// out of the world: its music stops on the server only (its client has none)
++	"          local th = music[sl].g.theme\n"
++	"          if th and th.playing and th:playing() then campaign.mute(true) pcall(th.stop, th) campaign.mute(false) end\n"
++	"          music[sl] = nil\n"
++	"        end\n"
++	"      end\n"
++	"      return false\n"
++	"    end\n"
++	"    local add, remove = rawget(_G, 'AddUniqueCall'), rawget(_G, 'RemoveUniqueCall')\n"
++	"    if add and remove then\n"
++	"      DMM.activate_feature = function()\n"
++	"        if rawget(DMM, 'feature_is_active') then return end\n"
++	"        rawset(DMM, 'feature_is_active', true)\n"
++	"        add(per_player_music)\n"
++	"        RegisterScriptCallback('on_game_end', DMM.on_actor_destroy)\n"
++	"      end\n"
++	"      DMM.deactivate_feature = function()\n"
++	"        if not rawget(DMM, 'feature_is_active') then return end\n"
++	"        rawset(DMM, 'feature_is_active', false)\n"
++	"        remove(per_player_music)\n"
++	"        UnregisterScriptCallback('on_game_end', DMM.on_actor_destroy)\n"
++	"      end\n"
++	"      if rawget(DMM, 'feature_is_active') then remove(main_loop) add(per_player_music) end\n"
++	"      S.music_wrap = 'per-player'\n"
++	"      S.wrapped = S.wrapped + 1\n"
++	"    end\n"
++	"  end\n"
++	"end\n"
+ 	// the psi-storm: its vortices come down around each player in turn; a
+ 	// vortex hits every player near it who is not in cover, in that player's
+ 	// context (its hit, its post-process)
+@@ -1935,6 +2135,18 @@ bool install_compat(lua_State* L)
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T05a compatibility layer emission wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 1);
++	lua_pushstring(L, "ambient_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T07 compatibility layer ambient wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
++	lua_pushstring(L, "combat_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T07 compatibility layer combat wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
++	lua_pushstring(L, "music_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T07 compatibility layer music wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
+ 	lua_pushstring(L, "story_wrap");
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T05c compatibility layer story wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+@@ -1993,6 +2205,7 @@ void script_register_context(lua_State* L)
+ 		def("client_session_load", &coop_client_session_load),
+ 		def("client_session_entries", &coop_client_session_entries),
+ 		def("client_session_version", &coop_client_session_version),
++		def("client_companion_order", &coop_client_companion_order), // S10-T07 (B12)
+ 		def("note_fee", &lua_note_fee),
+ 		def("enter_slot", &lua_enter_slot), // S10-T05a
+ 		def("slot_in_world", &lua_slot_in_world),
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 50b834d..68dd512 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -275,6 +275,7 @@ enum class Presentation : u8
+ 	HudStaticAdd, // detail: the static's name; flags bit 0: single instance
+ 	HudStaticRemove, // detail: the name
+ 	HudStaticText, // detail: "<name>|<text>" (cut to 127 characters)
++	SoundTail, // S10-T07 (B18): handle; detail: the next sound chained after it (sound_object:attach_tail)
+ 	Count,
+ };
+ 
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 09b2ec4..a792119 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -319,6 +319,20 @@ struct Link
+ 	bool leaving = false; // the level is being torn down after a connection end
+ 	u32 reconnect_at_ms = 0; // 0: none scheduled
+ 	u32 reconnect_backoff_ms = 1000;
++	u32 lost_at_ms = 0; // S10-T07 (B16): the server's connection ended and no welcome since
++	u32 far_snaps = 0; // S10-T07 (B6)
++	u16 grab_monster = 0xffff; // S10-T07 (B10): the bloodsucker holding the player's own actor
++	// S10-T07 (B13): the replica's ALife clock did not run between the server's clock events (each event found it
++	// a second of real time behind and stepped it); it runs from the last event on the link's own wall clock
++	u64 clock_anchor_game = 0;
++	u32 clock_anchor_wall = 0;
++	float clock_factor = 0.f; // the rate the link runs the clock at (the server's, or less while ahead)
++	float clock_server_factor = 0.f;
++	float clock_rate = 0.f; // the server's measured game ms per real ms
++	u64 clock_prev_game = 0;
++	u32 clock_prev_wall = 0;
++	u64 clock_forward = 0, clock_held = 0;
++	bool lost_told = false;
+ 	u32 reconnects = 0, worlds_left = 0;
+ 	u64 last_epoch = 0;
+ 	u32 last_lean_log_ms = 0; // the other player's lean, logged every 250 ms while held
+@@ -389,6 +403,7 @@ struct Link
+ 		u32 phase = 0, phase_ms = 0, live_count = 0;
+ 		coop::proto::Uuid128 first; // the campaign the session started in
+ 		xr_string first_hex;
++		u32 companion_phase = 0, companion_at = 0; // S10-T07 (B12) driver
+ 	} session;
+ 	// S10-T03c: party sleep (CampaignEvent 19)
+ 	struct Sleep
+@@ -1073,6 +1088,9 @@ void talk_driver_choose();
+ u64 talk_send_say(LPCSTR id, u32 round, u32 step, bool player);
+ void travel_hud(LPCSTR text, int seconds);
+ void on_session(const coop::proto::CampaignEvent& event); // S10-T06
++void session_lua(LPCSTR chunk, LPCSTR name); // S10-T06
++void grab_release(); // S10-T07 (B10)
++void grab_frame();
+ void session_menu_install(); // S10-T06
+ void travel_session_reset();
+ void travel_frame();
+@@ -1263,11 +1281,12 @@ void world_frame()
+ 	{
+ 		g_link->last_summary_ms = g_link->wall.GetElapsed_ms();
+ 		write_world_summary("latest");
+-		g_link->log.line("clock game_ms=%I64u factor=%.2f weather=%s clock_events=%I64u steps=%I64u weather_changes=%I64u",
++		g_link->log.line("clock game_ms=%I64u factor=%.2f weather=%s clock_events=%I64u steps=%I64u weather_changes=%I64u "
++			"forward=%I64u held=%I64u", // S10-T07 (B13)
+ 			ai().alife().time_manager().game_time(), ai().alife().time_manager().time_factor(),
+ 			g_pGamePersistent->Environment().CurrentWeatherName.size() ?
+ 				*g_pGamePersistent->Environment().CurrentWeatherName : "-",
+-			g_link->clock_events, g_link->clock_steps, g_link->weather_changes);
++			g_link->clock_events, g_link->clock_steps, g_link->weather_changes, g_link->clock_forward, g_link->clock_held);
+ 		campaign::report_replica("status");
+ 	}
+ }
+@@ -1444,9 +1463,25 @@ void reconcile_own_actor(u64 snapshot_id, u64 last_input)
+ 		p.x += c.offset.x;
+ 		p.y += c.offset.y;
+ 		p.z += c.offset.z;
+-		if (g_actor->character_physics_support()->movement()->CharacterExist())
+-			g_actor->character_physics_support()->movement()->SetPosition(p);
+-		g_actor->Position().set(p);
++		const float jump = Fvector().set(c.offset.x, c.offset.y, c.offset.z).magnitude();
++		if (c.kind == coop::proto::CorrectionKind::Snap && jump > 3.f)
++		{
++			// S10-T07 (B6): a long server-side move (a fixture's, a script's teleport) as the engine teleports an
++			// actor (CActor::MoveActor): the physics character woken at the new place with no velocity, and the
++			// actor's spatial entry moved (a 534 m jump left both behind and crashed a client, L58)
++			Fmatrix m = g_actor->XFORM();
++			m.c.set(p);
++			g_actor->ForceTransform(m);
++			g_actor->spatial_move();
++			++g_link->far_snaps;
++			g_link->log.line("far-snap metres=%.1f to=%.2f,%.2f,%.2f", jump, VPUSH(p));
++		}
++		else
++		{
++			if (g_actor->character_physics_support()->movement()->CharacterExist())
++				g_actor->character_physics_support()->movement()->SetPosition(p);
++			g_actor->Position().set(p);
++		}
+ 		if (c.kind == coop::proto::CorrectionKind::Smooth)
+ 			g_link->smoother.add(c.offset);
+ 		else
+@@ -2060,6 +2095,8 @@ void sample_input()
+ 		g_link->reconciler.record(in.tick, coop::proto::Vec3{actor->Position().x, actor->Position().y, actor->Position().z});
+ 	in.move_y = (wishful & mcFwd) ? 1.f : (wishful & mcBack) ? -1.f : 0.f;
+ 	in.move_x = (wishful & mcRStrafe) ? 1.f : (wishful & mcLStrafe) ? -1.f : 0.f;
++	if (g_link->grab_monster != 0xffff)
++		in.move_x = in.move_y = 0.f; // S10-T07 (B10): held by a bloodsucker (keys held from before the grab too)
+ 	in.yaw = angle_normalize_signed(actor->cam_Active()->yaw);
+ 	in.pitch = clampr(actor->cam_Active()->pitch, -1.5f, 1.5f);
+ 	in.stance = (wishful & mcCrouch) ? coop::proto::Stance::Crouch :
+@@ -2797,13 +2834,33 @@ void on_world_clock(const coop::proto::CampaignEvent& event)
+ 	weather[length] = 0;
+ 	++g_link->clock_events;
+ 	CALifeTimeManager& clock = const_cast<CALifeSimulator*>(ai().get_alife())->time_manager();
+-	const s64 apart = s64(game_ms) - s64(clock.game_time());
+-	if (!fsimilar(clock.time_factor(), factor) || _abs(apart) > 3000)
+-	{
++	// S10-T07 (B13): measured against the clock this link runs (the replica's own did not advance). The link runs
++	// it at the server's measured rate (the server's clock follows its ticks and falls behind real time under
++	// load: an emission halved it), and a little slower while it is ahead, so it neither jumps forward nor back
++	const u32 wall = g_link->wall.GetElapsed_ms();
++	const u64 predicted = g_link->clock_anchor_wall ?
++		g_link->clock_anchor_game + u64(g_link->clock_factor * float(wall - g_link->clock_anchor_wall)) : clock.game_time();
++	const s64 apart = s64(game_ms) - s64(predicted);
++	if (g_link->clock_prev_wall && wall - g_link->clock_prev_wall >= 500 && game_ms >= g_link->clock_prev_game &&
++		fsimilar(g_link->clock_server_factor, factor))
++	{
++		const float measured = float(game_ms - g_link->clock_prev_game) / float(wall - g_link->clock_prev_wall);
++		g_link->clock_rate = 0.7f * g_link->clock_rate + 0.3f * clampr(measured, 0.25f * factor, 1.5f * factor);
++	}
++	else if (!fsimilar(g_link->clock_server_factor, factor))
++		g_link->clock_rate = factor;
++	g_link->clock_prev_game = game_ms;
++	g_link->clock_prev_wall = wall;
++	g_link->clock_server_factor = factor;
++	if (!g_link->clock_anchor_wall || _abs(apart) > 3000)
++	{
++		g_link->clock_anchor_game = game_ms;
++		g_link->clock_anchor_wall = wall;
++		g_link->clock_factor = g_link->clock_rate;
+ 		clock.set_time_factor(factor);
+ 		clock.set_game_time(game_ms);
+ 		if (++g_link->clock_steps <= 8 || _abs(apart) > 600000) // S10-T03c: and every jump of the world's time (a sleep)
+-			g_link->log.line("clock-step apart_ms=%I64d factor=%.2f", apart, factor);
++			g_link->log.line("clock-step apart_ms=%I64d factor=%.2f rate=%.2f", apart, factor, g_link->clock_rate);
+ 		// S06-T08: a step backwards reads as a day forward to the weather
+ 		// effect (CEnvironment::SetGameTime subtracts TimeDiff, which wraps),
+ 		// which ended the effect and restarted it from the wrong descriptors
+@@ -2815,6 +2872,26 @@ void on_world_clock(const coop::proto::CampaignEvent& event)
+ 			g_link->log.line("clock-step backwards wfx-kept apart_ms=%I64d", apart);
+ 		}
+ 	}
++	else
++	{
++		// within 3 s: forward only (a clock running backwards would turn the sky back)
++		if (!fsimilar(clock.time_factor(), factor))
++			clock.set_time_factor(factor); // the scripts read the factor (an emission changes it)
++		if (apart > 0)
++		{
++			g_link->clock_anchor_game = game_ms;
++			g_link->clock_factor = g_link->clock_rate;
++			++g_link->clock_forward;
++		}
++		else
++		{
++			g_link->clock_anchor_game = predicted;
++			g_link->clock_factor = apart < -250 ? g_link->clock_rate * 0.8f : g_link->clock_rate;
++			++g_link->clock_held;
++		}
++		g_link->clock_anchor_wall = wall;
++		clock.set_game_time(g_link->clock_anchor_game);
++	}
+ 	// S06-T08: the weather itself comes with the environment event (kind 2):
+ 	// the cycle and the two blended descriptors, or the weather effect and
+ 	// its time left. The name here is logged only.
+@@ -3112,10 +3189,25 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		case 1: // the vampire grab: no HUD, no inventory until the release
+ 			HUD().SetRenderable(false);
+ 			viewer->set_inventory_disabled(true);
++			// S10-T07 (B10): held as single player holds the grabbed actor (the bloodsucker's CControlledActor on the
++			// player's own actor: no movement input, the camera turned to its head); its replica runs no update here,
++			// so the link drives the turn each frame and lets go at the release or if the bloodsucker is gone
++			if (CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(Level().Objects.net_Find(object)))
++			{
++				grab_release();
++				Fvector head = b->Position();
++				head.y += 1.6f;
++				b->CControlledActor::install(viewer);
++				b->CControlledActor::look_point(head);
++				g_link->grab_monster = object;
++				g_link->log.line("grab-hold monster=%u", u32(object));
++			}
+ 			break;
+ 		case 2:
+ 		{
+ 			CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(Level().Objects.net_Find(object));
++			if (b && g_link->grab_monster == object)
++				b->CControlledActor::look_point(position); // S10-T07 (B10): its head, as the server has it
+ 			const float t = value > 0.f ? value : 6.f;
+ 			viewer->Cameras().AddCamEffector(xr_new<CVampireCameraEffector>(t, position, get_head_position(viewer)));
+ 			if (b)
+@@ -3125,6 +3217,7 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		case 3:
+ 			HUD().SetRenderable(true);
+ 			viewer->set_inventory_disabled(false);
++			grab_release(); // S10-T07 (B10)
+ 			break;
+ 		case 4: // a pseudogigant's threaten kick (S10-T02e), scaled by its strength
+ 			if (CPseudoGigant* g = smart_cast<CPseudoGigant*>(Level().Objects.net_Find(object)))
+@@ -3310,6 +3403,19 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 			sound.play_at_pos(viewer, position, flags, value);
+ 		break;
+ 	}
++	case campaign::Presentation::SoundTail:
++	{
++		// S10-T07 (B18): the next part chained after a playing sound (the dynamic music's themes)
++		auto it = g_link->sounds.find(handle);
++		string_path path;
++		if (it == g_link->sounds.end() || !it->second._handle())
++			applied = "absent";
++		else if (!detail[0] || !FS.exist(path, "$game_sounds$", detail, ".ogg"))
++			applied = "missing";
++		else
++			it->second.attach_tail(detail);
++		break;
++	}
+ 	case campaign::Presentation::SoundStop:
+ 	case campaign::Presentation::SoundStopDeferred:
+ 	case campaign::Presentation::SoundVolume:
+@@ -3681,6 +3787,11 @@ void on_event(const coop::session::ClientEvent& e)
+ 	{
+ 		const coop::proto::Welcome& w = e.welcome;
+ 		++g_link->welcomes;
++		if (g_link->lost_at_ms) // S10-T07 (B16)
++			g_link->log.line("server-back after_ms=%u told=%d", g_link->wall.GetElapsed_ms() - g_link->lost_at_ms,
++				g_link->lost_told ? 1 : 0);
++		g_link->lost_at_ms = 0;
++		g_link->lost_told = false;
+ 		travel_session_reset(); // S09-T01: a proposal from the last connection is void
+ 		g_link->sleep.live_id = 0; // S10-T03c: likewise a sleep proposal
+ 		talk_session_reset("welcome"); // S10-T04a: a new connection holds no talk
+@@ -3776,6 +3887,8 @@ void on_event(const coop::session::ClientEvent& e)
+ 				g_link->have_end = false;
+ 				g_link->world = WorldMenu;
+ 			}
++			if (!g_link->lost_at_ms)
++				g_link->lost_at_ms = g_link->wall.GetElapsed_ms(); // S10-T07 (B16)
+ 			if (!g_link->reconnect_at_ms)
+ 				g_link->reconnect_at_ms = g_link->wall.GetElapsed_ms() + g_link->reconnect_backoff_ms;
+ 			g_link->log.line("reconnect-scheduled in_ms=%u attempt=%u", g_link->reconnect_backoff_ms,
+@@ -6629,6 +6742,26 @@ void on_upgrade_table(const coop::proto::CampaignEvent& event)
+ 		}
+ 		t.table[item] = entry;
+ 	}
++	// S10-T07 (B8): the server's price percent (the mechanic's discount x the economy factor): the installed
++	// tooltip (inventory_upgrades.get_upgrade_cost) prices with it, as the server charges
++	if (r.ok && r.at + sizeof(float) <= b.size())
++	{
++		const float percent = r.get<float>();
++		if (r.ok && _valid(percent) && percent > 0.f && percent < 100.f)
++		{
++			string512 chunk;
++			xr_sprintf(chunk, "if inventory_upgrades and inventory_upgrades.mech_discount then "
++				"local e = game_difficulties and game_difficulties.get_eco_factor and game_difficulties.get_eco_factor('upgrade') or 1 "
++				"if e == 0 then e = 1 end inventory_upgrades.mech_discount(%.6f / e) end", percent);
++			session_lua(chunk, "coop_upgrade_percent");
++			float shown = -1.f; // what the installed tooltip now prices with
++			luabind::functor<float> get_percent;
++			if (ai().script_engine().functor("inventory_upgrades.get_price_percent", get_percent))
++				shown = float(get_percent());
++			if (part + 1 >= parts)
++				g_link->log.line("upgrade-percent npc=%u percent=%.3f tooltip_percent=%.3f", u32(npc_id), percent, shown);
++		}
++	}
+ 	t.npc = npc_id;
+ 	t.npc_ref = ref;
+ 	t.actor_money = actor_money;
+@@ -6837,6 +6970,34 @@ static void upgrade_result(const Link::PickupPending& p, const coop::proto::Acti
+ // --- S10-T06: session control from the co-op menu ----------------------------------------------------------------
+ // The server's answer to a list (its campaigns) or a switch (the campaign it is relaunched on: this client then
+ // proves itself to that campaign when it reconnects).
++
++// S10-T07 (B10): the bloodsucker's hold on the player's own actor
++void grab_release()
++{
++	if (g_link->grab_monster == 0xffff)
++		return;
++	CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(Level().Objects.net_Find(g_link->grab_monster));
++	if (b && b->CControlledActor::is_controlling())
++		b->CControlledActor::release();
++	else if (g_actor)
++		g_actor->set_input_external_handler(nullptr); // the replica is gone: its handler must not stay
++	g_link->log.line("grab-released monster=%u replica=%d", u32(g_link->grab_monster), b ? 1 : 0);
++	g_link->grab_monster = 0xffff;
++}
++
++void grab_frame()
++{
++	if (g_link->grab_monster == 0xffff)
++		return;
++	CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(Level().Objects.net_Find(g_link->grab_monster));
++	if (!b || !g_actor || !g_actor->g_Alive() || g_link->world != WorldLive)
++	{
++		grab_release();
++		return;
++	}
++	b->CControlledActor::frame_update();
++}
++
+ void on_session(const coop::proto::CampaignEvent& event)
+ {
+ 	PayloadReader r(event.payload);
+@@ -7033,6 +7194,46 @@ void session_menu_install()
+ 		"__coop_session_menu = true "
+ 		"end";
+ 	session_lua(chunk, "coop_session_menu");
++	// S10-T07 (B12): the companion hotkeys and the wheel run their installed functions here (the wheel shows the
++	// modes on this client's copies) and ask the server to give the same order to the player's own companions
++	LPCSTR companions =
++		"if not __coop_companion_orders and campaign and campaign.client_companion_order then "
++		"local ok, AC = pcall(function() return axr_companions end) "
++		"if ok and type(AC) == 'table' and AC.cycle_state then "
++		"  local cmds = { combat = 1, move = 2, stealth = 3, loot = 4, distance = 5 } "
++		"  local function state_of(key) "
++		"    if not (debug and debug.getupvalue) then return 0 end "
++		"    for i = 1, 64 do "
++		"      local n, v = debug.getupvalue(AC.cycle_state, i) "
++		"      if n == nil then break end "
++		"      if n == '_current_states' and type(v) == 'table' then return tonumber(v[key]) or 0 end "
++		"    end "
++		"    return 0 "
++		"  end "
++		"  for key, cmd in pairs(cmds) do "
++		"    local cname, sname = 'cycle_companions_' .. key .. '_mode', 'set_companion_squad_' .. key .. '_mode' "
++		"    local o_cycle, o_set = rawget(AC, cname), rawget(AC, sname) "
++		"    if o_cycle then rawset(AC, cname, function(force_mode, no_msg) "
++		"      pcall(o_cycle, force_mode, no_msg) "
++		"      campaign.client_companion_order(cmd, state_of(key), 0, -1, 0) end) end "
++		"    if o_set then rawset(AC, sname, function(mode, npc, squad) "
++		"      pcall(o_set, mode, npc, squad) "
++		"      local id = npc and npc.id and npc:id() "
++		"      if id then campaign.client_companion_order(cmd, tonumber(mode) or 1, 1, id, 0) end end) end "
++		"  end "
++		"  local o_point = rawget(AC, 'move_to_point') "
++		"  if o_point then rawset(AC, 'move_to_point', function(p) "
++		"    local lvid = nil "
++		"    if p ~= 1 and p ~= 2 then "
++		"      local r = level.get_target_dist and level.get_target_dist() "
++		"      if r then lvid = level.vertex_in_direction(level.vertex_id(device().cam_pos), device().cam_dir, r) end "
++		"    end "
++		"    pcall(o_point, p) "
++		"    if lvid then campaign.client_companion_order(6, 0, 0, -1, lvid) end end) end "
++		"  if AC.cw_prepare then pcall(AC.cw_prepare) end "
++		"  __coop_companion_orders = true "
++		"end end";
++	session_lua(companions, "coop_companion_orders");
+ 	g_link->log.line("session-menu-installed");
+ }
+ 
+@@ -7064,6 +7265,30 @@ const char* const kSessionPartnerLoadout =
+ 	"helm_resp,novice_outfit,wpn_pm,wpn_knife,stalker_patch,bolt,bread,device_pda_1,device_flashlight,itm_backpack,"
+ 	"box_matches,flask,detector_geiger,vodka,kolbasa"; // the faction's own bread line overrides the shared one
+ 
++// S10-T07 (B12) driver (config companion_test): seconds after the world goes live the client presses the companion
++// hotkeys as the installed key handler does (all companions: move, then combat)
++void companion_driver()
++{
++	const u32 wait = g_link->config.companion_test;
++	Link::Session& s = g_link->session;
++	if (!wait || s.companion_phase >= 3 || g_link->world != WorldLive || !g_actor)
++		return;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (s.companion_phase == 0)
++	{
++		s.companion_at = now + wait * 1000;
++		s.companion_phase = 1;
++		return;
++	}
++	if (now < s.companion_at)
++		return;
++	session_lua(s.companion_phase == 1 ? "if axr_companions then axr_companions.cycle_companions_move_mode() end" :
++		"if axr_companions then axr_companions.cycle_companions_combat_mode() end", "coop_companion_driver");
++	g_link->log.line("companion-driver pressed=%s", s.companion_phase == 1 ? "move" : "combat");
++	s.companion_at = now + 8000;
++	++s.companion_phase;
++}
++
+ // S10-T06 driver (config session_script): 1 the owner, 2 the partner
+ void session_driver()
+ {
+@@ -7196,6 +7421,31 @@ bool coop_client_session_load(LPCSTR id_hex)
+ 	return session_send(params);
+ }
+ 
++// S10-T07 (B12): a companion order from the hotkeys or the wheel (ActionIntent 28)
++bool coop_client_companion_order(int command, int mode, int scope, int npc, u32 lvid)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || command < 1 || command > 6 || mode < 0 || mode > 4 ||
++		scope < 0 || scope > 1)
++		return false;
++	coop::proto::EntityRef target;
++	if (scope == 1)
++	{
++		const auto it = g_link->refs.find(u16(npc));
++		if (npc < 0 || npc >= 0xffff || it == g_link->refs.end())
++			return false;
++		target = it->second;
++	}
++	xr_vector<u8> params;
++	params.push_back(u8(command));
++	params.push_back(u8(mode));
++	params.push_back(u8(scope));
++	for (int b = 0; b < 4; ++b)
++		params.push_back(u8(lvid >> (8 * b)));
++	request_ownership(coop::proto::kActionCompanion, target, params, 0, 0xffffffff, 0, true, "companion");
++	g_link->log.line("companion-order-sent command=%d mode=%d scope=%d npc=%d lvid=%u", command, mode, scope, npc, lvid);
++	return true;
++}
++
+ LPCSTR coop_client_session_entries() { return g_link ? g_link->session.entries.c_str() : ""; }
+ u32 coop_client_session_version() { return g_link ? g_link->session.version : 0; }
+ 
+@@ -7503,7 +7753,10 @@ bool coop_client_trade_open(CInventoryOwner* partner)
+ 	t.npc = u16(go->ID());
+ 	t.npc_ref = ref;
+ 	request_ownership(coop::proto::kActionTradeOpen, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
+-	g_link->log.line("trade-open-sent npc=%u", u32(go->ID()));
++	// S10-T07 (B1): what the window's profile reads on this replica (ui_inventory TMode_InitProfile: the icon and
++	// the name)
++	g_link->log.line("trade-open-sent npc=%u icon=%s name=%s", u32(go->ID()),
++		partner->IconName() && partner->IconName()[0] ? partner->IconName() : "-", partner->Name() ? partner->Name() : "-");
+ 	return true;
+ }
+ 
+@@ -7791,6 +8044,25 @@ void coop_client_frame()
+ 	inject_step();
+ 	world_frame();
+ 	session_driver(); // S10-T06
++	companion_driver(); // S10-T07 (B12)
++	if (g_link->active && g_actor)
++		grab_frame(); // S10-T07 (B10)
++	if (g_link->clock_anchor_wall && g_link->world == WorldLive && ai().get_alife()) // S10-T07 (B13)
++		const_cast<CALifeSimulator*>(ai().get_alife())->time_manager().set_game_time(g_link->clock_anchor_game +
++			u64(g_link->clock_factor * float(g_link->wall.GetElapsed_ms() - g_link->clock_anchor_wall)));
++	// S10-T07 (B16): the server has not answered for a minute (two and a half after a campaign switch, whose
++	// new game takes about one): the player gets the main menu and is told; the reconnects go on behind it
++	if (g_link->lost_at_ms && !g_link->lost_told && !g_link->quitting && g_link->world == WorldMenu &&
++		g_link->wall.GetElapsed_ms() - g_link->lost_at_ms >= (g_link->session.switches ? 150000u : 60000u))
++	{
++		g_link->lost_told = true;
++		g_link->log.line("server-lost-told after_ms=%u attempts=%u", g_link->wall.GetElapsed_ms() - g_link->lost_at_ms,
++			g_link->reconnects);
++		Console->Execute("main_menu on");
++		session_lua("if ui_dyn_msg_box and ui_dyn_msg_box.msg_box_ui then ui_dyn_msg_box.msg_box_ui('message_box_ok', "
++			"true, 'The co-op server is not answering. Still trying to reconnect: you join again as soon as it is back. "
++			"You can also quit from the main menu.') end", "coop_server_lost");
++	}
+ 	// S07-T05: the reconnect, once the stale world is gone
+ 	if (g_link->reconnect_at_ms && !g_link->quitting && g_link->world == WorldMenu &&
+ 		g_link->wall.GetElapsed_ms() >= g_link->reconnect_at_ms)
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 25db7ca..9c3950e 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -87,6 +87,7 @@ bool coop_client_session_create(LPCSTR choices);
+ bool coop_client_session_load(LPCSTR id_hex);
+ LPCSTR coop_client_session_entries();
+ u32 coop_client_session_version();
++bool coop_client_companion_order(int command, int mode, int scope, int npc, u32 lvid); // S10-T07 (B12)
+ // S10-T03d: a script's level change or jump of the own actor on a co-op client
+ // (fast travel, the backpack): a party travel request to that point instead
+ bool coop_client_relocate(const Fvector& position, u32 level_vertex, u16 game_vertex, u8 source);
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index d67e11e..86bec61 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -170,6 +170,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.emission_party = ini.line_exist("coop", "emission_party") ? ini.r_u32("coop", "emission_party") : 0; // S10-T05a
+ 		out.emission_variant = ini.line_exist("coop", "emission_variant") ? ini.r_u32("coop", "emission_variant") : 0;
+ 		out.story_party = ini.line_exist("coop", "story_party") ? ini.r_u32("coop", "story_party") : 0; // S10-T05c
++		out.music_party = ini.line_exist("coop", "music_party") ? ini.r_u32("coop", "music_party") : 0; // S10-T07
+ 		// S10-T03f
+ 		out.new_game = ini.line_exist("coop", "new_game") && ini.r_u32("coop", "new_game") != 0;
+ 		ok = read_string(ini, "new_game_faction", out.new_game_faction, sizeof(out.new_game_faction), false) && ok;
+@@ -203,6 +204,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_load_fail = ini.line_exist("coop", "travel_load_fail") ? ini.r_u32("coop", "travel_load_fail") : 0;
+ 		out.relocate_test = ini.line_exist("coop", "relocate_test") ? ini.r_u32("coop", "relocate_test") : 0; // S10-T03d
+ 		out.session_script = ini.line_exist("coop", "session_script") ? ini.r_u32("coop", "session_script") : 0; // S10-T06
++		out.companion_test = ini.line_exist("coop", "companion_test") ? ini.r_u32("coop", "companion_test") : 0; // S10-T07
+ 		if (ok && !absolute(out.key_path))
+ 		{
+ 			Msg("! S05-T01 coop config: key must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index dca007d..46063f0 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -170,6 +170,10 @@ struct CoopConfig
+ 	                        // level, then the right one
+ 	u32 travel_rejoin_delay; // S09-T04 test driver: seconds after a committed travel until the client reconnects (0: 2 s)
+ 	u32 travel_load_fail; // S09-T04 test driver: 1 terminates the process when the destination world is received
++	u32 music_party; // S10-T07 (B18) fixture: seconds after both attach until p1 moves away and a hostile stalker
++	                 // fights p2 (the combat music must be p2's only); 0 off
++	u32 companion_test; // S10-T07 (B12) test driver: seconds after the world goes live until the client presses the
++	                    // companion hotkeys (move, then combat); 0 off
+ 	u32 session_script; // S10-T06 test driver: 1 the owner (a refused create, a new game, then the first campaign
+ 	                    // loaded back), 2 the partner (its loadout, then a refused load); 0 off
+ 	                  // by itself (0: the player confirms with the use key); also sends one early (refused) request
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index d6d47a3..5baef0b 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -917,6 +917,15 @@ struct Host
+ 		u32 dest_lvid = 0;
+ 		u16 dest_gvid = 0, npc = 0xffff;
+ 	} relocate_fixture;
++	u64 companion_orders = 0; // S10-T07 (B12)
++	// S10-T07 (B18): the combat-music fixture
++	struct MusicFixture
++	{
++		u64 both_since = 0, phase_tick = 0;
++		u32 phase = 0;
++		u16 npc = 0xffff;
++		bool fought = false;
++	} music_fixture;
+ 	// S10-T06: session control from the co-op menu (decisions T01-17…T01-19)
+ 	struct Session
+ 	{
+@@ -9696,6 +9705,7 @@ void upgrade_close(PlayerLink& link, LPCSTR why)
+ // inventory_upgrades.get_upgrade_cost returns a text; the price it shows is
+ // char_ini cost x cur_price_percent (mech_discount, set while can_upgrade_item
+ // evaluates the mechanic's discount condlist; get_price_percent reads it)
++static float s_upgrade_percent = -1.f; // S10-T07 (B8): the price percent the last table was priced with
+ static u32 upgrade_install_price(const inventory::upgrade::Upgrade* up)
+ {
+ 	float percent = 1.f;
+@@ -9703,6 +9713,7 @@ static u32 upgrade_install_price(const inventory::upgrade::Upgrade* up)
+ 	if (ai().script_engine().functor("inventory_upgrades.get_price_percent", get_percent))
+ 		percent = float(get_percent());
+ 	const u32 cost = READ_IF_EXISTS(pSettings, r_u32, up->section(), "cost", 0);
++	s_upgrade_percent = percent;
+ 	return u32(_max(0.f, floorf(float(cost) * percent)));
+ }
+ 
+@@ -9813,11 +9824,13 @@ static void upgrade_send_table(PlayerLink& link, LPCSTR why)
+ 		put_u8(p, u8(parts[part].second - parts[part].first));
+ 		for (u32 i = parts[part].first; i < parts[part].second; ++i)
+ 			p.insert(p.end(), blobs[i].begin(), blobs[i].end());
++		put_f32(p, s_upgrade_percent); // S10-T07 (B8): the client's tooltip prices with the server's percent
+ 		queue_event(link, 16, p);
+ 	}
+ 	++g_host->upgrade_tables_sent;
+-	g_host->log.line("upgrade-table slot=%u npc=%u items=%u installable=%u parts=%u money=%u why=%s", u32(link.ref.slot),
+-		u32(link.upgrade_npc), u32(entries.size()), installable, count, actor->get_money(), why);
++	g_host->log.line("upgrade-table slot=%u npc=%u items=%u installable=%u parts=%u money=%u percent=%.3f why=%s",
++		u32(link.ref.slot), u32(link.upgrade_npc), u32(entries.size()), installable, count, actor->get_money(),
++		s_upgrade_percent, why);
+ }
+ 
+ // CampaignEvent 17: an upgrade installed on an item (op 1) or its repair (op 2), to every client
+@@ -17317,6 +17330,254 @@ void on_joined(const coop::session::SessionEvent& e)
+ 	give_actor(*link);
+ }
+ 
++// ------------------------------------------------------------ S10-T07 (B12)
++// A companion order (ActionIntent 28) from the hotkeys or the companion wheel: the installed axr_companions function
++// runs on the server in the player's context, on that player's own companions only (each companion follows its
++// recruiter, T02f-1): for "all", companion_squads is narrowed to the player's squads around the call; for one
++// squad, its members must be the player's; move to a point uses the level vertex the client's camera picked.
++u16 take_companion(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	const std::vector<u8>& p = intent.params;
++	if (!link.session || p.size() != 7)
++		return coop::proto::kReasonMalformed;
++	const u8 command = p[0], mode = p[1], scope = p[2];
++	const u32 lvid = u32(p[3]) | (u32(p[4]) << 8) | (u32(p[5]) << 16) | (u32(p[6]) << 24);
++	if (command < 1 || command > 6 || mode > 4 || scope > 1)
++		return coop::proto::kReasonMalformed;
++	CActor* actor = participant_actor(link.ref);
++	if (!actor || !actor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	const u16 npc = scope == 1 ? engine_id_of(intent.target) : 0xffff;
++	if (scope == 1 && npc == kNoEngineId)
++		return coop::proto::kReasonItemGone;
++	if (command == 6 && (lvid == u32(-1) || !ai().level_graph().valid_vertex_id(lvid)))
++		return coop::proto::kReasonMalformed;
++	string4096 chunk;
++	xr_sprintf(chunk,
++		"local sl, cmd, mode, scope, npc, lvid = %u, %u, %u, %u, %d, %u\n"
++		"local AC = axr_companions\n"
++		"if not AC then return -1 end\n"
++		"local keys = { 'combat', 'move', 'stealth', 'loot', 'distance' }\n"
++		"local tok = campaign.enter_slot(sl)\n"
++		"if tok == 0 then return -2 end\n"
++		"local all = rawget(AC, 'companion_squads') or {}\n"
++		"local n = 0\n"
++		"local ok, err = pcall(function()\n"
++		"  local function mine(sq)\n"
++		"    if not (sq and sq.commander_id) then return false end\n"
++		"    for k in sq:squad_members() do if campaign.companion_slot(k.id) == sl then return true end end\n"
++		"    return false\n"
++		"  end\n"
++		"  local own = {}\n"
++		"  for id, sq in pairs(all) do if mine(sq) then own[id] = sq n = n + 1 end end\n"
++		"  if cmd <= 5 then\n"
++		"    local key = keys[cmd]\n"
++		"    if scope == 0 then\n"
++		"      if n > 0 then\n"
++		"        rawset(AC, 'companion_squads', own)\n"
++		"        AC['cycle_companions_' .. key .. '_mode'](mode > 0 and mode or nil, true)\n"
++		"      end\n"
++		"    else\n"
++		"      local o = level.object_by_id(npc)\n"
++		"      local sq = o and get_object_squad(o)\n"
++		"      if sq and mine(sq) then AC['set_companion_squad_' .. key .. '_mode'](mode > 0 and mode or 1, o) n = 1 else n = 0 end\n"
++		"    end\n"
++		"  else\n"
++		"    for id, sq in pairs(own) do\n"
++		"      for k in sq:squad_members() do\n"
++		"        local st = db.storage[k.id]\n"
++		"        local member = st and st.object\n"
++		"        if member and member:alive() then AC.set_companion_to_follow_state(member) save_var(member, 'fight_from_point', lvid) end\n"
++		"        if k.id == sq:commander_id() and st and st.beh then st.beh.rally_lvid = lvid end\n"
++		"      end\n"
++		"    end\n"
++		"  end\n"
++		"end)\n"
++		"rawset(AC, 'companion_squads', all)\n"
++		"campaign.leave(tok)\n"
++		"if not ok then return -4 end\n"
++		"return n\n",
++		u32(link.ref.slot), u32(command), u32(mode), u32(scope), int(npc == 0xffff ? -1 : int(npc)), lvid);
++	double v[1] = {-9};
++	alife_lua(chunk, v, 1, "companion-order");
++	const int n = int(v[0]);
++	++g_host->companion_orders;
++	g_host->log.line("companion-order slot=%u command=%u mode=%u scope=%u npc=%d lvid=%u squads=%d", u32(link.ref.slot),
++		u32(command), u32(mode), u32(scope), npc == 0xffff ? -1 : int(npc), command == 6 ? lvid : 0u, n);
++	result.revision = g_host->commit;
++	return n > 0 ? 0 : (n == 0 ? coop::proto::kReasonNothing : coop::proto::kReasonUseRefused);
++}
++
++// ------------------------------------------------------------ S10-T07 (B18)
++// The combat-music fixture (profile music_party, server-driven): p1 moves about 120 m away (p1 only, L58), a
++// hostile stalker is spawned 20 m in front of p2 and made p2's enemy; p2's health is held at 0.6 or more while
++// they fight for 60 s, then the stalker dies and the music fades. The compat layer's notes (music-start/-stop
++// slot=N) and the clients' music sounds are checked by compare-coop-music.py: p2's music only.
++void music_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.music_party || !ai().get_alife())
++		return;
++	Host::MusicFixture& f = g_host->music_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-music both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 99 || g_host->tick < f.both_since + u64(config.music_party) * 50)
++		return;
++	if (slots[0] != 0)
++		std::swap(actors[0], actors[1]);
++	CActor* p2 = actors[1];
++	if (p2->g_Alive() && p2->GetfHealth() < 1.f)
++		p2->SetfHealth(1.f); // the fixture tests the music, not survival (bugfix-2: another NPC killed p2)
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	CEntityAlive* npc = f.npc != 0xffff ? smart_cast<CEntityAlive*>(Level().Objects.net_Find(f.npc)) : nullptr;
++	if (f.phase == 0)
++	{
++		// out of the start village (a no-combat zone: the installed combat_ignore keeps the peace there): p2 to a
++		// level-graph point about 200 m away (a long move of p2 is safe since B6), p1 about 120 m from it
++		const CLevelGraph& graph = ai().level_graph();
++		const u32 count = graph.header().vertex_count();
++		auto pick = [&graph, count](const Fvector& from, float lo, float hi, Fvector& out) {
++			float best = -1.f;
++			const float mid = 0.5f * (lo + hi);
++			for (u32 i = 0; i < count; i += 41)
++			{
++				const Fvector at = graph.vertex_position(i);
++				const float d = at.distance_to(from);
++				if (d >= lo && d <= hi && (best < 0.f || _abs(d - mid) < _abs(best - mid)))
++				{
++					best = d;
++					out = at;
++				}
++			}
++			return best > 0.f;
++		};
++		Fvector p2_at = p2->Position(), p1_at = actors[0]->Position();
++		if (pick(p2->Position(), 180.f, 220.f, p2_at))
++		{
++			p2_at.y += 0.3f;
++			place_beside(p2, p2_at);
++		}
++		if (pick(p2_at, 110.f, 130.f, p1_at))
++		{
++			p1_at.y += 0.3f;
++			place_beside(actors[0], p1_at);
++		}
++		g_host->log.line("fixture-music placed p2=%.2f,%.2f,%.2f p1_distance=%.1f", VPUSH(p2_at), p1_at.distance_to(p2_at));
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 5 * 50)
++			return; // the moves settle
++		LPCSTR section = nullptr;
++		for (LPCSTR s : {"sim_default_monolith_1", "sim_default_monolith_0", "sim_default_bandit_1", "sim_default_bandit_0"})
++			if (pSettings->section_exist(s))
++			{
++				section = s;
++				break;
++			}
++		Fvector forward;
++		forward.setHP(p2->XFORM().k.getH(), 0.f);
++		f.npc = section ? spawn_at(alife, section, Fvector().mad(p2->Position(), forward, 20.f), u16(p2->ID())) : 0xffff;
++		g_host->log.line("fixture-music spawned section=%s npc=%u", section ? section : "-", u32(f.npc));
++		f.phase = f.npc == 0xffff ? 99 : 2;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		if (!npc || g_host->tick - f.phase_tick < 2 * 50)
++			return;
++		string512 chunk;
++		double v[1] = {0};
++		xr_sprintf(chunk, "local n = level.object_by_id(%u) local a = level.object_by_id(%u)\n"
++			"if n and a then n:set_relation(game_object.enemy, a) n:force_set_goodwill(-5000, a) return 1 end return 0\n",
++			u32(f.npc), u32(p2->ID()));
++		alife_lua(chunk, v, 1, "music-enemy");
++		g_host->log.line("fixture-music enemy-set npc=%u p2=%u ok=%d", u32(f.npc), u32(p2->ID()), int(v[0]));
++		f.phase = 3;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (npc && !f.fought)
++		{
++			string256 chunk;
++			double v[1] = {-1};
++			xr_sprintf(chunk, "local n = level.object_by_id(%u) local e = n and n:best_enemy() return e and e:id() or -1\n",
++				u32(f.npc));
++			if (alife_lua(chunk, v, 1, "music-best-enemy") == 1 && int(v[0]) == int(p2->ID()))
++			{
++				f.fought = true;
++				g_host->log.line("fixture-music fighting npc=%u enemy=p2 after_s=%.1f", u32(f.npc),
++					float(g_host->tick - f.phase_tick) / 50.f);
++			}
++		}
++		if (g_host->tick - f.phase_tick < 60 * 50 && npc && npc->g_Alive())
++			return;
++		if (npc && npc->g_Alive())
++			npc->KillEntity(u16(p2->ID()));
++		g_host->log.line("fixture-music npc-dead fought=%d", f.fought ? 1 : 0);
++		f.phase = 4;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 4 && g_host->tick - f.phase_tick >= 40 * 50)
++	{
++		// B6: p2's own actor moved about 500 m in one step (the move that crashed a client, L58)
++		const CLevelGraph& graph = ai().level_graph();
++		const u32 count = graph.header().vertex_count();
++		Fvector to = p2->Position();
++		float best = 0.f;
++		for (u32 i = 0; i < count; i += 37)
++		{
++			const Fvector at = graph.vertex_position(i);
++			const float d = at.distance_to(p2->Position());
++			if (d >= 450.f && d <= 600.f && _abs(d - 525.f) < _abs(best - 525.f))
++			{
++				best = d;
++				to = at;
++			}
++		}
++		if (best > 0.f)
++		{
++			to.y += 0.3f;
++			place_beside(p2, to);
++		}
++		g_host->log.line("fixture-music p2-jump metres=%.1f to=%.2f,%.2f,%.2f", best, VPUSH(to));
++		f.phase = 5;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 5 && g_host->tick - f.phase_tick >= 20 * 50)
++	{
++		u32 in_world = 0;
++		for (PlayerLink& link : g_host->links)
++			if (link.ref.slot == 1 && client_in_world(link))
++				++in_world;
++		g_host->log.line("fixture-music done fought=%d p2_client_in_world=%u", f.fought ? 1 : 0, in_world);
++		f.phase = 99;
++	}
++}
++
+ // --- S10-T06: session control from the co-op menu (decisions T01-17…T01-19) ------------------------------------
+ // The owner is the first key this server accepted (app data coop-owner.txt; T01-18). The campaign library is the
+ // app data folder campaigns\<id>\campaign.ltx, one per campaign this server served or created. A create or a load
+@@ -18129,6 +18390,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_relocate(*link, *intent, result); // S10-T03d
+ 		else if (intent->kind == coop::proto::kActionSession)
+ 			reason = take_session(*link, *intent, result); // S10-T06
++		else if (intent->kind == coop::proto::kActionCompanion)
++			reason = take_companion(*link, *intent, result); // S10-T07 (B12)
+ 		else if (intent->kind == coop::proto::kActionTalkStart)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
+ 		else if (intent->kind == coop::proto::kActionUseObject)
+@@ -19376,6 +19639,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	sweep_fixtures(); // S10-T03e
+ 	emission_fixtures(); // S10-T05a
+ 	story_fixtures(); // S10-T05c
++	music_fixtures(); // S10-T07 (B18)
+ 	// S10-T05d1: the looped sounds already playing, to a player entering the world; only once its
+ 	// presentation has started (the start skips every record queued before it)
+ 	for (PlayerLink& link : g_host->links)
+diff --git a/src/xrGame/script_sound.cpp b/src/xrGame/script_sound.cpp
+index ac30380..d670206 100644
+--- a/src/xrGame/script_sound.cpp
++++ b/src/xrGame/script_sound.cpp
+@@ -20,7 +20,7 @@
+ // S06-T08: presentation kinds, in the order coop_script_sound_present numbers them.
+ static const campaign::Presentation s_sound_kinds[] = {campaign::Presentation::Sound, campaign::Presentation::SoundAtPos,
+ 	campaign::Presentation::SoundStop, campaign::Presentation::SoundStopDeferred, campaign::Presentation::SoundVolume,
+-	campaign::Presentation::SoundPosition};
++	campaign::Presentation::SoundPosition, campaign::Presentation::SoundTail};
+ static u32 s_coop_sound_handles = 0;
+ 
+ // S10-T05d1
+@@ -134,13 +134,16 @@ static bool coop_route_play(u32 handle, LPCSTR name, const Fvector* at, float de
+ 	return true;
+ }
+ 
+-bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, const Fvector* position, float value)
++bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, const Fvector* position, float value,
++	LPCSTR detail)
+ {
++	if (!detail)
++		detail = "";
+ 	if (campaign::process_role() != campaign::Role::Server)
+ 		return false;
+ 	if (slot == campaign::kBroadcastSlot)
+ 	{
+-		coop_script_sound_present(kind, handle, "", position, value, 0);
++		coop_script_sound_present(kind, handle, detail, position, value, 0);
+ 		return true;
+ 	}
+ 	campaign::ParticipantRef now = {campaign::kBroadcastSlot, 0};
+@@ -154,7 +157,7 @@ bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, cons
+ 	}
+ 	if (audience == campaign::ScriptAudience::Player)
+ 	{
+-		coop_script_sound_present(kind, handle, "", position, value, 0);
++		coop_script_sound_present(kind, handle, detail, position, value, 0);
+ 		return true;
+ 	}
+ 	// outside any context: to the player who got the play
+@@ -164,7 +167,7 @@ bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, cons
+ 		args.position = *position;
+ 	args.value = value;
+ 	campaign::ParticipantRef to = {slot, generation};
+-	return campaign::present(to, s_sound_kinds[kind], 0, "", args) == campaign::Refusal::None;
++	return campaign::present(to, s_sound_kinds[kind], 0, detail, args) == campaign::Refusal::None;
+ }
+ 
+ // A sound on no object or on an actor is the players' to hear; so is one on
+diff --git a/src/xrGame/script_sound.h b/src/xrGame/script_sound.h
+index 2070df3..8fb63f0 100644
+--- a/src/xrGame/script_sound.h
++++ b/src/xrGame/script_sound.h
+@@ -28,7 +28,8 @@ void coop_presentation_report(string512& out);
+ // S10-T05d1: a stop, volume or position for a routed sound (kinds as coop_script_sound_present), to whom
+ // got its play: everyone, or the one player (slot, generation) it was played to. From another player's
+ // context, or muted, it is not sent (false).
+-bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, const Fvector* position, float value);
++bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, const Fvector* position, float value,
++	LPCSTR detail = nullptr); // S10-T07: kind 6 (a tail) carries the next sound's name
+ extern u32 g_coop_volume_deduped, g_coop_pp_orphans, g_coop_cam_orphans, g_coop_sounds_replayed, g_coop_follow_dropped;
+ 
+ class CScriptSound
+diff --git a/src/xrGame/script_sound_inline.h b/src/xrGame/script_sound_inline.h
+index 6a05cc9..f7fc0b2 100644
+--- a/src/xrGame/script_sound_inline.h
++++ b/src/xrGame/script_sound_inline.h
+@@ -80,6 +80,8 @@ IC bool CScriptSound::IsPlaying() const
+ IC void CScriptSound::AttachTail(LPCSTR caSoundName)
+ {
+ 	m_sound.attach_tail(caSoundName);
++	if (m_coop_routed) // S10-T07 (B18): the dynamic music chains a theme's next part this way
++		coop_script_sound_follow(6, m_coop_handle, m_coop_slot, m_coop_generation, nullptr, 0.f, caSoundName);
+ }
+ 
+ IC void CScriptSound::Stop()

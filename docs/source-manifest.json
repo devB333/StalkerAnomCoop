@@ -333,6 +333,10 @@
     {
       "path": "patches/engine/0081-new-game.patch",
       "sha256": "ee433d8b6df57a49b319e5b43814b594f80160bca28d61507991390cd539d8aa"
+    },
+    {
+      "path": "patches/engine/0082-emission-per-player.patch",
+      "sha256": "6f00dab7190636f461be5d349ebb16f5d78f92d93da8ea43034272231b80d288"
     }
   ],
   "submodules": [

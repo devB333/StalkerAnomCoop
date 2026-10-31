@@ -276,6 +276,14 @@ def main():
                              "the party travels every passage it can reach; fixture sweep_party)")
     parser.add_argument("--sweep-start", type=int, default=20,
                         help="with --sweep: seconds after both players are in the world until the sweep starts")
+    parser.add_argument("--emission", default="",
+                        help="comma-separated client names present for the S10-T05a emission fixture (server-driven: "
+                             "variant 0 places player 1 in the nearest emission cover and starts a surge, variant 1 "
+                             "places player 1 350+ m from player 2 and starts a psi-storm; fixture emission_party)")
+    parser.add_argument("--emission-start", type=int, default=20,
+                        help="with --emission: seconds after both players are in the world until player 1 is placed")
+    parser.add_argument("--emission-variant", type=int, choices=(0, 1), default=0,
+                        help="with --emission: 0 a surge (one player in cover), 1 a psi-storm (the players apart)")
     parser.add_argument("--new-game", default="",
                         help="S10-T03f: <faction>:<start location> (new_game_start_locations.ltx): the server starts a "
                              "new game (all.spawn) with the creator's choices in its axr_options.ltx "
@@ -386,6 +394,7 @@ def main():
     sleep_fix = {n for n in args.sleep.split(",") if n}
     relocate_fix = {n for n in args.relocate.split(",") if n}
     sweep_fix = {n for n in args.sweep.split(",") if n}
+    emission_fix = {n for n in args.emission.split(",") if n}
     relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
@@ -393,7 +402,8 @@ def main():
     load_fail = {n for n in args.travel_load_fail.split(',') if n}
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
                | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
-               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix | sweep_fix)
+               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix | sweep_fix
+               | emission_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -516,6 +526,8 @@ def main():
                       f"relocate_party = {args.relocate_start if relocate_fix else 0}",
                       f"relocate_variant = {args.relocate_variant}",
                       f"sweep_party = {args.sweep_start if sweep_fix else 0}",
+                      f"emission_party = {args.emission_start if emission_fix else 0}",
+                      f"emission_variant = {args.emission_variant}",
                       f"place_giver = {args.place_giver}"]
             if args.new_game:
                 # S10-T03f: the second player's own choices (T01-3: the creator's faction)
@@ -536,7 +548,7 @@ def main():
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                                 "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                                 "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                                "sleep_party", "relocate_party", "sweep_party")
+                                "sleep_party", "relocate_party", "sweep_party", "emission_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -549,7 +561,7 @@ def main():
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                             "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                             "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                            "sleep_party", "relocate_party", "sweep_party")
+                            "sleep_party", "relocate_party", "sweep_party", "emission_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")

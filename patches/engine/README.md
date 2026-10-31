@@ -575,6 +575,16 @@ takes the creator's community, its own name and money, and its loadout from
 the profile (`new_game_loadout_2`) or the faction's kit. Single player is
 unchanged.
 
+`0082-emission-per-player.patch` (S10-T05a) makes emissions and psi-storms
+each player's own: the compat layer runs the installed surge update once for
+the world (muted, its cover check answered "in cover") and once per player in
+that player's context with its own stage flags, waves and the surge file's
+timers (`campaign.enter_slot`, `campaign.mute`); a psi-storm's vortices come
+down around each player in turn and hit each player near one by that player's
+cover and protection. A player rejoining during a surge gets its current
+phase. The emission fixture (`emission_party`, `emission_variant`). Single
+player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

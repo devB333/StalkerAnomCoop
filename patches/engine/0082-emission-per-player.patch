@@ -1,0 +1,596 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 0673035..de6a5a8 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -37,6 +37,8 @@ static CGameObject* s_npc_eval = nullptr; // S10-T02a: the NPC whose binder upda
+ xr_vector<PresentationRecord> s_outbox[kOutboxSlots];
+ u32 s_present_serial = 0;
+ u32 s_present_dropped = 0; // to no participant, or evicted from a full outbox
++u32 s_present_muted = 0; // S10-T05a: broadcast presentation dropped while muted
++int s_mute = 0; // S10-T05a: campaign.mute (the world's run of the surge)
+ 
+ bool server_role()
+ {
+@@ -741,6 +743,12 @@ Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const Prese
+ 	ScriptContext context;
+ 	if (current_script_context(context) == Refusal::None)
+ 		return present(context.action.actor, kind, object, detail, args);
++	// S10-T05a: the world's run of the emission; each player's pass shows its own
++	if (s_mute > 0)
++	{
++		++s_present_muted;
++		return Refusal::None;
++	}
+ 	// S06-T08: no context, so every player's
+ 	++s_stats.present_broadcast;
+ 	ParticipantRef nobody;
+@@ -962,6 +970,38 @@ double lua_enter_captured(double handle)
+ 	return double(token);
+ }
+ 
++// S10-T05a: a participant's context by roster slot (each player's pass of the emission)
++double lua_enter_slot(int slot)
++{
++	if (!s_stack || !server_role() || !g_pGameLevel || slot < 0 || slot > 0xff)
++		return 0;
++	CActor* actor = slot_actor(u8(slot));
++	ActionContext context;
++	if (!actor || !actor_context(actor, context))
++		return 0;
++	u32 token = 0;
++	if (s_stack->enter(context, Scope::Self, "emission", token) != Refusal::None)
++		return 0;
++	sync_lua(true);
++	return double(token);
++}
++
++bool lua_slot_in_world(int slot)
++{
++	return server_role() && slot >= 0 && slot <= 0xff && coop_server_slot_in_world(u8(slot));
++}
++
++void lua_note(LPCSTR text)
++{
++	if (server_role() && text)
++		coop_server_note(text);
++}
++
++void lua_mute(bool on)
++{
++	s_mute = on ? s_mute + 1 : (s_mute > 0 ? s_mute - 1 : 0);
++}
++
+ double lua_enter_task(LPCSTR task_id)
+ {
+ 	if (!s_stack || !server_role() || !g_pGameLevel || !task_id)
+@@ -1174,6 +1214,7 @@ LPCSTR const compat_source =
+ 	"rawset(db_ns, 'actor', nil)\n"
+ 	"mt.__index = function(t, k)\n"
+ 	"  if k == 'actor' then\n"
++	"    if S.actor_override ~= nil then return S.actor_override end\n" // S10-T05a: a psi vortex's player
+ 	"    if S.depth > 0 then return campaign.actor() end\n"
+ 	"    local n = campaign.npc_actor()\n" // S10-T02a: an NPC's update: the nearest participant
+ 	"    if n ~= nil then return n end\n"
+@@ -1469,6 +1510,275 @@ LPCSTR const compat_source =
+ 	"  S.relocate_wrap = S.relocate_wrap .. '+fee'\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// S10-T05a: emissions and psi-storms per player (decision T01-11). The
++	// world's schedule runs once, its presentation muted and its own cover check
++	// answered "in cover" so it hurts nobody; each player's part of the surge
++	// (cover, psy hits, the waves, the kill, the death camera, the sounds and
++	// effectors) runs as a pass of the installed update in that player's
++	// context, with its own stage flags and the surge file's own timers.
++	"S.emission_wrap = 'none'\n"
++	"S.emission_passes = 0\n"
++	"S.emission_errors = 0\n"
++	"S.emission_rejoins = 0\n"
++	"S.vortex_hits = 0\n"
++	"local function slots_with_actor()\n"
++	"  local t = {}\n"
++	"  for s = 0, 1 do if campaign.slot_actor_id(s) >= 0 then t[#t + 1] = s end end\n"
++	"  return t\n"
++	"end\n"
++	"local cover_override = nil\n"
++	"local orig_getevent = rawget(_G, 'GetEvent')\n"
++	"if type(orig_getevent) == 'function' then\n"
++	"  _G.GetEvent = function(k, ...)\n"
++	"    if k == 'current_safe_cover' and cover_override ~= nil then return cover_override end\n"
++	"    return orig_getevent(k, ...)\n"
++	"  end\n"
++	"end\n"
++	"local as_ok, ASM = pcall(function() return actor_status end)\n"
++	"local function context_cover()\n"
++	"  if not (as_ok and type(ASM) == 'table' and type(ASM.scan_safe_zone_old) == 'function') then return false end\n"
++	"  local ok, c = pcall(ASM.scan_safe_zone_old)\n"
++	"  return ok and c or false\n"
++	"end\n"
++	"S.cover_of = function(slot)\n"
++	"  local tok = campaign.enter_slot(slot)\n"
++	"  if tok == 0 then return -1 end\n"
++	"  local c = context_cover()\n"
++	"  campaign.leave(tok)\n"
++	"  return c and 1 or 0\n"
++	"end\n"
++	"local function note(fmt, ...)\n"
++	"  local ok, text = pcall(string.format, fmt, ...)\n"
++	"  if ok then campaign.note(text) end\n"
++	"end\n"
++	"local lvl = level\n"
++	"local orig_swfx = lvl and lvl.set_weather_fx\n"
++	"local function noop() end\n"
++	"local sm_ok, SMM = pcall(function() return surge_manager end)\n"
++	"local SMC = sm_ok and type(SMM) == 'table' and (rawget(SMM, 'CSurgeManager') or rawget(_G, 'CSurgeManager'))\n"
++	"local getup, setup = debug and debug.getupvalue, debug and debug.setupvalue\n"
++	"if SMC and SMC.update and SMC.start and getup and setup and orig_swfx then\n"
++	"  local orig_update, orig_start, orig_start_wave = SMC.update, SMC.start, SMC.start_wave\n"
++	"  local up = {}\n"
++	"  for i = 1, 255 do\n"
++	"    local n = getup(orig_update, i)\n"
++	"    if n == nil then break end\n"
++	"    up[n] = i\n"
++	"  end\n"
++	"  if up.prev_sec and up.prev_game_sec and up.currentPPEfactor then\n"
++	"    S.surge_serial = 0\n"
++	"    SMC.start = function(self, ...)\n"
++	"      local r = pack(orig_start(self, ...))\n"
++	"      if self.started then S.surge_serial = S.surge_serial + 1 end\n"
++	"      return unpack(r, 1, r.n)\n"
++	"    end\n"
++	// the world's methods do not run in a player's pass
++	"    local WORLD = { start = true, end_surge = true, skip_surge = true, initialize = true, new_surge_time = true,\n"
++	"                    launch_rockets = true, give_surge_hide_task = true, finalize = true }\n"
++	// one-shot sounds a late joiner does not hear in a burst (second of the stage)
++	"    local ONCE = { beginning = 0, siren = 25, impact = 47, ['1stwavesnd'] = 108, ['2ndwavesnd'] = 156, endsnd = 220 }\n"
++	"    local WAVE_AT = { 120, 168 }\n"
++	"    local passes = {}\n"
++	// a luabind class raises on a missing static, so its methods are looked up once
++	"    local methods = {}\n"
++	"    local function method(k)\n"
++	"      local m = methods[k]\n"
++	"      if m == nil then\n"
++	"        local ok, v = pcall(function() return SMC[k] end)\n"
++	"        m = ok and type(v) == 'function' and v or false\n"
++	"        methods[k] = m\n"
++	"      end\n"
++	"      return m or nil\n"
++	"    end\n"
++	"    local level_name = nil\n"
++	"    local function diff_sec_of(mgr)\n"
++	"      return math.ceil(game.get_game_time():diffSec(mgr.inited_time) / level.get_time_factor())\n"
++	"    end\n"
++	"    local function new_pass(mgr, slot)\n"
++	"      local p = { stages = {}, blowout_waves = {}, body_tears = {}, hitFactor = mgr.hitFactor or 0,\n"
++	"                  effector_set = false, blowout_sound = false, wave_sound = false, second_message_given = false,\n"
++	"                  ui_disabled = false, first_update = true, task_given = true, serial = S.surge_serial,\n"
++	"                  u_prev_sec = -1, u_prev_game_sec = -1, u_currentPPEfactor = 0.001, indik = nil, slot = slot }\n"
++	"      local d = diff_sec_of(mgr)\n"
++	"      for k, t in pairs(ONCE) do if d > t + 3 then p.stages[k] = true end end\n"
++	// a wave is where it would be had it started on time
++	"      p.start_wave = function(self, num, t)\n"
++	"        local at = WAVE_AT[num]\n"
++	"        if at then t = math.floor(at * level.get_time_factor() / 2) end\n"
++	"        return orig_start_wave(self, num, t)\n"
++	"      end\n"
++	"      return setmetatable(p, { __index = function(t, k)\n"
++	"        if WORLD[k] then return noop end\n"
++	"        local m = method(k)\n"
++	"        if m then return m end\n"
++	"        return mgr[k]\n"
++	"      end })\n"
++	"    end\n"
++	"    local function swap_in(p)\n"
++	"      local saved = { indik = rawget(SMM, 'currentIndik') }\n"
++	"      for _, n in ipairs({ 'prev_sec', 'prev_game_sec', 'currentPPEfactor' }) do\n"
++	"        local _, v = getup(orig_update, up[n])\n"
++	"        saved[n] = v\n"
++	"        setup(orig_update, up[n], p['u_' .. n])\n"
++	"      end\n"
++	"      rawset(SMM, 'currentIndik', p.indik)\n"
++	"      lvl.set_weather_fx = noop\n"
++	"      return saved\n"
++	"    end\n"
++	"    local function swap_out(p, saved)\n"
++	"      for _, n in ipairs({ 'prev_sec', 'prev_game_sec', 'currentPPEfactor' }) do\n"
++	"        local _, v = getup(orig_update, up[n])\n"
++	"        p['u_' .. n] = v\n"
++	"        setup(orig_update, up[n], saved[n])\n"
++	"      end\n"
++	"      p.indik = rawget(SMM, 'currentIndik')\n"
++	"      rawset(SMM, 'currentIndik', saved.indik)\n"
++	"      lvl.set_weather_fx = orig_swfx\n"
++	"    end\n"
++	// the end of the surge for one player: what end_surge stops (its sounds,
++	// waves, effectors, indicators), and the kill at the end when it is the fate
++	"    local function pass_end(p, mgr)\n"
++	"      local fate = ui_options.get('alife/event/emission_fate') or 'kill_at_wave'\n"
++	"      if fate == 'kill_at_end' then SMC.kill_all_unhided(p) end\n"
++	"      if p.blowout_sound then xr_sound.stop_sound_looped(AC_ID, 'blowout_rumble') end\n"
++	"      if p.wave_sound then xr_sound.stop_sound_looped(AC_ID, 'blowout_particle_wave_looped') end\n"
++	"      if p.second_message_given then xr_sound.stop_sound_looped(AC_ID, 'surge_earthquake_sound_looped') end\n"
++	"      for k, w in pairs(p.blowout_waves) do if w.effect and w.effect:playing() then w.effect:stop_deffered() end end\n"
++	"      p.blowout_waves = {}\n"
++	"      level.remove_pp_effector(1)\n"
++	"      level.remove_cam_effector(2)\n"
++	"      SMC.displayIndicators(p, 0)\n"
++	"    end\n"
++	"    local function run_pass(mgr, slot, p, ended)\n"
++	"      local tok = campaign.enter_slot(slot)\n"
++	"      if tok == 0 then return end\n"
++	"      local c = context_cover()\n"
++	"      cover_override = c\n"
++	"      local saved = swap_in(p)\n"
++	"      local hp0 = db.actor and db.actor.health or -1\n"
++	"      local ok, err\n"
++	"      if ended then ok, err = pcall(pass_end, p, mgr) else ok, err = pcall(orig_update, p) end\n"
++	"      local hp1 = db.actor and db.actor.health or -1\n"
++	"      local alive = db.actor and db.actor:alive()\n"
++	"      swap_out(p, saved)\n"
++	"      cover_override = nil\n"
++	"      campaign.leave(tok)\n"
++	"      S.emission_passes = S.emission_passes + 1\n"
++	"      if not ok then\n"
++	"        S.emission_errors = S.emission_errors + 1\n"
++	"        if S.emission_errors <= 5 then note('surge-pass-error slot=%d error=%s', slot, tostring(err)) end\n"
++	"      end\n"
++	"      local d = ended and -1 or diff_sec_of(mgr)\n"
++	"      if ended or hp1 < hp0 - 0.0001 or (d % 10 == 0 and d ~= p.noted) or (alive ~= p.alive) then\n"
++	"        p.noted = d\n"
++	"        p.alive = alive\n"
++	"        note('surge-pass slot=%d sec=%d cover=%s health=%.3f hit=%.4f alive=%d hitfactor=%.3f ended=%d',\n"
++	"          slot, d, tostring(c), hp1, math.max(0, hp0 - hp1), alive and 1 or 0, p.hitFactor or 0, ended and 1 or 0)\n"
++	"      end\n"
++	"    end\n"
++	"    SMC.update = function(self, ...)\n"
++	"      if campaign.slot_actor_id(0) < 0 then return orig_update(self, ...) end -- not a serving campaign server\n"
++	"      local here = level.name()\n"
++	"      if here ~= level_name then passes = {} level_name = here end\n"
++	// the world: the schedule, the weather, the NPCs; nobody hurt, nothing shown
++	"      campaign.mute(true)\n"
++	"      cover_override = true\n"
++	"      local r = pack(pcall(orig_update, self, ...))\n"
++	"      cover_override = nil\n"
++	"      campaign.mute(false)\n"
++	"      for _, slot in ipairs(slots_with_actor()) do\n"
++	"        local p = passes[slot]\n"
++	"        local in_world = campaign.slot_in_world(slot)\n"
++	"        if self.started then\n"
++	"          local fresh = not p or p.serial ~= S.surge_serial or not p.active\n"
++	// a player who (re)joins during the surge gets its effects from now on
++	"          if p and in_world and not p.in_world and not fresh then fresh = true S.emission_rejoins = S.emission_rejoins + 1 end\n"
++	"          if fresh then\n"
++	"            p = new_pass(self, slot)\n"
++	"            p.active = true\n"
++	"            passes[slot] = p\n"
++	"            note('surge-pass-start slot=%d sec=%d serial=%d in_world=%d', slot, diff_sec_of(self), S.surge_serial, in_world and 1 or 0)\n"
++	"          end\n"
++	"          p.in_world = in_world\n"
++	"          run_pass(self, slot, p, false)\n"
++	"        elseif p and p.active then\n"
++	"          p.active = false\n"
++	"          run_pass(self, slot, p, true)\n"
++	"        end\n"
++	"      end\n"
++	"      if not r[1] then error(r[2], 0) end\n"
++	"      return unpack(r, 2, r.n)\n"
++	"    end\n"
++	"    S.emission_wrap = 'surge'\n"
++	"    S.wrapped = S.wrapped + 1\n"
++	"  else\n"
++	"    S.emission_wrap = 'surge-no-upvalues'\n"
++	"  end\n"
++	"end\n"
++	// the psi-storm: its vortices come down around each player in turn; a
++	// vortex hits every player near it who is not in cover, in that player's
++	// context (its hit, its post-process)
++	"local ps_ok, PSM = pcall(function() return psi_storm_manager end)\n"
++	"local PSC = ps_ok and type(PSM) == 'table' and (rawget(PSM, 'CPsiStormManager') or rawget(_G, 'CPsiStormManager'))\n"
++	"if PSC and PSC.update and PSC.vortex and PSC.vortex_actor_hit then\n"
++	"  local orig_pupdate, orig_vortex, orig_vhit = PSC.update, PSC.vortex, PSC.vortex_actor_hit\n"
++	"  local turn = 0\n"
++	"  local pending = {}\n"
++	"  PSC.update = function(self, ...)\n"
++	"    if campaign.slot_actor_id(0) < 0 then return orig_pupdate(self, ...) end\n"
++	// the hits of the last second, measured now that they have landed
++	"    for _, h in ipairs(pending) do\n"
++	"      local id = campaign.slot_actor_id(h.slot)\n"
++	"      local o = id >= 0 and level.object_by_id(id)\n"
++	"      local hp1 = o and o.health or -1\n"
++	"      local hit = (o and o:alive()) and math.max(0, h.hp0 - hp1) or (h.hp0 > 0 and h.hp0 or 0)\n"
++	"      if hit > 0.0001 then S.vortex_hits = S.vortex_hits + 1 end\n"
++	"      note('psi-vortex-hit index=%d slot=%d distance=%.1f cover=%s health=%.3f hit=%.4f alive=%d%s', h.index, h.slot,\n"
++	"        h.d, h.cover, hp1, hit, (o and o:alive()) and 1 or 0, h.err)\n"
++	"    end\n"
++	"    pending = {}\n"
++	"    cover_override = false -- every vortex reaches vortex_actor_hit, which asks each player\n"
++	"    local r = pack(pcall(orig_pupdate, self, ...))\n"
++	"    cover_override = nil\n"
++	"    if not r[1] then error(r[2], 0) end\n"
++	"    return unpack(r, 2, r.n)\n"
++	"  end\n"
++	"  PSC.vortex = function(self, ...)\n"
++	"    local slots = slots_with_actor()\n"
++	"    if #slots == 0 then return orig_vortex(self, ...) end\n"
++	"    turn = turn % #slots + 1\n"
++	"    local id = campaign.slot_actor_id(slots[turn])\n"
++	"    S.actor_override = id >= 0 and level.object_by_id(id) or nil\n"
++	"    local r = pack(pcall(orig_vortex, self, ...))\n"
++	"    S.actor_override = nil\n"
++	"    local v = self.vortexes and self.vortexes[self.vortex_index]\n"
++	"    if v and v.particle_pos then\n"
++	"      note('psi-vortex index=%d around=%d pos=%.1f,%.1f,%.1f', self.vortex_index, slots[turn], v.particle_pos.x,\n"
++	"        v.particle_pos.y, v.particle_pos.z)\n"
++	"    end\n"
++	"    if not r[1] then error(r[2], 0) end\n"
++	"    return unpack(r, 2, r.n)\n"
++	"  end\n"
++	"  PSC.vortex_actor_hit = function(self, vortex, ...)\n"
++	"    local index = -1\n"
++	"    for k, v in pairs(self.vortexes or {}) do if v == vortex then index = k end end\n"
++	"    for _, slot in ipairs(slots_with_actor()) do\n"
++	"      local tok = campaign.enter_slot(slot)\n"
++	"      if tok ~= 0 then\n"
++	"        local c = context_cover()\n"
++	"        local hp0 = db.actor and db.actor.health or -1\n"
++	"        local d = db.actor and vortex.particle_pos and distance_2d(db.actor:position(), vortex.particle_pos) or -1\n"
++	"        local ok, err = true, nil\n"
++	"        if not c then ok, err = pcall(orig_vhit, self, vortex, ...) end\n"
++	"        campaign.leave(tok)\n"
++	"        pending[#pending + 1] = { index = index, slot = slot, d = d, cover = tostring(c), hp0 = hp0,\n"
++	"          err = ok and '' or (' error=' .. tostring(err)) }\n"
++	"      end\n"
++	"    end\n"
++	"  end\n"
++	"  S.emission_wrap = S.emission_wrap .. '+psi'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
+ 	"S.installed = true\n";
+ 
+ bool install_compat(lua_State* L)
+@@ -1510,6 +1820,10 @@ bool install_compat(lua_State* L)
+ 	lua_pushstring(L, "relocate_wrap");
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T03d compatibility layer relocate wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
++	lua_pushstring(L, "emission_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T05a compatibility layer emission wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 2);
+ 	++s_stats.compat_installs;
+ 	s_compat_state = L;
+@@ -1561,6 +1875,10 @@ void script_register_context(lua_State* L)
+ 		def("relocate", &lua_relocate), // S10-T03d
+ 		def("client_relocate", &lua_client_relocate),
+ 		def("note_fee", &lua_note_fee),
++		def("enter_slot", &lua_enter_slot), // S10-T05a
++		def("slot_in_world", &lua_slot_in_world),
++		def("note", &lua_note),
++		def("mute", &lua_mute),
+ 		def("present", &lua_present)
+ 	];
+ }
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 79c9690..4c115d1 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -167,6 +167,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.relocate_party = ini.line_exist("coop", "relocate_party") ? ini.r_u32("coop", "relocate_party") : 0; // S10-T03d
+ 		out.relocate_variant = ini.line_exist("coop", "relocate_variant") ? ini.r_u32("coop", "relocate_variant") : 0;
+ 		out.sweep_party = ini.line_exist("coop", "sweep_party") ? ini.r_u32("coop", "sweep_party") : 0; // S10-T03e
++		out.emission_party = ini.line_exist("coop", "emission_party") ? ini.r_u32("coop", "emission_party") : 0; // S10-T05a
++		out.emission_variant = ini.line_exist("coop", "emission_variant") ? ini.r_u32("coop", "emission_variant") : 0;
+ 		// S10-T03f
+ 		out.new_game = ini.line_exist("coop", "new_game") && ini.r_u32("coop", "new_game") != 0;
+ 		ok = read_string(ini, "new_game_faction", out.new_game_faction, sizeof(out.new_game_faction), false) && ok;
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index b94f506..edba180 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -128,6 +128,8 @@ struct CoopConfig
+ 	u32 relocate_variant; // S10-T03d fixture: 0 the guide rounds (refused, then agreed to another level); 1 a
+ 	                      // client's fast travel (client 2's relocate_test) agreed by p1
+ 	u32 sweep_party; // S10-T03e fixture: seconds after both attach until the passage sweep starts
++	u32 emission_party; // S10-T05a fixture: seconds after both attach until player 1 is placed for an emission
++	u32 emission_variant; // 0 a surge (player 1 in cover, player 2 out), 1 a psi-storm (the players 350+ m apart)
+ 	// S10-T03f: a new game (all.spawn) instead of the save when the campaign has no generation yet; the
+ 	// creator's choices are in the server's axr_options.ltx [character_creation] (the installed new-game
+ 	// script reads them); the second player's own loadout and money here (decision T01-3)
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 75e5cc1..7d78779 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -846,6 +846,14 @@ struct Host
+ 		u32 failures = 0;
+ 	} squad_fixture;
+ 	// S10-T03e: the passage sweep (profile sweep_party)
++	// S10-T05a: the emission fixture (profile emission_party)
++	struct EmissionFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0, last_log = 0;
++		u32 failures = 0;
++	} emission_fixture;
+ 	struct SweepFixture
+ 	{
+ 		u64 since = 0; // both in the world, nothing executing, on this level
+@@ -15821,6 +15829,135 @@ xr_string sweep_next_hop(const xr_string& from, xr_string& target)
+ 	return "";
+ }
+ 
++// S10-T05a: an emission with the players in different places (decision
++// T01-11). Variant 0: player 1 is placed in the nearest emission cover
++// (misc\surge_manager.ltx [list]), player 2 stays out of it, the installed
++// surge starts; player 1 must live and player 2 die. Variant 1: player 1 is
++// placed 350+ m from player 2 and a psi-storm starts; each vortex must hit
++// only the player it came down near. compare-coop-emission.py.
++void emission_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.emission_party || !ai().get_alife())
++		return;
++	Host::EmissionFixture& f = g_host->emission_fixture;
++	if (f.phase >= 999)
++		return;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				if (client_in_world(link))
++					++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-emission both-attached tick=%I64u variant=%u", g_host->tick, config.emission_variant);
++	}
++	if (g_host->tick < f.both_since + u64(config.emission_party) * 50 || !actors[0] || !actors[1])
++		return;
++	CActor* p1 = actors[0];
++	CActor* p2 = actors[1];
++	double v[4] = {-9, -9, -9, -9};
++	string2048 chunk;
++	if (f.phase == 0)
++	{
++		const Fvector& a = p1->Position();
++		const Fvector& b = p2->Position();
++		if (config.emission_variant == 0)
++			xr_sprintf(chunk,
++				"local p1, p2 = vector():set(%f, %f, %f), vector():set(%f, %f, %f)\n"
++				"local ini = ini_file('misc\\\\surge_manager.ltx')\n"
++				"local bd, bp = 1e9, nil\n"
++				"for i = 0, ini:line_count('list') - 1 do local _, name = ini:r_line('list', i, '', '')\n"
++				"  local z = db.zone_by_name[name]\n"
++				"  if z then local vid = level.vertex_id(z:position())\n"
++				"    if vid and vid < 4294967295 then local vp = level.vertex_position(vid)\n"
++				"      if (z:inside(vp) or z:inside(vector():set(vp.x, vp.y + 0.5, vp.z))) and vp:distance_to(p2) > 40 then\n"
++				"        local d = vp:distance_to(p1) if d < bd then bd, bp = d, vp end end end end\n"
++				"end\n"
++				"if not bp then return -1, 0, 0, 0 end\n"
++				"return bd, bp.x, bp.y, bp.z\n",
++				a.x, a.y, a.z, b.x, b.y, b.z);
++		else
++			xr_sprintf(chunk,
++				"local p2 = vector():set(%f, %f, %f)\n"
++				"local a = level.object_by_id(0)\n"
++				// no hostile stalker or monster online within 80 m of the spot
++				"local function safe(vp)\n"
++				"  for id in pairs(db.storage) do local o = id ~= 0 and level.object_by_id(id)\n"
++				"    if o and (IsStalker(o) or IsMonster(o)) and o:alive() and o:position():distance_to(vp) < 80\n"
++				"      and a and o:relation(a) == game_object.enemy then return false end end\n"
++				"  return true\n"
++				"end\n"
++				"for r = 400, 800, 100 do for k = 0, 23 do local an = k * math.pi / 12\n"
++				"  local vid = level.vertex_id(vector():set(p2.x + r * math.cos(an), p2.y, p2.z + r * math.sin(an)))\n"
++				"  if vid and vid < 4294967295 then local vp = level.vertex_position(vid)\n"
++				"    if vp:distance_to(p2) >= 350 and safe(vp) then return vp:distance_to(p2), vp.x, vp.y, vp.z end end\n"
++				"end end\n"
++				"return -1, 0, 0, 0\n",
++				b.x, b.y, b.z);
++		if (alife_lua(chunk, v, 4, "emission-place") != 4 || v[0] < 0)
++		{
++			++f.failures;
++			g_host->log.line("fixture-emission done phase=no-place failures=%u", f.failures);
++			f.phase = 999;
++			return;
++		}
++		const Fvector at = {float(v[1]), float(v[2]) + 0.3f, float(v[3])};
++		place_beside(p1, at);
++		g_host->log.line("fixture-emission place variant=%u d=%.1f at=%.2f,%.2f,%.2f", config.emission_variant, v[0], VPUSH(at));
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		const int got = alife_lua("local S = rawget(_G, '__campaign_ctx')\n"
++			"if not (S and S.cover_of) then return -2, -2 end\n"
++			"return S.cover_of(0), S.cover_of(1)\n", v, 2, "emission-cover");
++		const int c1 = got == 2 ? int(v[0]) : -9, c2 = got == 2 ? int(v[1]) : -9;
++		const float d = p1->Position().distance_to(p2->Position());
++		const bool ok = config.emission_variant == 0 ? (c1 == 1 && c2 == 0) : d >= 350.f;
++		if (!ok)
++			++f.failures;
++		g_host->log.line("fixture-emission placed cover1=%d cover2=%d d_p1_p2=%.1f pass=%d", c1, c2, d, ok ? 1 : 0);
++		const bool started = call_lua(config.emission_variant == 0 ? "surge_manager.start_surge" : "psi_storm_manager.start_psi_storm");
++		g_host->log.line("fixture-emission started kind=%s called=%d", config.emission_variant == 0 ? "surge" : "psi", started ? 1 : 0);
++		f.phase = 2;
++		f.phase_tick = g_host->tick;
++		f.last_log = 0;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		const u64 sec = (g_host->tick - f.phase_tick) / 50;
++		const bool finished = sec > 20 && alife_lua(config.emission_variant == 0 ?
++			"return surge_manager.is_finished() and 1 or 0\n" : "return psi_storm_manager.is_finished() and 1 or 0\n",
++			v, 1, "emission-finished") == 1 && v[0] == 1;
++		if (sec >= f.last_log + 5 || finished || sec > 330)
++		{
++			f.last_log = sec;
++			g_host->log.line("fixture-emission status sec=%I64u p1_alive=%d p1_health=%.3f p2_alive=%d p2_health=%.3f d_p1_p2=%.1f",
++				sec, p1->g_Alive() ? 1 : 0, p1->GetfHealth(), p2->g_Alive() ? 1 : 0, p2->GetfHealth(),
++				p1->Position().distance_to(p2->Position()));
++		}
++		if (!finished && sec <= 330)
++			return;
++		g_host->log.line("fixture-emission done variant=%u finished=%d p1_alive=%d p2_alive=%d failures=%u",
++			config.emission_variant, finished ? 1 : 0, p1->g_Alive() ? 1 : 0, p2->g_Alive() ? 1 : 0, f.failures);
++		f.phase = 999;
++	}
++}
++
+ void sweep_fixtures()
+ {
+ 	const CoopConfig& config = g_host->config;
+@@ -17411,6 +17548,23 @@ bool coop_server_dialogue_answer(CInventoryOwner* speaker, LPCSTR text)
+ 	return true; // the server has no talk window
+ }
+ 
++// S10-T05a
++bool coop_server_slot_in_world(u8 slot)
++{
++	if (!g_host || !g_host->started)
++		return false;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot == slot)
++			return client_in_world(l);
++	return false;
++}
++
++void coop_server_note(LPCSTR text)
++{
++	if (g_host && g_host->started)
++		g_host->log.line("emission %s", text);
++}
++
+ // S10-T03d: see "Guides, fast travel and the backpack"
+ bool coop_server_relocate(u8 slot, const Fvector& position, u32 level_vertex, u16 game_vertex)
+ {
+@@ -18285,6 +18439,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	sleep_fixtures(); // S10-T03c
+ 	relocate_fixtures(); // S10-T03d
+ 	sweep_fixtures(); // S10-T03e
++	emission_fixtures(); // S10-T05a
+ 
+ 
+ 
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 676efef..45078dd 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -84,4 +84,7 @@ bool coop_server_relocate(u8 slot, const Fvector& position, u32 level_vertex, u1
+ // S10-T03d: a time skip a player's script asked (held for the tick), a fee it paid
+ void coop_server_defer_skip(u8 slot, u32 minutes);
+ void coop_server_note_fee(u8 slot, s32 amount);
++// S10-T05a: whether the player in `slot` is in the world; a line from the compat layer into the co-op log
++bool coop_server_slot_in_world(u8 slot);
++void coop_server_note(LPCSTR text);
+ } // namespace campaign

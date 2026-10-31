@@ -8,7 +8,9 @@ Checks (S10-T05d1):
   orphans   a client got almost no record for a sound or effector it does not have: "absent" records are under
             1 % of the run's records (before: a volume for every loop every update, a remove for effects never on)
   loops     every client entering the world got the looped sounds already playing (loops-joined loops > 0) and
-            applied them (sound / sound-at-pos records applied after its join)
+            applied them: as many looped plays (flags bit 1) applied within 10 s of each join as the join replayed
+  passloops when the run has a surge, each player's pass played its own looped sounds (emission surge-pass-loop
+            lines for every slot with a pass) and that player's client applied looped plays during the surge
   dropped   the server's outboxes evicted fewer records than the baseline (when one is given)
 The baseline's counts are printed beside the run's.
 """
@@ -22,6 +24,18 @@ from pathlib import Path
 
 def lines(path):
     return path.read_text(errors="replace").splitlines() if path.exists() else []
+
+
+def looped_plays(path):
+    """(utc ms, kind) of every looped sound play a client applied."""
+    out = []
+    for ln in lines(path):
+        if " present " not in ln or not ln.endswith(" applied"):
+            continue
+        m = re.match(r"(\d+) .*kind=(sound|sound-at-pos) .*flags=(\d+)", ln)
+        if m and int(m.group(3)) & 1:
+            out.append(int(m.group(1)))
+    return out
 
 
 def counts(root):
@@ -66,10 +80,23 @@ def main():
     joins = [dict(re.findall(r"(\w+)=(\S+)", ln)) for ln in log if " loops-joined " in ln]
     applied = {c: sum(v for (kind, st), v in run[c].items() if kind in ("sound", "sound-at-pos") and st == "applied")
                for c in run}
+    plays = {str(i): looped_plays(root / c / f"coop-{c}.log") for i, c in enumerate(("c1", "c2"))}
+    for ln, j in zip([ln for ln in log if " loops-joined " in ln], joins, strict=True):
+        at = int(ln.split(" ", 1)[0])
+        j["applied"] = str(sum(1 for t in plays.get(j.get("to"), []) if at <= t <= at + 10000))
     checks["loops"] = {"pass": bool(joins) and all(int(j.get("loops", "0")) > 0 for j in joins)
-                       and {j.get("to") for j in joins} >= {"0", "1"} and all(v > 0 for v in applied.values()),
+                       and {j.get("to") for j in joins} >= {"0", "1"}
+                       and all(int(j["applied"]) >= int(j["loops"]) for j in joins),
                        "joins": joins, "sounds_applied": applied,
                        "stop": [ln.split(" ", 1)[1] for ln in log if " presentation-stop " in ln]}
+    starts = [dict(re.findall(r"(\w+)=(\S+)", ln)) | {"at": ln.split(" ", 1)[0]}
+              for ln in log if " surge-pass-start " in ln]
+    pass_loops = Counter(dict(re.findall(r"(\w+)=(\S+)", ln)).get("slot") for ln in log if " surge-pass-loop " in ln)
+    slots = sorted({st.get("slot") for st in starts})
+    during = {sl: sum(1 for t in plays.get(sl, []) if starts and t >= min(int(st["at"]) for st in starts))
+              for sl in slots}
+    checks["passloops"] = {"pass": all(pass_loops.get(sl, 0) > 0 and during[sl] > 0 for sl in slots),
+                           "slots": slots, "pass_loops": dict(pass_loops), "looped_applied_in_surge": during}
     checks["dropped"] = {"pass": base is None or server["dropped"] < base[1]["dropped"], "run": server,
                          "baseline": base[1] if base else None}
     report = {"checks": checks, "pass": all(c["pass"] for c in checks.values())}

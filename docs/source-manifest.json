@@ -341,6 +341,10 @@
     {
       "path": "patches/engine/0083-story-chains.patch",
       "sha256": "3f9e82fd571820e9aa58fdb09c1c73e471a7dcc981d1a5e8d8d446395f4b7fda"
+    },
+    {
+      "path": "patches/engine/0084-presentation-traffic.patch",
+      "sha256": "55a1413a799c9b80f95fa855e856487d49d4286e568f640f3c7ebaaa125b53c4"
     }
   ],
   "submodules": [

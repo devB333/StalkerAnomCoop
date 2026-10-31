@@ -7,7 +7,7 @@ and xray_*.log; result.json.
 Variant 0 (--emission c1,c2): player 1 placed in the nearest emission cover, player 2 outside, a surge.
 Variant 1 (--emission c1,c2 --emission-variant 1): player 1 placed 350+ m from player 2, a psi-storm.
 Checks:
-  wrap        the server's compat layer wrapped the surge and the psi-storm (emission wrap: surge+psi)
+  wrap        the server's compat layer wrapped the surge and the psi-storm (wrap surge[+loops]+psi)
   placed      v0: player 1 in cover, player 2 not; v1: the players 350+ m apart
   v0 passes   each player's pass of the surge ran (surge-pass-start slot 0 and 1), no pass error, each pass saw
               its own player's cover (slot 0 in cover, slot 1 out of it)
@@ -52,7 +52,7 @@ def main():
     xlog = "".join(p.read_text(errors="replace") for p in (root / "server").glob("xray-campaign-server_*.log"))
     checks = {}
     wrap = re.findall(r"S10-T05a compatibility layer emission wrap: (\S+)", xlog)
-    checks["wrap"] = {"pass": bool(wrap) and wrap[-1] == "surge+psi", "wrap": wrap[-1:]}
+    checks["wrap"] = {"pass": bool(wrap) and wrap[-1] in ("surge+psi", "surge+loops+psi"), "wrap": wrap[-1:]}
     placed = grep(log, " fixture-emission placed ")
     checks["placed"] = {"pass": bool(placed) and placed[0].get("pass") == "1", "placed": placed[:1]}
     done = grep(log, " fixture-emission done ")

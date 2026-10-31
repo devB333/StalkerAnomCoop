@@ -1,7 +1,18 @@
-# Session handoff — S10-T02, S10-T03 and S10-T05a complete; next S10-T05c
+# Session handoff — S10-T02, S10-T03, S10-T05a…c complete; next S10-T05d
 
 ## State (2026-10-31)
 
+- **Completed and committed: S10-T05c storyline chains**
+  ([S10-T05c](../../validation/S10-T05c.md), patch 0083 `story-chains`, patch
+  check 95; builds **campaign-402 / client-288**; **story-2 pass 5/5**). The
+  DoctorX chain's `drx_sl_*` script variables were per actor (player 2's
+  dialogue wrote a second chain on its own actor); the compat layer's
+  `save_var`/`load_var` now keep them on the host actor, and each change is
+  published as a checkpoint (`story_tick`). Living Legend needed nothing new
+  (party infos and tasks). Fixture `--story c1,c2` with `-ServerKill`:
+  steps by both players, a travel to Garbage, a restart.
+  `tools/compare-coop-story.py`. A completed task leaves the task manager
+  (`get_task_state` 65535). Decisions T05c-1…3.
 - **Completed and committed: S10-T05a emission and psi-storm per player**
   ([S10-T05a](../../validation/S10-T05a.md), patch 0082
   `emission-per-player`, patch check 94; proto-build-55; builds
@@ -61,37 +72,39 @@
   travel and a backpack travel answered by the partner**; walking through a few
   changers by hand (S10-T03e); a new game's first quest giver and task
   (S10-T03f); an emission with one player in a shelter, a psi-storm,
-  joining during an emission (S10-T05a).
+  joining during an emission (S10-T05a); the DoctorX chain with each player meeting
+  a honcho in turn, Living Legend's first steps (S10-T05c).
   `bash tools/start-coop-demo.sh S10-T02c 0 20 0`.
 - **Decisions awaiting the user at G10** ([Stage 10
   decisions](../../stage10-decisions.md)): T04a-1…4, T04b-1…3, T05b-1…5,
   T04c-1…8, T04f-1…6, T04d-1…4, T04e-1…3, T02a-1…2, T02b-1…2, T02c-1…3,
-  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, T03b-1…3 (T03b-2 open), T03c-1…5, T03d-1…5, T03e-1…3, T03f-1…3, **T05a-1…5**. Open question: T05b-4 (who pays a
+  T02d-1…3, T02e-1…4, T02f-1…5, T03a-1…3, T03b-1…3 (T03b-2 open), T03c-1…5, T03d-1…5, T03e-1…3, T03f-1…3, T05a-1…5, **T05c-1…3**. Open question: T05b-4 (who pays a
   task's money cost).
 
 ## Next
 
-1. **S10-T05c storyline chains** (matrix F20, T01-16: the DoctorX chain in
-   Cordon and the Living Legend Lost Zone chain, `tm_lostzone_ll.ltx`,
-   `dialogs_lostzone`, `tasks_fate`): start each chain, carry it through a
-   travel and a restart; both players must see the same chain state, a
-   step done by either advances it once, recovery keeps the step. Read the
-   chain scripts first (`drx_sl_*`, the `tm_<level>.ltx` sections; re-extract
-   `scripts.db0`/`configs.db0` into the scratchpad) and the S10-T05b report
-   (every quest is a party quest) for what already holds.
-2. Then S10-T05d (presentation split; B4/B7; L28's rest), S10-T06 (co-op
-   menu); stop at G10 with the decisions list and the bug list (B1…B16) for
-   item-by-item approval; S10-T07 (bugs) follows.
+1. **S10-T05d presentation split** (matrix F21; L05, L06, L33, L47; bugs B4,
+   B7 and L28's rest from S10-T05a): per-player news, PDA updates, HUD
+   scripts (custom statics such as the emission's psi indicators),
+   statistics and achievements as presentation records to the right
+   client; the partner's use animation (L47); NPC movement type, body
+   state and aim (B4); the partner's zoom (B7); the ambient loops
+   (`sound_ambient.script`). Start from the dropped-presentation audit of
+   the S06/S08 fixtures (`present_no_context`, `dropped`,
+   `presentations_unknown`) to list what is still lost, then pick the
+   families. It is broad: split it into children if needed and say so.
+2. Then S10-T06 (co-op menu); stop at G10 with the decisions list and the
+   bug list (B1…B16) for item-by-item approval; S10-T07 (bugs) follows.
 
 ## Run names
 
-- Used: `campaign-334…400` (373, 374, 384, 385, 395 failed to compile, 381
-  to link), `client-226…286`, `proto-build-52` (unused), `proto-build-53…55`,
-  `st-28…30`, `sweep-1…7`, `newgame-1…4`, `emission-1…5`, patch checks 77–94; the rest in
+- Used: `campaign-334…402` (373, 374, 384, 385, 395 failed to compile, 381
+  to link), `client-226…288`, `proto-build-52` (unused), `proto-build-53…55`,
+  `st-28…30`, `sweep-1…7`, `newgame-1…4`, `emission-1…5`, `story-1…2`, patch checks 77–95; the rest in
   the snapshots.
-- Next: `campaign-401`, `client-287`, `proto-build-56`, `st-31`, patch
-  check 95.
+- Next: `campaign-403`, `client-289`, `proto-build-56`, `st-31`, patch
+  check 96.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T05c](../done/snapshot-before-S10-T05c.md).
+Previous snapshot: [before S10-T05d](../done/snapshot-before-S10-T05d.md).

@@ -585,6 +585,12 @@ cover and protection. A player rejoining during a surge gets its current
 phase. The emission fixture (`emission_party`, `emission_variant`). Single
 player is unchanged.
 
+`0083-story-chains.patch` (S10-T05c) keeps the DoctorX storyline's state the
+party's: the compat layer's `save_var` / `load_var` keep a `drx_sl_*` variable
+of a participant actor on the host actor whoever's context writes or reads it,
+and each change asks for a checkpoint (`story_tick`). The story fixture
+(`story_party`). Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

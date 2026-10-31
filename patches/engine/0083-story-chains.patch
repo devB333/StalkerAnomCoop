@@ -1,0 +1,338 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index de6a5a8..f9807a6 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -997,6 +997,13 @@ void lua_note(LPCSTR text)
+ 		coop_server_note(text);
+ }
+ 
++// S10-T05c: a party story variable changed (the compat layer's save_var)
++void lua_story_changed(LPCSTR name, LPCSTR value)
++{
++	if (server_role() && name)
++		coop_server_story_changed(name, value ? value : "");
++}
++
+ void lua_mute(bool on)
+ {
+ 	s_mute = on ? s_mute + 1 : (s_mute > 0 ? s_mute - 1 : 0);
+@@ -1779,6 +1786,34 @@ LPCSTR const compat_source =
+ 	"  S.emission_wrap = S.emission_wrap .. '+psi'\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// S10-T05c: the DoctorX storyline's own variables (drx_sl_*: the current
++	// honcho, the task number, the current task, the task givers) are the
++	// party's: kept on the host actor whichever player's context writes or
++	// reads them (decision T05c-1); a change asks for a checkpoint
++	"S.story_wrap = 'none'\n"
++	"S.story_redirects = 0\n"
++	"local orig_save, orig_load = rawget(_G, 'save_var'), rawget(_G, 'load_var')\n"
++	"if type(orig_save) == 'function' and type(orig_load) == 'function' then\n"
++	"  local function story_name(name) return type(name) == 'string' and name:sub(1, 7) == 'drx_sl_' end\n"
++	"  local function holder(obj, name)\n"
++	"    if not (obj and story_name(name)) then return obj end\n"
++	"    local h = S.host_actor()\n"
++	"    if h and obj:id() ~= h:id() and campaign.is_participant_actor(obj) then\n"
++	"      S.story_redirects = S.story_redirects + 1\n"
++	"      return h\n"
++	"    end\n"
++	"    return obj\n"
++	"  end\n"
++	"  _G.save_var = function(obj, name, val, ...)\n"
++	"    local h = holder(obj, name)\n"
++	"    local r = pack(orig_save(h, name, val, ...))\n"
++	"    if h and story_name(name) and campaign.is_participant_actor(h) then campaign.story_changed(name, tostring(val)) end\n"
++	"    return unpack(r, 1, r.n)\n"
++	"  end\n"
++	"  _G.load_var = function(obj, name, ...) return orig_load(holder(obj, name), name, ...) end\n"
++	"  S.story_wrap = 'drx'\n"
++	"  S.wrapped = S.wrapped + 1\n"
++	"end\n"
+ 	"S.installed = true\n";
+ 
+ bool install_compat(lua_State* L)
+@@ -1824,6 +1859,10 @@ bool install_compat(lua_State* L)
+ 	lua_pushstring(L, "emission_wrap");
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T05a compatibility layer emission wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
++	lua_pushstring(L, "story_wrap");
++	lua_rawget(L, -2);
++	Msg("S10-T05c compatibility layer story wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 2);
+ 	++s_stats.compat_installs;
+ 	s_compat_state = L;
+@@ -1879,6 +1918,7 @@ void script_register_context(lua_State* L)
+ 		def("slot_in_world", &lua_slot_in_world),
+ 		def("note", &lua_note),
+ 		def("mute", &lua_mute),
++		def("story_changed", &lua_story_changed), // S10-T05c
+ 		def("present", &lua_present)
+ 	];
+ }
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 4c115d1..4e172f4 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -169,6 +169,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.sweep_party = ini.line_exist("coop", "sweep_party") ? ini.r_u32("coop", "sweep_party") : 0; // S10-T03e
+ 		out.emission_party = ini.line_exist("coop", "emission_party") ? ini.r_u32("coop", "emission_party") : 0; // S10-T05a
+ 		out.emission_variant = ini.line_exist("coop", "emission_variant") ? ini.r_u32("coop", "emission_variant") : 0;
++		out.story_party = ini.line_exist("coop", "story_party") ? ini.r_u32("coop", "story_party") : 0; // S10-T05c
+ 		// S10-T03f
+ 		out.new_game = ini.line_exist("coop", "new_game") && ini.r_u32("coop", "new_game") != 0;
+ 		ok = read_string(ini, "new_game_faction", out.new_game_faction, sizeof(out.new_game_faction), false) && ok;
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index edba180..ff6bdad 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -129,6 +129,7 @@ struct CoopConfig
+ 	                      // client's fast travel (client 2's relocate_test) agreed by p1
+ 	u32 sweep_party; // S10-T03e fixture: seconds after both attach until the passage sweep starts
+ 	u32 emission_party; // S10-T05a fixture: seconds after both attach until player 1 is placed for an emission
++	u32 story_party; // S10-T05c fixture: seconds after both attach until the story chains' steps (and on each level)
+ 	u32 emission_variant; // 0 a surge (player 1 in cover, player 2 out), 1 a psi-storm (the players 350+ m apart)
+ 	// S10-T03f: a new game (all.spawn) instead of the save when the campaign has no generation yet; the
+ 	// creator's choices are in the server's axr_options.ltx [character_creation] (the installed new-game
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 7d78779..9daa9a8 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -846,6 +846,19 @@ struct Host
+ 		u32 failures = 0;
+ 	} squad_fixture;
+ 	// S10-T03e: the passage sweep (profile sweep_party)
++	// S10-T05c: party story variables changed since the last checkpoint
++	bool story_dirty = false;
++	u32 story_changes = 0, story_checkpoints = 0;
++	// S10-T05c: the story fixture (profile story_party)
++	struct StoryFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u32 failures = 0;
++		bool restart = false;
++		xr_string level;
++	} story_fixture;
+ 	// S10-T05a: the emission fixture (profile emission_party)
+ 	struct EmissionFixture
+ 	{
+@@ -15829,6 +15842,180 @@ xr_string sweep_next_hop(const xr_string& from, xr_string& target)
+ 	return "";
+ }
+ 
++// S10-T05c: a party story change is published as a checkpoint once nothing
++// else is (the drx_sl_* variables live in the save only)
++void story_tick()
++{
++	if (!g_host->story_dirty || !g_host->persistence || g_host->persistence->failed() ||
++		g_host->persistence->in_flight() || g_host->travel.exec)
++		return;
++	g_host->story_dirty = false;
++	const bool published = request_publication("story");
++	++g_host->story_checkpoints;
++	g_host->log.line("story-checkpoint changes=%u published=%d", g_host->story_changes, published ? 1 : 0);
++}
++
++// S10-T05c: the two story chains (matrix F20, decision T01-16). DoctorX: a
++// step in player 2's context (drx_sl_meet_random_honcho: the next honcho and
++// its meet task), then player 1 meets the honcho (the meet info taken, the
++// task completes) and takes the next step. Living Legend: player 2 gets
++// lttz_ll_find_doctor, player 1 finds the doctor (living_legend_doctor), the
++// chain moves to lttz_ll_visit_agro_ug (a completed task leaves the task
++// manager: its state reads 65535, not 2). Both players must read the same
++// chain state; the party then travels Cordon -> Garbage, and after the travel
++// and after a server restart the state is the same. compare-coop-story.py.
++static LPCSTR const kStoryVerify =
++	"local tag = '%s'\n"
++	"local function drx(slot)\n"
++	"  local tok = 0\n"
++	"  if slot >= 0 then tok = campaign.enter_slot(slot) if tok == 0 then return 'none', -9, -9, -9, -9 end end\n"
++	"  local a = db.actor\n"
++	"  local t = load_var(a, 'drx_sl_current_task', '')\n"
++	"  local h = load_var(a, 'drx_sl_current_honcho', '')\n"
++	"  local s = string.format('%%s/%%s/%%s', tostring(h), tostring(load_var(a, 'drx_sl_current_task_number', 1)), tostring(t))\n"
++	"  local ts = t ~= '' and a:get_task_state(t) or -1\n"
++	"  local meet = a:has_info('drx_sl_meet_honcho_' .. tostring(h)) and 1 or 0\n"
++	"  local ll = a:has_info('lttz_ll_visit_agro_ug_task') and 1 or 0\n"
++	"  local lla = a:get_task_state('lttz_ll_visit_agro_ug')\n"
++	"  if tok ~= 0 then campaign.leave(tok) end\n"
++	"  return s, ts, meet, ll, lla\n"
++	"end\n"
++	"local s0, t0, m0, l0, a0 = drx(0)\n"
++	"local s1, t1, m1, l1, a1 = drx(1)\n"
++	"local sh = drx(-1)\n"
++	"local doc = db.actor:get_task_state('lttz_ll_find_doctor')\n"
++	"local pass = s0 == s1 and s0 == sh and s0:sub(1, 1) ~= '/' and t0 == 1 and t1 == 1 and m0 == 1 and m1 == 1\n"
++	"  and l0 == 1 and l1 == 1 and a0 == 1 and a1 == 1 and (doc == 2 or doc == 65535)\n" // a completed task leaves the list
++	"campaign.note(string.format('story-verify tag=%%s level=%%s drx0=%%s drx1=%%s drx_host=%%s task0=%%s task1=%%s meet0=%%d meet1=%%d ll_info0=%%d ll_info1=%%d ll_agro0=%%s ll_agro1=%%s ll_doctor=%%s pass=%%d',\n"
++	"  tag, level.name(), s0, s1, sh, tostring(t0), tostring(t1), m0, m1, l0, l1, tostring(a0), tostring(a1), tostring(doc), pass and 1 or 0))\n"
++	"return pass and 1 or 0\n";
++
++void story_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.story_party || !ai().get_alife())
++		return;
++	Host::StoryFixture& f = g_host->story_fixture;
++	if (f.phase >= 999)
++		return;
++	PlayerLink* links[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2 && participant_actor(link.ref))
++		{
++			links[link.ref.slot] = &link;
++			++attached;
++		}
++	const xr_string here = Level().name().c_str();
++	if (f.both_since && here != f.level)
++		f.both_since = 0; // a travel: count again on the new level
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		f.level = here;
++		if (f.phase == 0 && !g_host->recovered_save.empty())
++			f.restart = true;
++		g_host->log.line("fixture-story both-attached tick=%I64u level=%s restart=%d phase=%u", g_host->tick, here.c_str(),
++			f.restart ? 1 : 0, f.phase);
++	}
++	if (attached < 2 || g_host->tick < f.both_since + u64(config.story_party) * 50 || g_host->travel.exec)
++		return;
++	double v[1] = {-9};
++	string4096 chunk;
++	auto verify = [&](LPCSTR tag) {
++		xr_sprintf(chunk, kStoryVerify, tag);
++		const bool ok = alife_lua(chunk, v, 1, "story-verify") == 1 && v[0] == 1;
++		if (!ok)
++			++f.failures;
++		g_host->log.line("fixture-story verified tag=%s pass=%d", tag, ok ? 1 : 0);
++	};
++	auto step = [&](LPCSTR label, int slot, LPCSTR body) {
++		xr_sprintf(chunk,
++			"local tok = campaign.enter_slot(%d)\n"
++			"if tok == 0 then return -1 end\n"
++			"local ok, err = pcall(function()\n%s\nend)\n"
++			"local a = db.actor\n"
++			"local t = load_var(a, 'drx_sl_current_task', '')\n"
++			"local s = string.format('honcho=%%s number=%%s task=%%s task_state=%%s', tostring(load_var(a, 'drx_sl_current_honcho', '')),\n"
++			"  tostring(load_var(a, 'drx_sl_current_task_number', 1)), tostring(t), tostring(t ~= '' and a:get_task_state(t) or -1))\n"
++			"campaign.leave(tok)\n"
++			"campaign.note(string.format('story-step label=%s slot=%d %%s ok=%%s%%s', s, tostring(ok), ok and '' or (' error=' .. tostring(err))))\n"
++			"return ok and 1 or 0\n",
++			slot, body, label, slot);
++		const bool ok = alife_lua(chunk, v, 1, label) == 1 && v[0] == 1;
++		if (!ok)
++			++f.failures;
++		f.phase_tick = g_host->tick;
++		++f.phase;
++	};
++	const u64 since = (g_host->tick - f.phase_tick) / 50;
++	if (f.restart)
++	{
++		verify("restart");
++		g_host->log.line("fixture-story done tag=restart failures=%u", f.failures);
++		f.phase = 999;
++		return;
++	}
++	switch (f.phase)
++	{
++	case 0: // DoctorX, player 2: the next honcho and its meet task
++		step("drx-p2", 1, "xr_effects.drx_sl_meet_random_honcho(db.actor, nil, {})");
++		break;
++	case 1: // player 1 meets that honcho (the dialogue takes the meet info)
++		if (since >= 3)
++			step("drx-p1-meet", 0, "disable_info('drx_sl_meet_honcho_' .. load_var(db.actor, 'drx_sl_current_honcho', ''))");
++		break;
++	case 2: // the meet task completed; player 1 takes the next step
++		if (since >= 8)
++			step("drx-p1", 0,
++				"local t = load_var(db.actor, 'drx_sl_current_task', '')\n"
++				"campaign.note(string.format('story-meet-done task=%s state=%s', t, tostring(db.actor:get_task_state(t))))\n"
++				"xr_effects.drx_sl_meet_random_honcho(db.actor, nil, {})");
++		break;
++	case 3: // Living Legend, player 2: the first task
++		if (since >= 3)
++			step("ll-p2", 1, "task_manager.get_task_manager():give_task('lttz_ll_find_doctor')");
++		break;
++	case 4: // player 1 finds the doctor
++		if (since >= 3)
++			step("ll-p1", 0, "give_info('living_legend_doctor')");
++		break;
++	case 5:
++		if (since >= 10)
++		{
++			verify("steps");
++			f.phase = 6;
++			f.phase_tick = g_host->tick;
++		}
++		break;
++	case 6: // the party travels to Garbage
++	{
++		CObject* changer = Level().Objects.FindObjectByName("esc_level_changer_to_garbage_1");
++		const u16 reason = changer && links[0] && links[1] ? sweep_request(*links[0], *links[1], u16(changer->ID())) : u16(9999);
++		g_host->log.line("fixture-story travel changer=%d reason=%u", changer ? int(changer->ID()) : -1, u32(reason));
++		if (reason)
++		{
++			++f.failures;
++			g_host->log.line("fixture-story done tag=travel-refused failures=%u", f.failures);
++			f.phase = 999;
++			return;
++		}
++		f.phase = 7;
++		break;
++	}
++	case 7: // on the new level (both_since counted again there)
++		if (here != "l01_escape")
++		{
++			verify("travel");
++			g_host->log.line("fixture-story done tag=travel failures=%u", f.failures);
++			f.phase = 999;
++		}
++		break;
++	}
++}
++
+ // S10-T05a: an emission with the players in different places (decision
+ // T01-11). Variant 0: player 1 is placed in the nearest emission cover
+ // (misc\surge_manager.ltx [list]), player 2 stays out of it, the installed
+@@ -17565,6 +17752,16 @@ void coop_server_note(LPCSTR text)
+ 		g_host->log.line("emission %s", text);
+ }
+ 
++// S10-T05c: kept in the save only (the host actor's pstor): published by story_tick
++void coop_server_story_changed(LPCSTR name, LPCSTR value)
++{
++	if (!g_host || !g_host->started)
++		return;
++	++g_host->story_changes;
++	g_host->story_dirty = true;
++	g_host->log.line("story-var name=%s value=%s", name, value);
++}
++
+ // S10-T03d: see "Guides, fast travel and the backpack"
+ bool coop_server_relocate(u8 slot, const Fvector& position, u32 level_vertex, u16 game_vertex)
+ {
+@@ -18440,6 +18637,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	relocate_fixtures(); // S10-T03d
+ 	sweep_fixtures(); // S10-T03e
+ 	emission_fixtures(); // S10-T05a
++	story_fixtures(); // S10-T05c
++	story_tick();
+ 
+ 
+ 
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 45078dd..9ee75f9 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -87,4 +87,6 @@ void coop_server_note_fee(u8 slot, s32 amount);
+ // S10-T05a: whether the player in `slot` is in the world; a line from the compat layer into the co-op log
+ bool coop_server_slot_in_world(u8 slot);
+ void coop_server_note(LPCSTR text);
++// S10-T05c: a party story variable (drx_sl_*) changed: logged, and a checkpoint is asked for
++void coop_server_story_changed(LPCSTR name, LPCSTR value);
+ } // namespace campaign

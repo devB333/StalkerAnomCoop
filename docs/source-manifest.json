@@ -337,6 +337,10 @@
     {
       "path": "patches/engine/0082-emission-per-player.patch",
       "sha256": "6f00dab7190636f461be5d349ebb16f5d78f92d93da8ea43034272231b80d288"
+    },
+    {
+      "path": "patches/engine/0083-story-chains.patch",
+      "sha256": "3f9e82fd571820e9aa58fdb09c1c73e471a7dcc981d1a5e8d8d446395f4b7fda"
     }
   ],
   "submodules": [

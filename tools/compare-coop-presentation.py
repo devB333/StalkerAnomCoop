@@ -12,6 +12,9 @@ Checks (S10-T05d1):
   passloops when the run has a surge, each player's pass played its own looped sounds (emission surge-pass-loop
             lines for every slot with a pass) and that player's client applied looped plays during the surge
   dropped   the server's outboxes evicted fewer records than the baseline (when one is given)
+  statics   (S10-T05d2, when the run has a surge) the exposed player's client (c2) showed the emission's psi
+            indicator (hud-static-add atm_indik_psi_*) and the covered player's (c1) did not; on every client log
+            each indicator added was removed by the end; no hud-static record was absent
 The baseline's counts are printed beside the run's.
 """
 import argparse
@@ -97,6 +100,27 @@ def main():
               for sl in slots}
     checks["passloops"] = {"pass": all(pass_loops.get(sl, 0) > 0 and during[sl] > 0 for sl in slots),
                            "slots": slots, "pass_loops": dict(pass_loops), "looped_applied_in_surge": during}
+    if starts:
+        hud = {}
+        for name in ("c1", "c2", "c2-first-run"):
+            log_c = root / name / f"coop-{name.split('-')[0]}.log"
+            if not log_c.exists():
+                continue
+            shown, adds, absent = {}, 0, 0
+            for ln in lines(log_c):
+                m = re.search(r" present .*kind=(hud-static-add|hud-static-remove) .*detail=(\S+) .* (\w+)$", ln)
+                if not m:
+                    continue
+                absent += m.group(3) == "absent"
+                if m.group(2).startswith("atm_indik_psi_"):
+                    adds += m.group(1) == "hud-static-add"
+                    shown[m.group(2)] = m.group(1) == "hud-static-add"
+            hud[name] = {"psi_adds": adds, "left_shown": sorted(k for k, v in shown.items() if v), "absent": absent}
+        c2_adds = sum(v["psi_adds"] for k, v in hud.items() if k.startswith("c2"))
+        checks["statics"] = {"pass": c2_adds > 0 and hud.get("c1", {}).get("psi_adds", 1) == 0
+                             and all(not v["left_shown"] and not v["absent"] for v in hud.values()),
+                             "clients": hud,
+                             "joined": [dict(re.findall(r"(\w+)=(\S+)", ln)) for ln in log if " statics-joined " in ln]}
     checks["dropped"] = {"pass": base is None or server["dropped"] < base[1]["dropped"], "run": server,
                          "baseline": base[1] if base else None}
     report = {"checks": checks, "pass": all(c["pass"] for c in checks.values())}

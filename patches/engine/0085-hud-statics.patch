@@ -1,0 +1,398 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index f49eed3..d59b9ec 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -674,6 +674,9 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::JointDrive: return "joint-drive";
+ 	case Presentation::ControllerPsyHit: return "controller-psy-hit"; // S10-T02c
+ 	case Presentation::MonsterEffect: return "monster-effect"; // S10-T02d
++	case Presentation::HudStaticAdd: return "hud-static-add"; // S10-T05d2
++	case Presentation::HudStaticRemove: return "hud-static-remove";
++	case Presentation::HudStaticText: return "hud-static-text";
+ 	default: return "?";
+ 	}
+ }
+@@ -1763,6 +1766,16 @@ LPCSTR const compat_source =
+ 	"          if p and in_world and not p.in_world and not fresh then fresh = true S.emission_rejoins = S.emission_rejoins + 1 end\n"
+ 	"          if fresh then\n"
+ 	"            stop_loops(p)\n"
++	// S10-T05d2: the replaced pass's psi indicator leaves that player's HUD
++	"            if p and p.indik then\n"
++	"              local tok = campaign.enter_slot(slot)\n"
++	"              if tok ~= 0 then\n"
++	"                local saved = swap_in(p)\n"
++	"                pcall(SMC.displayIndicators, p, 0)\n"
++	"                swap_out(p, saved)\n"
++	"                campaign.leave(tok)\n"
++	"              end\n"
++	"            end\n"
+ 	"            p = new_pass(self, slot)\n"
+ 	"            p.active = true\n"
+ 	"            passes[slot] = p\n"
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 78e86e7..50b834d 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -271,6 +271,10 @@ enum class Presentation : u8
+ 	               // 4 a pseudogigant's threaten kick (value: its strength; S10-T02e)
+ 	ControllerPsyHit, // S10-T02c:object: the controller; flags: phase (1 prepare, 2 glide: position the target point,
+ 	                  // value the glide time; 3 hit, 4 stop, 5 hit sounds off, 6 all tube sounds off, 7 control hit)
++	// S10-T05d2: a custom static on this player's HUD (CUIGameCustom in the player's context)
++	HudStaticAdd, // detail: the static's name; flags bit 0: single instance
++	HudStaticRemove, // detail: the name
++	HudStaticText, // detail: "<name>|<text>" (cut to 127 characters)
+ 	Count,
+ };
+ 
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 0a94d7a..a3434d9 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -73,6 +73,8 @@
+ #include "UIGameSP.h" // S10-T04a: the talk window
+ #include "ui/UIActorMenu.h" // S10-T04c: the trade window
+ #include "ui/UITalkWnd.h"
++#include "ui/UIStatic.h" // S10-T05d2: a custom static's text
++#include "ui/UILines.h"
+ 
+ ENGINE_API extern float psHUD_FOV; // the camera watch log
+ #include "../xrEngine/xr_input.h"
+@@ -3196,6 +3198,37 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		g_link->log.line("psy-hit-applied controller=%u phase=%u replica=%d", u32(object), flags, c ? 1 : 0);
+ 		break;
+ 	}
++	case campaign::Presentation::HudStaticAdd:
++	case campaign::Presentation::HudStaticRemove:
++	case campaign::Presentation::HudStaticText:
++	{
++		// S10-T05d2: a custom static the server's scripts showed on this player's HUD
++		// (in its context: the emission's psi indicator, a timer, a script message)
++		CUIGameCustom* ui = CurrentGameUI();
++		string256 name;
++		xr_strcpy(name, detail);
++		LPCSTR text = "";
++		if (char* bar = strchr(name, '|'))
++		{
++			*bar = 0;
++			text = bar + 1;
++		}
++		if (!ui || !name[0])
++		{
++			applied = "refused";
++			break;
++		}
++		if (kind == campaign::Presentation::HudStaticAdd)
++			ui->AddCustomStatic(name, (flags & 1) != 0);
++		else if (!ui->GetCustomStatic(name))
++			applied = "absent"; // gone by its own ttl
++		else if (kind == campaign::Presentation::HudStaticRemove)
++			ui->RemoveCustomStatic(name);
++		else if (StaticDrawableWrapper* s = ui->GetCustomStatic(name))
++			s->wnd()->TextItemControl()->SetText(text);
++		g_link->log.line("hud-static kind=%s name=%s serial=%u", campaign::presentation_name(kind), name, serial);
++		break;
++	}
+ 	case campaign::Presentation::PostProcess:
+ 	{
+ 		CPostprocessAnimator* pp = xr_new<CPostprocessAnimator>(int(object), (flags & 1) != 0);
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 284dc31..10b953b 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -41,6 +41,7 @@
+ #include "../xrEngine/Environment.h"
+ #include "CampaignScriptContext.h" // S06-T08: presentation outboxes
+ #include "script_sound.h" // S10-T05d1: the live loops
++#include "UIGameCustom.h" // S10-T05d2: each player's custom statics
+ #include "CampaignActorControl.h"
+ #include "Inventory.h"
+ #include "Weapon.h"
+@@ -18654,7 +18655,10 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 		link.loops_sent = true;
+ 		const u32 n = coop_script_sound_replay(link.ref);
+ 		g_host->log.line("loops-joined to=%u loops=%u", u32(link.ref.slot), n);
++		// S10-T05d2: and the custom statics its scripts show on its HUD
++		g_host->log.line("statics-joined to=%u statics=%u", u32(link.ref.slot), coop_hud_statics_replay(link.ref));
+ 	}
++	coop_hud_statics_tick(); // S10-T05d2
+ 	story_tick();
+ 
+ 
+@@ -18803,7 +18807,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		timeEndPeriod(1);
+ 		string512 pres; // S10-T05d1
+ 		coop_presentation_report(pres);
+-		g_host->log.line("presentation-stop %s", pres);
++		string256 statics; // S10-T05d2
++		coop_hud_statics_report(statics);
++		g_host->log.line("presentation-stop %s %s", pres, statics);
+ 		g_host->log.line("server-stopped");
+ 	}
+ 	xr_delete(g_host->persistence);
+diff --git a/src/xrGame/UIGameCustom.cpp b/src/xrGame/UIGameCustom.cpp
+index cda19a3..0c3cca8 100644
+--- a/src/xrGame/UIGameCustom.cpp
++++ b/src/xrGame/UIGameCustom.cpp
+@@ -17,6 +17,7 @@
+ #include "game_cl_base.h"
+ 
+ #include "xrEngine/x_ray.h"
++#include "CampaignScriptContext.h" // S10-T05d2
+ 
+ #include "ui\UICellItem.h" //Alundaio
+ //#include "script_game_object.h" //Alundaio
+@@ -51,6 +52,7 @@ bool g_b_ClearGameCaptions = false;
+ CUIGameCustom::~CUIGameCustom()
+ {
+ 	delete_data(CustomStatics);
++	coop_hud_statics_clear(); // S10-T05d2
+ 	g_b_ClearGameCaptions = false;
+ }
+ 
+@@ -109,7 +111,7 @@ void CUIGameCustom::Render()
+ 	DoRenderDialogs();
+ }
+ 
+-StaticDrawableWrapper* CUIGameCustom::AddCustomStatic(const char* id, bool singleInstance)
++StaticDrawableWrapper* CUIGameCustom::add_custom_static(const char* id, bool singleInstance)
+ {
+ 	if (singleInstance)
+ 	{
+@@ -129,7 +131,7 @@ StaticDrawableWrapper* CUIGameCustom::AddCustomStatic(const char* id, bool singl
+ 	return sss;
+ }
+ 
+-StaticDrawableWrapper* CUIGameCustom::GetCustomStatic(const char* id)
++StaticDrawableWrapper* CUIGameCustom::get_custom_static(const char* id)
+ {
+ 	auto it = std::find_if(CustomStatics.begin(), CustomStatics.end(), predicate_find_stat(id));
+ 	if (it != CustomStatics.end())
+@@ -137,7 +139,7 @@ StaticDrawableWrapper* CUIGameCustom::GetCustomStatic(const char* id)
+ 	return nullptr;
+ }
+ 
+-void CUIGameCustom::RemoveCustomStatic(const char* id)
++void CUIGameCustom::remove_custom_static(const char* id)
+ {
+ 	auto it = std::find_if(CustomStatics.begin(), CustomStatics.end(), predicate_find_stat(id));
+ 	if (it != CustomStatics.end())
+@@ -147,6 +149,188 @@ void CUIGameCustom::RemoveCustomStatic(const char* id)
+ 	}
+ }
+ 
++// --- S10-T05d2: each player's custom statics on the campaign server ----------------------
++// The installed scripts keep a HUD indicator's state in a Lua variable and remove only what
++// GetCustomStatic finds (surge_manager displayIndicators). With one HUD for two players, one
++// player's remove took the other's indicator. Inside a player's context the three calls work on
++// that player's own set of names and are presented to it; the HUD keeps one real static per name
++// (for the scripts' wnd() calls) while any player holds it. Outside a context nothing changes:
++// those statics (actor 0's binder: actor_effects) are the server's own and are not presented.
++namespace
++{
++struct CoopHudStatic
++{
++	shared_str name;
++	u32 generation;
++	xr_string text; // as last presented
++	float end_time; // a static with a ttl expires by itself, on the server as on the client
++};
++const u32 kCoopHudSlots = 8;
++xr_vector<CoopHudStatic> s_coop_statics[kCoopHudSlots];
++u32 s_coop_static_adds = 0, s_coop_static_removes = 0, s_coop_static_texts = 0, s_coop_static_replayed = 0;
++
++bool coop_static_player(campaign::ParticipantRef& player)
++{
++	return campaign::script_audience(&player) == campaign::ScriptAudience::Player && player.slot < kCoopHudSlots;
++}
++
++xr_vector<CoopHudStatic>::iterator coop_static_find(u8 slot, const char* id)
++{
++	xr_vector<CoopHudStatic>& set = s_coop_statics[slot];
++	return std::find_if(set.begin(), set.end(), [id](const CoopHudStatic& s) { return s.name == id; });
++}
++
++bool coop_static_held(const char* id)
++{
++	for (u8 slot = 0; slot < kCoopHudSlots; ++slot)
++		if (coop_static_find(slot, id) != s_coop_statics[slot].end())
++			return true;
++	return false;
++}
++
++bool coop_static_expired(const CoopHudStatic& s)
++{
++	return s.end_time > 0.f && Device.fTimeGlobal > s.end_time;
++}
++
++void coop_static_present(const campaign::ParticipantRef& to, campaign::Presentation kind, const char* id, u32 flags)
++{
++	campaign::PresentationArgs args;
++	args.flags = flags;
++	campaign::present(to, kind, 0, id, args);
++}
++}
++
++StaticDrawableWrapper* CUIGameCustom::AddCustomStatic(const char* id, bool singleInstance)
++{
++	campaign::ParticipantRef player;
++	if (!coop_static_player(player))
++		return add_custom_static(id, singleInstance);
++	StaticDrawableWrapper* s = add_custom_static(id, singleInstance);
++	auto it = coop_static_find(player.slot, id);
++	const bool had = it != s_coop_statics[player.slot].end() && !coop_static_expired(*it);
++	if (it == s_coop_statics[player.slot].end())
++	{
++		s_coop_statics[player.slot].push_back(CoopHudStatic());
++		it = s_coop_statics[player.slot].end() - 1;
++		it->name = id;
++	}
++	it->generation = player.generation;
++	it->end_time = s && s->m_endTime > 0.f ? s->m_endTime : 0.f;
++	if (!had || !singleInstance)
++	{
++		it->text.clear();
++		coop_static_present(player, campaign::Presentation::HudStaticAdd, id, singleInstance ? 1u : 0u);
++		++s_coop_static_adds;
++	}
++	return s;
++}
++
++StaticDrawableWrapper* CUIGameCustom::GetCustomStatic(const char* id)
++{
++	campaign::ParticipantRef player;
++	if (!coop_static_player(player))
++		return get_custom_static(id);
++	auto it = coop_static_find(player.slot, id);
++	if (it == s_coop_statics[player.slot].end())
++		return nullptr;
++	if (coop_static_expired(*it))
++	{
++		s_coop_statics[player.slot].erase(it);
++		return nullptr;
++	}
++	StaticDrawableWrapper* s = get_custom_static(id);
++	return s ? s : add_custom_static(id, true); // another context's remove took the HUD's copy
++}
++
++void CUIGameCustom::RemoveCustomStatic(const char* id)
++{
++	campaign::ParticipantRef player;
++	if (!coop_static_player(player))
++	{
++		remove_custom_static(id);
++		return;
++	}
++	auto it = coop_static_find(player.slot, id);
++	if (it == s_coop_statics[player.slot].end())
++		return; // not this player's
++	s_coop_statics[player.slot].erase(it);
++	coop_static_present(player, campaign::Presentation::HudStaticRemove, id, 0);
++	++s_coop_static_removes;
++	if (!coop_static_held(id))
++		remove_custom_static(id);
++}
++
++void coop_hud_statics_tick()
++{
++	static shared_str level; // a new level starts with no statics
++	const shared_str here = g_pGameLevel ? Level().name() : shared_str();
++	if (here != level)
++	{
++		coop_hud_statics_clear();
++		level = here;
++	}
++	CUIGameCustom* ui = CurrentGameUI();
++	for (u8 slot = 0; slot < kCoopHudSlots; ++slot)
++	{
++		xr_vector<CoopHudStatic>& set = s_coop_statics[slot];
++		for (u32 i = 0; i < set.size();)
++		{
++			if (coop_static_expired(set[i]))
++			{
++				set.erase(set.begin() + i);
++				continue;
++			}
++			StaticDrawableWrapper* s = ui ? ui->get_custom_static(*set[i].name) : nullptr;
++			LPCSTR text = s && s->wnd() ? s->wnd()->TextItemControl()->GetText() : nullptr;
++			if (text && set[i].text != text)
++			{
++				set[i].text = text;
++				// detail: "<name>|<text>", cut to the record's 127 characters
++				string128 detail;
++				_snprintf_s(detail, sizeof(detail), _TRUNCATE, "%s|%s", *set[i].name, text);
++				campaign::ParticipantRef to = {slot, set[i].generation};
++				coop_static_present(to, campaign::Presentation::HudStaticText, detail, 0);
++				++s_coop_static_texts;
++			}
++			++i;
++		}
++	}
++}
++
++u32 coop_hud_statics_replay(const campaign::ParticipantRef& to)
++{
++	if (to.slot >= kCoopHudSlots)
++		return 0;
++	u32 n = 0;
++	for (CoopHudStatic& s : s_coop_statics[to.slot])
++	{
++		if (coop_static_expired(s))
++			continue;
++		s.generation = to.generation;
++		coop_static_present(to, campaign::Presentation::HudStaticAdd, *s.name, 1);
++		s.text.clear(); // the next tick sends it again
++		++n;
++	}
++	s_coop_static_replayed += n;
++	return n;
++}
++
++void coop_hud_statics_clear()
++{
++	for (xr_vector<CoopHudStatic>& set : s_coop_statics)
++		set.clear();
++}
++
++void coop_hud_statics_report(string256& out)
++{
++	u32 held = 0;
++	for (const xr_vector<CoopHudStatic>& set : s_coop_statics)
++		held += u32(set.size());
++	xr_sprintf(out, "statics_held=%u static_adds=%u static_removes=%u static_texts=%u statics_replayed=%u", held,
++		s_coop_static_adds, s_coop_static_removes, s_coop_static_texts, s_coop_static_replayed);
++}
++
+ void CUIGameCustom::OnInventoryAction(PIItem item, u16 actionType)
+ {
+ 	if (ActorMenu->IsShown())
+diff --git a/src/xrGame/UIGameCustom.h b/src/xrGame/UIGameCustom.h
+index fd95fd4..12788d1 100644
+--- a/src/xrGame/UIGameCustom.h
++++ b/src/xrGame/UIGameCustom.h
+@@ -77,6 +77,15 @@ private:
+ 
+ extern CMapListHelper gMapListHelper;
+ 
++// S10-T05d2: on the campaign server a custom static added, found or removed in a
++// player's script context is that player's (its own set of names; the server has
++// one HUD for everyone) and is presented to that player's client.
++namespace campaign { struct ParticipantRef; }
++void coop_hud_statics_tick(); // the text of each player's statics, sent when it changes
++u32 coop_hud_statics_replay(const campaign::ParticipantRef& to); // to a player entering the world
++void coop_hud_statics_clear(); // a new level
++void coop_hud_statics_report(string256& out);
++
+ class CUIGameCustom :
+ 	public DLL_Pure,
+ 	public CDialogHolder
+@@ -129,6 +138,10 @@ public:
+ 	StaticDrawableWrapper* AddCustomStatic(const char* id, bool singleInstance);
+ 	StaticDrawableWrapper* GetCustomStatic(const char* id);
+ 	void RemoveCustomStatic(const char* id);
++	// S10-T05d2: the HUD's own statics, whoever's context (the three above are a player's on the campaign server)
++	StaticDrawableWrapper* add_custom_static(const char* id, bool singleInstance);
++	StaticDrawableWrapper* get_custom_static(const char* id);
++	void remove_custom_static(const char* id);
+ 	void CommonMessageOut(const char* text);
+ 
+ 	virtual void ChangeTotalMoneyIndicator(const char* newMoneyString)

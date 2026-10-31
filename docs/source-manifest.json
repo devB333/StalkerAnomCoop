@@ -345,6 +345,10 @@
     {
       "path": "patches/engine/0084-presentation-traffic.patch",
       "sha256": "55a1413a799c9b80f95fa855e856487d49d4286e568f640f3c7ebaaa125b53c4"
+    },
+    {
+      "path": "patches/engine/0085-hud-statics.patch",
+      "sha256": "70aaf5c646a5d73429386534577d973c8084949f85dc36b6864bb716692336f9"
     }
   ],
   "submodules": [

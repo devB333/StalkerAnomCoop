@@ -42,6 +42,8 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.8 + S10-T03c: the sleep kinds (24 request, 25 answer), reason 42 and
 // CampaignEvent kind 19 (sleep); no wire layout change.
 // 1.8 + S10-T03d: the relocate kind (26); no wire layout change.
+// 1.8 + S10-T06: the session kind (27), reasons 43-46 and CampaignEvent kind 20
+// (the campaign list, a campaign switch); no wire layout change.
 constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -421,6 +423,14 @@ enum ActionKind : std::uint16_t
                                // request to a point instead of a level changer (fast travel, the backpack): the
                                // proposal and the answer are the travel's (CampaignEvent 13, kind 12), the time
                                // skips once when it is carried out (decision T01-9)
+    kActionSession = 27,       // S10-T06: session control from the co-op menu; params: u8 op, then by op:
+                               // 1 list (none): the server's campaigns follow as CampaignEvent 20;
+                               // 2 create part, 4 loadout part: u8 part (0-based), u8 parts (1..8), u8 length,
+                               // that many bytes of "key=value" lines (the creation screen's choices); the last
+                               // part carries it out: the owner's create starts a new campaign (revision 1), the
+                               // partner's is kept as its loadout for the owner's next new game (revision 2);
+                               // 3 load: 16 bytes, the campaign id (revision 1). A switch is announced to every
+                               // client as CampaignEvent 20 before the server stops and is relaunched on it
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -478,6 +488,12 @@ enum ActionReason : std::uint16_t
                                   // group or a precondition) or the item cannot be repaired
     kReasonCannotSleep = 42,      // S10-T03c: the requester bleeds or is irradiated (the installed window's rule),
                                   // or is passed out
+    kReasonNotOwner = 43,         // S10-T06: only the session's owner (the first key the server accepted) may load
+    kReasonUnknownCampaign = 44,  // S10-T06: no campaign with that id in the server's library, or it is the one
+                                  // being served
+    kReasonSessionBusy = 45,      // S10-T06: a travel, a sleep or another switch is under way
+    kReasonBadChoices = 46,       // S10-T06: the creation choices break the creation screen's rules (an unknown
+                                  // faction or start, a loadout item not offered to the faction, over its points)
 };
 
 struct Input

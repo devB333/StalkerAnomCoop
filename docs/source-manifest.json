@@ -349,6 +349,10 @@
     {
       "path": "patches/engine/0085-hud-statics.patch",
       "sha256": "70aaf5c646a5d73429386534577d973c8084949f85dc36b6864bb716692336f9"
+    },
+    {
+      "path": "patches/engine/0086-session-control.patch",
+      "sha256": "00d14a9aadf05a0fcebb81c5320934da355910d608d12581113a05dd31798fdb"
     }
   ],
   "submodules": [

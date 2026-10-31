@@ -308,6 +308,9 @@ def main():
     parser.add_argument("--relocate-test", default="",
                         help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
                              "same-level fast travel does")
+    parser.add_argument("--session", default="",
+                        help="S10-T06 driver: <client>:<script> (1 the owner: a refused create, a new game, the first "
+                             "campaign loaded back; 2 the partner: its loadout, a refused load), e.g. c1:1,c2:2")
     parser.add_argument("--place-giver", type=int, default=0,
                         help="hands-on aid: seconds after both players are in the world until both actors are placed "
                              "in front of Sidorovich, once (profile place_giver; 0 off)")
@@ -403,6 +406,7 @@ def main():
     emission_fix = {n for n in args.emission.split(",") if n}
     story_fix = {n for n in args.story.split(",") if n}
     relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
+    session_script = {e.split(':')[0]: int(e.split(':')[1]) for e in args.session.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
     rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
@@ -591,7 +595,8 @@ def main():
                       f"travel_ready_wrong = {1 if name in ready_wrong else 0}",
                       f"travel_rejoin_delay = {rejoin_delay.get(name, 0)}",
                       f"travel_load_fail = {1 if name in load_fail else 0}",
-                      f"relocate_test = {relocate_test.get(name, 0)}"]
+                      f"relocate_test = {relocate_test.get(name, 0)}",
+                      f"session_script = {session_script.get(name, 0)}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile

@@ -16,6 +16,10 @@
 # when there is one (the failpoint profile minus its failpoint). The clients
 # keep running through the outage. With -ServerKill 0 the server exits by
 # itself at its failpoint, and the restart follows its exit.
+# S10-T06: a server that exits with 75 asked for a relaunch on another campaign
+# (a create or load from the owner's co-op menu): its logs go to
+# server-campaign-<n>/ and it starts again at once with the launch files named
+# in its app data coop-relaunch.ltx, as tools/Start-CoopServer.ps1 does.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Run,
     [ValidatePattern('^S[0-9]{2}-T[0-9]{2}[a-z]?$')][string]$Task = 'S05-T01',
@@ -100,7 +104,19 @@ $listeningAt = $timer.Elapsed.TotalSeconds
 $serverKillAt = if ($ServerKill -ge 0) { $listeningAt + $ServerKill } else { -1 }
 $serverRestartAt = -1
 $serverRuns = 0
+$relaunches = 0
 $result.server_runs = @()
+$result.relaunches = @()
+function Read-Relaunch() {
+    $file = Join-Path $serverRuntime 'appdata\coop-relaunch.ltx'
+    if (-not (Test-Path $file)) { return $null }
+    $values = @{}
+    foreach ($line in Get-Content $file) {
+        if ($line -match '^\s*([a-z_]+)\s*=\s*(.*?)\s*$') { $values[$Matches[1]] = $Matches[2] }
+    }
+    Move-Item $file ($file + '.used-' + ($relaunches + 1)) -Force
+    return $values
+}
 
 $clients = @{}
 $plan = @()
@@ -116,8 +132,25 @@ if ($listening) {
         $plan += [pscustomobject]@{ name = $parts[0]; start = $at; stop = $at + [int]$parts[2]; started = $false; stopped = $false; restarts = 1 }
     }
     $serverStopAt = ($plan | Measure-Object -Property stop -Maximum).Maximum + $AfterSeconds
-    while (-not $serverProcess.HasExited -or $serverKillAt -ge 0 -or $serverRestartAt -ge 0 -or ($ServerKill -eq 0 -and $serverRuns -eq 0)) {
+    while (-not $serverProcess.HasExited -or $serverProcess.ExitCode -eq 75 -or $serverKillAt -ge 0 -or $serverRestartAt -ge 0 -or ($ServerKill -eq 0 -and $serverRuns -eq 0)) {
         $now = $timer.Elapsed.TotalSeconds
+        # S10-T06: a campaign switch: start the server again on the next campaign
+        if ($serverProcess.HasExited -and $serverProcess.ExitCode -eq 75) {
+            $next = Read-Relaunch
+            if (-not $next) { Note 'server-relaunch-file-missing'; break }
+            $relaunches++
+            Note ("server-exited-for-relaunch#$relaunches to=" + $next['campaign'])
+            $keep = Join-Path $logDir "server-campaign-$relaunches"
+            New-Item -ItemType Directory $keep -Force | Out-Null
+            Get-ChildItem (Join-Path $serverRuntime 'appdata\logs') -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $keep; Remove-Item $_.FullName }
+            $relaunchArgs = '-campaign-serve -snd_cpu -fsltx ' + $next['fsgame'] + ' -coop-config ' + $next['profile']
+            if (Test-Path $server.stop_file) { Remove-Item $server.stop_file }
+            $serverProcess = Start-CoopProcess 'server' $serverExe $relaunchArgs $serverRuntime
+            $result.relaunches += [ordered]@{ relaunch = $relaunches; campaign = $next['campaign']; why = $next['why']; command = '"' + $serverExe + '" ' + $relaunchArgs }
+            Note "server-relaunched#$relaunches"
+            if (Wait-Listening $serverProcess) { Note "server-listening-relaunch#$relaunches" } else { Note "server-relaunch-not-listening#$relaunches" }
+            continue
+        }
         foreach ($p in $plan) {
             $proc = $session.processes.($p.name)
             $runtime = Join-Path $workspace ($proc.runtime -replace '/', '\')

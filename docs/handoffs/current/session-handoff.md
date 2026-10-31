@@ -1,4 +1,4 @@
-# Session handoff — S10-T05 complete; next S10-T06 (co-op menu and session control)
+# Session handoff — S10-T06 complete; next S10-T07 bug fixes, then the G10 review
 
 ## State (2026-10-31)
 
@@ -60,21 +60,21 @@
 
 ## Next
 
-1. **S10-T06 co-op menu and session control** (T01-17…19, approved
-   2026-10-28; matrix row F25; L51 closed by S10-T03f for the server side).
-   It has no section of its own in plan.md yet. Write one and split it into
-   children:
-   - **a** a protocol session-control message (create / load / list saves;
-     owner-only; a protocol change, proto-build-56);
-   - **b** the server carrying out a create (S10-T03f's new game, in
-     process) or a load (another generation or save) and both clients
-     re-attaching as after a travel;
-   - **c** the client's main-menu Co-op page (installed Lua main menu,
-     `ui_main_menu.script`) with the standard creation screen for the owner
-     and loadout-only for the joiner;
-   - **d** the owner role (the first key, T01-18).
-2. Then stop at **G10** with the decisions list and the bug list (B1…B18)
-   for item-by-item approval. S10-T07 (bugs) follows.
+1. **S10-T06 co-op menu and session control: Completed and committed**
+   ([S10-T06](../../validation/S10-T06.md), patch 0086, proto-build-56 st-31
+   115/115, campaign-410 / client-296, **session-2 pass 8/8**). The owner (the
+   first key the server accepted) creates a new game with the standard
+   creation screen or loads a campaign of the server's library in the
+   standard load window. The server checks the choices by the screen's rules,
+   checkpoints, tells both clients and exits 75. Its launcher
+   (`tools/Run-CoopSession.ps1`, new `tools/Start-CoopServer.ps1`) relaunches
+   it on that campaign. The partner's creation screen keeps only its loadout.
+   Decisions **T06-1…6**.
+2. **S10-T07 bug fixes** (user, 2026-10-31: "keep going and finish the rest of
+   G10 until you get to the bug fixes that require my input"). Fix the rows of
+   the [bug list](../../known-issues.md) that need no input from the user.
+   Then stop with the G10 decisions list (T04a-1…T06-6), the bug list, and
+   the rows that need the user (B2 details, hands-on checks).
 
 ## Run names
 
@@ -83,9 +83,11 @@
   `proto-build-52` (unused), `proto-build-53…55`, `st-28…30`,
   `sweep-1…7`, `newgame-1…4`, `emission-1…5`, `story-1…2`,
   `presentation-1…5`, patch checks 77–97.
-- Next: `campaign-409`, `client-295`, `proto-build-56`, `st-31`, patch
-  check 98.
+- Also used: `campaign-409…410`, `client-295…296`, `proto-build-56`, `st-31`,
+  `session-1…2`, patch check 98.
+- Next: `campaign-411`, `client-297`, `proto-build-57`, `st-32`, patch
+  check 99.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S10-T06](../done/snapshot-before-S10-T06.md).
+Previous snapshot: [before S10-T07](../done/snapshot-before-S10-T07.md).

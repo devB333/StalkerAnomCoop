@@ -564,6 +564,17 @@ skips destroy-pending objects in the identity check and retries the check
 after 10 more ticks up to 3 times, and reads the level's objects in the stop
 status only while there is a level. Single player is unchanged.
 
+`0081-new-game.patch` (S10-T03f) starts a new game on the campaign server
+when the profile asks (`new_game = 1`) and the campaign has no generation
+yet: the level starts from the spawn data (`all/single/alife/new`), the
+installed `on_game_load` applies the creator's choices from the server's
+`axr_options.ltx`, and the new-game script's `ChangeLevel` to the start
+(in a player's context or as `M_CHANGE_LEVEL`) is carried out as an agreed
+party travel by the S09 executor. Player 2's actor, created when it joins,
+takes the creator's community, its own name and money, and its loadout from
+the profile (`new_game_loadout_2`) or the faction's kit. Single player is
+unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

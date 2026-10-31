@@ -54,6 +54,26 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def merge_ini_section(path, section, values):
+    """Set keys of one [section] in an X-Ray ini file, keeping its other lines and line endings (S10-T03f)."""
+    text = path.read_text(encoding="latin-1") if path.exists() else ""
+    eol = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip().lower() == f"[{section}]"), None)
+    if start is None:
+        lines += [f"[{section}]"]
+        start = len(lines) - 1
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines))
+    left = dict(values)
+    for i in range(start + 1, end):
+        key = lines[i].split("=", 1)[0].strip()
+        if key in left:
+            lines[i] = f"\t{key} = {left.pop(key)}"
+    lines[end:end] = [f"\t{k} = {v}" for k, v in left.items()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(eol.join(lines) + eol, encoding="latin-1", newline="")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("run")
@@ -410,13 +430,13 @@ def main():
         faction, _, location = args.new_game.partition(":")
         if not faction or not location:
             raise SystemExit("--new-game <faction>:<start location>")
-        creation = ["[character_creation]", "new_game_difficulty = 1", "new_game_economy = 1",
-                    "new_game_economy_treasure = 1", "new_game_story_mode = true", "new_game_character_name = Player_1",
-                    f"new_game_faction = {faction}", f"new_game_map = {location}",
-                    f"new_game_money = {args.new_game_money}"]
+        creation = {"new_game_difficulty": "1", "new_game_economy": "1", "new_game_economy_treasure": "1",
+                    "new_game_story_mode": "true", "new_game_character_name": "Player_1", "new_game_faction": faction,
+                    "new_game_map": location, "new_game_money": str(args.new_game_money)}
         if args.new_game_loadout:
-            creation.append(f"new_game_loadout = {args.new_game_loadout}")
-        (runtimes["server"] / "appdata/axr_options.ltx").write_text("\n".join(creation) + "\n")
+            creation["new_game_loadout"] = args.new_game_loadout
+        # axr_main.config is ini_file_ex("axr_options.ltx"): $game_config$, the runtime's own gamedata copy
+        merge_ini_section(runtimes["server"] / "gamedata/configs/axr_options.ltx", "character_creation", creation)
 
     # Players: keys (DPAPI, this Windows user) and the public roster.
     roster_lines = []

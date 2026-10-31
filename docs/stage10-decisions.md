@@ -262,3 +262,14 @@ T01-1 binds it. Awaiting the user's approval at G10.
 | T03e-1 | *(test only)* **The sweep's own travel requests skip the "at the changer" and combat checks, and the sweep turns on god mode for the party**; a player's request keeps every check | the fixture cannot walk the party to each of 99 changers or fight its way out; the checks are S09's and tested there (tv-1…tv-26) | walk the party to every changer (a pathing fixture per level; slower and fragile) |
 | T03e-2 | **The passage scope is the spawn data's own graph: 99 directed passages** between the 33 levels (T01-1 said 98, from a string scan) | the server's level changers are what the players can use; the scan misnamed two levels and skipped two changers | keep the scan's table as the list |
 | T03e-3 | **A failed identity check after a load is retried after 10 more ticks, up to 3 times, before the server stops** | an object ALife has just released keeps its level object until its destroy event is processed (one frame); a real mismatch is still there after 30 ticks and still stops the server | stop at once (sweep-4 and sweep-6 stopped on a harmless timing gap) |
+
+## S10-T03f — new game on the campaign server
+
+Taken 2026-10-31 while building the slice ([S10-T03f](validation/S10-T03f.md));
+T01-2, T01-3 and T01-19 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03f-1 | **Creating the game is the consent for the start move**: the installed new-game script's `ChangeLevel` from the spawn's stub level (`fake_start`) to the faction's start is carried out as an agreed party travel, with no prompt, before or while the players join | nobody is in the world yet to answer; the move is part of starting the game the creator asked for | prompt the partner (nobody to ask; the game would sit on `fake_start`) |
+| T03f-2 | **Player 1's choices come from the server's `axr_options.ltx` [character_creation]** (the file the creation screen writes in single player), **player 2's loadout and money from the server profile** (`new_game_loadout_2`, `new_game_money_2`) until S10-T06's Co-op menu sends both from the clients (T01-17, T01-19) | the installed `on_game_load` reads the creator's choices unchanged; the menu that collects them from two clients is S10-T06 | build the menu first (S10-T06 depends on this slice) |
+| T03f-3 | **Player 2 is created when it joins the start level**, of the creator's community, with its own name and money; its loadout is given once (as the creation screen does: each item once, a weapon's ammo per `new_game_loadouts.ltx`), or the faction's kit when none is set | T01-3 (one faction), T01-19 (own loadout); the same path as any join (G07) | spawn player 2 at the start move (no client to own it yet) |

@@ -45,6 +45,8 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.8 + S10-T06: the session kind (27), reasons 43-46 and CampaignEvent kind 20
 // (the campaign list, a campaign switch); no wire layout change.
 // 1.8 + S10-T07: the companion order kind (28); no wire layout change.
+// 1.8 + S10-T07 (B4/B7/B21): the zoom button (bit 5), the state_bits layouts
+// per entity class; no wire layout change.
 constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -290,7 +292,11 @@ enum SnapshotComponent : std::uint16_t
     kTransform = 1 << 0, // x, y, z, yaw
     kVelocity = 1 << 1,  // vx, vy, vz
     kHealth = 1 << 2,    // u16, 0..10000 (hundredths of a percent)
-    kStateBits = 1 << 3, // u16, opaque state flags
+    kStateBits = 1 << 3, // u16, opaque state flags. S10-T07 (B4/B7) layouts, by entity class:
+                         //   actor: bits 0-14 the engine's move state, bit 15 zoomed;
+                         //   stalker: bit 0 alive, 1-2 movement type, 3 body state, 4-5 mental state,
+                         //            6-9 weapon animation, 10 set when bits 1-9 are meant;
+                         //   monster: bit 0 alive, 1-7 motion + 1 (0 none), 8-11 motion variant
     kRotation = 1 << 4,  // qx, qy, qz, qw: a unit quaternion (v1.2; physics objects)
     kRemoved = 1 << 5,   // v1.2: the entity leaves the client's snapshot set; no fields, never with another bit
     kAim = 1 << 6,       // v1.3: aim yaw, aim pitch (an actor's torso; radians)
@@ -350,6 +356,7 @@ constexpr std::uint32_t kButtonFire = 1u << 1; // S06-T04: the fire key is held
 constexpr std::uint32_t kButtonJump = 1u << 2;      // S06-T07: the jump key is held
 constexpr std::uint32_t kButtonLeanLeft = 1u << 3;  // S06-T07: leaning left
 constexpr std::uint32_t kButtonLeanRight = 1u << 4; // S06-T07: leaning right
+constexpr std::uint32_t kButtonZoom = 1u << 5;      // S10-T07 (B7): aiming down the sights
 
 // S06-T04: the action kinds the server defines (ActionIntent.kind); every
 // other kind is refused. Their params are decoded by the server with their

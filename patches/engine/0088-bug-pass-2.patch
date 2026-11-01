@@ -1,0 +1,1370 @@
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index b047298..e0bedc0 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -1233,7 +1233,7 @@ void CActor::UpdateCL()
+ 
+ 	PickupModeUpdate_COD(pickup_result);
+ 
+-	SetZoomAimingMode(false);
++	SetZoomAimingMode(r_wpn_anim.zoomed); // S10-T07 (B7): a held zoom (the server's participant, a client's partner)
+ 	CWeapon* pWeapon = smart_cast<CWeapon*>(inventory().ActiveItem());
+ 
+ 	cam_Update(float(Device.dwTimeDelta) / 1000.0f, currentFOV());
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 79b0d82..416ecfc 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -322,6 +322,9 @@ protected:
+ 		u32 held = u32(-1); // an attack state kept until held_until
+ 		u32 held_until_ms = 0; // Device.dwTimeGlobal
+ 		u32 changed_at_ms = 0;
++		// S10-T07 (B7): the player's zoom as the input (server) or the snapshot
++		// (a client's partner) carries it; the own item's IsZoomed elsewhere
++		bool zoomed = false;
+ 	} r_wpn_anim;
+ 
+ 	//ориентация модели
+@@ -380,6 +383,8 @@ public:
+ 	void replica_present_attack(u32 attack_state); // a shot seen by the counter between samples
+ 	u32 replica_anim_weapon_state(u32 item_state);
+ 	bool replica_anim_weapon_state_active() const { return r_wpn_anim.server != u32(-1); }
++	void replica_set_zoomed(bool zoomed) { r_wpn_anim.zoomed = zoomed; } // S10-T07 (B7)
++	bool replica_zoomed() const { return r_wpn_anim.zoomed; }
+ 	// S06-T01: what the last native control step did with its input (the
+ 	// co-op host logs it after each tick that applied an input).
+ 	struct ControlTrace
+diff --git a/src/xrGame/ActorAnimation.cpp b/src/xrGame/ActorAnimation.cpp
+index 07b9791..376f975 100644
+--- a/src/xrGame/ActorAnimation.cpp
++++ b/src/xrGame/ActorAnimation.cpp
+@@ -520,11 +520,11 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 						{
+ 							switch (wpn_state)
+ 							{
+-							case CWeapon::eIdle: M_torso = W->IsZoomed() ? TW->zoom : (m_bSafemode && moving_idx != STorsoWpn::eSprint) ? TW->safemode : TW->moving[moving_idx];
++							case CWeapon::eIdle: M_torso = (W->IsZoomed() || r_wpn_anim.zoomed) ? TW->zoom : (m_bSafemode && moving_idx != STorsoWpn::eSprint) ? TW->safemode : TW->moving[moving_idx];
+ 								break;
+-							case CWeapon::eFire: M_torso = W->IsZoomed() ? TW->attack_zoom : TW->attack;
++							case CWeapon::eFire: M_torso = (W->IsZoomed() || r_wpn_anim.zoomed) ? TW->attack_zoom : TW->attack;
+ 								break;
+-							case CWeapon::eFire2: M_torso = W->IsZoomed() ? TW->attack_zoom : TW->attack;
++							case CWeapon::eFire2: M_torso = (W->IsZoomed() || r_wpn_anim.zoomed) ? TW->attack_zoom : TW->attack;
+ 								break;
+ 							case CWeapon::eReload:
+ 								if (!R3)
+@@ -624,7 +624,7 @@ void CActor::g_SetAnimation(u32 mstate_rl)
+ 					{
+ 						switch (P->GetState())
+ 						{
+-						case CPda::eIdle: M_torso = P->m_bZoomed ? TW->zoom : (moving_idx == STorsoWpn::eSprint ? ST->m_torso[0].moving[moving_idx] : ST->m_torso[4].moving[moving_idx]);
++						case CPda::eIdle: M_torso = (P->m_bZoomed || r_wpn_anim.zoomed) ? TW->zoom : (moving_idx == STorsoWpn::eSprint ? ST->m_torso[0].moving[moving_idx] : ST->m_torso[4].moving[moving_idx]);
+ 							break;
+ 						case CPda::eShowing: M_torso = TW->draw;
+ 							break;
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index 7ee0287..7ec7915 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -227,7 +227,12 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
+ 		// jump
+ 		m_fJumpTime -= dt;
+ 
+-		if (CanJump() && (mstate_wf & mcJump))
++		// S10-T07 (B22): the physics character must be able to take the jump
++		// now (a valid ground contact, no lost control); before, a jump the
++		// physics refused still set the animation bit, the 0.3 s lockout and
++		// the stamina cost, so a press on a frame without contact (a bump, a
++		// step edge, a co-op correction) was swallowed
++		if (CanJump() && (mstate_wf & mcJump) && character_physics_support()->movement()->PhysicsCanJump())
+ 		{
+ 			mstate_real |= mcJump;
+ 			m_bJumpKeyPressed = TRUE;
+@@ -495,7 +500,13 @@ void CActor::replica_present(const Fvector& position, float model_yaw, u32 mstat
+ 	xform.rotateY(-model_yaw);
+ 	xform.c.set(position);
+ 	XFORM().set(xform);
+-	mstate_real = mstate;
++	// S10-T07 (B7): bit 15 is the partner's zoom; the move state is bits 0-14
++	if (!local_view)
++	{
++		r_wpn_anim.zoomed = (mstate & 0x8000) != 0;
++		SetZoomAimingMode(r_wpn_anim.zoomed);
++	}
++	mstate_real = mstate & 0x7fff;
+ 	g_SetAnimation(mstate_real);
+ 	if (!local_view)
+ 	{
+diff --git a/src/xrGame/Actor_Network.cpp b/src/xrGame/Actor_Network.cpp
+index 9e39099..98a61e7 100644
+--- a/src/xrGame/Actor_Network.cpp
++++ b/src/xrGame/Actor_Network.cpp
+@@ -701,8 +701,13 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
+ 
+ 	if (IsGameTypeSingle())
+ 	{
+-		Level().MapManager().AddMapLocation("actor_location", ID());
+-		Level().MapManager().AddMapLocation("actor_location_p", ID());
++		// S10-T07 (B2): a dead body (a co-op player's, spawned again on a
++		// client after its own death) gets no player icon
++		if (g_Alive())
++		{
++			Level().MapManager().AddMapLocation("actor_location", ID());
++			Level().MapManager().AddMapLocation("actor_location_p", ID());
++		}
+ 
+ 		m_statistic_manager = xr_new<CActorStatisticMgr>();
+ 	}
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 9a77e70..5091ca9 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -15,6 +15,9 @@
+ #include "ai_space.h"
+ #include "alife_simulator.h"
+ #include "alife_graph_registry.h"
++#include "alife_object_registry.h" // S10-T07 (B2)
++#include "ai_object_location.h" // S10-T07 (B2)
++#include "game_graph.h" // S10-T07 (B2)
+ #include "script_engine.h"
+ #include "script_game_object.h"
+ #include "xrServer_Objects_ALife_Monsters.h"
+@@ -678,6 +681,7 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::HudStaticRemove: return "hud-static-remove";
+ 	case Presentation::HudStaticText: return "hud-static-text";
+ 	case Presentation::SoundTail: return "sound-tail"; // S10-T07
++	case Presentation::ZoneState: return "zone-state"; // S10-T07 (B23)
+ 	default: return "?";
+ 	}
+ }
+@@ -809,6 +813,34 @@ void note_map_spot(Presentation kind, u16 object, LPCSTR spot, LPCSTR detail, u3
+ 
+ void map_spots(xr_vector<MapSpotState>& out) { out = s_map_spots; }
+ 
++bool object_map_place(u16 object, Fvector& position, xr_string& level, u16& graph)
++{
++	position.set(0.f, 0.f, 0.f);
++	level = "";
++	graph = u16(-1);
++	if (object == u16(-1) || !g_pGameLevel)
++		return false;
++	if (CGameObject* o = smart_cast<CGameObject*>(Level().Objects.net_Find(object)))
++	{
++		position = o->Position();
++		level = *Level().name();
++		graph = o->ai_location().game_vertex_id();
++		return true;
++	}
++	if (!ai().get_alife())
++		return false;
++	CSE_ALifeDynamicObject* se = ai().alife().objects().object(object, true);
++	if (!se)
++		return false;
++	position = se->draw_level_position();
++	graph = se->m_tGraphID;
++	if (ai().get_game_graph() && ai().game_graph().valid_vertex_id(graph))
++		level = *ai().game_graph().header().level(ai().game_graph().vertex(graph)->level_id()).name();
++	else
++		level = *Level().name();
++	return true;
++}
++
+ Refusal present_broadcast(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args)
+ {
+ 	if (!server_role())
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 68dd512..2a900dd 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -276,6 +276,7 @@ enum class Presentation : u8
+ 	HudStaticRemove, // detail: the name
+ 	HudStaticText, // detail: "<name>|<text>" (cut to 127 characters)
+ 	SoundTail, // S10-T07 (B18): handle; detail: the next sound chained after it (sound_object:attach_tail)
++	ZoneState, // S10-T07 (B23): object: the zone; flags: its EZoneState (CCustomZone::OnStateSwitch on the server)
+ 	Count,
+ };
+ 
+@@ -337,6 +338,10 @@ struct MapSpotState
+ 	u32 flags;
+ };
+ void note_map_spot(Presentation kind, u16 object, LPCSTR spot, LPCSTR detail, u32 flags);
++// S10-T07 (B2): where the server's object is for a client's map spot: the
++// online object's position and this level, else its ALife record's. False
++// when the server holds neither.
++bool object_map_place(u16 object, Fvector& position, xr_string& level, u16& graph);
+ void map_spots(xr_vector<MapSpotState>& out);
+ 
+ // S08-T09 (user, 2026-10-27): per-player script state. Called after every
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index a792119..08c1984 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -50,6 +50,8 @@
+ #include "ai/stalker/ai_stalker.h"
+ #include "HUDManager.h" // S08-T01: the crosshair pick
+ #include "ai/monsters/basemonster/base_monster.h" // S06-T05
++#include "ai/monsters/control_animation_base.h" // S10-T07 (B4)
++#include "stalker_movement_manager_smart_cover.h" // S10-T07 (B4)
+ #include "ai/monsters/controller/controller.h" // S10-T02c
+ #include "ai/monsters/ai_monster_effector.h"
+ #include "ai/monsters/bloodsucker/bloodsucker.h" // S10-T02d
+@@ -68,6 +70,7 @@
+ #include "map_location.h"
+ #include "UIGameCustom.h"
+ #include "Weapon.h"
++#include "ZoneCampfire.h" // S10-T07 (B23)
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+ #include "UIGameSP.h" // S10-T04a: the talk window
+@@ -192,6 +195,8 @@ struct Link
+ 	FILE* prediction_csv = nullptr;
+ 	u64 correction_frames = 0;
+ 	u64 reconciled_snapshot = 0; // the last snapshot id reconciled
++	u64 reconciled_last_input = 0; // S10-T07 (B21): the last input tick reconciled
++	u64 reconcile_held_skipped = 0; // snapshots naming it again (a server hold)
+ 	Fvector leg_start_pos = {0, 0, 0};
+ 	// S06-T03: the HUD's camera turn rate while the camera is still (should be
+ 	// 0; the other actor's angles leaked into it before ActorCameras.cpp's fix)
+@@ -243,6 +248,8 @@ struct Link
+ 	u32 input_period_ms = 20;
+ 	u32 next_input_ms = 0;
+ 	u64 inputs_skipped = 0; // sample times lost to a frame longer than the catch-up bound
++	u32 inputs_per_frame_peak = 0; // S10-T07 (B21): the most ticks one frame covered
++	u64 input_frames_multi = 0; // frames that sent more than one input
+ 	// test driver (profile script = 1): face the other player, screenshot, walk
+ 	// (script = 2): the S06-T01 movement validation program
+ 	u32 script_phase = 0;
+@@ -519,6 +526,7 @@ struct Link
+ 	xr_map<u64, AmountPending> amounts_pending; // S08-T08: items not on this level yet
+ 	u64 reparents_retried = 0;
+ 	u64 party_tasks_presented = 0, map_spots = 0; // S08-T09
++	u64 zone_states = 0; // S10-T07 (B23)
+ 	u32 hold_fire_until_ms = 0; // S08-T09: the driver holds the fire key until then
+ 	u64 needs_received = 0; // S08-T09
+ 	// S08-T08: an item-graph point that arrived while Reparents waited for their objects:
+@@ -1423,6 +1431,7 @@ void prediction_begin()
+ 	g_link->reconciler.reset();
+ 	g_link->smoother.clear();
+ 	g_link->reconciled_snapshot = 0;
++	g_link->reconciled_last_input = 0; // S10-T07 (B21)
+ 	g_link->predicting = g_link->config.predict != 0 && g_actor;
+ 	campaign::replica_set_predicting(g_link->predicting);
+ 	if (g_link->predicting && !g_actor->Cameras().GetCamEffector(kCoopViewEffector))
+@@ -1448,6 +1457,17 @@ void reconcile_own_actor(u64 snapshot_id, u64 last_input)
+ 		snapshot_id <= g_link->reconciled_snapshot)
+ 		return;
+ 	g_link->reconciled_snapshot = snapshot_id;
++	// S10-T07 (B21): the same last input as the snapshot before means the
++	// server's queue ran dry and it held (re-applied) that input: the actor
++	// moved on beyond the input's record, so the comparison would correct a
++	// phantom error (one tick of movement per held tick, every snapshot
++	// while moving on a client under 50 fps or on a late batch)
++	if (last_input == g_link->reconciled_last_input)
++	{
++		++g_link->reconcile_held_skipped;
++		return;
++	}
++	g_link->reconciled_last_input = last_input;
+ 	const coop::proto::SnapshotFrame* frame = g_link->receiver.frame(snapshot_id);
+ 	const auto ref = g_link->refs.find(u16(g_actor->ID()));
+ 	if (!frame || ref == g_link->refs.end())
+@@ -1505,6 +1525,14 @@ bool present_death(CEntityAlive* body)
+ 	if (!body->g_Alive())
+ 		return false;
+ 	body->Die(body);
++	// S10-T07 (B2): the dead player's icon leaves the map (single player ends
++	// the game here; a co-op body stays an actor object until its cleanup, and
++	// the respawned actor adds its own icon under its new id)
++	if (smart_cast<CActor*>(body))
++	{
++		Level().MapManager().RemoveMapLocation("actor_location", body->ID());
++		Level().MapManager().RemoveMapLocation("actor_location_p", body->ID());
++	}
+ 	++g_link->deaths_presented;
+ 	g_link->log.line("death-presented id=%u section=%s own=%d pos=%.2f,%.2f,%.2f", u32(body->ID()),
+ 		body->cNameSect().c_str(), body == g_actor ? 1 : 0, VPUSH(body->Position()));
+@@ -1731,7 +1759,22 @@ void present_actors()
+ 					}
+ 				}
+ 			if (creature->g_Alive())
++			{
+ 				creature->replica_present(position, s.transform.yaw, velocity);
++				// S10-T07 (B4): its animation state (the legs, torso and head of a
++				// stalker; a monster's motion), as the server packed it
++				if (CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(creature))
++					stalker->replica_present_animation(s.state_bits, (s.components & coop::proto::kAim) != 0, s.aim_yaw,
++						s.aim_pitch);
++				else if (CBaseMonster* monster = smart_cast<CBaseMonster*>(creature))
++				{
++					const u32 motion = (s.state_bits >> 1) & 127;
++					if (motion == 0 || motion > u32(eAnimCount))
++						monster->anim().clear_override_animation();
++					else
++						monster->anim().set_override_animation(EMotionAnim(motion - 1), (s.state_bits >> 8) & 15);
++				}
++			}
+ 		}
+ 		else if (CAI_Crow* crow = smart_cast<CAI_Crow*>(object))
+ 		{
+@@ -2071,13 +2114,13 @@ void sample_input()
+ 	}
+ 	if (now < g_link->next_input_ms)
+ 		return;
+-	// A frame longer than three ticks does not produce a burst: the server
++	// A frame longer than five ticks does not produce a burst: the server
+ 	// would drop it anyway (its queue holds five), and the actor cannot gain
+ 	// distance from it.
+-	if (now - g_link->next_input_ms > 3 * g_link->input_period_ms)
++	if (now - g_link->next_input_ms > 4 * g_link->input_period_ms)
+ 	{
+-		g_link->inputs_skipped += (now - g_link->next_input_ms) / g_link->input_period_ms - 3;
+-		g_link->next_input_ms = now - 3 * g_link->input_period_ms;
++		g_link->inputs_skipped += (now - g_link->next_input_ms) / g_link->input_period_ms - 4;
++		g_link->next_input_ms = now - 4 * g_link->input_period_ms;
+ 	}
+ 	CActor* actor = g_actor;
+ 	u32 wishful = actor->replica_wishful();
+@@ -2088,11 +2131,6 @@ void sample_input()
+ 	if (g_link->send_mode == Link::SendShift7)
+ 		g_link->input_tick += 6;
+ 	in.tick = ++g_link->input_tick;
+-	// S06-T03: the actor's position as this input is sampled: the server's
+-	// snapshot naming this tick as its last consumed input has the actor
+-	// after the inputs before it (coop/proto/prediction.h).
+-	if (g_link->predicting)
+-		g_link->reconciler.record(in.tick, coop::proto::Vec3{actor->Position().x, actor->Position().y, actor->Position().z});
+ 	in.move_y = (wishful & mcFwd) ? 1.f : (wishful & mcBack) ? -1.f : 0.f;
+ 	in.move_x = (wishful & mcRStrafe) ? 1.f : (wishful & mcLStrafe) ? -1.f : 0.f;
+ 	if (g_link->grab_monster != 0xffff)
+@@ -2111,6 +2149,8 @@ void sample_input()
+ 		in.buttons |= coop::proto::kButtonLeanLeft;
+ 	else if (wishful & mcRLookout)
+ 		in.buttons |= coop::proto::kButtonLeanRight;
++	if (actor->IsZoomAimingMode())
++		in.buttons |= coop::proto::kButtonZoom; // S10-T07 (B7): the own weapon's zoom
+ 	// S06-T04: the fire key, held by the player or the test driver
+ 	bool fire = false;
+ 	for (int idx = 0; idx < 2 && !fire; ++idx)
+@@ -2161,9 +2201,43 @@ void sample_input()
+ 	// (CActor::shedule_Update, after this frame's link update).
+ 	if (!g_link->predicting)
+ 		actor->replica_set_wishful(actor->replica_wishful() & ~cleared);
+-	g_link->inputs.push_front(in);
+-	while (g_link->inputs.size() > coop::proto::kMaxInputsPerBatch)
+-		g_link->inputs.pop_back();
++	// S10-T07 (B21): one input for every tick period this frame covered (at
++	// most five), not one per frame: a client under 50 fps sent fewer inputs
++	// than the server has ticks, so the server held (repeated) inputs and
++	// its actor ran ahead of the client's record, a correction on nearly
++	// every snapshot while moving. Each tick's record is the actor's
++	// position at that tick's nominal time: the position now, moved back by
++	// the velocity over the time since (S06-T03: the server's snapshot
++	// naming a tick holds the actor after the inputs before it,
++	// coop/proto/prediction.h; before, the record was taken up to a frame
++	// after the tick's time, up to 8 cm behind at a sprint).
++	const u32 period = _max(1u, g_link->input_period_ms);
++	u32 count = (now - g_link->next_input_ms) / period + 1;
++	if (count > 5)
++		count = 5;
++	Fvector speed;
++	speed.set(0.f, 0.f, 0.f);
++	if (g_link->predicting && actor->character_physics_support()->movement()->CharacterExist())
++		actor->character_physics_support()->movement()->GetCharacterVelocity(speed);
++	for (u32 i = 0; i < count; ++i)
++	{
++		if (i)
++			in.tick = ++g_link->input_tick;
++		if (g_link->predicting)
++		{
++			const float back = float(s64(g_link->next_input_ms + i * period) - s64(now)) / 1000.f; // <= 0
++			Fvector p = actor->Position();
++			if (_valid(speed))
++				p.mad(speed, _max(back, -0.1f));
++			g_link->reconciler.record(in.tick, coop::proto::Vec3{p.x, p.y, p.z});
++		}
++		g_link->inputs.push_front(in);
++		while (g_link->inputs.size() > coop::proto::kMaxInputsPerBatch)
++			g_link->inputs.pop_back();
++	}
++	g_link->inputs_per_frame_peak = _max(g_link->inputs_per_frame_peak, count);
++	if (count > 1)
++		++g_link->input_frames_multi;
+ 	coop::proto::InputBatch batch;
+ 	batch.inputs.assign(g_link->inputs.begin(), g_link->inputs.end());
+ 	const coop::proto::Message message(batch);
+@@ -2185,7 +2259,7 @@ void sample_input()
+ 		g_link->client->send(coop::proto::Message(jump));
+ 		g_link->log.line("script-ahead-sent tick=%I64u", ahead.tick);
+ 	}
+-	g_link->next_input_ms += g_link->input_period_ms;
++	g_link->next_input_ms += count * period; // S10-T07 (B21)
+ }
+ 
+ // ------------------------------------------------------------ S06-T01
+@@ -3128,6 +3202,20 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		// S08-T09: the server's map spot ("<spot type>|<hint>") on this player's map
+ 		string256 spot;
+ 		xr_strcpy(spot, detail);
++		// S10-T07 (B2): "<spot>|<hint>\t<level>\t<graph>": the object's place on the
++		// server, shown when this client holds neither the object nor its record
++		LPCSTR level = "";
++		u16 graph = u16(-1);
++		if (char* tab = strchr(spot, '\t'))
++		{
++			*tab = 0;
++			level = tab + 1;
++			if (char* tab2 = strchr(tab + 1, '\t'))
++			{
++				*tab2 = 0;
++				graph = u16(atoi(tab2 + 1));
++			}
++		}
+ 		char* bar = strchr(spot, '|');
+ 		LPCSTR hint = "";
+ 		if (bar)
+@@ -3140,6 +3228,7 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 			applied = "refused";
+ 			break;
+ 		}
++		const char* where = "object";
+ 		if (kind == campaign::Presentation::MapSpotRemove)
+ 			Level().MapManager().RemoveMapLocation(spot, object);
+ 		else if (kind == campaign::Presentation::MapSpotHint)
+@@ -3153,10 +3242,15 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 				ml->SetHint(hint);
+ 			if (flags & 1)
+ 				ml->SetSerializable(true);
++			if (level[0] && !ml->HasOwnerObject() && !Level().Objects.net_Find(object))
++			{
++				ml->SetFixedPosition(position, level, graph);
++				where = "fixed";
++			}
+ 		}
+ 		++g_link->map_spots;
+-		g_link->log.line("map-spot kind=%s object=%u spot=%s hint=\"%s\" serial=%u", campaign::presentation_name(kind),
+-			u32(object), spot, hint, serial);
++		g_link->log.line("map-spot kind=%s object=%u spot=%s hint=\"%s\" where=%s level=%s serial=%u",
++			campaign::presentation_name(kind), u32(object), spot, hint, where, level, serial);
+ 		break;
+ 	}
+ 	case campaign::Presentation::CameraEffector:
+@@ -3266,6 +3360,17 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 			if (!viewer->Cameras().GetCamEffector(eCEControllerPsyHit))
+ 				viewer->Cameras().AddCamEffector(xr_new<CControllerPsyHitCamEffector>(eCEControllerPsyHit,
+ 					viewer->cam_Active()->vPosition, position, value > 0.f ? value : 1.f, g_fov, 10.f));
++			// S10-T07 (B7): held as single player holds the target during the glide
++			// (CControllerPsyHit::death_glide_start: the controller's CControlledActor,
++			// no turn of its own; the effector steers the camera): no keys, no mouse
++			if (c)
++			{
++				grab_release();
++				c->CControlledActor::install(viewer);
++				c->CControlledActor::dont_need_turn();
++				g_link->grab_monster = object;
++				g_link->log.line("psy-hold controller=%u", u32(object));
++			}
+ 			break;
+ 		case 3:
+ 			if (c)
+@@ -3279,6 +3384,8 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 			HUD().SetRenderable(true);
+ 			if (viewer->Cameras().GetCamEffector(eCEControllerPsyHit))
+ 				viewer->Cameras().RemoveCamEffector(eCEControllerPsyHit);
++			if (g_link->grab_monster == object)
++				grab_release(); // S10-T07 (B7)
+ 			break;
+ 		case 5:
+ 		case 6:
+@@ -3307,6 +3414,36 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		g_link->log.line("psy-hit-applied controller=%u phase=%u replica=%d", u32(object), flags, c ? 1 : 0);
+ 		break;
+ 	}
++	case campaign::Presentation::ZoneState:
++	{
++		// S10-T07 (B23): the server's zone state; a campfire through its own
++		// turn (its fade, m_turned_on) so the installed scripts see it
++		CCustomZone* zone = smart_cast<CCustomZone*>(Level().Objects.net_Find(object));
++		if (!zone)
++		{
++			applied = "refused";
++			break;
++		}
++		const CCustomZone::EZoneState state = CCustomZone::EZoneState(flags);
++		const bool on = state != CCustomZone::eZoneStateDisabled;
++		if (CZoneCampfire* fire = smart_cast<CZoneCampfire*>(zone))
++		{
++			if (fire->is_on() != on || (zone->IsEnabled() != on))
++			{
++				if (on)
++					fire->turn_on_script();
++				else
++					fire->turn_off_script();
++			}
++		}
++		else
++			zone->replica_switch_state(state);
++		++g_link->zone_states;
++		if (g_link->zone_states <= 200 || on != zone->IsEnabled())
++			g_link->log.line("zone-state object=%u section=%s state=%u on=%d serial=%u", u32(object),
++				zone->cNameSect().c_str(), flags, on ? 1 : 0, serial);
++		break;
++	}
+ 	case campaign::Presentation::HudStaticAdd:
+ 	case campaign::Presentation::HudStaticRemove:
+ 	case campaign::Presentation::HudStaticText:
+@@ -3831,6 +3968,7 @@ void on_event(const coop::session::ClientEvent& e)
+ 		g_link->reconciler.reset();
+ 		g_link->smoother.clear();
+ 		g_link->reconciled_snapshot = 0;
++		g_link->reconciled_last_input = 0; // S10-T07 (B21)
+ 		// S06-T01: input ticks count per connection, one per server tick.
+ 		g_link->input_tick = 0;
+ 		g_link->inputs.clear();
+@@ -4592,7 +4730,7 @@ void log_status(LPCSTR tag)
+ 	const std::vector<double>& rtts = g_link->client ? g_link->client->rtts() : std::vector<double>();
+ 	g_link->log.line("%s state=%u welcomes=%u connects=%u level=%d local_starts_refused=%u rtt_samples=%u "
+ 		"last_rtt_ms=%.2f inject_ok=%u inject_failed=%u snapshots=%I64u snapshot_unknown=%I64u inputs_sent=%I64u "
+-		"input_acked=%I64u input_tick=%I64u input_period_ms=%u inputs_skipped=%I64u replays=%u "
++		"input_acked=%I64u input_tick=%I64u input_period_ms=%u inputs_skipped=%I64u inputs_per_frame_peak=%u input_frames_multi=%I64u reconcile_held_skipped=%I64u replays=%u "
+ 		"snap_parts=%I64u snap_completed=%I64u snap_full=%I64u snap_delta=%I64u snap_duplicate=%I64u "
+ 		"snap_missing_baseline=%I64u snap_inconsistent=%I64u snap_incomplete=%I64u snap_older=%I64u "
+ 		"snap_states=%I64u snap_removed=%I64u acks_sent=%I64u tracks=%u presented=%I64u holding=%I64u extrapolated=%I64u "
+@@ -4604,7 +4742,8 @@ void log_status(LPCSTR tag)
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+-		g_link->last_input_acked, g_link->input_tick, g_link->input_period_ms, g_link->inputs_skipped, g_link->replays,
++		g_link->last_input_acked, g_link->input_tick, g_link->input_period_ms, g_link->inputs_skipped,
++		g_link->inputs_per_frame_peak, g_link->input_frames_multi, g_link->reconcile_held_skipped, g_link->replays,
+ 		g_link->receiver.counters().parts, g_link->receiver.counters().completed, g_link->receiver.counters().full,
+ 		g_link->receiver.counters().delta, g_link->receiver.counters().duplicate_parts,
+ 		g_link->receiver.counters().missing_baseline, g_link->receiver.counters().inconsistent,
+@@ -4920,8 +5059,19 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 		r.str(location, sizeof(location));
+ 		const u16 object = r.get<u16>();
+ 		const u32 priority = r.get<u32>();
++		// S10-T07 (B2): the target's place on the server (level, position, game
++		// vertex) for a target this client does not hold
++		string256 level;
++		r.str(level, sizeof(level));
++		Fvector place;
++		place.x = r.get<float>();
++		place.y = r.get<float>();
++		place.z = r.get<float>();
++		const u16 graph = r.get<u16>();
+ 		if (!r.ok || !id[0])
+ 			break;
++		if (!_valid(place))
++			place.set(0.f, 0.f, 0.f);
+ 		CGameTaskManager& tasks = Level().GameTaskManager();
+ 		string512 shown;
+ 		if (need > 0)
+@@ -4939,12 +5089,11 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 			t->m_Title = shown;
+ 			t->m_Description = description;
+ 			t->SetIconName_script(icon);
+-			// a spot only on an object this client holds (the server's quest corpse
+-			// elsewhere in the Zone is not in a client's ALife: demo-1 crash in
+-			// CMapLocation::UpdateSpot)
+-			const bool known = object != 0xffff && ai().alife().objects().object(object, true) != nullptr;
+-			t->SetMapLocation_script(known ? location : "");
+-			t->SetMapObjectID_script(known ? object : u16(0xffff));
++			// S10-T07 (B2): the spot on an object this client does not hold (the
++			// server's quest corpse elsewhere in the Zone) stands at the server's
++			// place (before: no spot at all, and demo-1's crash in UpdateSpot)
++			t->SetMapLocation_script(location);
++			t->SetMapObjectID_script(object);
+ 			t->m_priority = priority;
+ 			if (!tasks.GiveGameTaskToActor(t, 0, false, 0))
+ 			{
+@@ -4960,16 +5109,18 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 				t->m_Description = description;
+ 			// demo-5: the server's map location follows the installed check_task;
+ 			// the PDA's task spot and its map centring need the current one
+-			const bool known = object != 0xffff && ai().alife().objects().object(object, true) != nullptr;
+ 			const bool location_changed = xr_strcmp(t->GetMapLocation_script() ? t->GetMapLocation_script() : "", location) != 0 ||
+ 				t->GetMapObjectID_script() != object;
+-			if (location_changed && state == 1)
++			// S10-T07 (B2): a spot the client's checkpoint could not restore (its
++			// object unknown) is made again from the server's place
++			const bool spot_missing = location[0] && object != u16(0xffff) && !t->LinkedMapLocation();
++			if ((location_changed || spot_missing) && state == 1)
+ 			{
+-				if (location[0] && known)
++				if (location[0] && object != u16(0xffff))
+ 					t->ChangeMapLocation(location, object);
+ 				else if (t->GetMapObjectID_script() != u16(0xffff))
+ 					t->RemoveMapLocations(false);
+-				what = known ? "relocated" : "relocated-unknown-object";
++				what = spot_missing && !location_changed ? "spot-restored" : "relocated";
+ 			}
+ 			const ETaskState want = state == 2 ? eTaskStateCompleted : state == 0 ? eTaskStateFail : eTaskStateInProgress;
+ 			if (t->GetTaskState() != want && want != eTaskStateInProgress)
+@@ -4978,11 +5129,23 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 				what = "finished";
+ 			}
+ 		}
++		// S10-T07 (B2): the spot stands at the server's place while this client
++		// holds neither the object nor its ALife record
++		const char* where = "none";
++		if (CMapLocation* ml = t->LinkedMapLocation())
++		{
++			where = "object";
++			if (level[0] && !ml->HasOwnerObject() && !Level().Objects.net_Find(object))
++			{
++				ml->SetFixedPosition(place, level, graph);
++				where = "fixed";
++			}
++		}
+ 		if (CurrentGameUI())
+ 			CurrentGameUI()->UpdatePda();
+ 		++g_link->party_tasks_presented;
+-		g_link->log.line("party-task %s id=%s state=%u count=%d need=%d title=\"%s\" local_state=%d", what, id, u32(state),
+-			int(count), int(need), shown, int(t->GetTaskState()));
++		g_link->log.line("party-task %s id=%s state=%u count=%d need=%d title=\"%s\" local_state=%d spot=%s level=%s",
++			what, id, u32(state), int(count), int(need), shown, int(t->GetTaskState()), where, level);
+ 	}
+ }
+ 
+@@ -6971,17 +7134,30 @@ static void upgrade_result(const Link::PickupPending& p, const coop::proto::Acti
+ // The server's answer to a list (its campaigns) or a switch (the campaign it is relaunched on: this client then
+ // proves itself to that campaign when it reconnects).
+ 
+-// S10-T07 (B10): the bloodsucker's hold on the player's own actor
++// S10-T07 (B10): the bloodsucker's hold on the player's own actor; (B7) the
++// controller's during its psy glide
++static CControlledActor* grab_holder(u16 id)
++{
++	CObject* o = Level().Objects.net_Find(id);
++	if (!o)
++		return nullptr;
++	if (CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(o))
++		return static_cast<CControlledActor*>(b);
++	if (CController* c = smart_cast<CController*>(o))
++		return static_cast<CControlledActor*>(c);
++	return nullptr;
++}
++
+ void grab_release()
+ {
+ 	if (g_link->grab_monster == 0xffff)
+ 		return;
+-	CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(Level().Objects.net_Find(g_link->grab_monster));
+-	if (b && b->CControlledActor::is_controlling())
+-		b->CControlledActor::release();
++	CControlledActor* h = grab_holder(g_link->grab_monster);
++	if (h && h->is_controlling())
++		h->release();
+ 	else if (g_actor)
+ 		g_actor->set_input_external_handler(nullptr); // the replica is gone: its handler must not stay
+-	g_link->log.line("grab-released monster=%u replica=%d", u32(g_link->grab_monster), b ? 1 : 0);
++	g_link->log.line("grab-released monster=%u replica=%d", u32(g_link->grab_monster), h ? 1 : 0);
+ 	g_link->grab_monster = 0xffff;
+ }
+ 
+@@ -6989,13 +7165,13 @@ void grab_frame()
+ {
+ 	if (g_link->grab_monster == 0xffff)
+ 		return;
+-	CAI_Bloodsucker* b = smart_cast<CAI_Bloodsucker*>(Level().Objects.net_Find(g_link->grab_monster));
+-	if (!b || !g_actor || !g_actor->g_Alive() || g_link->world != WorldLive)
++	CControlledActor* h = grab_holder(g_link->grab_monster);
++	if (!h || !g_actor || !g_actor->g_Alive() || g_link->world != WorldLive)
+ 	{
+ 		grab_release();
+ 		return;
+ 	}
+-	b->CControlledActor::frame_update();
++	h->frame_update();
+ }
+ 
+ void on_session(const coop::proto::CampaignEvent& event)
+diff --git a/src/xrGame/CoopReplica.cpp b/src/xrGame/CoopReplica.cpp
+index b6dcb70..3734bc4 100644
+--- a/src/xrGame/CoopReplica.cpp
++++ b/src/xrGame/CoopReplica.cpp
+@@ -259,6 +259,16 @@ bool replica_refuse_event(u16 type, bool bridge)
+ 		++g_stats.weapon_states_allowed;
+ 		return false;
+ 	}
++	// S10-T07 (B23): a zone's state change is presentation on a client too
++	// (its idle light and particles, a campfire's turn on and off): the zone
++	// only switches when its own level echoes the event, so with it refused
++	// every campfire burned on every client (46 shadowed lights on Jupiter).
++	// The server's state reaches the client as a ZoneState presentation.
++	if (type == GE_ZONE_STATE_CHANGE)
++	{
++		++g_stats.zone_states_allowed;
++		return false;
++	}
+ 	++g_stats.events_refused;
+ 	if (type < 64)
+ 		++g_stats.event_types_refused[type];
+@@ -295,12 +305,12 @@ void report_replica(LPCSTR tag)
+ 		}
+ 	Msg("S05-T02 replica %s active=%d local_actor=%u online_set=%u scheduled_skipped=%I64u switched_online=%I64u "
+ 		"switched_offline=%I64u player_flag_set=%I64u player_flag_cleared=%I64u creates_refused=%I64u "
+-		"releases_refused=%I64u spawns_local=%I64u spawns_remote=%I64u creatures_kept_remote=%I64u weapon_states_allowed=%I64u "
++		"releases_refused=%I64u spawns_local=%I64u spawns_remote=%I64u creatures_kept_remote=%I64u weapon_states_allowed=%I64u zone_states_allowed=%I64u "
+ 		"messages_refused=%I64u events_refused=%I64u "
+ 		"binder_updates_skipped=%I64u alife_shedule=%I64u alife_updates=%I64u switch_calls=%I64u events:%s",
+ 		tag, g_active ? 1 : 0, u32(g_local_actor), replica_online_count(), s.scheduled_skipped, s.switched_online,
+ 		s.switched_offline, s.player_flag_set, s.player_flag_cleared, s.creates_refused, s.releases_refused,
+-		s.spawns_local, s.spawns_remote, s.creatures_kept_remote, s.weapon_states_allowed, s.messages_refused, s.events_refused, s.binder_updates_skipped,
++		s.spawns_local, s.spawns_remote, s.creatures_kept_remote, s.weapon_states_allowed, s.zone_states_allowed, s.messages_refused, s.events_refused, s.binder_updates_skipped,
+ 		s.alife_shedule_calls, s.alife_updates, s.switch_calls, events);
+ }
+ } // namespace campaign
+diff --git a/src/xrGame/CoopReplica.h b/src/xrGame/CoopReplica.h
+index d2d186e..9eecfc4 100644
+--- a/src/xrGame/CoopReplica.h
++++ b/src/xrGame/CoopReplica.h
+@@ -89,6 +89,7 @@ struct ReplicaStats
+ 	u64 spawns_local;
+ 	u64 creatures_kept_remote;
+ 	u64 weapon_states_allowed; // S06-T04
++	u64 zone_states_allowed; // S10-T07 (B23)
+ 	u64 messages_refused;
+ 	u64 events_refused;
+ 	u64 binder_updates_skipped;
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 5baef0b..e451d31 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -45,6 +45,7 @@
+ #include "CampaignActorControl.h"
+ #include "Inventory.h"
+ #include "Weapon.h"
++#include "ZoneCampfire.h" // S10-T07 (B23)
+ #include "xr_level_controller.h"
+ #include "CampaignActivityCapture.h" // S06-T05: ActivityFixtureChooseVertex
+ #include "Hit.h"
+@@ -62,6 +63,8 @@
+ #include "ai/monsters/poltergeist/poltergeist.h"
+ #include "ai/monsters/anti_aim_ability.h"
+ #include "ai/stalker/ai_stalker.h" // S10-T02f
++#include "stalker_movement_manager_smart_cover.h" // S10-T07 (B4)
++#include "ai/monsters/control_animation_base.h" // S10-T07 (B4)
+ #include "ai/monsters/pseudodog/psy_dog.h" // S10-T02e: the fauna fixture
+ #include "CampaignServerLighting.h" // S10-T02e: the lighting counters
+ #include "ai/monsters/basemonster/base_monster.h"
+@@ -153,6 +156,9 @@ struct PlayerLink
+ 	u64 fire_logged_tick;
+ 	u64 input_dead; // S06-T05: inputs that reached a dead actor (not applied)
+ 	u32 last_action_log_ms; // S06-T07: jump/lean log pacing
++	bool jump_down; // S10-T07 (B22): the jump button in the last input
++	u32 jump_latch; // ticks the press is kept until the actor's state shows the jump
++	u64 jump_latched; // presses latched
+ 	u64 actions_accepted, actions_refused;
+ 	bool armed;
+ 	bool arm_settled; // S06-T07: the pistol put away once it is in slot 2
+@@ -2256,12 +2262,31 @@ void apply_inputs()
+ 			bits |= mcAccel;
+ 		// S06-T07: jump and lean go into the native control bits too; the
+ 		// actor's controller decides (no jump in the air, none when dead)
+-		if (in.buttons & coop::proto::kButtonJump)
++		// S10-T07 (B22): a press is latched until the actor's own state shows
++		// the jump, for at most 10 ticks: a tap on a tick where the physics
++		// had no ground contact (a bump, a step edge), or on a tick the queue
++		// dropped, used to be lost (the client's predicted jump then corrected
++		// away). The level is kept too, as the key held does in single player.
++		const bool jump_down = (in.buttons & coop::proto::kButtonJump) != 0;
++		if (jump_down && !link.jump_down)
++		{
++			link.jump_latch = 10;
++			++link.jump_latched;
++		}
++		link.jump_down = jump_down;
++		if (link.jump_latch && (actor->MovingState() & mcJump))
++			link.jump_latch = 0;
++		if (jump_down || link.jump_latch)
+ 			bits |= mcJump;
++		if (link.jump_latch)
++			--link.jump_latch;
+ 		if (in.buttons & coop::proto::kButtonLeanLeft)
+ 			bits |= mcLLookout;
+ 		else if (in.buttons & coop::proto::kButtonLeanRight)
+ 			bits |= mcRLookout;
++		// S10-T07 (B7): the player's zoom: the server's actor walks and does
++		// not jump while aiming, as the client's own prediction does
++		actor->replica_set_zoomed((in.buttons & coop::proto::kButtonZoom) != 0);
+ 		actor->replica_set_wishful(actor->replica_wishful() | bits);
+ 		if ((bits & (mcJump | mcLookout)) && now - link.last_action_log_ms >= 250)
+ 		{
+@@ -2288,11 +2313,14 @@ void apply_inputs()
+ 			if (now - link.last_input_log_ms >= 500)
+ 			{
+ 				link.last_input_log_ms = now;
+-				g_host->log.line("input-apply slot=%u actor=%u tick=%I64u source=%s depth=%u move=%.1f,%.1f stance=%u "
++				const coop::proto::InputQueueCounters& qc = link.inputs.counters(); // S10-T07 (B21)
++				g_host->log.line("input-apply slot=%u actor=%u tick=%I64u source=%s depth=%u queued=%I64u held=%I64u idle=%I64u "
++					"stale=%I64u dropped=%I64u jump_latched=%I64u move=%.1f,%.1f stance=%u "
+ 					"yaw=%.3f wishful=%x real=%x pos=%.2f,%.2f,%.2f enabled=%d processing=%d environment=%d "
+ 					"character=%d can_move=%d cant_walk=%d cant_walk_weight=%d talking=%d power=%.3f",
+ 					u32(link.ref.slot), u32(actor->ID()), in.tick,
+-					source == coop::proto::InputSource::Queued ? "queued" : "held", u32(link.inputs.depth()), in.move_x,
++					source == coop::proto::InputSource::Queued ? "queued" : "held", u32(link.inputs.depth()),
++					qc.consumed, qc.held, qc.idle, qc.stale, qc.dropped_oldest, link.jump_latched, in.move_x,
+ 					in.move_y, u32(in.stance), in.yaw, actor->replica_wishful(), actor->MovingState(),
+ 					VPUSH(actor->Position()), actor->getEnabled() ? 1 : 0, actor->processing_enabled() ? 1 : 0,
+ 					int(actor->character_physics_support()->movement()->Environment()),
+@@ -2341,7 +2369,8 @@ bool actor_state(CActor* actor, coop::proto::EntityState& out)
+ 	out.vy = v.y;
+ 	out.vz = v.z;
+ 	out.health = health_of_alive(actor);
+-	out.state_bits = u16(actor->MovingState() & 0xffff);
++	// S10-T07 (B7): bits 0-14 the move state, bit 15 the zoom
++	out.state_bits = u16(actor->MovingState() & 0x7fff) | (actor->replica_zoomed() ? u16(0x8000) : u16(0));
+ 	// S06-T03 (protocol 1.3): where it looks, for its arms and weapon
+ 	out.components |= coop::proto::kAim;
+ 	out.aim_yaw = angle_normalize_signed(actor->replica_torso().yaw);
+@@ -2817,6 +2846,29 @@ bool creature_state(CEntity* creature, coop::proto::EntityState& out)
+ 	// the velocity is the observed one (Gait, collect_candidates)
+ 	out.health = health_of_alive(creature);
+ 	out.state_bits = creature->g_Alive() ? 1 : 0;
++	// S10-T07 (B4): the animation state a client needs (protocol messages.h,
++	// kStateBits): a stalker's movement, body, mental and weapon state and its
++	// head; a monster's current motion and variant
++	if (CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(creature))
++	{
++		out.state_bits = CAI_Stalker::replica_animation_bits(stalker);
++		const MonsterSpace::SBoneRotation& head = stalker->movement().head_orientation();
++		if (_valid(head.current.yaw) && _valid(head.current.pitch))
++		{
++			out.components |= coop::proto::kAim;
++			out.aim_yaw = angle_normalize_signed(head.current.yaw);
++			out.aim_pitch = clampr(head.current.pitch, -coop::proto::kMaxAngle, coop::proto::kMaxAngle);
++		}
++	}
++	else if (CBaseMonster* monster = smart_cast<CBaseMonster*>(creature))
++	{
++		const EMotionAnim motion = monster->anim().cur_anim_info().get_motion();
++		if (motion != eAnimUndefined && u32(motion) < u32(eAnimCount))
++		{
++			out.state_bits |= u16((u32(motion) + 1) & 127) << 1;
++			out.state_bits |= u16(_min<u32>(monster->anim().cur_anim_info().index, 15)) << 8;
++		}
++	}
+ 	return true;
+ }
+ 
+@@ -7710,6 +7762,31 @@ void put_party_task(std::vector<u8>& p, LPCSTR id, u8 state, s32 count, s32 need
+ 	put_str(p, t ? t->GetMapLocation_script() : "");
+ 	put_u16(p, t ? t->GetMapObjectID_script() : u16(0xffff));
+ 	put_u32(p, t ? t->m_priority : 0);
++	// S10-T07 (B2): the target's place for a client that does not hold the
++	// object (level name, position, game vertex)
++	Fvector position;
++	xr_string level;
++	u16 graph;
++	campaign::object_map_place(t ? t->GetMapObjectID_script() : u16(0xffff), position, level, graph);
++	put_str(p, level.c_str());
++	put_f32(p, position.x);
++	put_f32(p, position.y);
++	put_f32(p, position.z);
++	put_u16(p, graph);
++}
++
++// S10-T07 (B2): a target's place, coarse (8 m) for the change hash
++static u64 map_place_hash(u64 hash, u16 object)
++{
++	Fvector position;
++	xr_string level;
++	u16 graph;
++	if (!campaign::object_map_place(object, position, level, graph))
++		return hash;
++	hash = fnv1a(hash, 0x20000 | u64(graph));
++	hash = fnv1a(hash, u64(s32(position.x / 8.f)) & 0xffff);
++	hash = fnv1a(hash, u64(s32(position.z / 8.f)) & 0xffff);
++	return hash;
+ }
+ 
+ void send_party_tasks()
+@@ -7737,6 +7814,7 @@ void send_party_tasks()
+ 			for (const char* c = gt->GetMapLocation_script(); c && *c; ++c)
+ 				hash = fnv1a(hash, 0x200 | u64(u8(*c)));
+ 			hash = fnv1a(hash, 0x10000 | u64(gt->GetMapObjectID_script()));
++			hash = map_place_hash(hash, gt->GetMapObjectID_script()); // S10-T07 (B2)
+ 		}
+ 	}
+ 	for (const Host::PartyFinished& f : g_host->party_finished)
+@@ -7775,21 +7853,59 @@ void send_party_tasks()
+ 		campaign::map_spots(spots);
+ 		for (const campaign::MapSpotState& m : spots)
+ 		{
++			// S10-T07 (B2): with the object's place, as a live spot carries it
++			Fvector position;
++			xr_string level;
++			u16 graph;
++			const bool placed = campaign::object_map_place(m.object, position, level, graph);
++			string256 detail;
++			if (placed)
++				xr_sprintf(detail, "%s\t%s\t%u", m.detail.c_str(), level.c_str(), u32(graph));
++			else
++				xr_strcpy(detail, m.detail.c_str());
+ 			std::vector<u8> p;
+ 			put_u8(p, u8(campaign::Presentation::MapSpotAdd));
+ 			put_u16(p, m.object);
+ 			put_u32(p, 0);
+-			put_f32(p, 0.f);
+-			put_f32(p, 0.f);
+-			put_f32(p, 0.f);
++			put_f32(p, position.x);
++			put_f32(p, position.y);
++			put_f32(p, position.z);
+ 			put_f32(p, 0.f);
+ 			put_u32(p, m.flags);
+ 			put_u32(p, 0);
+-			put_str(p, m.detail.c_str());
++			put_str(p, detail);
+ 			queue_event(link, kEventPresentation, p);
+ 		}
+ 		if (!spots.empty())
+ 			g_host->log.line("map-spots-joined to=%u spots=%u", u32(link.ref.slot), u32(spots.size()));
++		// S10-T07 (B23): the zones' states (a campfire lit or put out since the
++		// client's checkpoint; a disabled zone)
++		u32 zones = 0;
++		for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		{
++			CObject* o = Level().Objects.o_get_by_iterator(i);
++			CCustomZone* zone = smart_cast<CCustomZone*>(o);
++			if (!zone || o->getDestroy())
++				continue;
++			const bool fire = smart_cast<CZoneCampfire*>(zone) != nullptr;
++			if (!fire && zone->IsEnabled())
++				continue;
++			std::vector<u8> p;
++			put_u8(p, u8(campaign::Presentation::ZoneState));
++			put_u16(p, u16(zone->ID()));
++			put_u32(p, 0);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_u32(p, u32(zone->ZoneState()));
++			put_u32(p, 0);
++			put_str(p, "");
++			queue_event(link, kEventPresentation, p);
++			++zones;
++		}
++		if (zones)
++			g_host->log.line("zone-states-joined to=%u zones=%u", u32(link.ref.slot), zones);
+ 	}
+ }
+ 
+diff --git a/src/xrGame/CustomZone.cpp b/src/xrGame/CustomZone.cpp
+index 03c3323..72d5d30 100644
+--- a/src/xrGame/CustomZone.cpp
++++ b/src/xrGame/CustomZone.cpp
+@@ -18,6 +18,8 @@
+ #include "breakableobject.h"
+ #include "GamePersistent.h"
+ #include "../../script_game_object.h"
++#include "CampaignScriptContext.h" // S10-T07 (B23)
++#include "CampaignActorAccess.h"
+ 
+ #define WIND_RADIUS (4*Radius())	//расстояние до актера, когда появляется ветер 
+ #define FASTMODE_DISTANCE (100.f)	//distance to camera from sphere, when zone switches to fast update sequence
+@@ -1308,8 +1310,24 @@ void CCustomZone::OnStateSwitch(EZoneState new_state)
+ 
+ 	m_eZoneState = new_state;
+ 	m_iPreviousStateTime = m_iStateTime = 0;
++	// S10-T07 (B23): on the campaign server every client shows the same state
++	// (a campfire lit by an NPC or a player, a zone's disable)
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		campaign::PresentationArgs args;
++		args.flags = u32(new_state);
++		campaign::present_broadcast(campaign::Presentation::ZoneState, ID(), "", args);
++	}
+ };
+ 
++// S10-T07 (B23): a client applies the server's state (presentation only)
++void CCustomZone::replica_switch_state(EZoneState new_state)
++{
++	if (m_eZoneState == new_state)
++		return;
++	OnStateSwitch(new_state);
++}
++
+ void CCustomZone::SwitchZoneState(EZoneState new_state)
+ {
+ 	if (OnServer())
+diff --git a/src/xrGame/CustomZone.h b/src/xrGame/CustomZone.h
+index 97fd936..62af67c 100644
+--- a/src/xrGame/CustomZone.h
++++ b/src/xrGame/CustomZone.h
+@@ -208,6 +208,7 @@ protected:
+ 	virtual void GoDisabledState();
+ public:
+ 	bool IsEnabled() { return m_eZoneState != eZoneStateDisabled; };
++	void replica_switch_state(EZoneState new_state); // S10-T07 (B23)
+ 	void ZoneEnable();
+ 	void ZoneDisable();
+ 	void ChangeIdleParticles(LPCSTR name, bool bIdleLight);
+diff --git a/src/xrGame/PHMovementControl.cpp b/src/xrGame/PHMovementControl.cpp
+index b4bd65d..9757483 100644
+--- a/src/xrGame/PHMovementControl.cpp
++++ b/src/xrGame/PHMovementControl.cpp
+@@ -1597,6 +1597,11 @@ bool CPHMovementControl::JumpState()
+ 	return (m_character && m_character->b_exist && m_character->IsEnabled() && m_character->JumpState());
+ }
+ 
++bool CPHMovementControl::PhysicsCanJump()
++{
++	return !m_character || !m_character->b_exist || m_character->CanJumpNow();
++}
++
+ bool CPHMovementControl::PhysicsOnlyMode()
+ {
+ 	return m_character && m_character->b_exist && m_character->IsEnabled() && (m_character->JumpState() || m_character->ForcedPhysicsControl());
+diff --git a/src/xrGame/PHMovementControl.h b/src/xrGame/PHMovementControl.h
+index a80ca30..7538dea 100644
+--- a/src/xrGame/PHMovementControl.h
++++ b/src/xrGame/PHMovementControl.h
+@@ -73,6 +73,7 @@ public:
+ 	void Jump(const Fvector& end_point, float time);
+ 	float Jump(const Fvector& end_point);
+ 	bool JumpState();
++	bool PhysicsCanJump(); // S10-T07 (B22): the character could take a jump now
+ 	///
+ 	bool PhysicsOnlyMode();
+ 	void GetJumpMinVelParam(Fvector& min_vel, float& time, JumpType& type, const Fvector& end_point);
+diff --git a/src/xrGame/ai/stalker/ai_stalker.cpp b/src/xrGame/ai/stalker/ai_stalker.cpp
+index 3b235c7..1c29ad0 100644
+--- a/src/xrGame/ai/stalker/ai_stalker.cpp
++++ b/src/xrGame/ai/stalker/ai_stalker.cpp
+@@ -1802,3 +1802,75 @@ bool CAI_Stalker::use_HolderEx(CHolderCustom *object)
+ 	return true;
+ }
+ #endif
++
++// ------------------------------------------------------------ S10-T07 (B4)
++// The stalker's animation state on the wire (kStateBits, protocol messages.h):
++// bit 0 alive, bits 1-2 movement type, bit 3 body state, bits 4-5 mental
++// state, bits 6-9 the weapon animation (EReplicaWeaponAnim), bit 10 set.
++u16 CAI_Stalker::replica_animation_bits(CAI_Stalker* stalker)
++{
++	u16 bits = stalker->g_Alive() ? 1 : 0;
++	const stalker_movement_manager_smart_cover& m = stalker->movement();
++	bits |= u16(u32(m.movement_type()) & 3) << 1;
++	bits |= u16(u32(m.body_state()) & 1) << 3;
++	bits |= u16(u32(m.mental_state()) & 3) << 4;
++	u32 weapon = rwaNone;
++	if (CWeapon* w = smart_cast<CWeapon*>(stalker->inventory().ActiveItem()))
++	{
++		switch (w->GetState())
++		{
++		case CWeapon::eIdle: weapon = rwaIdle; break;
++		case CWeapon::eShowing: weapon = rwaShowing; break;
++		case CWeapon::eHiding: weapon = rwaHiding; break;
++		case CWeapon::eHidden: weapon = rwaNone; break;
++		case CWeapon::eFire:
++		case CWeapon::eFire2: weapon = rwaFire; break;
++		case CWeapon::eReload:
++			weapon = w->GetReloadState() == CWeapon::eSubstateReloadInProcess ? rwaReloadInProcess :
++				w->GetReloadState() == CWeapon::eSubstateReloadEnd ? rwaReloadEnd : rwaReloadBegin;
++			break;
++		default: weapon = rwaIdle; break;
++		}
++	}
++	bits |= u16(weapon & 15) << 6;
++	bits |= 1 << 10;
++	return bits;
++}
++
++void CAI_Stalker::replica_present_animation(u16 bits, bool has_aim, float head_yaw, float head_pitch)
++{
++	if (!(bits & (1 << 10)) || !g_Alive())
++		return;
++	const u32 movement_type = (bits >> 1) & 3;
++	const u32 body_state = (bits >> 3) & 1;
++	const u32 mental_state = (bits >> 4) & 3;
++	if (movement_type > u32(eMovementTypeStand) || mental_state > u32(eMentalStatePanic))
++		return;
++	movement().replica_set_current(EMovementType(movement_type), EBodyState(body_state), EMentalState(mental_state));
++	m_replica_weapon_anim = (bits >> 6) & 15;
++	if (has_aim && _valid(head_yaw) && _valid(head_pitch))
++	{
++		// the server's head_orientation().current (its convention, see
++		// CSightAction::execute_direction); Exec_Look lerps current to target
++		movement().m_head.target.yaw = head_yaw;
++		movement().m_head.target.pitch = head_pitch;
++	}
++}
++
++bool CAI_Stalker::replica_weapon_anim(u32& state, u32& reload_state) const
++{
++	if (m_replica_weapon_anim == u32(-1))
++		return false;
++	switch (m_replica_weapon_anim)
++	{
++	case rwaIdle: state = CWeapon::eIdle; break;
++	case rwaShowing: state = CWeapon::eShowing; break;
++	case rwaHiding: state = CWeapon::eHiding; break;
++	case rwaReloadBegin: state = CWeapon::eReload; reload_state = CWeapon::eSubstateReloadBegin; break;
++	case rwaReloadInProcess: state = CWeapon::eReload; reload_state = CWeapon::eSubstateReloadInProcess; break;
++	case rwaReloadEnd: state = CWeapon::eReload; reload_state = CWeapon::eSubstateReloadEnd; break;
++	case rwaFire: state = CWeapon::eFire; break;
++	default: state = CWeapon::eHidden; break;
++	}
++	return true;
++}
+diff --git a/src/xrGame/ai/stalker/ai_stalker.h b/src/xrGame/ai/stalker/ai_stalker.h
+index 7353884..4e7a426 100644
+--- a/src/xrGame/ai/stalker/ai_stalker.h
++++ b/src/xrGame/ai/stalker/ai_stalker.h
+@@ -405,6 +405,21 @@ public:
+ 	IC CStalkerPlanner& brain() const;
+ 	IC CSightManager& sight() const;
+ 
++public:
++	// S10-T07 (B4): the stalker's animation state as the snapshot carries it
++	// (protocol messages.h, kStateBits). The weapon codes are what the torso
++	// picker needs: a replica's weapon is idle on a client, so the server's
++	// state is read instead (weapon_animation).
++	enum EReplicaWeaponAnim
++	{
++		rwaNone = 0, rwaIdle, rwaShowing, rwaHiding, rwaReloadBegin, rwaReloadInProcess, rwaReloadEnd, rwaFire,
++	};
++	static u16 replica_animation_bits(CAI_Stalker* stalker); // the server's packing
++	void replica_present_animation(u16 bits, bool has_aim, float head_yaw, float head_pitch); // a client's replica
++	bool replica_weapon_anim(u32& state, u32& reload_state) const; // true on a presented replica
++private:
++	u32 m_replica_weapon_anim = u32(-1); // EReplicaWeaponAnim, -1 when not a presented replica
++
+ private:
+ 	CStalkerSoundDataVisitor* m_sound_user_data_visitor;
+ 
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 285df28..8782c95 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -454,7 +454,18 @@ static void present_map_spot(campaign::Presentation kind, u16 id, LPCSTR spot_ty
+ 	xr_sprintf(detail, "%s|%s", spot_type ? spot_type : "", text ? text : "");
+ 	campaign::PresentationArgs args;
+ 	args.flags = flags;
+-	campaign::present_broadcast(kind, id, detail, args);
++	// S10-T07 (B2): the object's place, for a client that does not hold it
++	// ("<spot>|<hint>\t<level>\t<graph>"); the stored state keeps "<spot>|<hint>"
++	string256 sent;
++	xr_strcpy(sent, detail);
++	if (kind == campaign::Presentation::MapSpotAdd)
++	{
++		xr_string level;
++		u16 graph;
++		if (campaign::object_map_place(id, args.position, level, graph))
++			xr_sprintf(sent, "%s\t%s\t%u", detail, level.c_str(), u32(graph));
++	}
++	campaign::present_broadcast(kind, id, sent, args);
+ 	campaign::note_map_spot(kind, id, spot_type ? spot_type : "", detail, flags);
+ }
+ 
+diff --git a/src/xrGame/map_location.cpp b/src/xrGame/map_location.cpp
+index 09fc66e..aa1b7d4 100644
+--- a/src/xrGame/map_location.cpp
++++ b/src/xrGame/map_location.cpp
+@@ -70,6 +70,7 @@ CMapLocation::CMapLocation(LPCSTR type, u16 object_id)
+ 	m_position_global.set(0.f, 0.f, 0.f);
+ 	m_cached.m_updatedFrame = u32(-1);
+ 	m_cached.m_graphID = GameGraph::_GRAPH_ID(-1);
++	m_fixed_graph = u16(-1); // S10-T07 (B2)
+ 	if (!IsGameTypeSingle())
+ 		m_cached.m_LevelName = Level().name();
+ }
+@@ -297,6 +298,8 @@ void CMapLocation::CalcPosition()
+ 			m_position_global = m_owner_se_object->draw_level_position();
+ 			m_cached.m_Position.set(m_position_global.x, m_position_global.z);
+ 		}
++		else if (m_flags.test(eFixedPosition)) // S10-T07 (B2): the server's position
++			m_cached.m_Position.set(m_position_global.x, m_position_global.z);
+ 	}
+ 	else
+ 	{
+@@ -349,12 +352,31 @@ void CMapLocation::CalcLevelName()
+ 			m_cached.m_graphID = m_owner_se_object->m_tGraphID;
+ 		}
+ 	}
++	else if (m_flags.test(eFixedPosition)) // S10-T07 (B2): the server's level name stays
++	{
++	}
+ 	else
+ 	{
+ 		m_cached.m_LevelName = Level().name();
+ 	}
+ }
+ 
++// S10-T07 (B2): a co-op client shows the server's spot on an object it does
++// not hold (a quest corpse spawned elsewhere, an NPC on another level) at
++// the position and level the server gave. CalcPosition prefers the live
++// object or the ALife record when this client has one.
++void CMapLocation::SetFixedPosition(const Fvector& position, LPCSTR level_name, u16 graph_id)
++{
++	m_fixed_graph = graph_id;
++	m_position_global = position;
++	m_cached.m_Position.set(position.x, position.z);
++	if (level_name && level_name[0])
++		m_cached.m_LevelName = level_name;
++	else
++		m_cached.m_LevelName = Level().name();
++	m_flags.set(eFixedPosition, TRUE);
++}
++
+ bool CMapLocation::Update() //returns actual
+ {
+ 	R_ASSERT(m_cached.m_updatedFrame!=Device.dwFrame);
+@@ -371,7 +393,7 @@ bool CMapLocation::Update() //returns actual
+ 
+ 	CObject* pObject = Level().Objects.net_Find(m_objectID);
+ 
+-	if (m_owner_se_object || (!IsGameTypeSingle() && pObject))
++	if (m_owner_se_object || (!IsGameTypeSingle() && pObject) || m_flags.test(eFixedPosition))
+ 	{
+ 		m_cached.m_Actuality = true;
+ 		if (IsGameTypeSingle())
+@@ -395,12 +417,13 @@ void CMapLocation::UpdateSpot(CUICustomMap* map, CMapSpot* sp, CMapSpotPointer*
+ 	{
+ 		bool b_alife = !!ai().get_alife();
+ 
+-		if (b_alife && m_flags.test(eHideInOffline) && !m_owner_se_object->m_bOnline)
++		// S10-T07 (B2): no ALife record on a co-op client (a fixed-position spot)
++		if (b_alife && m_owner_se_object && m_flags.test(eHideInOffline) && !m_owner_se_object->m_bOnline)
+ 		{
+ 			return;
+ 		}
+ 
+-		if (b_alife && m_owner_se_object->m_flags.test(CSE_ALifeObject::flVisibleForMap) == FALSE)
++		if (b_alife && m_owner_se_object && m_owner_se_object->m_flags.test(CSE_ALifeObject::flVisibleForMap) == FALSE)
+ 		{
+ 			return;
+ 		}
+@@ -476,9 +499,12 @@ void CMapLocation::UpdateSpot(CUICustomMap* map, CMapSpot* sp, CMapSpotPointer*
+ 	{
+ 		// S03-T02: the exit pointer path is the viewer's; none on the server.
+ 		CActor* viewer = campaign::local_view_actor();
+-		if (!viewer || !m_owner_se_object) // S10-T04c: a co-op client may not hold the spot's object (demo-1 crash)
++		if (!viewer) // S10-T04c: a co-op client may not hold the spot's object (demo-1 crash)
++			return;
++		// S10-T07 (B2): a fixed-position spot carries the server's game vertex
++		GameGraph::_GRAPH_ID dest_graph_id = m_owner_se_object ? m_owner_se_object->m_tGraphID : m_fixed_graph;
++		if (dest_graph_id == GameGraph::_GRAPH_ID(-1) || !ai().game_graph().valid_vertex_id(dest_graph_id))
+ 			return;
+-		GameGraph::_GRAPH_ID dest_graph_id = m_owner_se_object->m_tGraphID;
+ 		GameGraph::_GRAPH_ID actor_graph_id = viewer->ai_location().game_vertex_id();
+ 
+ 		// the graph path only changes when one of its ends moves to another vertex
+diff --git a/src/xrGame/map_location.h b/src/xrGame/map_location.h
+index bcab5dd..a1b5bd0 100644
+--- a/src/xrGame/map_location.h
++++ b/src/xrGame/map_location.h
+@@ -29,6 +29,9 @@ public:
+ 		eSpotEnabled = (1 << 5),
+ 		eCollidable = (1 << 6),
+ 		eHintEnabled = (1 << 7),
++		// S10-T07 (B2): a co-op client's spot on an object it does not hold: the
++		// server's position and level stand in for the object
++		eFixedPosition = (1 << 8),
+ 	};
+ 
+ protected:
+@@ -52,6 +55,7 @@ protected:
+ 
+ 	u16 m_objectID;
+ 	CSE_ALifeDynamicObject* m_owner_se_object;
++	u16 m_fixed_graph; // S10-T07 (B2): the game vertex of a fixed-position spot (0xffff: none)
+ 	int m_ttl;
+ 	u32 m_actual_time;
+ 	Fvector m_position_global; //last global position, actual time only current frame 
+@@ -119,6 +123,10 @@ public:
+ 	virtual LPCSTR CurrentSpotType() { return spot_type; }
+ 	virtual bool Update();
+ 	Fvector GetLastPosition() { return m_position_global; };
++	// S10-T07 (B2): where the spot is when neither the object nor its ALife
++	// record is on this client (the live object still wins when it appears)
++	void SetFixedPosition(const Fvector& position, LPCSTR level_name, u16 graph_id);
++	IC bool HasOwnerObject() const { return m_owner_se_object != nullptr; }
+ 	bool Serializable() const { return !!m_flags.test(eSerailizable); }
+ 	void SetSerializable(bool b) { m_flags.set(eSerailizable, b); }
+ 
+diff --git a/src/xrGame/stalker_animation_torso.cpp b/src/xrGame/stalker_animation_torso.cpp
+index 1201301..b8288ca 100644
+--- a/src/xrGame/stalker_animation_torso.cpp
++++ b/src/xrGame/stalker_animation_torso.cpp
+@@ -208,11 +208,16 @@ MotionID CStalkerAnimationManager::weapon_animation(u32 slot, const EBodyState&
+ 		return (animation[15].A[0]);
+ 	}
+ 
+-	switch (m_weapon->GetState())
++	// S10-T07 (B4): on a co-op client the replica's weapon is idle; the
++	// server's state is held on the stalker
++	u32 weapon_state = m_weapon->GetState();
++	u32 reload_state = m_weapon->GetReloadState();
++	object().replica_weapon_anim(weapon_state, reload_state);
++	switch (weapon_state)
+ 	{
+ 	case CWeapon::eReload:
+ 		{
+-			switch (m_weapon->GetReloadState())
++			switch (reload_state)
+ 			{
+ 			case CWeapon::eSubstateReloadBegin:
+ 				return (animation[4].A[0]);
+diff --git a/src/xrGame/stalker_movement_manager_base.h b/src/xrGame/stalker_movement_manager_base.h
+index 5ff2557..2714847 100644
+--- a/src/xrGame/stalker_movement_manager_base.h
++++ b/src/xrGame/stalker_movement_manager_base.h
+@@ -74,6 +74,10 @@ public:
+ #endif
+ 	IC void set_movement_type(EMovementType movement_type);
+ 	IC void set_mental_state(EMentalState mental_state);
++	// S10-T07 (B4): a co-op client's replica takes the server's state as its
++	// current one (update(), which copies target to current, is the AI's path
++	// step and does not run on a replica)
++	IC void replica_set_current(EMovementType movement_type, EBodyState body_state, EMentalState mental_state);
+ 	IC void set_path_type(EPathType path_type);
+ 	IC void set_detail_path_type(EDetailPathType detail_path_type);
+ 	void set_nearest_accessible_position();
+diff --git a/src/xrGame/stalker_movement_manager_base_inline.h b/src/xrGame/stalker_movement_manager_base_inline.h
+index 385d693..d4c7292 100644
+--- a/src/xrGame/stalker_movement_manager_base_inline.h
++++ b/src/xrGame/stalker_movement_manager_base_inline.h
+@@ -72,6 +72,14 @@ IC void stalker_movement_manager_base::set_mental_state(EMentalState mental_stat
+ 	//.	m_path_actuality			= m_path_actuality && (m_target.m_mental_state == m_current.m_mental_state);
+ }
+ 
++IC void stalker_movement_manager_base::replica_set_current(EMovementType movement_type, EBodyState body_state,
++	EMentalState mental_state)
++{
++	m_current.m_movement_type = m_target.m_movement_type = movement_type;
++	m_current.m_body_state = m_target.m_body_state = body_state;
++	m_current.m_mental_state = m_target.m_mental_state = mental_state;
++}
++
+ IC void stalker_movement_manager_base::set_path_type(EPathType path_type)
+ {
+ 	m_target.m_path_type = path_type;
+diff --git a/src/xrPhysics/PHActorCharacter.h b/src/xrPhysics/PHActorCharacter.h
+index 44a7502..0e015a0 100644
+--- a/src/xrPhysics/PHActorCharacter.h
++++ b/src/xrPhysics/PHActorCharacter.h
+@@ -107,6 +107,7 @@ public:
+ 	typedef TPHCharacterRestrictor<rtMonsterMedium> medium_monster_restrictor;
+ public:
+ 	virtual CPHActorCharacter* CastActorCharacter() { return this; }
++	virtual bool CanJumpNow() { return CanJump(); } // S10-T07 (B22)
+ 	virtual void SetObjectContactCallback(ObjectContactCallbackFun* callback);
+ 	virtual void SetMaterial(u16 material);
+ 	virtual void Create(dVector3 sizes);
+diff --git a/src/xrPhysics/PHCharacter.h b/src/xrPhysics/PHCharacter.h
+index 38e9509..704dc6b 100644
+--- a/src/xrPhysics/PHCharacter.h
++++ b/src/xrPhysics/PHCharacter.h
+@@ -86,6 +86,8 @@ protected:
+ public:
+ 	virtual ECastType CastType() { return CPHObject::tpCharacter; }
+ 	virtual CPHActorCharacter* CastActorCharacter() { return NULL; }
++	// S10-T07 (B22): whether a jump asked for now would be taken (an actor's ground contact)
++	virtual bool CanJumpNow() { return true; }
+ 	virtual CPHAICharacter* CastAICharacter() { return NULL; }
+ 	ERestrictionType RestrictionType() { return m_restriction_type; }
+ 	void SetNewRestrictionType(ERestrictionType rt) { m_new_restriction_type = rt; }

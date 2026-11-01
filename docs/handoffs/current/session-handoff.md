@@ -1,65 +1,57 @@
-# Session handoff — stopped at the G10 review (S10-T07 part 1 done)
+# Session handoff — S10-T07 part 2 in code, the user's hands-on check next
 
-## State (2026-10-31)
+## State (2026-11-01)
 
-- **Stopped for the user** (direction 2026-10-31: "finish the rest of G10
-  until you get to the bug fixes that require my input"). The review record
-  is [G10](../../validation/G10.md). It has two open questions (T05b-4 who
-  pays a fee inside a task, T03b-2 what attracts bounty squads), the decision
-  list ([Stage 10 decisions](../../stage10-decisions.md), up to T07-4), the
-  bug rows waiting for the user, the hands-on checks and the limits to add.
-- **Completed and committed this session:**
-  - S10-T05d: presentation split, patches 0084–0085.
-  - S10-T06: co-op menu and session control, patch 0086, proto-build-56,
-    session-2 8/8.
-  - **S10-T07 part 1**: [S10-T07](../../validation/S10-T07.md), patch 0087,
-    proto-build-57 st-32, campaign-415 / client-301. Fixed: B6, B8, B10,
-    B12, B13, B16, B17, B18 and the new B19. Runs bugfix-1…11:
-    - bugfix-10: emission 6/6, presentation 5/5, clock 5/1 steps.
-    - bugfix-5: music for player 2 only, a 525 m jump survived.
-    - bugfix-6: the grab hold works.
-    - bugfix-7: the tooltip percent matches the server's.
-    - bugfix-4: companion orders reach the player's own companions.
-
-    L58 closed, L28 narrowed. Decisions T07-1…4.
-- **Waiting on the user:**
-  - B1: a hands-on trade (client 2 logs `trade-open-sent … icon= name=`).
-  - B2: details.
-  - B4, B7: body animation now or in Stage 11.
-  - B5 and B20: permission for crash dumps. B20 is a client hung once at
-    level load in bugfix-8 and has not repeated.
-  - B9: a "pending" mark, or waive.
-  - B11: waiting for it to recur.
-- The music fixture (`--music`) sometimes does not get the stalker to
-  engage (bugfix-11). If it is used again, re-set the enemy relation every
-  few seconds until it fights.
-- Tools added this session:
-  - `tools/compare-coop-session.py`
-  - `tools/compare-coop-bugfix.py`
-  - `tools/Start-CoopServer.ps1` (the dedicated server's launcher: it
-    relaunches on exit 75)
-  - `prepare-coop-session.py` options `--session`, `--music`,
-    `--companion-test`
-- The installed scripts are packed in `scripts.db0` and `configs.db0`.
-  Extract them with `tools/xray-db-extract.py`; grep them with `grep -a`.
+- **S10-T07 part 2** ([S10-T07](../../validation/S10-T07.md), part 2
+  section): the user's answers of 2026-11-01 turned B2 into two faults and
+  added B21 (movement), B22 (jump), B23 (campfire lag). Fixed in code, patch
+  **0088**, proto-build-59 / st-34, builds **campaign-419 / client-304**:
+  - B2: task and script map markers on objects a client does not hold stand
+    at the server's place; a dead player's icon goes at death.
+  - B4: stalkers' and monsters' animation state in the snapshot.
+  - B7: the partner's zoom pose (new input bit 5); the controller's hold
+    during its psy glide (bugfix-13 psy 6/6).
+  - B21: one input per tick period, records at the tick's time, a held
+    snapshot skipped. The first form (held ticks numbered on) was wrong and
+    is reverted.
+  - B22: a jump is committed only when the physics can take it; the server
+    latches a press for 10 ticks.
+  - B23: zone states are presentation on a client (every campfire burned on
+    every client before); 72 campfires turned off per client at the join.
+  - Runs bugfix-12…16. Not exercised by a run: the fixed map spot, the
+    death icon removal, the jump, smoothness, the campfire frame rate.
+- **The user's hands-on check is the acceptance of part 2.** Start it with
+  `bash tools/start-coop-demo.sh S10-T07 0 30 120 0` (the current builds; it
+  picks demo-3 or the next free name). Checklist in the report's part 2.
+- **Answered in the session, still the user's to decide:** B5 (ProcDump per
+  process, no registry change, or Windows LocalDumps, a machine-wide key)
+  and B9 (a local "pending" mark in the Lua windows, or waive).
+- **Still waiting on the user:** B1 (a hands-on trade), B11 (to recur), B20
+  (a dump needs B5).
+- Decisions T07-5…T07-9 added ([Stage 10 decisions](../../stage10-decisions.md));
+  L47 narrowed, L57 fixed in code (closes after the hands-on check).
+- Noted on the rig: key presses typed into the terminal during a fixture
+  session reach the game windows; a zombie killed player 2 before the music
+  fixture's 525 m move in bugfix-12 and bugfix-15 (the jump check could not
+  run; nothing in part 2 changes server NPC behaviour).
 
 ## Next
 
-1. The user's G10 review. Implement the revisions they ask for.
-2. Do the bug rows the user answers (S10-T07 part 2). Carry or waive the
-   rest. Add the new limits (L60…).
-3. Close G10, then Stage 11.
+1. The user's hands-on check of B2, B4, B7, B21, B22, B23; fix what fails.
+2. The user's decisions on B5 and B9; B1's trade.
+3. The G10 review (two open questions, the decision list up to T07-9), the
+   new limits (L60…), then close G10 and start Stage 11.
 
 ## Run names
 
-- Used: `campaign-334…415` (373, 374, 384, 385, 395, 407 failed to compile;
-  381 failed to link), `client-226…301` (293 failed to compile),
-  `proto-build-52` (unused), `proto-build-53…57`, `st-28…32`, `sweep-1…7`,
-  `newgame-1…4`, `emission-1…5`, `story-1…2`, `presentation-1…5`,
-  `session-1…2`, `bugfix-1…11`, patch checks 77–99.
-- Next: `campaign-416`, `client-302`, `proto-build-58`, `st-33`,
-  `bugfix-12`, patch check 100.
+- Used: `campaign-334…419` (373, 374, 384, 385, 395, 407, 417 failed to
+  compile; 381 failed to link), `client-226…304` (293, 302 failed to
+  compile), `proto-build-52` (unused), `proto-build-53…59`, `st-28…34`,
+  `sweep-1…7`, `newgame-1…4`, `emission-1…5`, `story-1…2`,
+  `presentation-1…5`, `session-1…2`, `bugfix-1…16`, patch checks 77–100.
+- Next: `campaign-420`, `client-305`, `proto-build-60`, `st-35`,
+  `bugfix-17`, patch check 101, `demo-3` (or the next free demo name).
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before the G10 review](../done/snapshot-before-G10-review.md).
+Previous snapshot: [before S10-T07 part 2](../done/snapshot-before-S10-T07-part2.md).

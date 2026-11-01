@@ -591,6 +591,22 @@ of a participant actor on the host actor whoever's context writes or reads it,
 and each change asks for a checkpoint (`story_tick`). The story fixture
 (`story_party`). Single player is unchanged.
 
+`0088-bug-pass-2.patch` (S10-T07 part 2, 2026-11-01) fixes the rows the user
+answered: a task's or script map spot on an object a client does not hold
+stands at the server's place (`CMapLocation::SetFixedPosition`, the place
+sent with CampaignEvent 11 and every map-spot presentation); a dead player's
+map icon goes at death; the partner's zoom (input button bit 5 → actor
+state bit 15 → the aim pose and walking) and a stalker's or monster's
+animation state in the creature's state bits (`CAI_Stalker::
+replica_present_animation`, a monster's override motion); the controller's
+hold on the player during its psy glide; one input per tick period and a
+record at the tick's time, a held snapshot skipped (B21); a jump committed
+only when the physics can take it and latched on the server (B22); a zone's
+state as presentation on a client (`GE_ZONE_STATE_CHANGE` allowed through
+the replica, `ZoneState` presentation, the states sent at a join: every
+campfire burned on every client before, B23). Single player: the jump change
+only.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

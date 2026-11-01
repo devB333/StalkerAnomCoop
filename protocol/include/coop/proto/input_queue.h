@@ -22,7 +22,9 @@
 //   Queued   the oldest queued input; it becomes the last consumed
 //   Held     the queue is empty: the last consumed input again, for at most
 //            hold_ticks ticks in a row (a lost or late batch does not stop the
-//            actor for one tick)
+//            actor for one tick); the tick number stays the consumed one, so
+//            a snapshot during a hold names the same last input again (the
+//            client skips reconciling it: S10-T07, B21)
 //   None     nothing to apply: the actor gets no input this tick
 // reset() forgets the sequence (a new connection restarts the tick count);
 // the counters are kept.

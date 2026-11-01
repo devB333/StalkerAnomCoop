@@ -327,7 +327,7 @@ T01-17…T01-19 bind it. Awaiting the user's approval at G10.
 
 ## S10-T07 — the bug pass (part 1)
 
-Taken 2026-10-31 while fixing the bug list ([S10-T07](validation/S10-T07.md)).
+Taken 2026-10-31 and 2026-11-01 while fixing the bug list ([S10-T07](validation/S10-T07.md)).
 Awaiting the user's approval at G10.
 
 | # | Decision | Why | Alternative |
@@ -336,3 +336,8 @@ Awaiting the user's approval at G10.
 | T07-2 | **The combat music is each player's own**: it starts when a stalker fights that player, whatever the partner does | the music follows "the actor"; shared, it played on player 1's fights for both | one shared music (either player's fight) |
 | T07-3 | **The ambient wind, drone and rain on the helmet are each player's own** (its own cover; for player 2 "mask on" is a helmet in the helmet slot) | they follow "the actor"; shared, player 2 indoors heard player 1's outdoor wind | keep them player 1's for both |
 | T07-4 | **When the server is gone for a minute, a client goes back to the main menu with a message and keeps trying** (two and a half minutes after a campaign switch) | B16: the clients sat on the loading screen for good | quit the client; or wait silently |
+| T07-5 | **A zone's state (a campfire lit or out, an anomaly disabled) is the server's on every client**; the installed scripts' own turn on and off on a client apply too, as presentation | B23: every campfire burned on every client (the state change was refused on a replica) | keep zones client-local (the save's state only) |
+| T07-6 | **A task's or script's map marker on an object a client does not hold stands at the server's place** (level, position, game vertex sent with the task and the spot) | B2: no marker at all for the server's quest corpse or an NPC on another level | spawn the object's ALife record on every client |
+| T07-7 | **A dead player's map icon goes at its death**; the respawned actor has its own | B2: one more icon per death | keep the body's icon until its cleanup |
+| T07-8 | **A jump press is latched on the server for up to 10 ticks** until the actor's state shows the jump; a jump is committed (lockout, stamina) only when the physics can take it, in single player too | B22: a tap on a tick without ground contact or on a dropped tick was lost | the per-tick level as before |
+| T07-9 | **The partner's zoom is shown** (the input's zoom bit): its aim pose, and the server's actor walks and does not jump while aiming, as the aiming player's own does | B7 | zoom stays the aiming player's own |

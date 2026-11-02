@@ -59,6 +59,60 @@ kit and its own player key (`coop-keytool new-player`, DPAPI) whose roster
 line the host adds ([session authentication](../../session-authentication.md)).
 Waiting on the user's choice of route.
 
+## Picking this up (for a new session or model)
+
+- **Read first**: `CLAUDE.md` / `AGENTS.md` (rules), `plan.md` §I (status),
+  this file, then [G10](../../validation/G10.md) "The user's review" for the
+  exact wording of each revision.
+- **The user** owns gameplay design and tests anything that affects how the
+  game looks or feels **by hand**. Never call such a fix done before their
+  session; give them `bash tools/start-coop-demo.sh S10-T07 0 30 120 0` and
+  read `builds/stage2/test-install/S10-T07/demo-<n>-*/appdata/logs`
+  afterwards. When they are away they reach the session through the Discord
+  plugin (reply with the Discord reply tool to their chat). They are learning
+  C++ and X-Ray: keep answers short, with a one-line "why" for engine
+  concepts.
+- **Engine source first**: `engine/xray-monolith/src` (pinned, read only).
+  Edit only `builds/build_1/engine-work`. Game scripts and configs are in
+  the read-only install's archives: extract them into a scratch folder with
+  `python3 tools/xray-db-extract.py -q extract -m .script -o <dir>
+  /mnt/c/Users/djb20/StalkerAnom/db/configs/scripts.db0` (configs:
+  `configs.db0`; `grep -E -m <path part> <regex> <archive>` searches).
+- **One cycle**: edit → `Build-Stage2.ps1` Campaign **and** Client with
+  `-ProtocolBuild proto-build-59` (protocol unchanged since; ~3-5 min each,
+  run in the background) → `python3 tools/export-engine-patch.py
+  <NNNN-name>.patch <check-number>` (reconstructs and checks the whole
+  series) → `docs/source-manifest.json` hash, `patches/engine/README.md`
+  entry, the task report, known-issues, handoff (snapshot first), commit.
+- **Before a build**, list running processes under `builds\`. A demo's
+  campaign server often outlives the session (`AnomalyCampaignServer.exe`).
+  **Ask the user before stopping it**: the permission check refuses a stop
+  without their OK, and an earlier OK does not carry over.
+- **Pitfalls hit this session**:
+  - A failed build still uses up its run name.
+  - The release build has no debug-only APIs (`LL_MotionDefName_dbg`
+    exists only under `#ifdef DEBUG`).
+  - `svector::push_back` checks its bound only in debug builds.
+  - In `CoopClientLink.cpp`, an `extern` for a global must sit at global
+    scope, outside `namespace campaign`; otherwise it fails at link time
+    (LNK2001).
+  - The bash working directory persists between calls: use absolute paths
+    (two doc commits silently failed from `docs/handoffs`).
+- **Useful one-offs**: a client checkpoint (`.scop`) is a 12-byte header
+  plus LZO1X data, decodable with `lzo1x_decompress` from
+  `tools/xray-db-extract.py`. Import it with `importlib` and register the
+  module in `sys.modules` first, or its dataclasses fail. A Windows
+  minidump's exception stream (stream type 6) gives the fault code, the
+  address and the registers: that is how B24's null-blend read was confirmed.
+- **New diagnostics in the logs**:
+  - `replica-anim … legs=<idx>:<name> torso= yaw= drawn= travel= head=<cur>><target> body= danger= visual=`
+    (NPC facing);
+  - `trade-open … panel=` (the Lua trade panel);
+  - `frame-trace` (frame time near fires);
+  - `! [B24] blend list full` in the engine log (which model churns blends).
+- **Game console settings** (client, co-op): `coop_campfire_shadow <m>`
+  (default 0), `coop_campfire_light 0/1`.
+
 ## Run names
 
 - Used: `campaign-334…427`, `client-226…310`, `proto-build-53…59`,

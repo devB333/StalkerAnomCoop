@@ -675,6 +675,15 @@ kept in the roster file and bound at run time (never the owner), every
 binding pass on a fresh registry, no join while a travel replaces the world
 (ServerBusy). Single player: unchanged without `coop-menu.ltx`.
 
+`0096-dedicated-server.patch` (S11-T00, 2026-11-02): a dedicated server (the
+user: a third PC hosts, both players join from theirs). A server with a join
+code may start with an empty roster; its first player to join owns the
+session; that player takes over the start-up identity check's stand-in
+participant (slot 0) and the saved actor (`stand-in-released`,
+`stand-in-actor-taken`). The server's own scripts: `tools/Host-CoopServer.ps1`
+(a join code, the Tailscale address, the launcher) and
+`tools/Stop-CoopServer.ps1`. Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

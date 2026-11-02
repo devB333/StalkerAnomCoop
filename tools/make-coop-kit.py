@@ -2,14 +2,20 @@
 """S11-T00: the co-op kits for playing over Tailscale from the main menu (Host / Join).
 
 Usage:
+  python3 tools/make-coop-kit.py server <name> [--protocol-build proto-build-N]
   python3 tools/make-coop-kit.py host <name> [--player "Your name"] [--protocol-build proto-build-N]
-  python3 tools/make-coop-kit.py client <name> [--player "Friend"]
+  python3 tools/make-coop-kit.py client <name>
 
-host:   on this PC (the workspace): builds/kits/<name>/ with a server runtime (the current campaign server build)
+server: a dedicated server on this PC (no game played here): <kit folder>/<name>/ with Start-Server.cmd (prints
+        the Tailscale address and a join code), Start-Server-Continue.cmd (the last campaign) and Stop-Server.cmd.
+        Both players use client kits and New game > Join co-op; the first to join owns the session (New game,
+        Load).
+
+host:   on this PC (the workspace): <kit folder>/<name>/ with a server runtime (the current campaign server build)
         and a client runtime whose app data coop-menu.ltx can host (New game > Host co-op). The server's roster
         starts empty of friends: a friend gets in with the join code the menu shows. Start the game with
-        builds/kits/<name>/Start-Coop.cmd.
-client: for a friend's PC: builds/kits/<name>/ (and <name>.zip) with the client build, the runtime's loose files
+        <kit folder>/<name>/Start-Coop.cmd.
+client: for a friend's PC: <kit folder>/<name>/ (and <name>.zip) with the client build, the runtime's loose files
         and Setup-Coop.ps1. On the friend's PC, unzip anywhere, run Setup-Coop.ps1 once (it asks for the Anomaly
         1.5.3 folder and the player's name, writes fsgame.ltx and coop-menu.ltx), then Start-Coop.cmd; in the
         game: New game > Join co-op, Host = the host's Tailscale address, Password = the join code.
@@ -129,14 +135,21 @@ In the game: New game asks Single player / Host co-op / Join co-op.
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("kind", choices=["host", "client"])
+    ap.add_argument("kind", choices=["server", "host", "client"])
     ap.add_argument("name")
     ap.add_argument("--player", default="")
-    ap.add_argument("--protocol-build", default="proto-build-62")
+    ap.add_argument("--protocol-build", default="proto-build-63")
+    ap.add_argument("--dist", action="store_true",
+                    help="the distribution kits in Kits\\ (only after the final test, plan.md); default builds\\kits\\")
     a = ap.parse_args()
     if not re.fullmatch(r"[a-zA-Z0-9-]+", a.name):
         raise SystemExit("Kit name must be alphanumeric with optional hyphens")
-    kit = workspace / "builds/kits" / a.name
+    # the user (2026-11-02): Kits\ at the workspace root, out of Git (generated binaries): Kits\clientKit\ the
+    # client kit every joining player uses, Kits\client1HostKit\ the kit of a player who hosts,
+    # Kits\ServerHostKit\ a dedicated server's
+    # plan.md "Note: distribution kits": Kits\ only after the final test (--dist); test kits in builds\kits\
+    folder = {"client": "clientKit", "host": "client1HostKit", "server": "ServerHostKit"}[a.kind]
+    kit = (workspace / "Kits" if a.dist else workspace / "builds/kits") / folder / a.name
     if kit.exists():
         raise SystemExit(f"Preserving existing kit: {kit}")
     build = subprocess.run(["sha256sum", str(built_client / "AnomalyDX11.exe")], capture_output=True,
@@ -156,6 +169,25 @@ def main() -> int:
                 if f.is_file():
                     z.write(f, Path(a.name) / f.relative_to(kit))
         print(f"client kit: {kit}\nzip: {archive} ({archive.stat().st_size // (1024 * 1024)} MB)")
+        return 0
+    if a.kind == "server":
+        run = "kit-" + a.name
+        subprocess.run([sys.executable, str(workspace / "tools/prepare-coop-menu.py"), run, "--task", "S11-T00",
+                        "--protocol-build", a.protocol_build, "--dedicated"], check=True, stdout=subprocess.DEVNULL)
+        server = workspace / "builds/stage2/test-install/S11-T00" / f"{run}-server"
+        kit.mkdir(parents=True)
+        ps = "@echo off\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "
+        start = ps + f'"{win(workspace / "tools/Host-CoopServer.ps1")}" -Runtime "{win(server)}"'
+        (kit / "Start-Server.cmd").write_text(start + "\r\npause\r\n")
+        (kit / "Start-Server-Continue.cmd").write_text(start + " -Continue\r\npause\r\n")
+        (kit / "Stop-Server.cmd").write_text(
+            ps + f'"{win(workspace / "tools/Stop-CoopServer.ps1")}" -Runtime "{win(server)}"\r\npause\r\n')
+        steps = ("This PC is the server only. Start-Server.cmd starts it on its starting campaign and prints the "
+                 "address and join code; Start-Server-Continue.cmd starts the last campaign played; Stop-Server.cmd "
+                 "stops it cleanly (it saves first). Both players: client kit > New game > Join co-op. The first "
+                 "player to join owns the session: New game there starts a new campaign for both, Load switches.")
+        (kit / "README.txt").write_text(README.format(kind="server", build=build, steps=steps))
+        print(f"server kit: {kit}\nstart: {win(kit / 'Start-Server.cmd')}\nruntime: {win(server)}")
         return 0
     # host: a server runtime and a client runtime on this PC, from a prepared menu session
     run = "kit-" + a.name

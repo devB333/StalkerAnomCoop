@@ -53,6 +53,9 @@ def main() -> int:
     ap.add_argument("--task", default="S11-T00")
     ap.add_argument("--protocol-build", default="proto-build-62")
     ap.add_argument("--test", action="store_true")
+    ap.add_argument("--dedicated", action="store_true",
+                    help="a dedicated server (tools/Host-CoopServer.ps1): no one on its roster, both players join "
+                         "with its code, neither client can host")
     a = ap.parse_args()
     if not re.fullmatch(r"[a-zA-Z0-9-]+", a.run):
         raise SystemExit("Run name must be alphanumeric with optional hyphens")
@@ -67,8 +70,9 @@ def main() -> int:
     text = set_value(text, "serve_seconds", "0")
     server_profile.write_text(text)
     roster = unwin(ini_value(text, "roster"))
-    host_id = session["players"]["c1"]["player_id"]
-    kept = [ln for ln in roster.read_text().splitlines() if not ln.startswith("player ") or f" {host_id} " in ln]
+    host_id = "" if a.dedicated else session["players"]["c1"]["player_id"]
+    kept = [ln for ln in roster.read_text().splitlines()
+            if not ln.startswith("player ") or (host_id and f" {host_id} " in ln)]
     roster.write_text("\n".join(kept) + "\n")
     appdata = server_runtime / "appdata"
     for name in ("coop-join-code.txt", "coop-create.ltx", "coop-continue.txt", "coop-relaunch.ltx", "coop-owner.txt"):
@@ -76,12 +80,12 @@ def main() -> int:
     server_exe = workspace / "builds/stage2/campaign/_game/bin_dbg/AnomalyCampaignServer.exe"
     launcher = workspace / "tools/Start-CoopServer.ps1"
     c1_runtime = workspace / procs["c1"]["runtime"]
-    for name, host in (("c1", True), ("c2", False)):
+    for name, host in (("c1", not a.dedicated), ("c2", False)):
         runtime = workspace / procs[name]["runtime"]
         profile = (runtime / "coop.ltx").read_text()
         key = ini_value(profile, "key")
         if not host:
-            key_path = session_dir / "keys" / "c2-menu.key"
+            key_path = session_dir / "keys" / f"{name}-menu.key"
             key_path.unlink(missing_ok=True)
             key = win(key_path)
         menu = ["[coop_menu]", f"name = {ini_value(profile, 'name')}", f"key = {key}",
@@ -93,13 +97,15 @@ def main() -> int:
             if host:
                 menu += ["test = host_new", "test_delay = 3"]
             else:
-                menu += ["test = join", "test_delay = 10",
-                         f"test_info = {win(c1_runtime / 'appdata' / 'coop-host-info.txt')}"]
+                info = (server_runtime if a.dedicated else c1_runtime) / "appdata" / "coop-host-info.txt"
+                menu += ["test = join", "test_delay = 10", f"test_info = {win(info)}"]
         (runtime / "appdata" / "coop-menu.ltx").write_text("\n".join(menu) + "\n")
         for name2 in ("coop-host-info.txt", "coop-menu-client.ltx"):
             (runtime / "appdata" / name2).unlink(missing_ok=True)
-    session["menu"] = {"test": a.test, "host": "c1", "joiner": "c2", "server_exe": win(server_exe),
-                       "launcher": win(launcher)}
+    (appdata / "coop-host-info.txt").unlink(missing_ok=True)
+    session["menu"] = {"test": a.test, "host": "server" if a.dedicated else "c1", "joiner": "c2",
+                       "dedicated": a.dedicated, "server_exe": win(server_exe), "launcher": win(launcher),
+                       "server_runtime": win(server_runtime)}
     (session_dir / "session.json").write_text(json.dumps(session, indent=1) + "\n")
     print(session_dir / "session.json")
     return 0

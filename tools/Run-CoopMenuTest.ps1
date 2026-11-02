@@ -7,6 +7,8 @@
 #       [-Seconds 420] [-AfterSeconds 30] [-Phases 2]
 # -Phases 2: then both clients start again with the host's test set to host_continue (the last campaign) and
 # the friend rejoining (a roster player by then); its logs go to {c1,c2,server}-2.
+# A --dedicated session (prepare-coop-menu.py): each phase starts tools/Host-CoopServer.ps1 first (phase 2 with
+# -Continue) and both clients join with its code.
 # After -Seconds (from the first client's start) the clients' stop files are written (they quit cleanly; the
 # host's quit stops its server through the server's stop file); after -AfterSeconds more anything left is
 # stopped. Logs go to builds/logs/<task>/run-<run>/{c1,c2,server}.
@@ -43,6 +45,15 @@ $names = @('c1', 'c2')
 $result = [ordered]@{ started_utc = [DateTime]::UtcNow.ToString('o'); run = $Run; task = $Task; clients = [ordered]@{} }
 function Run-Phase([int]$phase) {
     $clients = @{}
+    if ($session.menu.dedicated) {
+        # the dedicated server's console (tools/Host-CoopServer.ps1), hidden; -Continue in phase 2
+        Remove-Item (Join-Path $session.menu.server_runtime 'appdata\coop-host-info.txt') -ErrorAction SilentlyContinue
+        $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+            (Join-Path $workspace 'tools\Host-CoopServer.ps1') + '" -Runtime "' + $session.menu.server_runtime + '"'
+        if ($phase -gt 1) { $arguments += ' -Continue' }
+        $hostConsole = Start-Process powershell.exe -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        Note "server-console-started#$phase"
+    }
     $phaseStart = $timer.Elapsed.TotalSeconds
     while ($timer.Elapsed.TotalSeconds - $phaseStart -lt $Seconds) {
         for ($i = 0; $i -lt 2; $i++) {
@@ -99,7 +110,7 @@ if ($Phases -ge 2) {
     foreach ($name in $names) {
         $runtime = Join-Path $workspace ($session.processes.$name.runtime -replace '/', '\')
         $menu = Join-Path $runtime 'appdata\coop-menu.ltx'
-        (Get-Content $menu) -replace '^test = host_new$', 'test = host_continue' | Set-Content $menu
+        (Get-Content $menu) -replace '^test = host_new$', 'test = host_continue' | Set-Content $menu  # (a hosting client)
         Remove-Item (Join-Path $runtime 'appdata\coop-host-info.txt') -ErrorAction SilentlyContinue
         Get-ChildItem (Join-Path $runtime 'appdata\logs') -File -ErrorAction SilentlyContinue | Remove-Item
     }

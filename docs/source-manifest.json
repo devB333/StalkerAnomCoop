@@ -389,6 +389,10 @@
     {
       "path": "patches/engine/0095-local-hosting.patch",
       "sha256": "bb63065966768af7b199fb4b29042dba168a1e0fab098853a057eb85401d8e9c"
+    },
+    {
+      "path": "patches/engine/0096-dedicated-server.patch",
+      "sha256": "93f5c22f820c443db70da7156870e4a6b371c00146be05e453a5508c817a35f9"
     }
   ],
   "submodules": [

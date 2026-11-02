@@ -9,9 +9,11 @@ param(
     [Parameter(Mandatory = $true)][string]$Runtime,
     [Parameter(Mandatory = $true)][string]$Fsgame,
     [Parameter(Mandatory = $true)][string]$Profile,
-    [string]$Exe = (Join-Path (Split-Path $PSScriptRoot -Parent) 'builds\stage2\campaign\_game\bin_dbg\AnomalyCampaignServer.exe')
+    [string]$Exe = ''
 )
 $ErrorActionPreference = 'Stop'
+# (Windows PowerShell 5.1: $PSScriptRoot is empty in a parameter's default, so the default is set here)
+if (-not $Exe) { $Exe = Join-Path (Split-Path $PSScriptRoot -Parent) 'builds\stage2\campaign\_game\bin_dbg\AnomalyCampaignServer.exe' }
 # S11-T00: started hidden by the host's co-op menu: its lines also go to the runtime's app data logs
 $launcherLog = Join-Path $Runtime 'appdata\logs\coop-launcher.log'
 New-Item -ItemType Directory (Split-Path $launcherLog -Parent) -Force | Out-Null

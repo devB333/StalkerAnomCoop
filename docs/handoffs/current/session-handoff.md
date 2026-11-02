@@ -11,17 +11,19 @@
   demo kit: a repair kit, a tent, a worn pistol, sleepy players).
 - **Stage 11 started by the user's direction** (Discord, 2026-11-02): S11-T00
   local hosting and the host and join menu ([S11-T00](../../validation/S11-T00.md),
-  patch **0095** `local-hosting`, engine-work equals the series of 95). Builds
-  **campaign-440 / client-322**, protocol **proto-build-63** (st-38: 122/122).
-  menu-7 (new campaign, then continue and rejoin) and kit-7 (the delivered
-  kits) pass on this PC.
-- **Kits for the user** (`tools/make-coop-kit.py`):
-  `builds/kits/host-3/Start-Coop.cmd` (this PC hosts; its server runtime is
-  `builds/stage2/test-install/S11-T00/kit-host-3-server`) and
-  `builds/kits/friend-3.zip` (for the friend's PC: unzip, run
-  `Setup-Coop.ps1`, then `Start-Coop.cmd`; in the game New game > Join co-op:
-  Host = the host's Tailscale address, this PC's is 100.94.188.110, Password =
-  the join code the host's menu shows).
+  patches **0095** `local-hosting` and **0096** `dedicated-server`, engine-work
+  equals the series of 96). Builds **campaign-442 / client-324**, protocol
+  **proto-build-63** (st-38: 122/122). A player who hosts (menu-7, kit-9) and
+  a dedicated server both players join (menu-10, kit-8) pass on this PC.
+- **Test kits** (`tools/make-coop-kit.py`, from campaign-442 / client-324;
+  remake them after any rebuild: their server runs from the build folder):
+  `builds/kits/ServerHostKit/server-1/Start-Server.cmd` (this PC only hosts;
+  prints the Tailscale address 100.94.188.110:27515 and a join code;
+  `Stop-Server.cmd`), `builds/kits/client1HostKit/host-4/Start-Coop.cmd` (play
+  and host here), `builds/kits/clientKit/client-4.zip` (every player: unzip,
+  `Setup-Coop.ps1` with the Anomaly folder, `Start-Coop.cmd`, New game > Join
+  co-op). Distribution kits go to `Kits/` only after the final test (plan.md's
+  last note, `--dist`).
 - The user is away and reachable on Discord (chat `1566639386420973638`,
   reply with the Discord reply tool); they asked to be kept updated.
 
@@ -59,12 +61,13 @@
 
 ## Run names
 
-- Used: `campaign-334…440`, `client-226…322`, `proto-build-53…63`,
-  `st-28…38`, `bugfix-1…19`, `demo-1…6` (S10-T07), `menu-1…7`, `kit-1…7`
-  (S11-T00), patch checks 77–107, kits host-1…3, friend-1…3.
-- Next: `campaign-441`, `client-323`, `proto-build-64`, `st-39`,
-  `bugfix-20`, `demo-7`, `menu-8`, `kit-8`, patch check 108, kits host-4,
-  friend-4.
+- Used: `campaign-334…442`, `client-226…324`, `proto-build-53…63`,
+  `st-28…38`, `bugfix-1…19`, `demo-1…6` (S10-T07), `menu-1…10`, `kit-1…9`
+  (S11-T00), patch checks 77–108, kits host-1…4, friend-1…3, client-4,
+  server-1.
+- Next: `campaign-443`, `client-325`, `proto-build-64`, `st-39`,
+  `bugfix-20`, `demo-7`, `menu-11`, `kit-10`, patch check 109, kits host-5,
+  client-5, server-2.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

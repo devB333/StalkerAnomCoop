@@ -26,3 +26,6 @@ __pycache__/
 # Claude Code personal files
 CLAUDE.local.md
 .claude/settings.local.json
+
+# S11-T00: co-op kits (generated binaries; tools/make-coop-kit.py)
+/Kits/

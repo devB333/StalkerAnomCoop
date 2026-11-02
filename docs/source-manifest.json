@@ -373,6 +373,10 @@
     {
       "path": "patches/engine/0091-bug-pass-5.patch",
       "sha256": "2f582834f9d445c159eb7dbd40409a024ceb876c852a7a2e61787b78d66dc803"
+    },
+    {
+      "path": "patches/engine/0092-blend-list-guard.patch",
+      "sha256": "0f82810384404e7c0c86060839854b7c545a5182bec66626e4cf1dc34fc79860"
     }
   ],
   "submodules": [

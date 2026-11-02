@@ -627,6 +627,14 @@ client's campfire casts no shadow by default; the game-console settings
 `coop_campfire_shadow <m>` and `coop_campfire_light 0/1`, and a `frame-trace`
 line near fires (B23). Single player is unchanged.
 
+`0092-blend-list-guard.patch` (S10-T07 part 6, 2026-11-02): a model part's
+blend list holds 16 blends in a fixed array whose bound is checked in debug
+builds only; when it is full, `CKinematicsAnimated::LL_PlayCycle` retires the
+part's oldest blend instead of writing past the end (B24: a co-op client
+crashed animating the other player), and logs `[B24] blend list full`. The
+per-bone lists already did this. Single player: the same guard, which only
+replaces a memory overwrite.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

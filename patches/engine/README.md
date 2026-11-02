@@ -651,6 +651,16 @@ Fixtures: the sleep fixture's shelter round, the party-task fixture's purse,
 item and fail probes. Single player: unchanged (every path is the campaign
 server's or a co-op client's).
 
+`0094-world-item-pickup.patch` (S10-T07, demo-6, 2026-11-02): B26, a client
+crashed picking up one of the randomly placed world items: the installed
+`game_setup` pickup handler read its spawn table, which a client's replica
+actor never filled (`init_settings` runs at the actor's first update). The
+client's Lua layer runs `init_settings` (ini reads only) and makes its
+`try_spawn_world_item` a no-op (the server spawns the replacement). Also the
+demo kit (profile `demo_kit`, with `arm`): a pistol repair kit and a tent, the
+pistol worn to 80 % and the player sleepy, for the hands-on checks. Single
+player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

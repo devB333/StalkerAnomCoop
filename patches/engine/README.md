@@ -607,6 +607,18 @@ the replica, `ZoneState` presentation, the states sent at a join: every
 campfire burned on every client before, B23). Single player: the jump change
 only.
 
+`0090-bug-pass-4.patch` (S10-T07 part 4, 2026-11-02): a creature replica
+faces where the server turns it (`CCustomMonster::replica_present` sets
+`m_body`; a stalker's `CSightManager::Exec_Look` and a monster's
+`CControlDirection::update_frame` no longer turn a replica themselves: they
+rebuilt its rotation from a yaw never set on a client, B4), and the
+`replica-anim` line gains the motion names and the drawn, sent and travel
+headings; the campaign server never turns a campfire and a co-op client's
+campfire casts its shadow only within 20 m of the camera (B23, decision
+T07-10); a hidden trade partner panel in the Lua trade window is shown and
+filled when the window opens, with a `panel=` probe on `trade-open` (B1).
+Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

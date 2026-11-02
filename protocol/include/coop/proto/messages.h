@@ -47,6 +47,9 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.8 + S10-T07: the companion order kind (28); no wire layout change.
 // 1.8 + S10-T07 (B4/B7/B21): the zoom button (bit 5), the state_bits layouts
 // per entity class; no wire layout change.
+// 1.8 + S10-T07 (G10): the field repair kind (29), reason 47 (no shelter to
+// sleep), kind 19's optional trailing flags byte (bit 0: a donation); no wire
+// layout change.
 constexpr std::uint16_t kProtocolMinor = 8;
 constexpr std::size_t kHeaderBytes = 24;
 
@@ -445,6 +448,12 @@ enum ActionKind : std::uint16_t
                                // server's next), u8 scope (0 all the player's companions, 1 the target's squad), u32
                                // level vertex (command 6); carried out on the server in the player's context, on
                                // that player's own companions only (decision T02f-1; 4 when it has none there)
+    kActionFieldRepair = 29,   // S10-T07 (G10): a repair kit's window (item_repair) on the player's client; target:
+                               // the item to repair; params: the kit's ref (u64 id + u32 generation), u8 1 and the
+                               // support part's ref or u8 0, u8 the condition % the window showed (diagnostics);
+                               // checked and applied on the server in the player's context by the installed
+                               // window's rules (41 refused: not a kit, the item or part not accepted by it, the
+                               // condition out of its range; 14 an item not in the player's own inventory)
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the
@@ -508,6 +517,8 @@ enum ActionReason : std::uint16_t
     kReasonSessionBusy = 45,      // S10-T06: a travel, a sleep or another switch is under way
     kReasonBadChoices = 46,       // S10-T06: the creation choices break the creation screen's rules (an unknown
                                   // faction or start, a loadout item not offered to the faction, over its points)
+    kReasonNoShelter = 47,        // S10-T07 (G10, T03c-2): the player is not in shelter to sleep (a sleep zone, an
+                                  // emission cover, underground, or within 1.5 m of a set-up tent)
 };
 
 struct Input

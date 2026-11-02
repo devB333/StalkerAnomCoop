@@ -377,6 +377,10 @@
     {
       "path": "patches/engine/0092-blend-list-guard.patch",
       "sha256": "0f82810384404e7c0c86060839854b7c545a5182bec66626e4cf1dc34fc79860"
+    },
+    {
+      "path": "patches/engine/0093-g10-revisions.patch",
+      "sha256": "a95647b893cd1f274945b16cfef31faad3ab62b4e6cc873e0f9445c51c167cce"
     }
   ],
   "submodules": [

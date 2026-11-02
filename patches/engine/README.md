@@ -635,6 +635,22 @@ crashed animating the other player), and logs `[B24] blend list full`. The
 per-bone lists already did this. Single player: the same guard, which only
 replaces a memory overwrite.
 
+`0093-g10-revisions.patch` (S10-T07, the user's G10 review, 2026-11-02): the
+nine revisions. The clicking player's purse for a party task's money
+(`CampaignScriptContext` `PartyPurseScope`, the Lua `money` / `give_money` /
+`transfer_money` bindings); the server's G10 Lua adapter (`g10_source`: item
+rewards and a failed task's goodwill penalty to both players, bounty squads by
+the worse standing, the sleep shelter check, the repair kit's rules, mechanic
+lending always on with a per-player ledger); parking an absent player after 5
+minutes (`set_participant_parked`: no ALife anchor, not seen by the AI, no hits
+or condition change); the sleep request and the partner's answer refused
+without shelter (reason 47); story mode only (the creation screen and the
+server's check); the trade window's donate as a free transfer and the repair
+kit's window on the client with the repair on the server (action kind 29).
+Fixtures: the sleep fixture's shelter round, the party-task fixture's purse,
+item and fail probes. Single player: unchanged (every path is the campaign
+server's or a co-op client's).
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

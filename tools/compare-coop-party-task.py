@@ -25,7 +25,10 @@ Checks:
                the turn-in was accepted and the restarted run logged quest-completed task=esc_m_trader_task_2
   paid         exactly two quest-paid lines for the task, to two different actors, the same amount > 0
   goodwill     two quest-goodwill lines for the task (one per participant actor), community stalker
-  item_probe   two quest-item-given lines for task=probe, section bandage, ok=1, to two different actors
+  item_probe   two quest-item-given lines for task=probe, section bandage, ok=1, to two different actors; G10:
+               the bread created on the anchor (quest-item-shared created_on=<anchor>) given once to the other actor
+  g10_probes   G10: fixture-task purse-probe pass=1 (the clicker paid the fee, both got the payment) and
+               fail-probe pass=1 (a fail path's goodwill loss on both actors)
   death_probe  fixture-task death-probe ok=1 (npc == the spawned stalker, ac == who == p2's actor)
   failures     the restarted run's fixture-task done phase=recovered has failures=0
 """
@@ -103,13 +106,22 @@ def main():
                           and all(g.get("community") == "stalker" for g in gw),
                           "goodwill": gw}
 
-    given = [kv(ln) for ln in second if " quest-item-given " in ln and "task=probe" in ln]
+    probe_given = [kv(ln) for ln in second if " quest-item-given " in ln and "task=probe" in ln]
+    given = [g for g in probe_given if g.get("section") == "bandage"]
+    bread = [g for g in probe_given if g.get("section") == "bread"]
+    shared = first_kv(second, " quest-item-shared ")
     given_actors = {g.get("actor") for g in given}
     probe = first_kv(second, " fixture-task item-probe ")
     checks["item_probe"] = {"pass": len(given) == 2 and len(given_actors) == 2
-                            and all(g.get("section") == "bandage" and g.get("ok") == "1" for g in given)
+                            and all(g.get("ok") == "1" for g in given) and len(probe_given) == 3
+                            and len(bread) == 1 and bread[0].get("ok") == "1"
+                            and bread[0].get("actor") != shared.get("created_on")
                             and probe.get("applied") == "1",
-                            "given": given, "fixture": probe}
+                            "given": probe_given, "shared": shared, "fixture": probe}
+    purse = first_kv(second, " fixture-task purse-probe ")
+    fail = first_kv(second, " fixture-task fail-probe ")
+    checks["g10_probes"] = {"pass": purse.get("pass") == "1" and fail.get("pass") == "1",
+                            "purse": purse, "fail": fail}
 
     death = first_kv(second, " fixture-task death-probe ")
     checks["death_probe"] = {"pass": death.get("ok") == "1", "probe": death}

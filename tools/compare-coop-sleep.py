@@ -7,6 +7,9 @@ The fixture (--sleep c1,c2, profile sleep_party; CoopServerHost.cpp sleep_fixtur
 sleep window and keys send, on the server.
 Checks:
   wrap      the server's compat layer wrapped ui_sleep_dialog.sleep_forced (S10-T03c ... sleep wrap: forced)
+  shelter   G10 (T03c-2): out of shelter p2's request is refused 47 and p1's accept of p2's sheltered request is
+            refused 47 (the proposal stays and p2 cancels it); both players then stand in the nearest sleep zone
+            (shelter-round pass=1)
   refusals  a stale answer is refused 28, the requester's own accept 29, a travel request while the sleep proposal is
             up 23; the partner's refusal ends it (refused-round pass=1) and no time passes (refused-time pass=1)
   agreed    the second request agreed: the world's time skipped 3 h once, both players' sleep need dropped
@@ -47,6 +50,8 @@ def main():
     checks = {}
     wrap = re.findall(r"S10-T03c compatibility layer sleep wrap: (\S+)", xlog)
     checks["wrap"] = {"pass": bool(wrap) and wrap[-1] == "forced", "wrap": wrap[-1:]}
+    sr = grep(log, " fixture-sleep shelter-round ")
+    checks["shelter"] = {"pass": bool(sr) and sr[0].get("pass") == "1", "round": sr[:1]}
     rr = grep(log, " fixture-sleep refused-round ")
     rt = grep(log, " fixture-sleep refused-time ")
     checks["refusals"] = {"pass": bool(rr) and rr[0].get("pass") == "1" and rr[0].get("stale") == "28"

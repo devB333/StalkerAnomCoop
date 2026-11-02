@@ -385,6 +385,10 @@
     {
       "path": "patches/engine/0094-world-item-pickup.patch",
       "sha256": "07aeb9fe35862c462fa3a5b0ed131eca9a131eb79902a73959c61aa19698acd6"
+    },
+    {
+      "path": "patches/engine/0095-local-hosting.patch",
+      "sha256": "bb63065966768af7b199fb4b29042dba168a1e0fab098853a057eb85401d8e9c"
     }
   ],
   "submodules": [

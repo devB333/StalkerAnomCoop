@@ -102,7 +102,8 @@ struct Cli
     std::unique_ptr<Client> c;
     std::vector<ClientEvent> ev;
     Cli(Rig& rig, const Uuid128& player, PrivateKey key, const proto::LocalBuild& build = Build(),
-        const LivenessConfig& liveness = {}, std::optional<proto::ResumeRequest> resume = std::nullopt)
+        const LivenessConfig& liveness = {}, std::optional<proto::ResumeRequest> resume = std::nullopt,
+        const std::string& join_code = std::string())
     {
         t = rig.make(transport_config(liveness));
         ClientConfig cfg;
@@ -112,6 +113,7 @@ struct Cli
         cfg.expected_campaign = {10, 10};
         cfg.liveness = liveness;
         cfg.resume = std::move(resume);
+        cfg.join_code = join_code; // S11-T00
         c = std::make_unique<Client>(*t, cfg, std::move(key));
     }
     int count(ClientEventType type) const

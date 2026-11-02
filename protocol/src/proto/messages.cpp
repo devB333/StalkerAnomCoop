@@ -234,12 +234,30 @@ void Read(Reader& r, AuthChallenge& m)
     m.campaign_id = r.uuid(true);
 }
 
-void Write(Writer& w, const AuthProof& m) { w.raw(m.signature.data(), m.signature.size()); }
+void Write(Writer& w, const AuthProof& m)
+{
+    w.raw(m.signature.data(), m.signature.size());
+    if (m.join)
+    {
+        w.u8(1); // S11-T00: the join fields
+        w.raw(m.public_key.data(), m.public_key.size());
+        w.digest(m.join_mac);
+    }
+}
 void Read(Reader& r, AuthProof& m)
 {
     r.field("auth_proof.signature");
     for (auto& b : m.signature)
         b = r.u8();
+    if (r.remaining() != 1 + 64 + 32)
+        return; // a plain proof (anything else left over is TrailingBytes, as before)
+    r.field("auth_proof.join");
+    m.join = r.u8() == 1;
+    r.field("auth_proof.public_key");
+    for (auto& b : m.public_key)
+        b = r.u8();
+    r.field("auth_proof.join_mac");
+    m.join_mac = r.digest();
 }
 
 void Write(Writer& w, const Welcome& m)

@@ -77,6 +77,10 @@ struct ServerConfig
     std::uint16_t tick_rate_hz = 30;
     std::uint16_t snapshot_rate_hz = 20;
     std::uint32_t handshake_timeout_ms = 5000;
+    // S11-T00: the host's join code (auth.h); empty: only roster players. A
+    // player not in the roster with a valid join proof is added to the roster
+    // (taken_by_code) while a slot is free.
+    std::string join_code;
     LivenessConfig liveness;
     // Handshakes started per remote address (port ignored) per window.
     std::uint32_t max_handshakes_per_address = 6;
@@ -152,6 +156,8 @@ struct ServerCounters
     std::uint64_t timeouts = 0;
     std::uint64_t heartbeats = 0;
     std::uint64_t auto_released = 0;
+    std::uint64_t joined_by_code = 0, rejected_code = 0; // S11-T00
+    std::uint64_t rejected_busy = 0; // S11-T00: a proof while not accepting (set_accepting(false))
 };
 
 struct PlayerView
@@ -195,6 +201,13 @@ public:
     // connection, so a producer can pace critical traffic below its bound.
     bool backlog(const proto::Uuid128& player, net::ChannelId channel, net::ChannelBacklog& out) const;
     const ServerCounters& counters() const { return counters_; }
+    // S11-T00: while false, an authenticated player gets Reject ServerBusy (the client retries): the game
+    // replaces its world and a session started now would not survive into the new one.
+    void set_accepting(bool accepting) { accepting_ = accepting; }
+    bool accepting() const { return accepting_; }
+    // S11-T00: the players the join code added since the last call (for the
+    // host to keep in its roster file); public data only.
+    std::vector<RosterEntry> take_added_by_code();
     // Diagnostic lines (never contain credentials, nonces or tokens).
     const std::vector<std::string>& log() const { return log_; }
 
@@ -266,5 +279,7 @@ private:
     ServerCounters counters_;
     std::vector<std::string> log_;
     std::uint64_t nextJoinSerial_ = 1;
+    std::vector<RosterEntry> addedByCode_;
+    bool accepting_ = true;
 };
 } // namespace coop::session

@@ -47,6 +47,10 @@ constexpr std::uint16_t kProtocolMajor = 1;
 // 1.8 + S10-T07: the companion order kind (28); no wire layout change.
 // 1.8 + S10-T07 (B4/B7/B21): the zoom button (bit 5), the state_bits layouts
 // per entity class; no wire layout change.
+// 1.8 + S11-T00: AuthProof's optional join fields (a player not in the
+// roster joins with the host's join code); older proofs decode unchanged.
+// 1.8 + S11-T00: RejectReason 9 ServerBusy (the server is replacing its
+// world; the client retries).
 // 1.8 + S10-T07 (G10): the field repair kind (29), reason 47 (no shelter to
 // sleep), kind 19's optional trailing flags byte (bit 0: a donation); no wire
 // layout change.
@@ -176,6 +180,13 @@ struct AuthChallenge // server -> client, control, after Hello
 struct AuthProof // client -> server, control, answers AuthChallenge
 {
     std::array<std::uint8_t, kSignatureBytes> signature{}; // over the transcript (session/auth.h)
+    // S11-T00: a player not yet in the roster joins with the host's join code:
+    // its public key (the signature above verifies against it) and a hash of
+    // the code bound to this transcript and key (session/auth.h join_mac).
+    // Optional trailing fields: absent unless join.
+    bool join = false;
+    std::array<std::uint8_t, 64> public_key{};
+    Digest join_mac{};
 };
 
 struct Welcome // server -> client, control
@@ -202,6 +213,7 @@ enum class RejectReason : std::uint16_t
     Malformed = 6,
     RateLimited = 7,
     ResumeExpired = 8,
+    ServerBusy = 9, // S11-T00: the server is loading a world (a new game's first level, a travel's reload): retry
     Other = 100,
 };
 

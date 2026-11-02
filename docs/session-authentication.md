@@ -78,6 +78,36 @@ GNS takes its root CA key at compile time,
 library) or application-level encryption keyed by this handshake. Recorded
 for release qualification (G11, R06).
 
+## Joining with the host's code (S11-T00)
+
+A player the roster does not list yet can join with the host's **join code**
+(10 letters and digits from an unambiguous alphabet, shown `XXXXX-XXXXX`),
+which the host's co-op menu writes into the server's app data
+(`coop-join-code.txt`) each time it hosts.
+
+- The client's `AuthProof` then also carries its **public key** and
+  `join_mac = SHA-256("COOP-JOIN-v1" || code || transcript || public key)`:
+  the code itself never crosses the wire, and the hash is good for one
+  connection (the transcript holds both nonces) and one key.
+- The server checks the signature against that key and the hash against its
+  code (constant-time compare). If both hold and a slot is free, the player is
+  added to the roster (`take_added_by_code`); the campaign server appends the
+  roster line to the roster file and binds the player to the free participant
+  slot before its `Joined`. From then on the player is a roster player: its
+  reconnects and the next server start need no code.
+- A wrong code, a server with no code, or no free slot: `AuthFailed`, like an
+  unknown key (`rejected_code` counts them).
+- The proof's join fields are optional trailing bytes: a plain proof decodes
+  as before.
+- While the campaign server replaces its world (a travel's reload, a new
+  game's first level), an authenticated player gets `Reject ServerBusy` (9)
+  and its client retries: a session started then would be attached to the
+  registry the reload replaces.
+
+What it changes: anyone who learns the code while a slot is free can take
+that slot. Over Tailscale (the supported route) only machines on the host's
+tailnet reach the server at all.
+
 ## Join rules (`session::Server`)
 
 - **Order:** Hello, then AuthProof, then the session. Anything else before the

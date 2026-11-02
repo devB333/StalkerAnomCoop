@@ -12,9 +12,16 @@ param(
     [string]$Exe = (Join-Path (Split-Path $PSScriptRoot -Parent) 'builds\stage2\campaign\_game\bin_dbg\AnomalyCampaignServer.exe')
 )
 $ErrorActionPreference = 'Stop'
+# S11-T00: started hidden by the host's co-op menu: its lines also go to the runtime's app data logs
+$launcherLog = Join-Path $Runtime 'appdata\logs\coop-launcher.log'
+New-Item -ItemType Directory (Split-Path $launcherLog -Parent) -Force | Out-Null
+function Say([string]$line) {
+    Write-Host $line
+    Add-Content -Path $launcherLog -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $line)
+}
 while ($true) {
     $arguments = '-campaign-serve -snd_cpu -fsltx ' + $Fsgame + ' -coop-config ' + $Profile
-    Write-Host ("starting: " + $arguments)
+    Say ("starting: " + $arguments)
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = $Exe
     $start.Arguments = $arguments
@@ -25,17 +32,17 @@ while ($true) {
     $process = [System.Diagnostics.Process]::Start($start)
     $process.WaitForExit()
     if ($process.ExitCode -ne 75) {
-        Write-Host ("server exited with " + $process.ExitCode)
+        Say ("server exited with " + $process.ExitCode)
         exit $process.ExitCode
     }
     $file = Join-Path $Runtime 'appdata\coop-relaunch.ltx'
-    if (-not (Test-Path $file)) { Write-Host 'relaunch asked but no coop-relaunch.ltx'; exit 75 }
+    if (-not (Test-Path $file)) { Say 'relaunch asked but no coop-relaunch.ltx'; exit 75 }
     $values = @{}
     foreach ($line in Get-Content $file) {
         if ($line -match '^\s*([a-z_]+)\s*=\s*(.*?)\s*$') { $values[$Matches[1]] = $Matches[2] }
     }
     Move-Item $file ($file + '.used') -Force
-    Write-Host ("switching to campaign " + $values['campaign'] + " (" + $values['why'] + ")")
+    Say ("switching to campaign " + $values['campaign'] + " (" + $values['why'] + ")")
     $Fsgame = $values['fsgame']
     $Profile = $values['profile']
 }

@@ -661,6 +661,20 @@ demo kit (profile `demo_kit`, with `arm`): a pistol repair kit and a tent, the
 pistol worn to 80 % and the player sleepy, for the hands-on checks. Single
 player: unchanged.
 
+`0095-local-hosting.patch` (S11-T00, 2026-11-02): local hosting over
+Tailscale and the host and join menu. The client's co-op menu (only with app
+data `coop-menu.ltx`): New game offers Host (a new or the last campaign: the
+key in the server's roster, a join code and the choice in its app data, the
+launcher started hidden, a join at 127.0.0.1) and Join (the installed
+direct-IP box: address and join code; the key made on first use); the link
+starts at run time from a profile the menu writes (values quoted: CInifile
+drops spaces outside quotes; the config reader unquotes). The campaign
+server: the join code from its app data, the host's choice served by a
+relaunch from the prepare stage (`x_ray.cpp`: exit 75), a code-joined player
+kept in the roster file and bound at run time (never the owner), every
+binding pass on a fresh registry, no join while a travel replaces the world
+(ServerBusy). Single player: unchanged without `coop-menu.ltx`.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

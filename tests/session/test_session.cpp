@@ -1,5 +1,6 @@
 // Sessions bound to canonical players (S04-T04), on the fake and on GNS.
 #include "session_rig.h"
+#include <cctype>
 
 namespace coop::test
 {
@@ -437,6 +438,132 @@ SCENARIO("session/handshake-timeout-and-order")
     CHECK(srv.count(SessionEventType::Joined) == 0);
     for (const auto& line : srv.s->log())
         note(line);
+}
+
+// S11-T00: a player not in the roster joins with the host's join code; a wrong
+// code, no code on the server, or no free slot is refused; the new player is
+// kept in the roster for its reconnects and handed to the host once.
+SCENARIO("session/join-code")
+{
+    Cast cast = MakeCast(1); // the host
+    ServerConfig cfg = SConfig();
+    cfg.join_code = make_join_code();
+    REQUIRE(cfg.join_code.size() == 11 && cfg.join_code[5] == '-');
+    std::string norm;
+    CHECK(normalize_join_code(cfg.join_code, norm) && norm.size() == 10);
+    std::string lower = cfg.join_code;
+    for (char& ch : lower)
+        ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    std::string norm2;
+    CHECK(normalize_join_code(lower, norm2) && norm2 == norm);
+    CHECK(!normalize_join_code("ABCDE-0OIL1", norm2)); // ambiguous symbols are not in the alphabet
+    Srv srv(rig, cast, cfg);
+    auto join = [&](Cli& c) {
+        REQUIRE(c.c->connect(srv.address));
+        return Run(rig, [&] {
+            srv.update();
+            c.update();
+            return c.c->state() == ClientState::Active || c.c->state() == ClientState::Ended;
+        }, 5000);
+    };
+    auto fresh = [](PrivateKey& k, PublicKey& pub, Uuid128& id) {
+        REQUIRE(generate_key(k, pub));
+        id = random_uuid();
+    };
+    // a wrong code
+    PrivateKey kw;
+    PublicKey pw;
+    Uuid128 iw;
+    fresh(kw, pw, iw);
+    Cli wrong(rig, iw, std::move(kw), Build(), {}, std::nullopt, "22222-22222");
+    REQUIRE(join(wrong));
+    REQUIRE(wrong.find(ClientEventType::Rejected));
+    CHECK(wrong.find(ClientEventType::Rejected)->reject.reason == std::uint16_t(proto::RejectReason::AuthFailed));
+    CHECK(srv.s->counters().rejected_code == 1 && srv.s->take_added_by_code().empty());
+    // the right code (any case, no separator)
+    PrivateKey kn;
+    PublicKey pn;
+    Uuid128 in;
+    fresh(kn, pn, in);
+    PrivateKey kn2 = Copy(kn);
+    Cli friend1(rig, in, std::move(kn), Build(), {}, std::nullopt, lower);
+    REQUIRE(join(friend1));
+    REQUIRE(friend1.c->state() == ClientState::Active);
+    CHECK(friend1.c->welcome().player_id == in);
+    const auto added = srv.s->take_added_by_code();
+    REQUIRE(added.size() == 1);
+    CHECK(added[0].player_id == in && added[0].key == pn && added[0].display_name == "p");
+    CHECK(srv.s->take_added_by_code().empty()); // handed over once
+    CHECK(srv.s->counters().joined_by_code == 1);
+    // the host still joins by its roster key
+    Cli host(rig, cast.ids[0], Copy(*cast.keys[0]));
+    REQUIRE(join(host));
+    CHECK(host.c->state() == ClientState::Active);
+    // both slots taken: another new player with the right code is refused
+    PrivateKey k3;
+    PublicKey p3;
+    Uuid128 i3;
+    fresh(k3, p3, i3);
+    Cli third(rig, i3, std::move(k3), Build(), {}, std::nullopt, cfg.join_code);
+    REQUIRE(join(third));
+    CHECK(third.find(ClientEventType::Rejected) != nullptr);
+    CHECK(srv.s->counters().rejected_code == 2);
+    // the friend reconnects with its key and no code: it is in the roster now
+    friend1.c->close(net::close_code::kNormal, "bye");
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        return srv.count(SessionEventType::Left) >= 1;
+    }, 5000));
+    Cli again(rig, in, std::move(kn2));
+    REQUIRE(join(again));
+    CHECK(again.c->state() == ClientState::Active && again.c->welcome().slot == friend1.c->welcome().slot);
+}
+
+// S11-T00: with no join code on the server a join proof is an unknown player.
+SCENARIO("session/join-code-off")
+{
+    Cast cast = MakeCast(1);
+    Srv srv(rig, cast);
+    PrivateKey k;
+    PublicKey pub;
+    REQUIRE(generate_key(k, pub));
+    Cli c(rig, random_uuid(), std::move(k), Build(), {}, std::nullopt, make_join_code());
+    REQUIRE(c.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        c.update();
+        return c.c->state() == ClientState::Ended;
+    }, 5000));
+    REQUIRE(c.find(ClientEventType::Rejected));
+    CHECK(c.find(ClientEventType::Rejected)->reject.reason == std::uint16_t(proto::RejectReason::AuthFailed));
+    CHECK(srv.s->counters().joined_by_code == 0);
+}
+
+// S11-T00: while the game replaces its world the server answers ServerBusy; afterwards the same player joins.
+SCENARIO("session/busy-while-loading")
+{
+    Cast cast = MakeCast(1);
+    Srv srv(rig, cast);
+    srv.s->set_accepting(false);
+    Cli a(rig, cast.ids[0], Copy(*cast.keys[0]));
+    REQUIRE(a.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        a.update();
+        return a.c->state() == ClientState::Ended;
+    }, 5000));
+    REQUIRE(a.find(ClientEventType::Rejected));
+    CHECK(a.find(ClientEventType::Rejected)->reject.reason == std::uint16_t(proto::RejectReason::ServerBusy));
+    CHECK(srv.s->counters().rejected_busy == 1 && srv.count(SessionEventType::Joined) == 0);
+    srv.s->set_accepting(true);
+    Cli b(rig, cast.ids[0], Copy(*cast.keys[0]));
+    REQUIRE(b.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        b.update();
+        return b.c->state() == ClientState::Active;
+    }, 5000));
+    CHECK(srv.count(SessionEventType::Joined) == 1);
 }
 
 SCENARIO("session/no-credentials-in-diagnostics")

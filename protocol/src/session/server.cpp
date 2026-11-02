@@ -386,13 +386,55 @@ void Server::onHello(Conn& c, const proto::Hello& h)
     c.state = State::AwaitProof;
 }
 
+std::vector<RosterEntry> Server::take_added_by_code()
+{
+    std::vector<RosterEntry> out;
+    out.swap(addedByCode_);
+    return out;
+}
+
 void Server::onProof(Conn& c, const proto::AuthProof& p, std::vector<SessionEvent>& out)
 {
     const RosterEntry* who = roster_.find(c.hello.player_id);
+    if (!who && p.join && !config_.join_code.empty())
+    {
+        // S11-T00: a new player with the host's join code, while a slot is free
+        bool free = false;
+        for (const Slot& s : slots_)
+            free = free || !s.bound;
+        RosterEntry e;
+        e.player_id = c.hello.player_id;
+        e.key = p.public_key;
+        e.display_name = c.hello.display_name;
+        bool printable = !e.display_name.empty() && e.display_name.size() <= proto::kMaxDisplayName;
+        for (char ch : e.display_name)
+            printable = printable && ch >= 0x20 && ch < 0x7F;
+        if (!printable)
+            e.display_name = "Player";
+        std::string error;
+        if (free && check_join_proof(c.hello, c.challenge, config_.join_code, p) && roster_.add(e, &error))
+        {
+            ++counters_.joined_by_code;
+            addedByCode_.push_back(e);
+            note("a new player joined with the join code from " + c.address);
+            who = roster_.find(c.hello.player_id);
+        }
+        else
+        {
+            ++counters_.rejected_code;
+            note("a join code proof was refused from " + c.address + (free ? "" : " (no free slot)") +
+                 (error.empty() ? "" : " (" + error + ")"));
+        }
+    }
     if (!who || !check_proof(c.hello, c.challenge, who->key, p))
     {
         ++counters_.rejected_auth;
         return reject(c, proto::RejectReason::AuthFailed, "authentication failed");
+    }
+    if (!accepting_)
+    {
+        ++counters_.rejected_busy;
+        return reject(c, proto::RejectReason::ServerBusy, "the server is loading a world; try again");
     }
     // The player's slot: theirs from before (reconnect), else a free one.
     int slot = -1;

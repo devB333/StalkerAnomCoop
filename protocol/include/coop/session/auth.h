@@ -32,6 +32,20 @@ bool make_proof(const proto::Hello& hello, const proto::AuthChallenge& challenge
 bool check_proof(const proto::Hello& hello, const proto::AuthChallenge& challenge, const PublicKey& pub,
     const proto::AuthProof& proof);
 
+// S11-T00: joining with the host's join code. A join code is 10 letters and
+// digits from an unambiguous alphabet (no 0/O, 1/I/L), shown as XXXXX-XXXXX;
+// normalize_join_code accepts it in any case with or without separators.
+// The proof carries the player's public key and join_mac(code, transcript,
+// key), so the code itself never crosses the wire and the hash is good for
+// one connection, one player key.
+std::string make_join_code();
+bool normalize_join_code(const std::string& in, std::string& out);
+proto::Digest join_mac(const std::string& code, const proto::Digest& transcript, const PublicKey& pub);
+bool make_join_proof(const proto::Hello& hello, const proto::AuthChallenge& challenge, const PrivateKey& key,
+    const std::string& code, proto::AuthProof& proof);
+bool check_join_proof(const proto::Hello& hello, const proto::AuthChallenge& challenge, const std::string& code,
+    const proto::AuthProof& proof);
+
 struct RosterEntry
 {
     proto::Uuid128 player_id;

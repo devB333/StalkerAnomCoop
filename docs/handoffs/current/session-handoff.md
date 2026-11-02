@@ -1,83 +1,71 @@
-# Session handoff — the G10 revisions are in code; the user's hands-on session decides
+# Session handoff — G10 waits on the user's verification; S11-T00 (local hosting) built, waiting on a two-PC test
 
 ## State (2026-11-02)
 
-- **All nine G10 revisions are in code** (patch **0093** `g10-revisions`,
-  engine-work equals the series of 93; builds **campaign-429 / client-311**;
-  protocol **proto-build-60**, st-35 pass). Report:
-  [S10-T07](../../validation/S10-T07.md) part 7. The choices made while
-  implementing them are decision rows **G10-1…G10-9** in
-  [Stage 10 decisions](../../stage10-decisions.md), for the user's word at
-  the gate.
-- Fixture runs pass: **bugfix-17** (sleep, with a new shelter round) and
-  **bugfix-18** (party task, with the clicker's purse, the item and the fail
-  penalty probes).
-- Mechanic lending as built was OK'd by the user on Discord (2026-11-02:
-  "Yeah go ahead with that").
-- New bug row **B25** (Donate was paid as a sale) fixed in code.
-- **The user was sent the demo command on Discord** and may be testing:
-  `bash tools/start-coop-demo.sh S10-T07 0 30 120 0` (the next free run is
-  `demo-6`). Read `builds/logs/S10-T07/run-demo-<n>` and
-  `builds/stage2/test-install/S10-T07/demo-<n>-*/appdata/logs` afterwards.
+- **G10**: all nine revisions in code (patch 0093), plus B26 (a world item's
+  pickup crashed a client: patch 0094) and the demo kit. Only the user's
+  hands-on verification is left ([S10-T07](../../validation/S10-T07.md) parts
+  7-8, decision rows G10-1…G10-9 in
+  [Stage 10 decisions](../../stage10-decisions.md)). Demo command for it:
+  `bash tools/start-coop-demo.sh S10-T07 0 30 120 0 1` (last argument: the
+  demo kit: a repair kit, a tent, a worn pistol, sleepy players).
+- **Stage 11 started by the user's direction** (Discord, 2026-11-02): S11-T00
+  local hosting and the host and join menu ([S11-T00](../../validation/S11-T00.md),
+  patch **0095** `local-hosting`, engine-work equals the series of 95). Builds
+  **campaign-440 / client-322**, protocol **proto-build-63** (st-38: 122/122).
+  menu-7 (new campaign, then continue and rejoin) and kit-7 (the delivered
+  kits) pass on this PC.
+- **Kits for the user** (`tools/make-coop-kit.py`):
+  `builds/kits/host-3/Start-Coop.cmd` (this PC hosts; its server runtime is
+  `builds/stage2/test-install/S11-T00/kit-host-3-server`) and
+  `builds/kits/friend-3.zip` (for the friend's PC: unzip, run
+  `Setup-Coop.ps1`, then `Start-Coop.cmd`; in the game New game > Join co-op:
+  Host = the host's Tailscale address, this PC's is 100.94.188.110, Password =
+  the join code the host's menu shows).
+- The user is away and reachable on Discord (chat `1566639386420973638`,
+  reply with the Discord reply tool); they asked to be kept updated.
 
 ## Next
 
-1. The user's session: the checklist sent on Discord: the New game screen
-   (no Ironman / Azazel / Survival / Warfare); sleep only in shelter (the
-   partner told to find shelter); Donate gives for 0 RU; a repair kit's
-   window and repair; mechanic lending (lend and ready news, own items only);
-   one player away 5+ minutes then back (`parked` / `unparked` lines); and
-   B7 (the partner's aim pose, the controller's pull), B10 (the
-   bloodsucker's grab), B24 (no crash; `[B24] blend list full` lines name
-   the model).
-2. Record the result in S10-T07 (part 8) and the bug list; fix what fails.
-3. Present G10-1…G10-9 and the part 7 limits (the workbench `ui_workshop`
-   not routed; both players away keeps player 1's area online) for the
-   user's word; close G10 only on the user's word.
+1. The user's G10 verification (checklist sent on Discord) and the two-PC
+   test over Tailscale with the kits. Record both (S10-T07 part 9, S11-T00).
+2. Close G10 only on the user's word (present G10-1…G10-9 and the part 7
+   limits: the workbench `ui_workshop` not routed; both players away keeps
+   player 1's area online).
+3. Stage 11 work that needs no hands-on: S11-T01 (adverse-network
+   qualification on one PC with simulated loss and lag), S11-T03, S11-T04.
+   S11-T02 needs the B5 permission (ProcDump).
 
-## Network test (the user wants one; independent of G10)
+## Picking this up
 
-Unchanged: waiting on the user's choice of route (Tailscale or forwarding
-UDP 27515; Cloudflare cannot host the server). The other PC needs Anomaly
-1.5.3, a client kit and its own player key
-([session authentication](../../session-authentication.md)).
-
-## Picking this up (for a new session or model)
-
-- **Read first**: `CLAUDE.md` / `AGENTS.md`, `plan.md` §I, this file,
-  [G10](../../validation/G10.md) "The user's review", S10-T07 part 7.
-- **The user** owns gameplay design and tests look-and-feel by hand; never
-  call such a fix done before their session. Away, they use Discord (chat
-  `1566639386420973638`, reply with the Discord reply tool). They are
-  learning C++ and X-Ray: short answers, a one-line "why".
-- **Engine source first**: `engine/xray-monolith/src` (read only). Edit only
-  `builds/build_1/engine-work`. Game scripts: extract with
-  `python3 tools/xray-db-extract.py -q extract -m .script -o <dir>
-  /mnt/c/Users/djb20/StalkerAnom/db/configs/scripts.db0` (files are CRLF,
-  latin-1: use `grep -a`).
-- **The G10 Lua adapter** (`g10_source` in `CoopServerHost.cpp`) is long:
-  it was written as a plain Lua file and converted to C string lines; keep
-  its `P.wrapped` count in mind (`party-adapter installed wrapped=14`).
-- **One cycle**: edit → `Build-Stage2.ps1` Campaign and Client with
-  `-ProtocolBuild proto-build-60` (background; do not edit engine-work while
-  a build compiles) → `python3 tools/export-engine-patch.py
-  <NNNN-name>.patch <check>` → `docs/source-manifest.json`,
-  `patches/engine/README.md`, the report, known-issues, handoff (snapshot
-  first), commit.
-- **Before a build**, list running processes under `builds\`; ask the user
-  before stopping a leftover campaign server.
-- **Pitfalls**: a failed build still uses its run name; release builds lack
-  debug-only APIs; `svector::push_back` checks its bound only in debug; an
-  `extern` in `CoopClientLink.cpp` must sit at global scope; use absolute
-  paths (the bash working directory persists).
+- Read `CLAUDE.md` / `AGENTS.md`, `plan.md` §I, this file, then the S10-T07
+  and S11-T00 reports.
+- **The menu** exists only when a client's app data holds `coop-menu.ltx`;
+  test runs: `python3 tools/prepare-coop-menu.py <run> --test` then
+  `tools/Run-CoopMenuTest.ps1 -Run <run> -Phases 2` (clients start without
+  `-coop-config`). Kit runs: `tools/Test-CoopKits.ps1`.
+- **CInifile drops spaces outside double quotes** (`_parse`): quote any value
+  with spaces in a co-op profile (the config reader unquotes). Do not pass a
+  quoted `-fsltx` path (the quotes stay in the name); without `-fsltx` the
+  engine finds `fsgame.ltx` beside `bin`.
+- **One cycle**: edit engine-work → `Build-Stage2.ps1` Campaign and Client
+  with `-ProtocolBuild proto-build-63` (a protocol change needs a new
+  protocol build first) → `python3 tools/export-engine-patch.py
+  <NNNN-name>.patch <check>` → manifest, README, report, handoff, commit.
+  Do not edit engine-work while a build compiles.
+- Before a build or a run, check for running `AnomalyDX11` /
+  `AnomalyCampaignServer` processes; ask the user before stopping one they
+  started.
 
 ## Run names
 
-- Used: `campaign-334…429`, `client-226…311`, `proto-build-53…60`,
-  `st-28…35`, `bugfix-1…18`, `demo-1…5` (S10-T07), patch checks 77–105.
-- Next: `campaign-430`, `client-312`, `proto-build-61`, `st-36`,
-  `bugfix-19`, patch check 106, `demo-6`.
+- Used: `campaign-334…440`, `client-226…322`, `proto-build-53…63`,
+  `st-28…38`, `bugfix-1…19`, `demo-1…6` (S10-T07), `menu-1…7`, `kit-1…7`
+  (S11-T00), patch checks 77–107, kits host-1…3, friend-1…3.
+- Next: `campaign-441`, `client-323`, `proto-build-64`, `st-39`,
+  `bugfix-20`, `demo-7`, `menu-8`, `kit-8`, patch check 108, kits host-4,
+  friend-4.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before the G10 revisions' hands-on](../done/snapshot-before-G10-revisions-hands-on.md).
+Previous snapshot: [before S11-T00 and the two-PC test](../done/snapshot-before-S11-T00-two-pc-test.md).

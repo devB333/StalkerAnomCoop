@@ -12,6 +12,16 @@ added T01-17…T01-19 → "I approve the rest"). They bind Stage 10's children;
 none is implemented yet by S10-T01 itself. Later Stage 10 children add
 their own rows here for approval at G10.
 
+**G10 review, 2026-11-02:** the user approved every later row except these
+revisions, which are implemented before the gate closes (details in
+[G10](validation/G10.md)): **T05b-4** the player who clicked pays a task's
+money cost; **T03b-2** bounty squads come for the player with the worse
+standing; **T04f-2** mechanic lending is always on in co-op, as long as a lent
+item is easy to track; **T03a-2** an absent player's area stays live 5
+minutes, then its character is parked (safe, offline) until it rejoins;
+**T03c-2** both players must be in shelter to sleep. Superseded by later
+fixes: T02a-2, T02c-3, T02d-3, T02f-5, T03f-2, T04a-4, T04f-4.
+
 Decisions D4 (explicit participants; player 2 is not a companion), D5 (party
 travel with both confirmations) and the Stage 8 policies (one party task,
 the anchor, per-player rewards and inventories, T07/T08/T09 rows in

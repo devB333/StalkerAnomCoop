@@ -1,50 +1,63 @@
-# Session handoff — S10-T07: B1, B4 and B23 fixed hands-on; crash B24 fixed in code; next the G10 review and a two-PC network test
+# Session handoff — G10 reviewed by the user; nine revisions to implement before the gate closes
 
 ## State (2026-11-02)
 
-- **demo-5** (campaign-426 / client-309): the user: "the bugs are fixed".
-  B4 (NPC facing and hip twist) and B23 (fire lag, with the default of no
-  campfire shadow) are **fixed**; B1 (trade panel) was fixed in demo-4.
-  B22 (jump): no complaint since demo-3.
-- **B24 (new)**: client 2 crashed animating the other player. A part's blend
-  list (`svector`, 16) overflowed in release and the next fade walked off its
-  end (minidump: access violation reading 0x12). Patch **0092**
-  `blend-list-guard` retires the oldest blend and logs `[B24] blend list
-  full`. Builds **campaign-427 / client-310**; **not run yet**. What churns
-  the remote body's legs is not proven (lead: `g_cl_ValidateMState` in the
-  remote branch of `CActor::UpdateCL`). Report:
-  [S10-T07](../../validation/S10-T07.md), "Part 6".
-- Engine-work equals patch 0092.
+- **The user reviewed G10 item by item** (2026-11-02). Every Stage 10
+  decision and new limit is answered: [G10](../../validation/G10.md) "The
+  user's review", the outcome paragraph in
+  [Stage 10 decisions](../../stage10-decisions.md), and new limits
+  **L60-L72** in [carried limits](../../carried-limits.md).
+- Bug pass: B1, B2, B4, B22, B23 fixed (hands-on); B5, B20 carried to
+  S11-T02 (L59, L70); B9 waived (L66); B11 carried (L72); B21's rest carried
+  to S11-T01 (L71). **B24** (a client crash animating the other player) is
+  fixed in code (patch 0092, campaign-427 / client-310) but **not run yet**.
+- Engine-work equals patch 0092 (commit 660d212).
 
-## What G10 still needs (the user asked; summary given 2026-11-02)
+## Next: the nine revisions (S10-T07 continues; then the gate)
 
-1. **Bug pass**: the user's word on B2 (a task marker at a far target, one
-   icon after death and respawn), B7 (the partner's aim pose, the
-   controller's pull) and B10 (the look of the bloodsucker's grab); decisions
-   on B5 and B20 (crash-dump permission, or carry as limits), B9 (a
-   "pending" mark, or waive) and B21's rest (fix, or carry); B11 carried; B24
-   seen not to recur.
-2. **Decision review**: the questions T05b-4 (who pays a task's money cost)
-   and T03b-2 (what attracts bounty hit squads), then 103 decisions
-   (T02a…T07-10) item by item, in short batches with a recommendation each.
-3. New limits L60… and the [G10](../../validation/G10.md) report updated
-   (it still describes part 2); close G10.
+1. **T05b-4**: a task's money cost is paid by the player who clicked (today
+   player 1's purse: `db.actor:money()` / `transfer_money` in task logic).
+2. **T03b-2**: bounty hit squads are triggered by either player, by the
+   worse standing (`sim_squad_bounty.spawn_timer` reads player 1 today).
+3. **T04f-2**: mechanic lending always on in co-op
+   (`gameplay/general/mechanic_feature`, default off; the server's
+   `axr_options.ltx` leaves it unset). Find how the installed scripts track a
+   lent item (`axr_trade_manager.script` and the mechanic's dialogue). If it
+   is not easy to follow, ask the user before closing.
+4. **T03a-2**: an absent player's area stays live 5 minutes after the leave,
+   then its character is parked (its area goes offline, it cannot be hurt,
+   NPCs ignore it) and unparked on the rejoin. Today detached actors stay
+   with no limit (`CoopServerHost.cpp` detach, around line 18418).
+5. **T03c-2**: both players must be in shelter to sleep (a sleep zone,
+   `ui_sleep_dialog.sleep_zones` / `current_safe_cover`, or within 1.5 m of
+   their own tent, `item_tent.get_nearby_tent`). The partner's USE counts
+   only there; otherwise it is told to find shelter.
+6. **Item rewards to both**: `xr_effects.give_reward` / stored rewards and
+   `alife_create_item` outside `reward_item` go to the anchor only today
+   ([S10-T05b](../../validation/S10-T05b.md) limits).
+7. **A failed or cancelled party task's goodwill penalty to both**
+   (`fail_task_dec_goodwill`, not wrapped today).
+8. **Story mode only**: remove Warfare, Azazel, Ironman and Survival from
+   co-op (the creation screen and the server's create check, T06-3).
+9. **The trade window's donate and the field workshop repair
+   (`ui_workshop`) through the server**, like trade and the mechanic's
+   repair.
 
-## Network test (the user wants one tonight; independent of G10)
+Then: build, fixture runs where a fixture fits, and the user's hands-on
+session, which also checks B7 (the partner's aim pose, the controller's
+pull), B10 (the bloodsucker's grab) and B24 (no recurrence; `[B24] blend list
+full` lines name the churning model). Update G10 and close it only on the
+user's word.
 
-- The user asked about hosting on Cloudflare. Cloudflare cannot run the
-  server (a Windows program with the game files). It could carry the
-  connection to this PC: Cloudflare Tunnel (`cloudflared`) plus the
-  Cloudflare One (WARP) client on the other PC (UDP supported; untested with
-  GNS). The recommendation was Tailscale or forwarding UDP 27515.
-  **Waiting on the user's choice.**
-- The other PC has no Anomaly 1.5.3 install yet (the user is not sure).
-- The other PC needs: Anomaly 1.5.3; a client kit (the client build, the
-  `gamedata` overlay, `fsgame.ltx` pointing at its install, a `coop.ltx`
-  with `server = <host>:27515`); a player key made **on that PC**
-  (`coop-keytool new-player`, encrypted with DPAPI), whose printed roster line
-  goes into the host's roster ([session authentication](../../session-authentication.md)).
-  The server already listens on `0.0.0.0:27515`.
+## Network test (the user wants one; independent of G10)
+
+Cloudflare cannot host the server (a Windows program with the game files).
+It could carry the connection: Cloudflare Tunnel and the Cloudflare One
+client, UDP, untested with GNS. The recommendation is Tailscale or forwarding
+UDP 27515. The other PC needs Anomaly 1.5.3 (not installed yet), a client
+kit and its own player key (`coop-keytool new-player`, DPAPI) whose roster
+line the host adds ([session authentication](../../session-authentication.md)).
+Waiting on the user's choice of route.
 
 ## Run names
 
@@ -55,4 +68,4 @@
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before the G10 review and the network test](../done/snapshot-before-G10-review-and-network-test.md).
+Previous snapshot: [before the G10 revisions](../done/snapshot-before-G10-revisions.md).

@@ -619,6 +619,14 @@ T07-10); a hidden trade partner panel in the Lua trade window is shown and
 filled when the window opens, with a `panel=` probe on `trade-open` (B1).
 Single player is unchanged.
 
+`0091-bug-pass-5.patch` (S10-T07 part 5, 2026-11-02): a stalker replica runs
+no sight action or aiming of its own; its upper body turns by the server's
+head aim from the body only, with the torso share of the server's mental
+state (B4: the hips twisted toward the replica's own stale look). A co-op
+client's campfire casts no shadow by default; the game-console settings
+`coop_campfire_shadow <m>` and `coop_campfire_light 0/1`, and a `frame-trace`
+line near fires (B23). Single player is unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

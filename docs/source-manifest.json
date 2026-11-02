@@ -369,6 +369,10 @@
     {
       "path": "patches/engine/0090-bug-pass-4.patch",
       "sha256": "e0b0cff8aa0b4182a09d6b62f4256db0a956022f5b4001e1396b971ff2ef2595"
+    },
+    {
+      "path": "patches/engine/0091-bug-pass-5.patch",
+      "sha256": "2f582834f9d445c159eb7dbd40409a024ceb876c852a7a2e61787b78d66dc803"
     }
   ],
   "submodules": [

@@ -717,6 +717,16 @@ installed 1.5 m holds one player, not two and a sleeping bag); a refused
 sleep request shows only its own words. The demo kit adds an AK-74 and three
 boxes of 5.45x39 (the user's rifle animation check). Single player: unchanged.
 
+`0101-effects-per-player-body-loot.patch` (S10-T07, 2026-11-02): the user's
+demo-11. B35: the installed `actor_effects` hit flash, bleeding, blood and
+radiation effects run on the server for each player in its context with its
+own state (they ran for player 1 outside a context and reached both
+screens); the server's effect de-duplication is keyed by audience and id.
+B36: on a client `get_object_by_id(0)` is the real object unless it is the
+client's own actor (the loot window moved player 1's body's items "from the
+player to the player"); a same-owner move is not sent; malformed transfers
+are logged with their check. Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

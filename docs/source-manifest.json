@@ -409,6 +409,10 @@
     {
       "path": "patches/engine/0100-tent-shelter-rifle-kit.patch",
       "sha256": "e154599bf6386fc3540d803b16a6bf6bbf3b1f66f736fa4e6f52e4a75e675ba9"
+    },
+    {
+      "path": "patches/engine/0101-effects-per-player-body-loot.patch",
+      "sha256": "0dc3fbdef2c3165285aa2df2819d7e5ef99f8558b23872ca7c73b2b592e9f344"
     }
   ],
   "submodules": [

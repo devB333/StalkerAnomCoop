@@ -425,6 +425,10 @@
     {
       "path": "patches/engine/0104-host-actor-fallback-spot-text.patch",
       "sha256": "11a369d8545920a822e0e791858fcbfe15719bf01bb6dcf723bedd3a1d20b788"
+    },
+    {
+      "path": "patches/engine/0105-travel-resume-fallback-itemswap.patch",
+      "sha256": "52708a255ffe25d786f79f8707d75da32b58c9a988776c500103e89f506f4520"
     }
   ],
   "submodules": [

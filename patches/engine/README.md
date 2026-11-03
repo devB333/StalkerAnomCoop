@@ -751,6 +751,15 @@ installed actor update (task targets, weather, `actor_on_update`) goes on
 after player 1's respawn. B42: a map spot's long detail is truncated, not
 fatal (`record_presentation`, `present_map_spot`). Single player: unchanged.
 
+`0105-travel-resume-fallback-itemswap.patch` (S10-T07, 2026-11-03): the
+user's demo-15. B43: B41's fallback holds no object across frames (it looks
+the binder's actor and the living one up by id, actors only): a level
+reload destroyed the held actor and the next `db.actor` read crashed the
+server (0xC0000005 at the travel); the installed weapon draw/holster camera
+nudge (`actor_effects.Update_ItemSwap`) runs per player. B44: travel events
+(the resume among them) go to every live player, inputs or not (the clients
+never got the resume after a reload). Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

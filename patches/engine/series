@@ -102,3 +102,4 @@
 0102-npc-weapons-status-hud.patch
 0103-npc-body-loot.patch
 0104-host-actor-fallback-spot-text.patch
+0105-travel-resume-fallback-itemswap.patch

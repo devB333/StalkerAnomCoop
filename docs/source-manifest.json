@@ -393,6 +393,10 @@
     {
       "path": "patches/engine/0096-dedicated-server.patch",
       "sha256": "93f5c22f820c443db70da7156870e4a6b371c00146be05e453a5508c817a35f9"
+    },
+    {
+      "path": "patches/engine/0097-demo7-fixes.patch",
+      "sha256": "a5e2a15afe842e3d80060dfb35c942bd104fc72cad03808968d63ff676f2af99"
     }
   ],
   "submodules": [

@@ -684,6 +684,16 @@ participant (slot 0) and the saved actor (`stand-in-released`,
 (a join code, the Tailscale address, the launcher) and
 `tools/Stop-CoopServer.ps1`. Single player: unchanged.
 
+`0097-demo7-fixes.patch` (S10-T07, 2026-11-02): the user's demo-7 bugs. B27:
+a monster's override animation index past its motion's variants is ignored
+(`select_animation`; the server's motion and index can pair across a
+change). B28: `level.add_call` re-enters the caller's script context (the
+tent is placed by the player who used it), the server's shelter check scans
+every placed tent, a client's placed sleeping bag opens the installed sleep
+window locally with its shelter check left to the server, the demo kit adds
+a sleeping bag. B29: a client moves a settled body to the server's position
+(loot reach). Single player: `select_animation`'s guard only.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

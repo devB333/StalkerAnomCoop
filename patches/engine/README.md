@@ -806,6 +806,21 @@ its crow state and the device's pause. Fixture options `travel_changer` and
 `travel_approach` take the travel fixture through that passage's approach.
 Single player: unchanged.
 
+`0110-torch-demo-quest.patch` (S10-T07, 2026-11-03): B48 (demo-20: the L key
+did nothing). The installed L key (`actor_effects.Hit_TorchToggle` →
+`item_device.toggle_torch`) runs on the client; the light is item_device's
+binder's, from one script-wide `torch_active`, and on the server it kept
+every player's torch off. Now the client's `toggle_torch` (wrapped) asks the
+server (ActionIntent 30, protocol `proto-build-64`), the server switches the
+torch in the player's own torch slot (`torch slot=`), every client shows it
+(Presentation `TorchState`, replayed at a join), and scripts no longer switch
+a player's torch (`torch-script-ignored`) except off at the battery's
+critical level (`torch-battery-off`). The demo kit adds a headlamp in the
+torch slot; the hands-on aid `demo_quest` (`start-coop-demo.sh` 7th
+argument) gives the party Sidorovich's "Mobbing the Mob" with its bandit
+patches, ready to turn in; the client driver `torch_test`. Single player:
+unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

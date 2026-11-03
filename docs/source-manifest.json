@@ -445,6 +445,10 @@
     {
       "path": "patches/engine/0109-server-never-paused.patch",
       "sha256": "c396c518921cb256134e19c1dffc4be5d1a099dbdaf8f2fbd4b4d6eec5047896"
+    },
+    {
+      "path": "patches/engine/0110-torch-demo-quest.patch",
+      "sha256": "606521db8c057bdfaaee99049ecfcff4b1ef609d17a8287ad8fc1b67e29b8ab4"
     }
   ],
   "submodules": [

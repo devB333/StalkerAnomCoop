@@ -466,6 +466,10 @@ enum ActionKind : std::uint16_t
                                // checked and applied on the server in the player's context by the installed
                                // window's rules (41 refused: not a kit, the item or part not accepted by it, the
                                // condition out of its range; 14 an item not in the player's own inventory)
+    kActionTorch = 30,         // S10-T07 (B48): the player's torch (the L key, item_device.toggle_torch on the client);
+                               // target: the torch in the player's own torch slot; params: u8 1 on, 0 off; switched
+                               // on the server (where the NPCs see its light) and shown on every client (presentation
+                               // TorchState); 14 not the player's own item, 21 not a torch in its torch slot
 };
 
 // ActionResult.reason of a Rejected outcome (0 with Accepted). Defined by the

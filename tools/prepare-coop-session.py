@@ -317,6 +317,9 @@ def main():
     parser.add_argument("--client-exit-after", type=int, default=1800,
                         help="a client's own limit on its run in seconds (exit_after_seconds; raise it for a long "
                              "sweep; the server's serve_seconds follows it)")
+    parser.add_argument("--torch-test", default="",
+                        help="S10-T07 (B48) driver: <client>:<seconds> after its world goes live the client presses "
+                             "the torch as the L key does, and again 12 s later")
     parser.add_argument("--relocate-test", default="",
                         help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
                              "same-level fast travel does")
@@ -422,6 +425,7 @@ def main():
     story_fix = {n for n in args.story.split(",") if n}
     music_fix = {n for n in args.music.split(",") if n}
     relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
+    torch_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.torch_test.split(',') if e}
     session_script = {e.split(':')[0]: int(e.split(':')[1]) for e in args.session.split(',') if e}
     companion_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.companion_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
@@ -618,6 +622,7 @@ def main():
                       f"travel_rejoin_delay = {rejoin_delay.get(name, 0)}",
                       f"travel_load_fail = {1 if name in load_fail else 0}",
                       f"relocate_test = {relocate_test.get(name, 0)}",
+                      f"torch_test = {torch_test.get(name, 0)}",
                       f"session_script = {session_script.get(name, 0)}",
                       f"companion_test = {companion_test.get(name, 0)}"]
         profile = runtime / "coop.ltx"

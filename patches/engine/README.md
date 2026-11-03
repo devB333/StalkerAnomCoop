@@ -727,6 +727,16 @@ client's own actor (the loot window moved player 1's body's items "from the
 player to the player"); a same-owner move is not sent; malformed transfers
 are logged with their check. Single player: unchanged.
 
+`0102-npc-weapons-status-hud.patch` (S10-T07, 2026-11-03): the user's
+demo-12. B38: the server sends each NPC stalker's active slot, weapon state
+(bit 7: strapped), ammo and shot counter (`kWeapon`, no wire change); a
+client gives the replica's object handler the item as its goal (idle or
+strapped, never fire) and shows each shot's flash and sound. B39: a client
+makes the installed `actor_status` icon window (its first-update handler
+never runs on a replica); the needs event carries the actor's bleeding speed
+(8th value) for the HUD's blood overlay (`UIMainIngameWnd`). Single player:
+unchanged (the overlay hook answers false).
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

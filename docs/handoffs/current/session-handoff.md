@@ -15,7 +15,7 @@
   their hands-on check is part of the user's verification. demo-8's bugs
   (B30 fire in the inventory, B31 hovering drops and the unseen tent) are
   fixed in patch **0098** (campaign-445 / client-327; S10-T07 part 10);
-  bugfix-21 (pickup) was contaminated by keyboard input (B32: rerun it untouched). demo-9: the sleeping bag's window and a dead player's jumping body and grab crash (B28, B33) fixed in patch **0099**; demo-10: the tent shelters within 3 m in co-op (B34, changes G10-5: the user's OK pending) and the demo kit adds an AK-74 and ammo, patch **0100** (campaign-447 / client-330; part 12). demo-11: the damage tint per player (B35) and player 1's body looted on a client (B36), patch **0101** (campaign-448 / client-331; part 13); B37 (AK magazine) waits on the user's answer (which view); player 2's heavy-hit effects (weapon drop) need the user's OK. **The test kits below are stale**
+  bugfix-21 (pickup) was contaminated by keyboard input (B32: rerun it untouched). demo-9: the sleeping bag's window and a dead player's jumping body and grab crash (B28, B33) fixed in patch **0099**; demo-10: the tent shelters within 3 m in co-op (B34, changes G10-5: the user's OK pending) and the demo kit adds an AK-74 and ammo, patch **0100** (campaign-447 / client-330; part 12). demo-11: the damage tint per player (B35) and player 1's body looted on a client (B36), patch **0101** (campaign-448 / client-331; part 13); B37 (AK magazine) waits on the user's answer (which view); player 2's heavy-hit effects (weapon drop) need the user's OK. demo-12: NPCs hold and fire their weapons on a client (B38) and the status icons and blood overlay (B39), patch **0102** (campaign-449 / client-333; part 14). **The test kits below are stale**
   (built from campaign-443 / client-325): the user asked to remake them only
   once everything works.
 - **Stage 11 started by the user's direction** (Discord, 2026-11-02): S11-T00
@@ -70,12 +70,12 @@
 
 ## Run names
 
-- Used: `campaign-334…448`, `client-226…331`, `proto-build-53…63`,
-  `st-28…38`, `bugfix-1…24`, `demo-1…11` (S10-T07), `menu-1…10`, `kit-1…9`
-  (S11-T00), patch checks 77–113, kits host-1…5, friend-1…3, client-4…5,
+- Used: `campaign-334…449`, `client-226…333`, `proto-build-53…63`,
+  `st-28…38`, `bugfix-1…25`, `demo-1…12` (S10-T07), `menu-1…10`, `kit-1…9`
+  (S11-T00), patch checks 77–114, kits host-1…5, friend-1…3, client-4…5,
   server-1…2.
-- Next: `campaign-449`, `client-332`, `proto-build-64`, `st-39`,
-  `bugfix-25`, `demo-12`, `menu-11`, `kit-10`, patch check 114, kits host-6,
+- Next: `campaign-450`, `client-334`, `proto-build-64`, `st-39`,
+  `bugfix-26`, `demo-13`, `menu-11`, `kit-10`, patch check 115, kits host-6,
   client-6, server-3.
 
 Preserve the original installation, the reference checkout, the accepted

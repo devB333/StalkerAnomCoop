@@ -15,7 +15,7 @@
   their hands-on check is part of the user's verification. demo-8's bugs
   (B30 fire in the inventory, B31 hovering drops and the unseen tent) are
   fixed in patch **0098** (campaign-445 / client-327; S10-T07 part 10);
-  bugfix-21 (pickup) fails on B32 (open). **The test kits below are stale**
+  bugfix-21 (pickup) was contaminated by keyboard input (B32: rerun it untouched). demo-9: the sleeping bag's window and a dead player's jumping body and grab crash (B28, B33) fixed in patch **0099** (campaign-446 / client-329; part 11). **The test kits below are stale**
   (built from campaign-443 / client-325): the user asked to remake them only
   once everything works.
 - **Stage 11 started by the user's direction** (Discord, 2026-11-02): S11-T00
@@ -70,12 +70,12 @@
 
 ## Run names
 
-- Used: `campaign-334…445`, `client-226…327`, `proto-build-53…63`,
-  `st-28…38`, `bugfix-1…21`, `demo-1…8` (S10-T07), `menu-1…10`, `kit-1…9`
-  (S11-T00), patch checks 77–110, kits host-1…5, friend-1…3, client-4…5,
+- Used: `campaign-334…446`, `client-226…329`, `proto-build-53…63`,
+  `st-28…38`, `bugfix-1…22`, `demo-1…9` (S10-T07), `menu-1…10`, `kit-1…9`
+  (S11-T00), patch checks 77–111, kits host-1…5, friend-1…3, client-4…5,
   server-1…2.
-- Next: `campaign-446`, `client-328`, `proto-build-64`, `st-39`,
-  `bugfix-22`, `demo-9`, `menu-11`, `kit-10`, patch check 111, kits host-6,
+- Next: `campaign-447`, `client-330`, `proto-build-64`, `st-39`,
+  `bugfix-23`, `demo-10`, `menu-11`, `kit-10`, patch check 112, kits host-6,
   client-6, server-3.
 
 Preserve the original installation, the reference checkout, the accepted

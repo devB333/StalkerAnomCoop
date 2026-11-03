@@ -702,6 +702,15 @@ drawn off the ground, a several-bone tent folded). B30: the fire key is sent
 only while the world has the input (no dialog, console, menu or pause).
 Single player: unchanged.
 
+`0099-sleepbag-corpse-grab.patch` (S10-T07, 2026-11-02): the user's demo-9
+bugs. B28: a client's F on a placed sleeping bag opens the installed sleep
+window itself (the installed handler is registered by a binder update a
+replica skips). B33: a body is moved to the server's position once (over
+1 m), again only when the server's body moves; `CPHCapture` takes a bone's
+callback parameter only when it is one of the shell's elements (a dead
+actor's spine, shoulder and head keep the actor's callbacks). Single
+player: the capture guard only (no dead actor is grabbed there).
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

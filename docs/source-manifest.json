@@ -401,6 +401,10 @@
     {
       "path": "patches/engine/0098-physics-present-fire-gate.patch",
       "sha256": "9e7ecccea3e0a2182a0642601b4887d5e9e23fec93f642b4beb5134d753b80d8"
+    },
+    {
+      "path": "patches/engine/0099-sleepbag-corpse-grab.patch",
+      "sha256": "4ba20c6587f0e9366fe17bd78a58dbaae7c228eb45e0a186e64054b0a1e6938e"
     }
   ],
   "submodules": [

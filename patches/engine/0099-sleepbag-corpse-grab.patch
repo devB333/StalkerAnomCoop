@@ -1,0 +1,110 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index adcd04b..8a19efc 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -185,6 +185,7 @@ struct Link
+ 		u8 kind = 0; // what presents it: 0 actor, 1 creature, 2 physics object, 3 other
+ 		bool presented = false; // shown at least once
+ 		u32 dead_seen_ms = 0, corpse_moved_ms = 0; // B29: a body's convergence to the server's
++		Fvector corpse_target = {0.f, 0.f, 0.f}; // the server's position it was last moved to
+ 	};
+ 	// S06-T02: server time from the least-delayed recent snapshot (a sliding
+ 	// window: the server's ticks are not exactly 20 ms)
+@@ -1753,11 +1754,13 @@ void present_object(CPhysicsShellHolder* object, const coop::proto::EntityState&
+ // came to rest up to 4 m from the server's body, whose position the server
+ // measures a loot's reach against (every take refused, demo-7). Once the body
+ // has lain kCorpseSettleMs here, a difference over kCorpseTolerance moves its
+-// shell (pose kept) to where the server has it; a body the server moves later
+-// follows the same way.
++// shell (pose kept) to where the server has it, once; it is moved again only
++// when the server's body itself has moved that far (B33: a moved ragdoll
++// slumps half a metre off the target, and moving it every 2 s made a dead
++// player's body jump).
+ const u32 kCorpseSettleMs = 8000;
+ const u32 kCorpseRepeatMs = 2000;
+-const float kCorpseTolerance = 0.5f;
++const float kCorpseTolerance = 1.0f;
+ 
+ void converge_corpse(CEntityAlive* body, Link::Track& track)
+ {
+@@ -1772,9 +1775,11 @@ void converge_corpse(CEntityAlive* body, Link::Track& track)
+ 	const coop::proto::EntityState* newest = track.buffer.newest();
+ 	if (!newest || !(newest->components & coop::proto::kTransform))
+ 		return;
+-	Fvector delta;
+-	delta.set(newest->transform.x, newest->transform.y, newest->transform.z);
+-	delta.sub(body->Position());
++	Fvector target, delta;
++	target.set(newest->transform.x, newest->transform.y, newest->transform.z);
++	if (track.corpse_moved_ms && target.distance_to(track.corpse_target) < kCorpseTolerance)
++		return; // moved here already; the server's body has not moved since
++	delta.sub(target, body->Position());
+ 	if (!_valid(delta) || delta.magnitude() < kCorpseTolerance)
+ 		return;
+ 	CPhysicsShell* shell = body->PPhysicsShell();
+@@ -1790,6 +1795,7 @@ void converge_corpse(CEntityAlive* body, Link::Track& track)
+ 	shell->GetGlobalTransformDynamic(&body->XFORM());
+ 	body->spatial_move();
+ 	track.corpse_moved_ms = now;
++	track.corpse_target = target;
+ 	++g_link->corpses_moved;
+ 	g_link->log.line("corpse-moved id=%u section=%s offset=%.2f to=%.2f,%.2f,%.2f", u32(body->ID()), *body->cNameSect(), offset,
+ 		newest->transform.x, newest->transform.y, newest->transform.z);
+@@ -8210,8 +8216,27 @@ bool coop_client_use_object(CGameObject* object, CGameObject* who)
+ 	// Sleep asks the server, which checks both players' shelter
+ 	if (!xr_strcmp(object->cNameSect(), "ph_sleepbag"))
+ 	{
+-		g_link->log.line("use-object-local object=%u section=%s", u32(object->ID()), *object->cNameSect());
+-		return false;
++		// the installed handler (item_tent's physic_object_on_use_callback) is
++		// registered by the object's binder update, which a replica skips
++		// (replica_binder_update_allowed): its call is made here
++		string256 chunk;
++		xr_sprintf(chunk, "if hide_hud_inventory then hide_hud_inventory() end ui_sleep_dialog.sleep_bag(%u, 'itm_sleepbag')",
++			u32(object->ID()));
++		lua_State* L = ai().script_engine().lua();
++		int result = -1;
++		if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_sleep_bag") == 0)
++		{
++			result = lua_pcall(L, 0, 0, 0);
++			if (result != 0)
++			{
++				g_link->log.line("use-object-local-error object=%u error=%s", u32(object->ID()),
++					lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++				lua_pop(L, 1);
++			}
++		}
++		g_link->log.line("use-object-local object=%u section=%s window=%d", u32(object->ID()), *object->cNameSect(),
++			result == 0 ? 1 : 0);
++		return true;
+ 	}
+ 	coop::proto::EntityRef ref;
+ 	if (!ref_of(u16(object->ID()), ref))
+diff --git a/src/xrPhysics/PHCaptureInit.cpp b/src/xrPhysics/PHCaptureInit.cpp
+index 9f321b8..7360362 100644
+--- a/src/xrPhysics/PHCaptureInit.cpp
++++ b/src/xrPhysics/PHCaptureInit.cpp
+@@ -183,6 +183,23 @@ CPHCapture::CPHCapture(CPHCharacter* a_character, IPhysicsShellHolder* a_taget_o
+ 	VERIFY(tag_bone.callback_param( ));
+ 
+ 	m_taget_element = (CPhysicsElement*)tag_bone.callback_param();
++	// co-op (B33): a dead player's body (an actor: never grabbable in single
++	// player) keeps the actor's own bone callbacks on its spine, shoulder and
++	// head (Actor_Network.cpp SetCallbacks: the parameter is the actor), so
++	// the parameter is taken only when it is one of the shell's elements
++	CPhysicsShell* shell = m_taget_object->ObjectPPhysicsShell();
++	bool element_of_shell = false;
++	if (shell)
++		for (u16 i = 0, n = shell->get_ElementsNumber(); i < n && !element_of_shell; ++i)
++			element_of_shell = shell->get_ElementByStoreOrder(i) == m_taget_element;
++	if (!element_of_shell)
++	{
++		m_taget_element = shell ? shell->get_Element(a_taget_element) : 0;
++		if (!m_taget_element && shell)
++			m_taget_element = shell->NearestToPoint(m_capture_bone->mTransform.c);
++		if (!m_taget_element)
++			return;
++	}
+ 	VERIFY(m_taget_element);
+ 
+ 	Init();

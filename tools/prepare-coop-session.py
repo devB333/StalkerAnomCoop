@@ -159,6 +159,11 @@ def main():
                              "changer (fixture travel_party)")
     parser.add_argument("--travel-start", type=int, default=20,
                         help="with --travel: seconds after both players are in the world until the actors are placed")
+    parser.add_argument("--travel-changer", default="",
+                        help="with --travel (B47): use the level changer whose name contains this (e.g. to_marsh_1); "
+                             "default: the first enabled")
+    parser.add_argument("--travel-approach", default="",
+                        help="with --travel (B47): \"x,y,z\" where player 1 stands 5 s before the changer")
     parser.add_argument("--travel-variant", type=int, default=0,
                         help="with --travel: 0 every round; 1 the crash run (rounds 0 and 1; with --failpoint "
                              "travel:after-propose the server exits itself after round 0's proposal); 2 (S09-T02) "
@@ -529,6 +534,8 @@ def main():
                       f"quest_variant = {args.quest_variant}",
                       f"travel_party = {args.travel_start if travel else 0}",
                       f"travel_variant = {args.travel_variant}",
+                      f"travel_changer = {args.travel_changer}",
+                      f"travel_approach = {args.travel_approach}",
                       f"travel_barrier_hold = {args.travel_barrier_hold}",
                       f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}",
                       f"info_party = {args.info_start if info else 0}",

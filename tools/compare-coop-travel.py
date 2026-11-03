@@ -35,6 +35,8 @@ Checks:
   rollback      (variants 3 and 4, S09-T04) the first agreed travel was rolled back in process for the expected
                 reason (3: a party member left during the barrier, nothing durable; 4: the publication failed,
                 phase 3 recorded) and both players were told; the retry was carried out
+  updates       (variants 2-5, B47) no actor or creature near a player went 100 frames without UpdateCL,
+                both actors updated at the resume; the server's refused device pauses are listed
   recovery      (variant 2 with a crash window) the restarted server recovered on the right level: the
                 source level after travel:before-take (prepared only), the destination level after
                 travel:after-commit (committed, rolled forward), and both clients rejoined there
@@ -261,6 +263,18 @@ def main():
     checks["prompt"] = {"pass": all(v > 0 for v in prompts.values()), "prompts": prompts}
 
     if a.variant >= 2:
+        # B47: the world keeps updating: no actor or creature near a player went 100 frames without
+        # UpdateCL (update-stall), both actors updated at the resume, and every device pause the
+        # server was asked for was refused (a paused device updates nothing)
+        stalls = [kv(ln) for ln in server + first if "update-stall count=" in ln and "count=0 " not in ln]
+        resumed_ages = [int(kv(ln)["updcl_age"]) for ln in server if "actor-weapons tag=resumed" in ln]
+        engine_logs = [ln for d in ("server", "server-first-run") for f in sorted((root / d).glob("xray*.log"))
+                       for ln in lines(f)]
+        refused = [kv(ln).get("reason") for ln in engine_logs if "device-pause-refused" in ln]
+        detail["binder_native_exceptions"] = sum(1 for ln in engine_logs if "native exception" in ln)
+        checks["updates"] = {"pass": not stalls and bool(resumed_ages) and max(resumed_ages) < 100,
+                             "stalls": len(stalls), "first_stall": stalls[0] if stalls else None,
+                             "resumed_updcl_age": resumed_ages, "pauses_refused": refused}
         dest = next((kv(ln) for ln in server + first if "travel-proposed" in ln), None)
         level = dest["level"] if dest else None
         first_level = level

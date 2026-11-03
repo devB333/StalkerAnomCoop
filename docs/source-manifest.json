@@ -441,6 +441,10 @@
     {
       "path": "patches/engine/0108-travel-combat-vanilla.patch",
       "sha256": "299f39323099b15abb41e880ba299bf6fb5e2c350047c92e1a6701323e76fbad"
+    },
+    {
+      "path": "patches/engine/0109-server-never-paused.patch",
+      "sha256": "c396c518921cb256134e19c1dffc4be5d1a099dbdaf8f2fbd4b4d6eec5047896"
     }
   ],
   "submodules": [

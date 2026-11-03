@@ -1,0 +1,212 @@
+diff --git a/src/xrEngine/device.cpp b/src/xrEngine/device.cpp
+index c46fd61..b2151f8 100644
+--- a/src/xrEngine/device.cpp
++++ b/src/xrEngine/device.cpp
+@@ -769,6 +769,19 @@ void CRenderDevice::Pause(BOOL bOn, BOOL bTimer, BOOL bSound, LPCSTR reason)
+ 
+ 	if (g_bBenchmark)
+ 		return;
++	// B47: the campaign server is never paused. A paused device runs no
++	// object's UpdateCL (CObjectList::Update), so players and NPCs froze for
++	// the rest of the session when an installed script paused it for a window
++	// the server cannot show (ui_sr_teleport's travel box at a passage:
++	// set_device_paused_script, demo-16/17/19, bugfix-38/39). Unpausing goes on.
++	if (g_campaign_server && bOn)
++	{
++		static u32 refused = 0;
++		++refused;
++		Msg("device-pause-refused reason=%s timer=%d sound=%d refused=%u", reason ? reason : "?", bTimer ? 1 : 0,
++			bSound ? 1 : 0, refused);
++		return;
++	}
+ #ifndef DEDICATED_SERVER
+ 	if (bOn)
+ 	{
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 000d53c..600324f 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -188,6 +188,12 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		ok = read_string(ini, "new_game_faction", out.new_game_faction, sizeof(out.new_game_faction), false) && ok;
+ 		ok = read_string(ini, "new_game_loadout_2", out.new_game_loadout_2, sizeof(out.new_game_loadout_2), false) && ok;
+ 		out.new_game_money_2 = ini.line_exist("coop", "new_game_money_2") ? ini.r_u32("coop", "new_game_money_2") : 0;
++		out.travel_approach[0] = 0;
++		if (ini.line_exist("coop", "travel_approach"))
++			read_string(ini, "travel_approach", out.travel_approach, sizeof(out.travel_approach), false);
++		out.travel_changer[0] = 0;
++		if (ini.line_exist("coop", "travel_changer"))
++			read_string(ini, "travel_changer", out.travel_changer, sizeof(out.travel_changer), false);
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 2d02635..01b7940 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -115,6 +115,8 @@ struct CoopConfig
+ 	u32 travel_party; // S09-T01 fixture: seconds after both attach until the travel rounds start (0 off)
+ 	u32 travel_variant; // S09-T01 fixture: 0 every round, 1 the crash run (rounds 0, 1; failpoint travel:after-propose),
+ 	                    // 2 one agreed travel (S09-T02), 3 partner drops in the barrier then retries, 4 two travels (S09-T04)
++	string64 travel_approach; // B47 fixture: "x,y,z": participant 1 stands there 5 s before the changer (empty off)
++	string64 travel_changer; // B47 fixture: a level changer whose name contains this (empty: the first enabled)
+ 	u32 travel_barrier_hold; // S09-T04 harness: seconds the barrier stays up before the take (0 off)
+ 	u32 talk_party; // S10-T04a fixture: seconds after both attach until the talk rounds start at Sidorovich (0 off)
+ 	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 4de7102..5311550 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -14820,6 +14820,64 @@ void log_actor_weapons(LPCSTR tag, u8 slot_of_player, CActor* actor)
+ 		Level().CurrentViewEntity() == actor ? 1 : 0, g_player_hud ? int(g_player_hud->script_anim_part) : -2, slots);
+ }
+ 
++// B47 (demo-16, 17, 19): after a travel the server sometimes ran no UpdateCL
++// for the players' actors (updcl_age grew with the session, every shot left
++// from 0,0,0) and the NPCs near them stood still. The engine updates only the
++// objects marked as crows this frame (CObjectList::Update); on the server an
++// object is marked by its own UpdateCL (within the activity anchors' crow
++// radius), its shedule_Update and its net_Spawn (xr_object.cpp). Once a
++// second: every alive actor or creature near a player with no UpdateCL for
++// 100 frames is logged with its crow state (crow flag, frames since it was
++// last marked: -1 none since its last update) and the device's pause. The
++// cause found (bugfix-38/39: paused=1, an installed script's pause) is refused
++// in CRenderDevice::Pause; this line stays to catch any other.
++void update_stall_tick()
++{
++	static u64 next_tick = 0;
++	static u32 last_count = 0;
++	static u64 last_logged = 0;
++	if (g_host->tick < next_tick || !g_pGameLevel || g_host->travel.exec)
++		return;
++	next_tick = g_host->tick + 50;
++	const u32 frame = Device.dwFrame;
++	u32 count = 0, actors = 0, flagged = 0, checked = 0;
++	string512 sample = "";
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CObject* o = Level().Objects.o_get_by_iterator(i);
++		CEntityAlive* alive = o ? smart_cast<CEntityAlive*>(o) : nullptr;
++		if (!alive || !alive->g_Alive() || o->getDestroy() || !o->processing_enabled())
++			continue;
++		const bool actor = !!smart_cast<CActor*>(o);
++		if (!actor && !smart_cast<CCustomMonster*>(o))
++			continue;
++		if (!actor && g_activity_policy.distance_to(o->Position()) > g_activity_policy.crow_radius)
++			continue;
++		++checked;
++		const u32 age = frame - o->dwFrame_UpdateCL;
++		if (age < 100)
++			continue;
++		++count;
++		actors += actor ? 1 : 0;
++		flagged += o->AmICrow() ? 1 : 0;
++		if (count <= 4)
++		{
++			string128 one;
++			xr_sprintf(one, " %u:%s:age=%u:crow=%d:marked=%d", u32(o->ID()), *o->cNameSect(), age, o->AmICrow() ? 1 : 0,
++				o->dwFrame_AsCrow == u32(-1) ? -1 : int(frame - o->dwFrame_AsCrow));
++			xr_strcat(sample, one);
++		}
++	}
++	if (count != last_count || (count && g_host->tick - last_logged >= 500))
++	{
++		g_host->log.line("update-stall count=%u actors=%u crow_flagged=%u checked=%u paused=%d time_delta=%.4f frame=%u "
++			"anchors=%u radius=%.0f%s", count, actors, flagged, checked, Device.Paused() ? 1 : 0, Device.fTimeDelta, frame,
++			u32(g_activity_policy.anchors.size()), g_activity_policy.crow_radius, sample);
++		last_logged = g_host->tick;
++	}
++	last_count = count;
++}
++
+ // B45: a player's pending weapon change is completed by its inventory's
+ // update (CInventory::Update, from CActor::UpdateCL). demo-17: after a
+ // travel both actors kept the change pending (active 0, next 2/3) for good
+@@ -17294,7 +17352,8 @@ void travel_fixtures()
+ 			g_host->log.line("fixture-travel changer id=%u name=%s enabled=%d level=%s center=%.2f,%.2f,%.2f radius=%.2f",
+ 				u32(lc->ID()), lc->cName().c_str(), lc->IsLevelChangerEnabled() ? 1 : 0, level.c_str(), VPUSH(center),
+ 				lc->Radius());
+-			if (!chosen && lc->IsLevelChangerEnabled() && level != "?")
++			if (!chosen && lc->IsLevelChangerEnabled() && level != "?" &&
++				(!config.travel_changer[0] || strstr(lc->cName().c_str(), config.travel_changer)))
+ 				chosen = lc;
+ 		}
+ 		if (!chosen)
+@@ -17312,6 +17371,10 @@ void travel_fixtures()
+ 			f.actors[k] = u16(actors[k]->ID());
+ 			Fvector at = center;
+ 			at.x += k ? -0.6f : 0.6f;
++			// B47: participant 1 first walks the installed approach (its space
++			// restrictor), as a player does, then stands in the changer
++			if (!k && config.travel_approach[0])
++				sscanf(config.travel_approach, "%f,%f,%f", &at.x, &at.y, &at.z);
+ 			place_beside(actors[k], at);
+ 			g_host->log.line("fixture-travel placed slot=%u actor=%u changer=%u at=%.2f,%.2f,%.2f", k, u32(f.actors[k]),
+ 				u32(f.changer), VPUSH(at));
+@@ -17324,6 +17387,17 @@ void travel_fixtures()
+ 	{
+ 		if (g_host->tick - f.phase_tick < 5 * 50)
+ 			return;
++		static bool approached = false;
++		if (config.travel_approach[0] && !approached)
++		{
++			approached = true;
++			Fvector at = f.center;
++			at.x += 0.6f;
++			place_beside(actors[0], at);
++			g_host->log.line("fixture-travel approached slot=0 at=%.2f,%.2f,%.2f", VPUSH(at));
++			f.phase_tick = g_host->tick;
++			return;
++		}
+ 		for (u32 k = 0; k < 2; ++k)
+ 		{
+ 			float distance = 0.f;
+@@ -20837,6 +20911,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 
+ 
+ 	demo_place_tick(); // the hands-on aid
++	update_stall_tick(); // B47: objects near a player whose UpdateCL stopped
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	sleep_tick(); // S10-T03c: the sleep proposal's, and the blackouts
+ 	relocate_tick(); // S10-T03d: a held time skip no travel took is applied
+diff --git a/src/xrGame/HUDManager.cpp b/src/xrGame/HUDManager.cpp
+index 4f785f7..f3dca1a 100644
+--- a/src/xrGame/HUDManager.cpp
++++ b/src/xrGame/HUDManager.cpp
+@@ -493,8 +493,14 @@ void CHUDManager::net_Relcase(CObject* obj)
+ #endif
+ }
+ 
++extern ENGINE_API bool g_campaign_server;
++
+ CDialogHolder* CurrentDialogHolder()
+ {
++	// B47: the campaign server has no main menu and shows no window (an
++	// installed script's ShowDialog there read a null MainMenu)
++	if (g_campaign_server || !MainMenu())
++		return nullptr;
+ 	if (MainMenu()->IsActive())
+ 		return MainMenu();
+ 	else
+diff --git a/src/xrGame/ui/UIDialogWnd.cpp b/src/xrGame/ui/UIDialogWnd.cpp
+index 95af147..e2864f7 100644
+--- a/src/xrGame/ui/UIDialogWnd.cpp
++++ b/src/xrGame/ui/UIDialogWnd.cpp
+@@ -53,8 +53,17 @@ CDialogHolder* CurrentDialogHolder();
+ 
+ void CUIDialogWnd::ShowDialog(bool bDoHideIndicators)
+ {
++	// B47: the campaign server has no dialog holder (an installed script's
++	// window there, such as ui_sr_teleport's, dereferenced null and its binder
++	// was cleared mid-call)
++	CDialogHolder* holder = CurrentDialogHolder();
++	if (!holder)
++	{
++		Msg("! ShowDialog without a dialog holder: not shown");
++		return;
++	}
+ 	if (!IsShown())
+-		CurrentDialogHolder()->StartDialog(this, bDoHideIndicators);
++		holder->StartDialog(this, bDoHideIndicators);
+ }
+ 
+ void CUIDialogWnd::HideDialog()

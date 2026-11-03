@@ -790,6 +790,22 @@ alone and carries the travel out (variant 0's nine rounds predate S09-T02). On a
 fast travel, session or repair keeps its own words (the generic "You can't
 pick that up." no longer overwrites them). Single player: unchanged.
 
+`0109-server-never-paused.patch` (S10-T07, 2026-11-03): B47 (demo-16, 17, 19:
+after player 1 walked into a Cordon or Marsh passage, the players' actors and
+the NPCs near them got no `UpdateCL` for the rest of the session: shots left
+from 0,0,0, NPCs stood still; the root cause of B45). The passage's space
+restrictor runs the installed `ui_sr_teleport` travel box on the server; its
+`ShowDialog` read a null `MainMenu` (no dialog holder there), and on the way
+the device was paused (`set_device_paused_script`), which nothing undid; a
+paused device runs no object's update (`CObjectList::Update`). Now
+`CRenderDevice::Pause` refuses a pause on the campaign server
+(`device-pause-refused`), `CurrentDialogHolder` returns none there and
+`ShowDialog` skips the window. `update-stall` (the server, once a second)
+logs any actor or creature near a player with no update for 100 frames, with
+its crow state and the device's pause. Fixture options `travel_changer` and
+`travel_approach` take the travel fixture through that passage's approach.
+Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

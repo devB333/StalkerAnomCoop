@@ -760,6 +760,15 @@ nudge (`actor_effects.Update_ItemSwap`) runs per player. B44: travel events
 (the resume among them) go to every live player, inputs or not (the clients
 never got the resume after a reload). Single player: unchanged.
 
+`0106-slot-resync-after-travel.patch` (S10-T07, 2026-11-03): the user's
+demo-16. B45: a client's refused slot intent (sent at world-live inside the
+travel's hold, refused 30) resets its record of the slot sent to the
+server's slot, so the local slot is asked for again; the travel's resume
+does the same. Diagnostics: `actor-weapons` (the server's inventory slots at
+a travel's commit and resume and at each activation; the travel fixture's
+weapon probe with profile `arm`), `player-slot-sent` / `player-slot-refused`
+on the client. Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

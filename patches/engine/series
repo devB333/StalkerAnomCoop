@@ -103,3 +103,4 @@
 0103-npc-body-loot.patch
 0104-host-actor-fallback-spot-text.patch
 0105-travel-resume-fallback-itemswap.patch
+0106-slot-resync-after-travel.patch

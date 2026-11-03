@@ -429,6 +429,10 @@
     {
       "path": "patches/engine/0105-travel-resume-fallback-itemswap.patch",
       "sha256": "52708a255ffe25d786f79f8707d75da32b58c9a988776c500103e89f506f4520"
+    },
+    {
+      "path": "patches/engine/0106-slot-resync-after-travel.patch",
+      "sha256": "6578349ca977335580010968410ed67880b399ef8ab1163ceb502bfbee702397"
     }
   ],
   "submodules": [

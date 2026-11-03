@@ -54,7 +54,7 @@ tick it receives it:
 | the target is an enabled `CLevelChanger` online on the server | 24 NoChanger |
 | the actor is inside the changer's shape (the engine's own touch test, `CCF_Shape::Contact`) or within 1 m of its bounding sphere (the server's actor trails the client's) | 25 NotAtChanger |
 | the partner (the other roster slot) is in the world (its client sends input) with a living actor | 26 PartnerUnavailable |
-| no alive NPC or monster online has either party actor as its selected enemy (`CMemoryManager::enemy().selected()`) | 27 InCombat |
+| ~~no alive NPC or monster online has either party actor as its selected enemy~~ **removed for level changers (B46, 2026-11-03)**: the installed game has no combat check there (`level_changer.cpp` `CLevelChanger::feel_touch_new`); kept for a PDA fast travel and a backpack jump (§12) | (27 InCombat, §12 only) |
 
 Accepted: the proposal is created (its id in `ActionResult.revision`),
 remembered under the operation id, and sent to both players with the
@@ -77,7 +77,7 @@ Params: `u64 transition id, u8 answer` (1 accept, 2 refuse, 3 cancel).
 | **the id is the live proposal's** | 28 NoTransition — a stale, replayed, unknown or pre-restart id approves nothing, whoever sends it |
 | accept or refuse from the partner; cancel from the requester | 29 WrongParty (the requester's own accept is not the partner's consent) |
 | accept: the partner's actor alive | 3 |
-| accept: the party out of combat now | 27 (the proposal stands; the tick's check may abort it) |
+| accept: the party out of combat now (fast travel and backpack only, §12; B46) | 27 (the proposal stands; the tick's check may abort it) |
 
 Accepted: the transition ends (Agreed, Refused or Cancelled), both players
 are told, the answer is remembered under its operation id (a duplicate
@@ -95,7 +95,7 @@ Checked every half second (and at a disconnect at once):
 |---|---|
 | the requester's or the partner's session ends (`on_left`) | Aborted: requester-left / partner-left. A rejoin starts over: the consent does not outlive the session |
 | the requester's or the partner's actor dies | Aborted: requester-dead / partner-dead |
-| an NPC or monster takes a party actor as its enemy | Aborted: combat |
+| an NPC or monster takes a party actor as its enemy (fast travel and backpack only, §12; B46) | Aborted: combat |
 | the changer leaves the online world or is disabled | Aborted: changer-gone |
 | the 30 s pass | Expired |
 
@@ -242,6 +242,9 @@ restart (§1).
 - A live proposal is **not durable**: a crash forgets it (the players
   request again). From Agreed on, S09-T02 records it (§9).
 - (S09-T02 adds the execution: §9.)
+- B46 (2026-11-03, the user's choice: match the installed game): only a PDA
+  fast travel and a backpack jump check combat (`travel_combat_rule`); a
+  level changer, a guide's trip and another script's `ChangeLevel` do not.
 - The combat test is the NPCs' enemy memory; a player shot at by someone
   who has not selected him as an enemy, or hit by an anomaly, is not "in
   combat". Hits in the last seconds could be added if play shows the need.
@@ -268,3 +271,12 @@ script just before, is held and applied once when the proposal is agreed
 paid by the script, is refunded to the requester if the proposal ends any
 other way. The executor (§9–10) carries it out, a same-level point included
 (the level is reloaded with both actors at the point).
+
+**Combat (B46, 2026-11-03).** As the installed scripts do by default
+(`game_fast_travel.script` and `game_backpack_travel.script`, option
+"on_combat" off): a fast travel (source 1) or a backpack jump (2) is refused
+27 while an NPC or monster online has a party actor as its enemy, the
+partner's accept likewise, and a live one is aborted when combat starts. A
+guide's trip (4: `ka_travel.script`, no check) and another script's
+`ChangeLevel` (3) check nothing. The server does not read the players'
+"allow in combat" option.

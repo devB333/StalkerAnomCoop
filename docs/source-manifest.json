@@ -437,6 +437,10 @@
     {
       "path": "patches/engine/0107-stalled-inventory-kick.patch",
       "sha256": "0b834d79340ad571ea1bf73de83769ccdcae544003718c64ecabdb326b175133"
+    },
+    {
+      "path": "patches/engine/0108-travel-combat-vanilla.patch",
+      "sha256": "299f39323099b15abb41e880ba299bf6fb5e2c350047c92e1a6701323e76fbad"
     }
   ],
   "submodules": [

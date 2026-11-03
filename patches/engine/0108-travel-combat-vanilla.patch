@@ -1,0 +1,170 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 32e7096..53585b4 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -4638,9 +4638,14 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				p.action == coop::proto::kActionTradeClose;
+ 			if (trade_action)
+ 				trade_result(p, result); // S10-T04c
+-			// B34: a sleep refusal has its own words above (not "You can't pick that up.")
+-			const bool sleep_action = p.action == coop::proto::kActionSleepRequest ||
+-				p.action == coop::proto::kActionSleepAnswer;
++			// B34, B46: a sleep, travel, fast travel, session or repair refusal has
++			// its own words above (the generic line below would overwrite them in
++			// the same HUD slot: "You can't pick that up." for a travel request)
++			const bool own_words = p.action == coop::proto::kActionSleepRequest ||
++				p.action == coop::proto::kActionSleepAnswer || p.action == coop::proto::kActionTravelRequest ||
++				p.action == coop::proto::kActionTravelAnswer || p.action == coop::proto::kActionTravelReady ||
++				p.action == coop::proto::kActionRelocate || p.action == coop::proto::kActionSession ||
++				p.action == coop::proto::kActionFieldRepair;
+ 			if (p.action == coop::proto::kActionUpgradeOpen || p.action == coop::proto::kActionUpgrade)
+ 				upgrade_result(p, result); // S10-T04f
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+@@ -4658,7 +4663,7 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 					result.reason == coop::proto::kReasonPlaceRefused ? "It doesn't fit there." :
+ 					result.reason == coop::proto::kReasonNotUsable ? "You can't use that." :
+ 					result.reason == coop::proto::kReasonItemGone ? "It's gone." : "You can't do that now.");
+-			else if (p.player && !accepted && !talk_action && !trade_action && !sleep_action)
++			else if (p.player && !accepted && !talk_action && !trade_action && !own_words)
+ 				pickup_message(result.reason == coop::proto::kReasonItemTaken ? "Someone else took it." :
+ 					result.reason == coop::proto::kReasonOutOfReach ? "Too far away." :
+ 					result.reason == coop::proto::kReasonStale ? "It was moved in the meantime." :
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index fdee60d..4de7102 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -15277,6 +15277,16 @@ bool party_in_combat(string256& who)
+ 	return false;
+ }
+ 
++// B46 (T01-5 revised by the user, 2026-11-03: match the installed game): only
++// a PDA fast travel (source 1) and a backpack jump (2) are refused in combat,
++// as game_fast_travel.script and game_backpack_travel.script refuse them by
++// default. A level changer (CLevelChanger::feel_touch_new), a guide's trip
++// (ka_travel.script) and another script's ChangeLevel (3) check nothing.
++bool travel_combat_rule(bool relocation, u8 source)
++{
++	return relocation && (source == 1 || source == 2);
++}
++
+ PlayerLink* travel_partner(u8 slot)
+ {
+ 	for (PlayerLink& l : g_host->links)
+@@ -15438,12 +15448,11 @@ u16 take_travel_request(PlayerLink& link, const coop::proto::ActionIntent& inten
+ 			partner_actor ? 1 : 0, partner_actor && partner_actor->g_Alive() ? 1 : 0);
+ 		return kTravelPartnerUnavailable;
+ 	}
++	// B46: no combat check at a level changer (travel_combat_rule); the
++	// partner's consent still decides. Noted when an enemy hunts the party.
+ 	string256 who;
+-	if (!g_host->sweep_bypass && party_in_combat(who)) // S10-T03e: the sweep travels from among monsters (god mode)
+-	{
+-		g_host->log.line("travel-in-combat slot=%u enemy=%s", u32(link.ref.slot), who);
+-		return coop::proto::kReasonInCombat;
+-	}
++	if (party_in_combat(who))
++		g_host->log.line("travel-combat-ignored slot=%u kind=11 enemy=%s", u32(link.ref.slot), who);
+ 	coop::proto::Transition t;
+ 	const coop::proto::TravelVerdict verdict = g_host->travel.coordinator->propose(link.ref.slot, partner->ref.slot,
+ 		intent.target.id, g_host->wall.GetElapsed_ms(), t);
+@@ -15512,7 +15521,8 @@ u16 take_travel_answer(PlayerLink& link, const coop::proto::ActionIntent& intent
+ 	if (answer == 1)
+ 	{
+ 		// an accept is a consent given now: the partner's actor must be alive
+-		// and the party out of combat at this moment
++		// and, for a fast travel or a backpack jump (B46), the party out of
++		// combat at this moment
+ 		PartyId party;
+ 		party.hi = g_host->config.party_id.hi;
+ 		party.lo = g_host->config.party_id.lo;
+@@ -15526,11 +15536,16 @@ u16 take_travel_answer(PlayerLink& link, const coop::proto::ActionIntent& intent
+ 		if (live->partner == link.ref.slot && (!actor || !actor->g_Alive()))
+ 			return coop::proto::kReasonNoActor;
+ 		string256 who;
++		const bool rule = travel_combat_rule(g_host->travel.relocation, g_host->travel.relocation_source);
+ 		if (!g_host->sweep_bypass && live->partner == link.ref.slot && party_in_combat(who))
+ 		{
+-			g_host->log.line("travel-in-combat slot=%u enemy=%s (accept refused; the proposal stands)",
+-				u32(link.ref.slot), who);
+-			return coop::proto::kReasonInCombat;
++			if (rule)
++			{
++				g_host->log.line("travel-in-combat slot=%u enemy=%s (accept refused; the proposal stands)",
++					u32(link.ref.slot), who);
++				return coop::proto::kReasonInCombat;
++			}
++			g_host->log.line("travel-combat-ignored slot=%u kind=12 enemy=%s", u32(link.ref.slot), who);
+ 		}
+ 	}
+ 	coop::proto::Transition out;
+@@ -15600,7 +15615,7 @@ void travel_tick()
+ 			}
+ 		}
+ 		string256 who;
+-		if (party_in_combat(who))
++		if (travel_combat_rule(g_host->travel.relocation, g_host->travel.relocation_source) && party_in_combat(who))
+ 		{
+ 			g_host->log.line("travel-combat-abort id=%I64x enemy=%s", live->id, who);
+ 			travel_abort(coop::proto::TravelAbort::Combat);
+@@ -16317,7 +16332,7 @@ u16 relocate_propose(PlayerLink& link, const Fvector& position, u32 lvid, u16 gv
+ 	if (!partner || !client_in_world(*partner) || !partner_actor || !partner_actor->g_Alive())
+ 		return coop::proto::kReasonPartnerUnavailable;
+ 	string256 who;
+-	if (party_in_combat(who))
++	if (travel_combat_rule(true, source) && party_in_combat(who)) // B46: a guide (4) or a script (3) checks nothing
+ 	{
+ 		g_host->log.line("relocate-in-combat slot=%u enemy=%s", u32(link.ref.slot), who);
+ 		return coop::proto::kReasonInCombat;
+@@ -17200,8 +17215,8 @@ void sweep_fixtures()
+ //   5  p1 requests then cancels -> cancelled; p2's late accept (28)
+ //   6  p1 placed 10 m away requests (25); put back
+ //   7  p1 requests twice (23); p2 cancels (29); p1 accepts its own (29); p2 accepts -> agreed
+-//   8  a boar beside p2: p1 requests (27 while it hunts; else accepted), p1 cancels
+-//      (28; else cancelled); the boar killed; p1 requests, p2 accepts -> agreed
++//   8  a boar beside p2 hunts it: p1 requests, p2 accepts -> agreed (B46: a
++//      level changer has no combat rule); the boar killed after
+ // travel_variant 1 (the crash run): rounds 0 and 1 only; the server
+ // terminates itself at travel:after-propose in round 0 (profile failpoint).
+ // travel_variant 2 (S09-T02): round 0 only; the agreed travel is carried out
+@@ -17212,6 +17227,9 @@ void sweep_fixtures()
+ // and the travel is carried out. travel_variant 4 (S09-T04): rounds 0 and 1
+ // both plain (the first's publication is failed from outside with
+ // checkpoint:<phase>:3:fail; the second travel goes through).
++// travel_variant 5 (B46): round 8 alone: p1 requests and p2 accepts while the
++// boar hunts p2, and the agreed travel is carried out. Variant 0's nine rounds
++// predate S09-T02: round 0's agreement now travels, so the rest never run.
+ const u32 kTravelRounds = 9;
+ 
+ void travel_fixtures()
+@@ -17316,9 +17334,12 @@ void travel_fixtures()
+ 		}
+ 		f.phase = 2;
+ 		f.round_tick = g_host->tick;
++		if (config.travel_variant == 5)
++			f.round = 8; // B46: the hunted round alone, then carried out
+ 		return;
+ 	}
+-	const u32 rounds = config.travel_variant == 1 || config.travel_variant >= 3 ? 2 : config.travel_variant == 2 ? 1 : kTravelRounds;
++	const u32 rounds = config.travel_variant == 5 ? kTravelRounds :
++		config.travel_variant == 1 || config.travel_variant >= 3 ? 2 : config.travel_variant == 2 ? 1 : kTravelRounds;
+ 	if (f.phase != 2 || f.round >= rounds || g_host->tick < f.round_tick)
+ 		return;
+ 	const u16 C = f.changer;
+@@ -17428,13 +17449,11 @@ void travel_fixtures()
+ 		steps.push_back({1, 12, 200, C, 0xffff, 0xffff, 0, 1});
+ 		break;
+ 	default:
+-		// with the boar hunting: 27, then the cancel finds nothing (28); without
+-		// (it noticed nobody in 25 s): accepted, then cancelled; either way the
+-		// boar dies at +350 and the party agrees after it
++		// B46: with the boar hunting participant 2, a level changer's request
++		// and the partner's accept are still taken (no combat rule there) and
++		// the party agrees; the boar dies at +350, after the agreement
+ 		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
+-		steps.push_back({0, 12, 150, C, 0xffff, 0xffff, 0, 3});
+-		steps.push_back({0, 11, 500, C, 0xffff, 0xffff, 0, 0});
+-		steps.push_back({1, 12, 600, C, 0xffff, 0xffff, 0, 1});
++		steps.push_back({1, 12, 150, C, 0xffff, 0xffff, 0, 1});
+ 		f.round_tick = g_host->tick + 20 * 50;
+ 		break;
+ 	}

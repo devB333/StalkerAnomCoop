@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the S09-T01 party travel request and two-player consent (plan.md S09-T01, docs/travel-contract.md).
 
-Usage: python3 tools/compare-coop-travel.py <session logs> [--variant 0|1|2|3|4] [--out compare-travel.json]
+Usage: python3 tools/compare-coop-travel.py <session logs> [--variant 0|1|2|3|4|5] [--out compare-travel.json]
          [--expect-resume all-ready|timeout] [--expect-wrong-readies N] [--expect-late c2]
          [--expect-client-crash c2] [--expect-retry-after-crash]
 
@@ -13,6 +13,8 @@ Checks:
   rounds        every step's result on the client that sent it has the expected outcome and reason
                 (per round: both accept, one refuses, timeout, stale and replayed confirmations, a
                 disconnect, a cancel, not at the changer, busy and wrong-party answers, combat)
+  combat_ignored (variants 0 and 5, B46) round 8's request and accept were taken while the boar hunted
+                participant 2; no combat refusal or abort at the changer
   ends          every round's transition ends in the expected state on the server, in order
   consent       no transition was agreed without the partner's accept of its own id (server
                 travel-answer accept -> agreed count == agreed count); no load began (no change_level)
@@ -21,7 +23,7 @@ Checks:
   prompt        each client's own actor touching the changer raised the travel prompt
   crash         (variant 1) the server exited at travel:after-propose with a proposal live; the restarted
                 server refused the partner's accept of it (no-transition) and ran a fresh agreed round
-  execution     (variant 2, S09-T02) the agreed travel was carried out: the transition record prepared and
+  execution     (variants 2 and 5, S09-T02) the agreed travel was carried out: the transition record prepared and
                 committed, the destination generation published (reason travel), the level reloaded in
                 process, both actors arrived within 3 m of the changer's destination point alive, both
                 clients rejoined on the destination level (travel-arrived), the participants' item layout
@@ -65,10 +67,10 @@ EXPECT_STEPS = {
     5: [(0, 11, A, 0), (0, 12, A, 0), (1, 12, R, 28)],
     6: [(0, 11, R, 25)],
     7: [(0, 11, A, 0), (0, 11, R, 23), (1, 12, R, 29), (0, 12, R, 29), (1, 12, A, 0)],
-    8: [(0, 11, R, 27), (0, 12, R, 28), (0, 11, A, 0), (1, 12, A, 0)],
+    # B46 (T01-5 revised 2026-11-03): a level changer has no combat rule; with the boar hunting
+    # participant 2 the request and the accept are taken and the party agrees
+    8: [(0, 11, A, 0), (1, 12, A, 0)],
 }
-# round 8 when the boar noticed nobody within 25 s (fixture-travel combat=0): the combat refusal not exercised
-EXPECT_STEPS_NO_COMBAT_8 = [(0, 11, A, 0), (0, 12, A, 0), (0, 11, A, 0), (1, 12, A, 0)]
 EXPECT_ENDS = {
     0: ["agreed"], 1: ["refused"], 2: ["expired"], 3: ["agreed"], 4: ["aborted:partner-left", "agreed"],
     5: ["cancelled"], 6: [], 7: ["agreed"], 8: ["agreed"],
@@ -139,7 +141,9 @@ def main():
     both_runs = first + server  # a crash window splits one story over two server logs
     rounds = server_rounds(both_runs)
     ran = sorted(r for r in rounds if r >= 0)
-    expected_rounds = [0, 1] if a.variant in (1, 3, 4) else [0] if a.variant == 2 else list(range(9))
+    # variant 5 (B46): round 8 alone (the request and accept while the boar hunts), then carried out
+    expected_rounds = [0, 1] if a.variant in (1, 3, 4) else [0] if a.variant == 2 else [8] if a.variant == 5 \
+        else list(range(9))
     if a.variant == 2 and a.expect_retry_after_crash:
         expected_rounds = [0]  # round 0 in each server run; judged per run below
     expect_steps = EXPECT_STEPS_RETRY if a.variant in (3, 4) else EXPECT_STEPS
@@ -153,7 +157,7 @@ def main():
     no_combat = bool(combat_line) and combat_line.get("combat") != "1"
     detail["combat_not_exercised"] = no_combat
     for r in expected_rounds:
-        steps = EXPECT_STEPS_NO_COMBAT_8 if r == 8 and no_combat else expect_steps[r]
+        steps = expect_steps[r]
         for s, exp in enumerate(steps):
             got = results.get((r, s), [])
             if exp is None:
@@ -189,6 +193,18 @@ def main():
                 failures.append(f"round {r} step {s}: expected {sorted(want)}, got {have}")
     checks["rounds"] = {"pass": not failures, "failures": failures}
 
+    # B46: round 8 ran while the boar hunted (combat=1), the server noted the request and the
+    # accept as taken in combat, and refused or aborted nothing for combat at the changer
+    if 8 in expected_rounds:
+        r8 = rounds.get(8, [])
+        ignored = sorted({kv(ln).get("kind") for ln in r8 if "travel-combat-ignored" in ln})
+        refused = [ln for ln in both_runs if "travel-in-combat" in ln or "travel-combat-abort" in ln]
+        exercised = detail["combat_exercised"] is True
+        # not exercised (the boar picked no enemy in 25 s): only the absence of refusals is judged
+        noted = ignored == ["11", "12"] if exercised else True
+        checks["combat_ignored"] = {"pass": noted and not refused, "exercised": exercised,
+                                    "ignored_kinds": ignored, "combat_refusals": len(refused)}
+
     # ends per round
     end_failures = []
     for r in expected_rounds:
@@ -202,8 +218,6 @@ def main():
             want = ["agreed"]  # the restarted server's round 0; the first run's proposal never ended there
         if a.expect_retry_after_crash:
             want = ["agreed", "agreed"]  # once per server run
-        if r == 8 and no_combat:
-            want = ["cancelled", "agreed"]
         # transitions requested by hand (a player's USE key in a client window) after the round's
         # steps are not the driver's: recorded, not judged
         if ends[:len(want)] != want:
@@ -237,7 +251,7 @@ def main():
                 if d["outcome"] == "2":
                     refused_at.setdefault(d["operation"], int(ln.split(" ", 1)[0]))
     repeat_proposals = sorted(op for op, t in refused_at.items() if op in proposed_at and proposed_at[op] > t)
-    checks["duplicates"] = {"pass": (dup_total > 0 or a.variant >= 3) and not repeat_proposals,
+    checks["duplicates"] = {"pass": (dup_total > 0 or a.variant in (3, 4)) and not repeat_proposals,
                             "server_duplicates": dup_total, "refused_then_proposed": repeat_proposals}
 
     # prompt
@@ -289,7 +303,7 @@ def main():
                 not any("phase=2" in ln and "travel-record" in ln for ln in first) and \
                 not any("checkpoint-published" in ln and "reason=travel" in ln for ln in first)
             exec_ok = first_ok and bool(reloaded) and arrived_ok and clients_ok and layout_same
-        if a.variant >= 3:
+        if a.variant in (3, 4):
             # the retry: the first execution failed (checked below), the second went through
             exec_ok = exec_ok and sum(1 for ln in server if "travel-committed" in ln) == 1 and len(reloaded) == 1
         checks["execution"] = {"pass": exec_ok, "destination": level,
@@ -298,7 +312,7 @@ def main():
                                "client_arrivals": {n: [v["level"] for v in vs] for n, vs in client_arrivals.items()},
                                "layout_before_after": (before[-1] if before else None, after[0] if after else None),
                                "executions": barred, "crash_window": crash}
-        if a.variant >= 3:
+        if a.variant in (3, 4):
             failed = [kv(ln) for ln in server if "travel-exec-failed" in ln]
             phase3 = sum(1 for ln in server if "travel-record" in ln and "phase=3" in ln)
             pub_failed = [kv(ln) for ln in server if "checkpoint-failed" in ln]

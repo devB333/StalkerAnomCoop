@@ -778,6 +778,18 @@ pending (`actor-weapons tag=kick`, once per actor); `actor-weapons` gains the
 update age, processing, view and hand-animation state. Single player:
 unchanged.
 
+`0108-travel-combat-vanilla.patch` (S10-T07, 2026-11-03): B46 (after a travel
+to the Marsh every request back to Cordon was refused 27, in combat, for over
+a minute: a renegade kept player 2 as its enemy). By the user's choice
+(T07-11, revising T01-5) the combat rule now follows the installed game:
+only a PDA fast travel or a backpack jump is refused in combat
+(`travel_combat_rule`); a level changer, a guide's trip and another script's
+`ChangeLevel` are taken (`travel-combat-ignored` noted). The travel fixture's
+round 8 asks and agrees with the boar hunting; its new variant 5 runs round 8
+alone and carries the travel out (variant 0's nine rounds predate S09-T02). On a client a refused travel,
+fast travel, session or repair keeps its own words (the generic "You can't
+pick that up." no longer overwrites them). Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

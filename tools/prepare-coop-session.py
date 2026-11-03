@@ -9,7 +9,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
            [--transfer c1,c2 [--transfer-start 20]] [--quest c1,c2 [--quest-start 20]]
            [--use c1,c2 [--use-start 20]] [--stack c1,c2 [--stack-start 20]]
-           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4] [--travel-barrier-hold 5]
+           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4|5] [--travel-barrier-hold 5]
             [--travel-ready-delay c2:15] [--travel-ready-wrong c2] [--travel-rejoin-delay c2:75]
             [--travel-load-fail c2]] [--talk c1,c2 [--talk-start 20]] [--info c1,c2 [--info-start 20]]
            [--party-task c1,c2 [--party-task-start 20]] [--trade c1,c2 [--trade-start 20]]
@@ -167,7 +167,8 @@ def main():
                              "crash windows); 3 (S09-T04) the partner accepts and drops its connection inside the "
                              "barrier (with --travel-barrier-hold), then the party asks again and travels; 4 "
                              "(S09-T04) two agreed travels, the first's publication failed from outside "
-                             "(--failpoint checkpoint:after-manifest:3:fail), the second carried out")
+                             "(--failpoint checkpoint:after-manifest:3:fail), the second carried out; 5 (B46) round 8 "
+                             "alone: the request and the accept while a boar hunts player 2, then carried out")
     parser.add_argument("--talk", default="",
                         help="comma-separated client names running the S10-T04a talk-window rounds at Sidorovich "
                              "(profile script = 8; fixture talk_party)")

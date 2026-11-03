@@ -737,6 +737,13 @@ never runs on a replica); the needs event carries the actor's bleeding speed
 (8th value) for the HUD's blood overlay (`UIMainIngameWnd`). Single player:
 unchanged (the overlay hook answers false).
 
+`0103-npc-body-loot.patch` (S10-T07, 2026-11-03): the user's demo-13. B40: a
+client sends the use of a dead NPC's body to the server instead of running
+its use callback (the installed `xr_motivator` makes the body's loot, which
+needs the server's ALife); the server uses the body in the player's context
+(3 m reach); the client's loot window refreshes while the loot arrives.
+Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

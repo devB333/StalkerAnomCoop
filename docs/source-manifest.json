@@ -417,6 +417,10 @@
     {
       "path": "patches/engine/0102-npc-weapons-status-hud.patch",
       "sha256": "9f15af3125ae9a614656018a0b41c7236bd8225185e9609e890b1cce50b4ad31"
+    },
+    {
+      "path": "patches/engine/0103-npc-body-loot.patch",
+      "sha256": "c367935bf0a829db85b488e71a3daabffaf397bd44ff743b7cda3ef6a4f4a146"
     }
   ],
   "submodules": [

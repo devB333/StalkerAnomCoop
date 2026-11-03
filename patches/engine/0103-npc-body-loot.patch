@@ -1,0 +1,83 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 499ce2e..adc0672 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -525,6 +525,7 @@ struct Link
+ 	u64 use_objects_requested = 0, joint_drives = 0; // S10-T04c
+ 	u64 corpses_moved = 0; // B29
+ 	float own_bleeding = 0.f; // B39: the server's bleeding speed of this player's actor
++	u32 body_refresh_until_ms = 0, body_refresh_last_ms = 0; // B40
+ 	u64 npc_weapons_presented = 0, npc_shots_presented = 0; // B38
+ 	u64 uses_presented = 0;
+ 	struct LayoutItem
+@@ -5730,6 +5731,13 @@ void layout_frame()
+ 				unresolved);
+ 		}
+ 	}
++	// B40: a body's loot the server makes after this client used the body
++	// arrives a moment after the loot window opened: refreshed twice a second
++	if (g_link->body_refresh_until_ms && now < g_link->body_refresh_until_ms && now - g_link->body_refresh_last_ms >= 500)
++	{
++		g_link->body_refresh_last_ms = now;
++		changed = true;
++	}
+ 	if (changed)
+ 		refresh_inventory_ui();
+ 	layout_point_frame();
+@@ -8310,7 +8318,26 @@ bool coop_client_use_object(CGameObject* object, CGameObject* who)
+ {
+ 	if (!g_link || !g_link->active || !object || !who)
+ 		return false;
+-	if (smart_cast<CInventoryItem*>(object) || smart_cast<CEntityAlive*>(object) || smart_cast<CLevelChanger*>(object))
++	// B40: a dead NPC's body: its use callback makes its loot (the installed
++	// xr_motivator / death_manager create items, which only the server can):
++	// the use goes to the server, nothing runs here; the engine still opens
++	// this client's loot window (CActor::ActorUse) and the loot arrives
++	CEntityAlive* alive = smart_cast<CEntityAlive*>(object);
++	if (alive && !alive->g_Alive() && smart_cast<CInventoryOwner*>(object) && !smart_cast<CActor*>(object))
++	{
++		if (g_link->world != WorldLive || !g_actor || who != g_actor)
++			return true;
++		coop::proto::EntityRef body_ref;
++		if (ref_of(u16(object->ID()), body_ref))
++		{
++			++g_link->use_objects_requested;
++			request_ownership(coop::proto::kActionUseObject, body_ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
++			g_link->log.line("use-body-sent object=%u section=%s", u32(object->ID()), *object->cNameSect());
++			g_link->body_refresh_until_ms = g_link->wall.GetElapsed_ms() + 4000;
++		}
++		return true;
++	}
++	if (smart_cast<CInventoryItem*>(object) || alive || smart_cast<CLevelChanger*>(object))
+ 		return false;
+ 	if (g_link->world != WorldLive || !g_actor || who != g_actor)
+ 		return true; // nothing uses locally on a replica
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 19763ee..afbbb98 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -9822,8 +9822,13 @@ u16 take_use_object(PlayerLink& link, const coop::proto::ActionIntent& intent, c
+ 	// in single player) but its use callback is where the treasure manager
+ 	// spawns a stash's contents: a box is used here as the client asked
+ 	const bool is_box = smart_cast<CInventoryBox*>(object) != nullptr;
+-	if (!usable || (usable->nonscript_usable() && !is_box) || smart_cast<CInventoryItem*>(object) ||
+-		smart_cast<CEntityAlive*>(object) || smart_cast<CLevelChanger*>(object))
++	// B40: a dead NPC's body: its use callback (xr_motivator) makes its loot
++	// the first time it is used (death_manager.create_release_item: ammo,
++	// outfit, items, money to the looter), which needs the server's ALife
++	CEntityAlive* alive = smart_cast<CEntityAlive*>(object);
++	const bool is_body = alive && !alive->g_Alive() && smart_cast<CInventoryOwner*>(object) && !smart_cast<CActor*>(object);
++	if (!usable || (usable->nonscript_usable() && !is_box && !is_body) || smart_cast<CInventoryItem*>(object) ||
++		(alive && !is_body) || smart_cast<CLevelChanger*>(object))
+ 	{
+ 		++g_host->uses_object_refused;
+ 		g_host->log.line("use-object-refused slot=%u object=%u section=%s why=not-usable", u32(link.ref.slot), u32(id),
+@@ -9831,7 +9836,7 @@ u16 take_use_object(PlayerLink& link, const coop::proto::ActionIntent& intent, c
+ 		return coop::proto::kReasonNotUsable;
+ 	}
+ 	const float distance = pickup_distance(actor, object);
+-	if (distance > kUseObjectReach)
++	if (distance > (is_body ? kContainerReach + kContainerSlack : kUseObjectReach))
+ 	{
+ 		++g_host->uses_object_refused;
+ 		g_host->log.line("use-object-refused slot=%u object=%u section=%s why=out-of-reach distance=%.2f",

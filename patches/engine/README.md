@@ -769,6 +769,15 @@ a travel's commit and resume and at each activation; the travel fixture's
 weapon probe with profile `arm`), `player-slot-sent` / `player-slot-refused`
 on the client. Single player: unchanged.
 
+`0107-stalled-inventory-kick.patch` (S10-T07, 2026-11-03): B45, second part
+(demo-17: after a travel both actors kept a weapon change pending, active 0
+and next 2/3, through every later accepted slot intent). The server updates
+a participant's inventory itself when its actor's own update (`UpdateCL`,
+which runs `CInventory::Update`) has not run for 10 frames with a change
+pending (`actor-weapons tag=kick`, once per actor); `actor-weapons` gains the
+update age, processing, view and hand-animation state. Single player:
+unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

@@ -405,6 +405,10 @@
     {
       "path": "patches/engine/0099-sleepbag-corpse-grab.patch",
       "sha256": "4ba20c6587f0e9366fe17bd78a58dbaae7c228eb45e0a186e64054b0a1e6938e"
+    },
+    {
+      "path": "patches/engine/0100-tent-shelter-rifle-kit.patch",
+      "sha256": "e154599bf6386fc3540d803b16a6bf6bbf3b1f66f736fa4e6f52e4a75e675ba9"
     }
   ],
   "submodules": [

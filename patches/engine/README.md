@@ -711,6 +711,12 @@ callback parameter only when it is one of the shell's elements (a dead
 actor's spine, shoulder and head keep the actor's callbacks). Single
 player: the capture guard only (no dead actor is grabbed there).
 
+`0100-tent-shelter-rifle-kit.patch` (S10-T07, 2026-11-02): the user's
+demo-10. B34: a placed tent shelters within 3 m of its origin in co-op (the
+installed 1.5 m holds one player, not two and a sleeping bag); a refused
+sleep request shows only its own words. The demo kit adds an AK-74 and three
+boxes of 5.45x39 (the user's rifle animation check). Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

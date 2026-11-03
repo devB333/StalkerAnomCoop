@@ -1,0 +1,53 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 8a19efc..e121938 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -4541,6 +4541,9 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				p.action == coop::proto::kActionTradeClose;
+ 			if (trade_action)
+ 				trade_result(p, result); // S10-T04c
++			// B34: a sleep refusal has its own words above (not "You can't pick that up.")
++			const bool sleep_action = p.action == coop::proto::kActionSleepRequest ||
++				p.action == coop::proto::kActionSleepAnswer;
+ 			if (p.action == coop::proto::kActionUpgradeOpen || p.action == coop::proto::kActionUpgrade)
+ 				upgrade_result(p, result); // S10-T04f
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+@@ -4558,7 +4561,7 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 					result.reason == coop::proto::kReasonPlaceRefused ? "It doesn't fit there." :
+ 					result.reason == coop::proto::kReasonNotUsable ? "You can't use that." :
+ 					result.reason == coop::proto::kReasonItemGone ? "It's gone." : "You can't do that now.");
+-			else if (p.player && !accepted && !talk_action && !trade_action)
++			else if (p.player && !accepted && !talk_action && !trade_action && !sleep_action)
+ 				pickup_message(result.reason == coop::proto::kReasonItemTaken ? "Someone else took it." :
+ 					result.reason == coop::proto::kReasonOutOfReach ? "Too far away." :
+ 					result.reason == coop::proto::kReasonStale ? "It was moved in the meantime." :
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 111b54f..b586008 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -7279,7 +7279,9 @@ LPCSTR const g10_source =
+ 	"  if type(tents) == 'table' then\n"
+ 	"    for id, v in pairs(tents) do\n"
+ 	"      local t = v == true and level.object_by_id(id)\n"
+-	"      if t and t:section() == 'ph_tent' and t:position():distance_to(pos) < 1.5 then return 4 end\n"
++	// B34: 3 m in co-op (the installed 1.5 m from the tent's origin holds one
++	// player; two players and a sleeping bag stand around it)
++	"      if t and t:section() == 'ph_tent' and t:position():distance_to(pos) < 3.0 then return 4 end\n"
+ 	"    end\n"
+ 	"  end\n"
+ 	"  return 0\n"
+@@ -14851,8 +14853,12 @@ void combat_fixtures()
+ 				give_item(alife, "cleaning_kit_p", actor, se);
+ 				give_item(alife, "itm_tent", actor, se);
+ 				give_item(alife, "itm_sleepbag", actor, se); // B28: the sleep window opens from a placed bag
+-				g_host->log.line("demo-kit slot=%u actor=%u +cleaning_kit_p +itm_tent +itm_sleepbag", u32(link.ref.slot),
+-					u32(actor->ID()));
++				// the user's rifle check (animations): an AK-74 and three boxes of its ammo
++				give_item(alife, "wpn_ak74", actor, se);
++				for (int i = 0; i < 3; ++i)
++					give_item(alife, "ammo_5.45x39_fmj", actor, se);
++				g_host->log.line("demo-kit slot=%u actor=%u +cleaning_kit_p +itm_tent +itm_sleepbag +wpn_ak74 +3x ammo_5.45x39_fmj",
++					u32(link.ref.slot), u32(actor->ID()));
+ 			}
+ 			g_host->log.line("arm slot=%u actor=%u %s +2x ammo_9x18_fmj", u32(link.ref.slot), u32(actor->ID()),
+ 				has ? actor->inventory().ItemFromSlot(INV_SLOT_2)->object().cNameSect().c_str() : "wpn_pm");

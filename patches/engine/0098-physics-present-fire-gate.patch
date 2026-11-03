@@ -1,0 +1,43 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 0d66734..adcd04b 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -75,6 +75,8 @@
+ #include "UIGameCustom.h"
+ #include "Weapon.h"
+ #include "ZoneCampfire.h" // S10-T07 (B23)
++#include "MainMenu.h" // B30: the fire key only reaches the world
++extern bool g_bDisableAllInput; // Level_input.cpp
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+ #include "UIGameSP.h" // S10-T04a: the talk window
+@@ -1734,7 +1736,11 @@ void present_object(CPhysicsShellHolder* object, const coop::proto::EntityState&
+ 	if (CPhysicsShell* shell = object->PPhysicsShell())
+ 		if (shell->isActive())
+ 		{
+-			shell->SetTransform(m, mh_clear);
++			// B28/B31: the whole shell moves rigidly to the object's transform
++			// (CPHShell::SetTransform puts every element at m itself: a
++			// several-bone tent folded onto one point, an item whose root
++			// element is offset from its origin drawn off the ground)
++			shell->SetGlTransformDynamic(m);
+ 			shell->set_LinearVel(Fvector().set(0, 0, 0));
+ 			shell->set_AngularVel(Fvector().set(0, 0, 0));
+ 			shell->Disable();
+@@ -2306,9 +2312,14 @@ void sample_input()
+ 		in.buttons |= coop::proto::kButtonLeanRight;
+ 	if (actor->IsZoomAimingMode())
+ 		in.buttons |= coop::proto::kButtonZoom; // S10-T07 (B7): the own weapon's zoom
+-	// S06-T04: the fire key, held by the player or the test driver
++	// S06-T04: the fire key, held by the player or the test driver. B30:
++	// only while the world has the input (the level's own routing,
++	// Level_input.cpp: a dialog such as the inventory, the console, the
++	// main menu or a pause take the click first)
++	const bool world_input = !g_bDisableAllInput && !Device.Paused() && !(Console && Console->bVisible) &&
++		!(MainMenu() && MainMenu()->IsActive()) && !(CurrentGameUI() && CurrentGameUI()->TopInputReceiver());
+ 	bool fire = false;
+-	for (int idx = 0; idx < 2 && !fire; ++idx)
++	for (int idx = 0; idx < 2 && !fire && world_input; ++idx)
+ 	{
+ 		const int dik = get_action_dik(kWPN_FIRE, idx);
+ 		fire = dik && pInput && pInput->iGetAsyncKeyState(dik);

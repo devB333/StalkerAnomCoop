@@ -397,6 +397,10 @@
     {
       "path": "patches/engine/0097-demo7-fixes.patch",
       "sha256": "a5e2a15afe842e3d80060dfb35c942bd104fc72cad03808968d63ff676f2af99"
+    },
+    {
+      "path": "patches/engine/0098-physics-present-fire-gate.patch",
+      "sha256": "9e7ecccea3e0a2182a0642601b4887d5e9e23fec93f642b4beb5134d753b80d8"
     }
   ],
   "submodules": [

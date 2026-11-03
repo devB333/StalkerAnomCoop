@@ -694,6 +694,14 @@ window locally with its shelter check left to the server, the demo kit adds
 a sleeping bag. B29: a client moves a settled body to the server's position
 (loot reach). Single player: `select_animation`'s guard only.
 
+`0098-physics-present-fire-gate.patch` (S10-T07, 2026-11-02): the user's
+demo-8 bugs. B31 (and B28's unseen tent): a client places a physics object's
+shell with `SetGlTransformDynamic` (rigid, `m_object_in_root` kept) instead
+of `SetTransform` (every element at the object's transform: a dropped item
+drawn off the ground, a several-bone tent folded). B30: the fire key is sent
+only while the world has the input (no dialog, console, menu or pause).
+Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

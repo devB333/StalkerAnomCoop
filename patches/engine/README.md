@@ -744,6 +744,13 @@ needs the server's ALife); the server uses the body in the player's context
 (3 m reach); the client's loot window refreshes while the loot arrives.
 Single player: unchanged.
 
+`0104-host-actor-fallback-spot-text.patch` (S10-T07, 2026-11-03): the user's
+demo-14. B41: on the server, outside a context, `db.actor` is a living
+player's actor when the binder's actor (player 1's first) is dead, so the
+installed actor update (task targets, weather, `actor_on_update`) goes on
+after player 1's respawn. B42: a map spot's long detail is truncated, not
+fatal (`record_presentation`, `present_map_spot`). Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

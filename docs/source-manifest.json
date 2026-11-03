@@ -421,6 +421,10 @@
     {
       "path": "patches/engine/0103-npc-body-loot.patch",
       "sha256": "c367935bf0a829db85b488e71a3daabffaf397bd44ff743b7cda3ef6a4f4a146"
+    },
+    {
+      "path": "patches/engine/0104-host-actor-fallback-spot-text.patch",
+      "sha256": "11a369d8545920a822e0e791858fcbfe15719bf01bb6dcf723bedd3a1d20b788"
     }
   ],
   "submodules": [

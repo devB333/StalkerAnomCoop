@@ -35,22 +35,29 @@
   now B47.
 - **Decisions waiting on the user's word at G10:** G10-5 revised (B34), B35,
   T07-11 (the user's own choice).
-- **Test kits in `builds/kits/` are stale** (campaign-443 / client-325);
-  remake them only once the user says everything works.
+- **Test kits remade 2026-11-03** (the user: "everything look good I think
+  were ready for the test kits"), build campaign-471 / client-354: **server-4**
+  (`builds/kits/ServerHostKit/server-4`), **host-7**
+  (`builds/kits/client1HostKit/host-7`), **client-6**
+  (`builds/kits/clientKit/client-6.zip`); checked on this PC by **kit-10**
+  (server kit + two client kits) and **kit-11** (host kit + client kit), both
+  pass ([S11-T00](../../validation/S11-T00.md)); server-3 and host-6 hold the
+  test players and are not for use.
 - demo-19's launcher stopped before copying its logs into
   `builds/logs/S10-T07/run-demo-19/` (empty); they are under
   `builds/stage2/test-install/S10-T07/demo-19-*/appdata/logs/`.
 
 ## Next
 
-1. The user's hands-on (demo-21): the torch (L) and the turn-in at
-   Sidorovich: `bash tools/start-coop-demo.sh S10-T07 0 30 120 0 1 1` (the
-   7th argument: the quest; both are placed at Sidorovich after 20 s).
-   Afterwards check the server log for `torch slot=`, `demo-quest`,
-   `quest-turnin`, `update-stall`.
-2. When the user says everything works: remake the kits
-   (`python3 tools/make-coop-kit.py server|host|client <name>`) and run the
-   first two-PC test over Tailscale ([S11-T00](../../validation/S11-T00.md)).
+1. The first two-PC test over Tailscale (S11-T00, the user's): this PC runs
+   **host-7** (`Start-Coop.cmd`, New game > Host co-op) or **server-4**
+   (`Start-Server.cmd`, both players join); the friend unzips **client-6.zip**,
+   runs `Setup-Coop.ps1` once, then `Start-Coop.cmd`, New game > Join co-op
+   with the host's Tailscale address and the join code. Afterwards read the
+   logs (host kit: its runtime's `appdata\logs`; friend: theirs) and record
+   the result in [S11-T00](../../validation/S11-T00.md).
+2. Remake the kits after any rebuild (a server refuses an older client
+   build); `demo_quest` / `torch_test` remain for hands-on checks.
 3. Close G10 only on the user's word.
 
 ## Picking this up
@@ -74,12 +81,12 @@
 ## Run names
 
 - Used: `campaign-334…471`, `client-226…354`, `proto-build-53…64`,
-  `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`, `kit-1…9`
-  (S11-T00), patch checks 77–123, kits host-1…5, friend-1…3, client-4…5,
-  server-1…2.
+  `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`,
+  (S11-T00), `kit-1…11`, patch checks 77–123, kits host-1…7, friend-1…3,
+  client-4…6, server-1…4.
 - Next: `campaign-472`, `client-355`, `proto-build-65`, `st-40`,
-  `bugfix-45`, `demo-21`, `menu-11`, `kit-10`, patch check 124, kits host-6,
-  client-6, server-3.
+  `bugfix-45`, `demo-21`, `menu-11`, `kit-12`, patch check 124, kits host-8,
+  client-7, server-5.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

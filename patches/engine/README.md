@@ -821,6 +821,17 @@ argument) gives the party Sidorovich's "Mobbing the Mob" with its bandit
 patches, ready to turn in; the client driver `torch_test`. Single player:
 unchanged.
 
+`0111-menu-new-game-click.patch` (S11-T00, 2026-11-03): B49 (the user, with
+kit host-7: New game showed no co-op choice). The installed main menu binds
+its New game button to `OnButton_new_game` when it is built
+(`ui_main_menu.script:73`), before the co-op menu is installed, so the
+replaced function was never reached by a click (the menu test driver had
+called the host flow directly). The choice now comes from `ShowFactionUI`,
+which the button's handler looks up when called; `Update` records the live
+menu, and the driver's `host_new` clicks New game through it, picks "Host
+co-op: a new campaign" as its double-click does and starts. Single player:
+unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

@@ -3,8 +3,8 @@
 ## State (2026-11-03)
 
 - **S10-T07** (bug pass before Stage 11) continues through the user's
-  hands-on demos. engine-work equals the series of **110** patches (patch
-  check 123). Builds **campaign-471 / client-354**, protocol
+  hands-on demos. engine-work equals the series of **111** patches (patch
+  check 124). Builds **campaign-472 / client-355**, protocol
   **proto-build-64** (st-39 122/122). Report: [S10-T07](../../validation/S10-T07.md) parts
   9–22; bug table: [known issues](../../known-issues.md).
 - **B46 (patch 0108):** travel matches vanilla (decision T07-11 in
@@ -35,14 +35,16 @@
   now B47.
 - **Decisions waiting on the user's word at G10:** G10-5 revised (B34), B35,
   T07-11 (the user's own choice).
-- **Test kits remade 2026-11-03** (the user: "everything look good I think
-  were ready for the test kits"), build campaign-471 / client-354: **server-4**
-  (`builds/kits/ServerHostKit/server-4`), **host-7**
-  (`builds/kits/client1HostKit/host-7`), **client-6**
-  (`builds/kits/clientKit/client-6.zip`); checked on this PC by **kit-10**
-  (server kit + two client kits) and **kit-11** (host kit + client kit), both
-  pass ([S11-T00](../../validation/S11-T00.md)); server-3 and host-6 hold the
-  test players and are not for use.
+- **Test kits (2026-11-03):** the user's first try (host-7) found **B49**:
+  New game showed no co-op choice (the installed button bound before the
+  hook; the tests had bypassed the button). Patch **0111** fixes it; build
+  **campaign-472 / client-355**. Kits for the two-PC test: **host-9**
+  (`builds/kits/client1HostKit/host-9`), **server-6**
+  (`builds/kits/ServerHostKit/server-6`), **client-7**
+  (`builds/kits/clientKit/client-7.zip`); checked by **kit-12** (host kit,
+  through the New game button) and **kit-13** (server kit), both pass
+  ([S11-T00](../../validation/S11-T00.md)). host-6…8 and server-3…5 hold
+  test players; not for use. A choice in the box runs on a double-click.
 - demo-19's launcher stopped before copying its logs into
   `builds/logs/S10-T07/run-demo-19/` (empty); they are under
   `builds/stage2/test-install/S10-T07/demo-19-*/appdata/logs/`.
@@ -50,8 +52,8 @@
 ## Next
 
 1. The first two-PC test over Tailscale (S11-T00, the user's): this PC runs
-   **host-7** (`Start-Coop.cmd`, New game > Host co-op) or **server-4**
-   (`Start-Server.cmd`, both players join); the friend unzips **client-6.zip**,
+   **host-9** (`Start-Coop.cmd`, New game, double-click Host co-op) or **server-6**
+   (`Start-Server.cmd`, both players join); the friend unzips **client-7.zip**,
    runs `Setup-Coop.ps1` once, then `Start-Coop.cmd`, New game > Join co-op
    with the host's Tailscale address and the join code. Afterwards read the
    logs (host kit: its runtime's `appdata\logs`; friend: theirs) and record
@@ -80,13 +82,13 @@
 
 ## Run names
 
-- Used: `campaign-334…471`, `client-226…354`, `proto-build-53…64`,
+- Used: `campaign-334…472`, `client-226…355`, `proto-build-53…64`,
   `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…11`, patch checks 77–123, kits host-1…7, friend-1…3,
-  client-4…6, server-1…4.
-- Next: `campaign-472`, `client-355`, `proto-build-65`, `st-40`,
-  `bugfix-45`, `demo-21`, `menu-11`, `kit-12`, patch check 124, kits host-8,
-  client-7, server-5.
+  (S11-T00), `kit-1…13`, patch checks 77–124, kits host-1…9, friend-1…3,
+  client-4…7, server-1…6.
+- Next: `campaign-473`, `client-356`, `proto-build-65`, `st-40`,
+  `bugfix-45`, `demo-21`, `menu-11`, `kit-14`, patch check 125, kits host-10,
+  client-8, server-7.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

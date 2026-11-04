@@ -449,6 +449,10 @@
     {
       "path": "patches/engine/0110-torch-demo-quest.patch",
       "sha256": "606521db8c057bdfaaee99049ecfcff4b1ef609d17a8287ad8fc1b67e29b8ab4"
+    },
+    {
+      "path": "patches/engine/0111-menu-new-game-click.patch",
+      "sha256": "5f7a3e6b5b7e05caa50668cbde3dc8c2d73793e6b60cf61b3396778da2c3168e"
     }
   ],
   "submodules": [

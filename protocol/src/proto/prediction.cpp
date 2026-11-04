@@ -49,6 +49,13 @@ Correction Reconciler::reconcile(std::uint64_t last_input, const Vec3& server)
         ++counters_.snapped;
     else
         ++counters_.smoothed;
+    if (c.kind == CorrectionKind::Smooth && config_.blend < 1.f && c.error <= config_.blend_below)
+    {
+        e.x *= config_.blend;
+        e.y *= config_.blend;
+        e.z *= config_.blend;
+        ++counters_.blended;
+    }
     c.offset = e;
     // Everything predicted from here on was predicted from the wrong place.
     for (Record& r : records_)

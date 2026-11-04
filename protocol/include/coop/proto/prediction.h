@@ -39,6 +39,11 @@ struct PredictionConfig
     std::size_t capacity = 256; // input ticks remembered (5 s at 50 Hz)
     float tolerance = 0.03f;    // metres: smaller errors are left alone
     float snap_distance = 1.5f; // metres: larger errors jump, unsmoothed
+    // B51: errors over tolerance and up to blend_below are corrected by the fraction blend of the error per
+    // snapshot (the two simulations' noise bled off a little at a time instead of one jump at each threshold
+    // crossing); 1 corrects every error in full (the default, as before)
+    float blend_below = 0.f;
+    float blend = 1.f;
 };
 
 enum class CorrectionKind : std::uint8_t
@@ -62,6 +67,7 @@ struct PredictionCounters
     std::uint64_t reconciled = 0; // snapshots with a record
     std::uint64_t within = 0;
     std::uint64_t smoothed = 0;
+    std::uint64_t blended = 0; // B51: smoothed by a fraction (counted in smoothed too)
     std::uint64_t snapped = 0;
     std::uint64_t unknown = 0;
     std::uint64_t resets = 0;

@@ -843,6 +843,24 @@ code is shown as typed; `menu_join` undoes `GetHost`'s `host/port=N` form. The
 menu test driver's `join` now clicks New game, opens Join co-op, types into
 the box and presses its OK. Single player: unchanged.
 
+`0113-smooth-movement.patch` (S10-T07, 2026-11-04): B51 (the user: both
+players' movement "choppy and jittery", on one PC too). A co-op client's
+correction of its predicted actor now moves the physics character by the
+offset (`CPHSimpleCharacter::ShiftPosition`, through
+`CPHMovementControl::ShiftPosition`: the body, its safe and death positions
+and both render interpolation points) instead of `SetPosition`, which placed
+the body at the shown position plus the offset (losing its lead over the shown
+position, up to a physics step) and restarted the interpolation (a frame
+without movement): the next snapshot found that loss and corrected again,
+7-9 times a second at a run. The client's reconciler bleeds errors of 5 mm to
+15 cm off at 30 % per snapshot (proto-build-66 `PredictionConfig::blend`); its
+server clock slews 1 ms per snapshot within 30 ms (5 ms steps had moved the
+other player 1.3 cm at a run); the render time uses the timer's full
+resolution. Test tooling: `motion_log = 1` writes `coop-motion-client.csv`
+(a row per frame: both actors' motion), `script = 9` is the smoothness walk
+(`prepare-coop-session.py --smooth`, `compare-coop-smoothness.py`). Single
+player: unchanged (`ShiftPosition` has no other caller).
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

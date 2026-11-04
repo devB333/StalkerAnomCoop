@@ -457,6 +457,10 @@
     {
       "path": "patches/engine/0112-menu-join-box.patch",
       "sha256": "159254cfbff5a8c5b933f69300efc5241c0b963f00b049120cd12c4a8b8e098c"
+    },
+    {
+      "path": "patches/engine/0113-smooth-movement.patch",
+      "sha256": "695fd379274d9bfc3dafbdbe488d9b07c66bdca729d4f6fd7c283aa177296ac6"
     }
   ],
   "submodules": [

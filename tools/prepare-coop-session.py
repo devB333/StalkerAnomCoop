@@ -363,6 +363,9 @@ def main():
     parser.add_argument("--auto-respawn", type=int, default=0,
                         help="S07-T07 driver: seconds after its own death until a client confirms the respawn by "
                              "itself (profile auto_respawn; also one early request while alive, expected refused)")
+    parser.add_argument("--smooth", default="",
+                        help="comma-separated client names running the B51 smoothness walk (profile script = 9; "
+                             "check with compare-coop-smoothness.py)")
     parser.add_argument("--no-predict", default="",
                         help="comma-separated client names that do not predict their own actor (S06-T03 baseline; "
                              "profile predict = 0)")
@@ -393,6 +396,7 @@ def main():
     script = {n for n in args.script.split(",") if n}
     movement = {n for n in args.movement.split(",") if n}
     no_predict = {n for n in args.no_predict.split(",") if n}
+    smooth = {n for n in args.smooth.split(",") if n}
     combat = {n for n in args.combat.split(",") if n}
     encounter = {n for n in args.encounter.split(",") if n}
     weather = {n for n in args.weather.split(",") if n}
@@ -609,13 +613,15 @@ def main():
             program = (8 if name in stepped else 7 if name in pickup else 6 if name in ledger
                        else 5 if name in weather
                        else 4 if name in encounter
-                       else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
+                       else 3 if name in combat else 2 if name in movement else 9 if name in smooth
+                       else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
                       f"name = {players[name]['display_name']}", f"exit_after_seconds = {args.client_exit_after}",
                       f"inject = {1 if name in inject else 0}",
                       f"script = {program}",
                       f"predict = {0 if name in no_predict else 1}",
+                      "motion_log = 1",  # B51: the per-frame motion log (compare-coop-smoothness.py)
                       f"auto_respawn = {args.auto_respawn}",
                       f"travel_ready_delay = {ready_delay.get(name, 0)}",
                       f"travel_ready_wrong = {1 if name in ready_wrong else 0}",

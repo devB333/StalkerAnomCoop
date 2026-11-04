@@ -39,11 +39,15 @@ EntityState interpolate(const EntityState& a, const EntityState& b, float k);
 // minimum, so it follows a server whose ticks run slower or faster than
 // their nominal length (the S06-T02 snap-1 session drifted about 1 %), and
 // the offset used moves towards it by at most max_slew_ms per observation,
-// so a change does not jolt the timeline.
+// so a change does not jolt the timeline. B51: with fast_beyond_ms > 0 the
+// limit is max_slew_ms only while the offset is within fast_beyond_ms of the
+// estimate and 5 ms beyond it (a small limit follows a drift in steps too
+// small to see; a large change still catches up quickly).
 class ServerClock
 {
 public:
-    explicit ServerClock(double window_ms = 2000, double max_slew_ms = 5) : window_ms_(window_ms), max_slew_ms_(max_slew_ms) {}
+    explicit ServerClock(double window_ms = 2000, double max_slew_ms = 5, double fast_beyond_ms = 0)
+        : window_ms_(window_ms), max_slew_ms_(max_slew_ms), fast_beyond_ms_(fast_beyond_ms) {}
 
     void observe(double local_ms, double server_ms);
     bool ready() const { return ready_; }
@@ -53,7 +57,7 @@ public:
     void reset();
 
 private:
-    double window_ms_, max_slew_ms_;
+    double window_ms_, max_slew_ms_, fast_beyond_ms_;
     bool ready_ = false;
     double offset_ = 0;
     std::deque<std::pair<double, double>> window_; // (local time, offset), offsets increasing: front is the minimum

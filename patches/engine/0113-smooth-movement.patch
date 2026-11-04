@@ -1,0 +1,402 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 94988fe..5341fed 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -193,7 +193,9 @@ struct Link
+ 	};
+ 	// S06-T02: server time from the least-delayed recent snapshot (a sliding
+ 	// window: the server's ticks are not exactly 20 ms)
+-	coop::proto::ServerClock clock;
++	// B51: 1 ms per snapshot within 30 ms of the estimate (5 ms steps moved the other player 1.3 cm at a run,
++	// 73 times in bugfix-46 as the server's ticks drifted)
++	coop::proto::ServerClock clock{2000.0, 1.0, 30.0};
+ 	xr_map<u16, Track> tracks;
+ 	u64 snapshots = 0, snapshot_unknown = 0, last_snapshot_tick = 0, last_input_acked = 0;
+ 	// S06-T02: snapshots against acknowledged baselines
+@@ -207,6 +209,14 @@ struct Link
+ 	bool predicting = false;
+ 	coop::proto::Reconciler reconciler;
+ 	coop::proto::Smoother smoother;
++	// B51: the per-frame motion log (config motion_log)
++	FILE* motion_csv = nullptr;
++	u32 motion_rows = 0;
++	float motion_corr = 0.f; // corrections applied to the own actor since the last row (metres)
++	u16 motion_remote = 0xffff; // the other player's actor, as last presented
++	double motion_margin_ms = 0; // its newest state's time minus the render time (negative: holding)
++	bool motion_holding = false;
++	Fvector motion_target = {0.f, 0.f, 0.f}; // where present_actors put it
+ 	FILE* prediction_csv = nullptr;
+ 	u64 correction_frames = 0;
+ 	u64 reconciled_snapshot = 0; // the last snapshot id reconciled
+@@ -298,6 +308,8 @@ struct Link
+ 	size_t replay_at = 0;
+ 	u32 replays = 0;
+ 	u32 program_t0 = 0; // script 2: when the program started (script time)
++	float drive_turn = 0.f; // B51 (script 9): the camera's turn while a leg runs (rad/s)
++	bool smooth_separated = false; // B51 (script 9): the first run away from the other player is done
+ 	string32 leg_name = "";
+ 	u32 leg_start_ms = 0;
+ 	u64 leg_start_utc = 0;
+@@ -1112,6 +1124,7 @@ void write_world_summary(LPCSTR tag)
+ }
+ 
+ void present_actors();
++void motion_row(); // B51
+ void run_script();
+ void sample_input();
+ void log_actors();
+@@ -1323,6 +1336,7 @@ void world_frame()
+ 	}
+ 	if (g_link->world == WorldLive)
+ 	{
++		motion_row(); // B51: what the last frame showed, before this frame moves anything
+ 		present_actors();
+ 		run_script();
+ 		respawn_frame(); // S07-T07
+@@ -1498,6 +1512,16 @@ public:
+ 
+ void prediction_begin()
+ {
++	if (g_link->reconciler.config().blend >= 1.f)
++	{
++		// B51: the two simulations' noise (1-5 cm at a run) is bled off, 30 % per snapshot, instead of a jump
++		// each time it crossed 3 cm; larger errors as before (bugfix-46: 0.8-1.3 such jumps a second)
++		coop::proto::PredictionConfig cfg;
++		cfg.tolerance = 0.005f;
++		cfg.blend_below = 0.15f;
++		cfg.blend = 0.3f;
++		g_link->reconciler = coop::proto::Reconciler(cfg);
++	}
+ 	g_link->reconciler.reset();
+ 	g_link->smoother.clear();
+ 	g_link->reconciled_snapshot = 0;
+@@ -1575,6 +1599,7 @@ void reconcile_own_actor(u64 snapshot_id, u64 last_input)
+ 		p.y += c.offset.y;
+ 		p.z += c.offset.z;
+ 		const float jump = Fvector().set(c.offset.x, c.offset.y, c.offset.z).magnitude();
++		g_link->motion_corr += jump; // B51
+ 		if (c.kind == coop::proto::CorrectionKind::Snap && jump > 3.f)
+ 		{
+ 			// S10-T07 (B6): a long server-side move (a fixture's, a script's teleport) as the engine teleports an
+@@ -1589,8 +1614,13 @@ void reconcile_own_actor(u64 snapshot_id, u64 last_input)
+ 		}
+ 		else
+ 		{
++			// B51: moved by the offset, not placed: SetPosition put the body at the shown position plus the offset
++			// (losing the body's lead over the shown position, up to a physics step) and restarted the render
++			// interpolation there (a frame without movement); the next snapshot found that loss and corrected
++			// again, 7-9 times a second at a run (bugfix-45)
++			const Fvector delta = Fvector().set(c.offset.x, c.offset.y, c.offset.z);
+ 			if (g_actor->character_physics_support()->movement()->CharacterExist())
+-				g_actor->character_physics_support()->movement()->SetPosition(p);
++				g_actor->character_physics_support()->movement()->ShiftPosition(delta);
+ 			g_actor->Position().set(p);
+ 		}
+ 		if (c.kind == coop::proto::CorrectionKind::Smooth)
+@@ -1884,6 +1914,39 @@ void apply_npc_weapon(CAI_Stalker* stalker, const coop::proto::EntityState& s)
+ 	}
+ }
+ 
++// B51: one row per frame while the world is live (config motion_log): the frame time, the camera and the own
++// actor as the last frame left them, the corrections applied to it since, the view's remaining smoothing offset;
++// the other player's actor as shown, where it was put, its buffer margin and the server clock's offset. Read by
++// tools/compare-coop-smoothness.py.
++const u32 kMotionRowsMax = 400000; // about an hour at 100 frames per second
++void motion_row()
++{
++	if (!g_link->config.motion_log || !g_actor || g_link->motion_rows >= kMotionRowsMax)
++		return;
++	if (!g_link->motion_csv)
++	{
++		string_path path;
++		FS.update_path(path, "$logs$", "coop-motion-client.csv");
++		g_link->motion_csv = fopen(path, "w");
++		if (!g_link->motion_csv)
++			return;
++		fprintf(g_link->motion_csv, "utc_ms,frame,dt_ms,cam_x,cam_y,cam_z,own_x,own_y,own_z,own_state,corr,view_off,"
++			"remote,r_x,r_y,r_z,r_yaw,r_state,t_x,t_y,t_z,margin_ms,holding,clock_off\n");
++	}
++	const coop::proto::Vec3 vo = g_link->smoother.offset();
++	const float view_off = _sqrt(vo.x * vo.x + vo.y * vo.y + vo.z * vo.z);
++	CActor* other = g_link->motion_remote != 0xffff ? smart_cast<CActor*>(Level().Objects.net_Find(g_link->motion_remote)) : nullptr;
++	const Fvector r = other ? other->XFORM().c : Fvector().set(0.f, 0.f, 0.f);
++	fprintf(g_link->motion_csv, "%I64u,%u,%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%d,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,"
++		"%.1f,%d,%.2f\n", utc_now_ms(), Device.dwFrame, Device.fTimeDelta * 1000.f, VPUSH(Device.vCameraPosition),
++		VPUSH(g_actor->Position()), g_actor->MovingState(), g_link->motion_corr, view_off, other ? int(other->ID()) : -1,
++		VPUSH(r), other ? other->replica_model_yaw() : 0.f, other ? other->MovingState() : 0u, VPUSH(g_link->motion_target),
++		g_link->motion_margin_ms, g_link->motion_holding ? 1 : 0, g_link->clock.offset());
++	g_link->motion_corr = 0.f;
++	if (++g_link->motion_rows % 600 == 0)
++		fflush(g_link->motion_csv);
++}
++
+ // Every tracked entity where the server had it kRenderDelayMs ago, by server
+ // time: interpolated between the states around that moment, so uneven
+ // arrival does not jolt the motion; past the newest state it holds (no
+@@ -1892,7 +1955,9 @@ void present_actors()
+ {
+ 	if (!g_link->clock.ready())
+ 		return;
+-	const double render_ms = g_link->clock.server_now(double(g_link->wall.GetElapsed_ms())) - double(kRenderDelayMs);
++	// B51: the timer's full resolution (whole milliseconds moved the other player by up to 1.3 mm a frame at a run)
++	const double local_ms = double(g_link->wall.GetElapsed_ticks()) * 1000.0 / double(CPU::qpc_freq);
++	const double render_ms = g_link->clock.server_now(local_ms) - double(kRenderDelayMs);
+ 	for (auto& entry : g_link->tracks)
+ 	{
+ 		CObject* object = Level().Objects.net_Find(entry.first);
+@@ -1931,6 +1996,13 @@ void present_actors()
+ 				continue;
+ 			}
+ 			actor->replica_present(position, s.transform.yaw, s.state_bits, velocity, actor == g_actor);
++			if (actor != g_actor) // B51: the motion log's other player
++			{
++				g_link->motion_remote = actor->ID();
++				g_link->motion_margin_ms = entry.second.buffer.newest_ms() - render_ms;
++				g_link->motion_holding = p.holding;
++				g_link->motion_target = position;
++			}
+ 			if (actor != g_actor && (s.state_bits & mcLookout) && g_link->wall.GetElapsed_ms() - g_link->last_lean_log_ms >= 250)
+ 			{
+ 				// S07 play test: the other player's lean as this client shows it
+@@ -2140,6 +2212,7 @@ void respawn_frame(); // S07-T07
+ void respawn_result(const coop::proto::ActionResult& result); // S07-T07
+ void on_rejoin(const coop::proto::CampaignEvent& event); // S07-T07
+ void run_script7(u32 t); // S08-T01
++void run_script9(u32 t); // B51
+ void on_pickup_round(const coop::proto::CampaignEvent& event);
+ bool pickup_operation(u64 operation);
+ void pickup_result(const coop::proto::ActionResult& result);
+@@ -2178,6 +2251,8 @@ void run_script()
+ 		return run_script7(t); // S08-T01
+ 	if (g_link->config.script == 8)
+ 		return run_script8(t); // S08-T02
++	if (g_link->config.script == 9)
++		return run_script9(t); // B51
+ 	// S06-T02: the nearest NPC stalker, 26 s in: face it, log its animation
+ 	// blends and remote flag, screenshot it.
+ 	if (g_link->npc_phase == 0 && t >= 26000)
+@@ -2616,6 +2691,98 @@ void send_forged_snapshot()
+ 		e.entity.generation, e.transform.x);
+ }
+ 
++// ------------------------------------------------------------ B51
++// The smoothness walk (profile script = 9): both players move at once, plainly (no forged stream), so each
++// client's motion log (coop-motion-client.csv) holds its own actor and the other's in every kind of movement:
++// run and return, back and walk, strafes, sprint and return, a running circle, three rounds. Each leg is logged
++// (script-leg-start / script-leg) for tools/compare-coop-smoothness.py.
++void run_script9(u32 t)
++{
++	if (!g_link->program_t0)
++	{
++		if (!other_actor())
++		{
++			g_link->other_since = 0;
++			return;
++		}
++		if (!g_link->other_since)
++			g_link->other_since = t;
++		if (t < g_link->other_since + 3000)
++			return;
++		g_link->program_t0 = t;
++		face_away_from_other();
++		g_link->log.line("script9-program-start slot=%u t=%u", u32(g_link->local_slot), t);
++	}
++	using coop::proto::Stance;
++	// Out and back: each leg is undone by a later one, so a round ends about where it began (open ground: a
++	// one-way walk ran into the world, and contact is where the two simulations differ most)
++	struct Leg
++	{
++		LPCSTR name;
++		u32 bits;
++		Stance stance;
++		bool force_stance;
++		u32 ms;
++		float turn; // rad/s
++		bool reverse; // turned 180 degrees first
++	};
++	static const Leg legs[] = {
++		{"run", mcFwd, Stance::Stand, false, 3000, 0.f, false},
++		{"stand", 0, Stance::Stand, false, 800, 0.f, false},
++		{"return", mcFwd, Stance::Stand, false, 3000, 0.f, true},
++		{"stand", 0, Stance::Stand, false, 800, 0.f, false},
++		{"back", mcBack, Stance::Stand, false, 2000, 0.f, false},
++		{"walk", mcFwd | mcAccel, Stance::Stand, false, 2600, 0.f, false},
++		{"strafe-left", mcLStrafe, Stance::Stand, false, 2000, 0.f, false},
++		{"strafe-right", mcRStrafe, Stance::Stand, false, 2000, 0.f, false},
++		{"sprint", mcFwd | mcSprint, Stance::Sprint, true, 1500, 0.f, false},
++		{"stand", 0, Stance::Stand, false, 800, 0.f, false},
++		{"sprint-return", mcFwd | mcSprint, Stance::Sprint, true, 1500, 0.f, true},
++		{"stand", 0, Stance::Stand, false, 800, 0.f, false},
++		{"circle", mcFwd, Stance::Stand, false, 5236, 1.2f, false}, // one full turn at 1.2 rad/s
++		{"stand", 0, Stance::Stand, false, 1000, 0.f, false},
++	};
++	const u32 per_round = u32(sizeof(legs) / sizeof(legs[0]));
++	const u32 rounds = 3;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (g_link->leg_name[0] && g_link->drive_turn != 0.f)
++	{
++		CCameraBase* camera = g_actor->cam_Active();
++		camera->yaw = angle_normalize_signed(camera->yaw + g_link->drive_turn * Device.fTimeDelta);
++	}
++	if (g_link->leg_name[0] || g_link->drive_until)
++		return; // the current leg runs (leg_end_check ends it)
++	if (!g_link->smooth_separated)
++	{
++		// first apart (about 11 m each): the rounds never meet, and contact between the players (where the
++		// two simulations differ most: bugfix-48) is left to its own test
++		g_link->smooth_separated = true;
++		g_link->drive_turn = 0.f;
++		face_away_from_other();
++		leg_begin("separate-0", mcFwd, Stance::Stand, false, 4000, Link::SendNormal);
++		return;
++	}
++	if (g_link->script_phase >= per_round * rounds)
++	{
++		if (g_link->script_phase == per_round * rounds)
++		{
++			++g_link->script_phase;
++			g_link->log.line("script9-program-end rounds=%u", rounds);
++		}
++		return;
++	}
++	const u32 round = g_link->script_phase / per_round;
++	const Leg& leg = legs[g_link->script_phase % per_round];
++	if (leg.reverse)
++		g_actor->cam_Active()->yaw = angle_normalize_signed(g_actor->cam_Active()->yaw + PI);
++	string64 name;
++	xr_sprintf(name, "%s-%u", leg.name, round + 1);
++	g_link->drive_turn = leg.turn;
++	leg_begin(name, leg.bits, leg.stance, leg.force_stance, leg.ms, Link::SendNormal);
++	++g_link->script_phase;
++	(void)now;
++}
++
+ void run_script2(u32 t)
+ {
+ 	// The program starts once the other actor has been there for 3 s, slot 1
+@@ -9707,6 +9874,8 @@ void coop_client_app_end()
+ 		fclose(g_link->ledger_csv);
+ 	if (g_link->camera_csv)
+ 		fclose(g_link->camera_csv);
++	if (g_link->motion_csv)
++		fclose(g_link->motion_csv); // B51
+ 	g_link->log.line("travel-summary events=%I64u prompts=%I64u requests=%I64u answers=%I64u accepted=%I64u refused=%I64u",
+ 		g_link->travel.events, g_link->travel.prompts, g_link->travel.requests, g_link->travel.answers,
+ 		g_link->travel.accepted, g_link->travel.refused);
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index a8a645f..3f39e78 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -223,6 +223,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_ready_wrong = ini.line_exist("coop", "travel_ready_wrong") ? ini.r_u32("coop", "travel_ready_wrong") : 0;
+ 		out.travel_rejoin_delay = ini.line_exist("coop", "travel_rejoin_delay") ? ini.r_u32("coop", "travel_rejoin_delay") : 0; // S09-T04
+ 		out.travel_load_fail = ini.line_exist("coop", "travel_load_fail") ? ini.r_u32("coop", "travel_load_fail") : 0;
++		out.motion_log = ini.line_exist("coop", "motion_log") ? ini.r_u32("coop", "motion_log") : 0; // B51
+ 		out.torch_test = ini.line_exist("coop", "torch_test") ? ini.r_u32("coop", "torch_test") : 0; // S10-T07 (B48)
+ 		out.relocate_test = ini.line_exist("coop", "relocate_test") ? ini.r_u32("coop", "relocate_test") : 0; // S10-T03d
+ 		out.session_script = ini.line_exist("coop", "session_script") ? ini.r_u32("coop", "session_script") : 0; // S10-T06
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index b9bdd40..dc318c6 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -168,6 +168,7 @@ struct CoopConfig
+ 	u32 script; // 1: S05-T03 look/walk/screenshot driver; 2: S06-T01 movement validation program
+ 	u32 predict; // S06-T03: 1 predicts the own actor (default), 0 waits for the server
+ 	u32 auto_respawn; // S07-T07 test driver: seconds after the own death until the client confirms the respawn
++	u32 motion_log; // B51: 1 writes coop-motion-client.csv (one row per frame: both actors' motion)
+ 	u32 torch_test; // S10-T07 (B48) test driver: seconds after the world goes live until this client presses the
+ 	                // torch as the L key does (actor_effects.Hit_TorchToggle), and again 12 s later
+ 	u32 relocate_test; // S10-T03d test driver: seconds after the world goes live until this client does what a
+diff --git a/src/xrGame/PHMovementControl.cpp b/src/xrGame/PHMovementControl.cpp
+index 9c7cfb1..7b22fff 100644
+--- a/src/xrGame/PHMovementControl.cpp
++++ b/src/xrGame/PHMovementControl.cpp
+@@ -871,6 +871,13 @@ void CPHMovementControl::SetEnvironment(int enviroment, int old_enviroment)
+ 	}
+ }
+ 
++void CPHMovementControl::ShiftPosition(const Fvector& delta)
++{
++	vPosition.add(delta);
++	VERIFY(m_character);
++	m_character->ShiftPosition(delta);
++}
++
+ void CPHMovementControl::SetPosition(const Fvector& P)
+ {
+ #ifdef DEBUG
+diff --git a/src/xrGame/PHMovementControl.h b/src/xrGame/PHMovementControl.h
+index 72efe92..d0befa0 100644
+--- a/src/xrGame/PHMovementControl.h
++++ b/src/xrGame/PHMovementControl.h
+@@ -242,6 +242,7 @@ public:
+ 	}
+ 
+ 	void SetPosition(const Fvector& P);
++	void ShiftPosition(const Fvector& delta); // B51: see CPHCharacter::ShiftPosition
+ 	void GetPosition(Fvector& P);
+ 	void GetCharacterPosition(Fvector& P);
+ 	void InterpolatePosition(Fvector& P);
+diff --git a/src/xrPhysics/PHCharacter.h b/src/xrPhysics/PHCharacter.h
+index 7d87eb2..63f1abc 100644
+--- a/src/xrPhysics/PHCharacter.h
++++ b/src/xrPhysics/PHCharacter.h
+@@ -175,6 +175,9 @@ public:
+ 	virtual const Fvector& CamDir() const =0;
+ 	virtual Fvector GetAcceleration() =0;
+ 	virtual void SetPosition(const Fvector& pos) =0;
++	// B51 (co-op): moves the character by delta and keeps its velocity and render interpolation (SetPosition
++	// restarts the interpolation at the new place, a frame without movement)
++	virtual void ShiftPosition(const Fvector& delta) =0;
+ 	virtual void SetApplyGravity(BOOL flag) { dBodySetGravityMode(m_body, flag); }
+ 	virtual void SetObjectContactCallbackData(void* callback) =0;
+ 	virtual void SetObjectContactCallback(ObjectContactCallbackFun* callback) =0;
+diff --git a/src/xrPhysics/PHSimpleCharacter.cpp b/src/xrPhysics/PHSimpleCharacter.cpp
+index 960f1ab..df34ee1 100644
+--- a/src/xrPhysics/PHSimpleCharacter.cpp
++++ b/src/xrPhysics/PHSimpleCharacter.cpp
+@@ -1162,6 +1162,32 @@ void CPHSimpleCharacter::SetPosition(const Fvector& pos)
+ }
+ 
+ 
++// B51: a co-op client's correction of its predicted actor: the body, its safe and death positions and both
++// interpolation points move by delta, so what is shown keeps its pace (no restart from the new place) and the
++// body keeps its lead over the shown position
++void CPHSimpleCharacter::ShiftPosition(const Fvector& delta)
++{
++	m_safe_position[0] += delta.x;
++	m_safe_position[1] += delta.y;
++	m_safe_position[2] += delta.z;
++	if (!b_exist)
++		return;
++	m_death_position[0] += delta.x;
++	m_death_position[1] += delta.y;
++	m_death_position[2] += delta.z;
++	const dReal* p = dBodyGetPosition(m_body);
++	dBodySetPosition(m_body, p[0] + delta.x, p[1] + delta.y, p[2] + delta.z);
++	for (u16 i = 0; i < CPHInterpolation::PH_INTERPOLATION_POINTS; ++i)
++	{
++		Fvector q;
++		m_body_interpolation.GetPosition(q, i);
++		q.add(delta);
++		m_body_interpolation.SetPosition(q, i);
++	}
++	CPHDisablingTranslational::Reinit();
++	CPHObject::spatial_move();
++}
++
+ void CPHSimpleCharacter::GetPosition(Fvector& vpos)
+ {
+ 	if (!b_exist)
+diff --git a/src/xrPhysics/PHSimpleCharacter.h b/src/xrPhysics/PHSimpleCharacter.h
+index cc5d3e6..25c4b60 100644
+--- a/src/xrPhysics/PHSimpleCharacter.h
++++ b/src/xrPhysics/PHSimpleCharacter.h
+@@ -205,6 +205,7 @@ public:
+ 	virtual const Fvector& CamDir() const { return m_cam_dir; }
+ 	virtual void SetMaterial(u16 material);
+ 	virtual void SetPosition(const Fvector& pos);
++	virtual void ShiftPosition(const Fvector& delta); // B51
+ 	virtual void GetVelocity(Fvector& vvel) const;
+ 	virtual void GetSmothedVelocity(Fvector& vvel);
+ 	virtual void SetVelocity(Fvector vel);

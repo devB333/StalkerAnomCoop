@@ -1,11 +1,11 @@
-# Session handoff — S11-T00: the first two-PC test passed; G10 and S11-T00 wait on the user's word
+# Session handoff — B51 smooth movement in code, the user's hands-on next; G10 and S11-T00 wait on the user's word
 
 ## State (2026-11-04)
 
 - **S10-T07** (bug pass before Stage 11) continues through the user's
-  hands-on demos. engine-work equals the series of **112** patches (patch
-  check 125). Builds **campaign-473 / client-357**, protocol
-  **proto-build-64** (st-39 122/122). Report: [S10-T07](../../validation/S10-T07.md) parts
+  hands-on demos. engine-work equals the series of **113** patches (patch
+  check 126). Builds **campaign-478 / client-362**, protocol
+  **proto-build-66** (st-41 124/124). Report: [S10-T07](../../validation/S10-T07.md) parts
   9–22; bug table: [known issues](../../known-issues.md).
 - **B46 (patch 0108):** travel matches vanilla (decision T07-11 in
   [Stage 10 decisions](../../stage10-decisions.md)): only fast travel and the
@@ -45,6 +45,18 @@
   through New game, the box's fields and its OK. Reproduced in **kit-14**,
   passing in **kit-15** (host-10 + client-8 from its zip) and **kit-16**
   (server-7 + two client-8), [S11-T00](../../validation/S11-T00.md).
+- **B51 (patch 0113, 2026-11-04): movement smoothed.** The user: both
+  players choppy, on one PC too. Measured with the new per-frame motion log
+  (`motion_log`, `coop-motion-client.csv`), the smoothness walk (`--smooth
+  c1,c2`, script 9) and `compare-coop-smoothness.py`: a correction loop
+  (`SetPosition` lost the body's lead and restarted its interpolation) made
+  7-9 corrections a second. Now corrections shift the body
+  (`ShiftPosition`), small errors are bled off (30 %/snapshot), the clock
+  slews 1 ms, render time is full resolution. bugfix-45 → 49: camera spikes
+  17-18 → 0-0.4 a second; the other player's jerk p50 8-10 → 3. Left: a few
+  corrections after a frame hitch and at player contact
+  ([S10-T07](../../validation/S10-T07.md) part 23). **Kits not remade**
+  (host-11 / client-8 are the B50 build): after the user's hands-on.
 - **First two-PC test passed (two-pc-1, 2026-11-04):** the user hosted with
   host-11, the friend joined with client-8 by code over Tailscale from
   100.106.37.43; about ten minutes of play, clean stop, no FATAL. The user:
@@ -61,14 +73,13 @@
 
 ## Next
 
-1. Ask the user whether to close **S11-T00** and **G10** (G10 closes only on
-   their word; the decisions G10-5 revised, B35 and T07-11 wait on it), and
-   which Stage 11 task comes next.
-2. More two-PC sessions are the user's: the quest turn-in by hand, a level
-   travel together, a fast travel in combat. Read the friend's logs if they
-   send them.
-3. Remake the kits after any rebuild (a server refuses an older client
-   build).
+1. The user's hands-on of B51: `bash tools/start-coop-demo.sh S10-T07 0 30
+   120 0 1` (demo-22: two windows on this PC). Its motion logs are in the
+   run's c1/c2 (the checker needs the walk's legs: read them by hand).
+2. If the user says it is smooth: remake the kits (host-12, client-9,
+   server-9) and a second two-PC test; else the next lead (hitch recovery,
+   player contact: no collision between the players' bodies on a client?).
+3. Ask the user whether to close **S11-T00** and **G10**.
 
 ## Picking this up
 
@@ -81,7 +92,7 @@
 - **Travel fixtures:** `--travel c1,c2 --travel-variant 2|5`, optionally
   `--travel-changer <name part> --travel-approach=x,y,z`; check with
   `compare-coop-travel.py --variant 2|5` (`updates` is the B47 check). Others:
-  `--sleep`, `--pickup`, `--loot`, `--quest c1,c2 --quest-variant 2
+  `--smooth c1,c2` (B51: check with `compare-coop-smoothness.py`), `--sleep`, `--pickup`, `--loot`, `--quest c1,c2 --quest-variant 2
   --auto-respawn 5`; arm with `arm = 1` in the server's `coop.ltx`. Don't
   type in the terminal while a fixture runs.
 - Installed scripts: `python3 tools/xray-db-extract.py -q grep 'pattern'
@@ -90,14 +101,14 @@
 
 ## Run names
 
-- Used: `campaign-334…473`, `client-226…357`, `proto-build-53…64`,
-  `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, `two-pc-1`, patch checks 77–125, kits host-1…11, friend-1…3,
+- Used: `campaign-334…478`, `client-226…362`, `proto-build-53…66`,
+  `st-28…41`, `bugfix-1…49`, `demo-1…20` (S10-T07), `menu-1…10`,
+  (S11-T00), `kit-1…16`, `two-pc-1`, patch checks 77–126, kits host-1…11, friend-1…3,
   client-4…8, server-1…8.
-- Next: `campaign-474`, `client-358`, `proto-build-65`, `st-40`,
-  `bugfix-45`, `demo-21`, `menu-11`, `kit-17`, patch check 126, kits host-12,
+- Next: `campaign-479`, `client-363`, `proto-build-67`, `st-42`,
+  `bugfix-50`, `demo-22`, `menu-11`, `kit-17`, patch check 126, kits host-12,
   client-9, server-9.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before the B50 hands-on](../done/snapshot-before-B50-hands-on.md).
+Previous snapshot: [before the B51 hands-on](../done/snapshot-before-B51-hands-on.md).

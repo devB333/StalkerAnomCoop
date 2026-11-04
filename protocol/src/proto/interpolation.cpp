@@ -76,7 +76,8 @@ void ServerClock::observe(double local_ms, double server_ms)
         return;
     }
     const double step = target - offset_;
-    offset_ += step > max_slew_ms_ ? max_slew_ms_ : step < -max_slew_ms_ ? -max_slew_ms_ : step;
+    const double limit = fast_beyond_ms_ > 0 && (step > fast_beyond_ms_ || step < -fast_beyond_ms_) ? 5.0 : max_slew_ms_;
+    offset_ += step > limit ? limit : step < -limit ? -limit : step;
 }
 
 void ServerClock::reset()

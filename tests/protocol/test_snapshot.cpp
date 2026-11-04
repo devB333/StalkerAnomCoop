@@ -683,6 +683,41 @@ TEST("interpolation/server-clock-follows-drift")
     CHECK(!c2.ready());
 }
 
+TEST("interpolation/server-clock-fine-slew")
+{
+    // B51: the client's clock (1 ms per observation within 30 ms of the estimate) follows a 1 % drift with no
+    // step over 1 ms, and a 300 ms stall at 5 ms per observation.
+    ServerClock clock(2000, 1.0, 30.0);
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<double> jitter(5.0, 40.0);
+    double worst = 0, largest_step = 0;
+    for (int i = 0; i < 4000; ++i)
+    {
+        const double local_send = 1000.0 + i * 50.0 * 1.01;
+        const double server_ms = i * 50.0;
+        const double before = clock.offset();
+        clock.observe(local_send + jitter(rng), server_ms);
+        if (i > 100)
+        {
+            largest_step = std::max(largest_step, std::fabs(clock.offset() - before));
+            worst = std::max(worst, std::fabs(clock.offset() - (local_send - server_ms + 5.0)));
+        }
+    }
+    metric("fine_worst_offset_error_ms", worst);
+    metric("fine_largest_step_ms", largest_step);
+    CHECK_MSG(worst < 40.0, "offset error %.1f ms", worst);
+    CHECK_MSG(largest_step <= 1.0 + 1e-9, "step %.2f ms", largest_step);
+    ServerClock c2(2000, 1.0, 30.0);
+    for (int i = 0; i < 100; ++i)
+        c2.observe(i * 50.0 + 10.0, i * 50.0);
+    const double before = c2.offset();
+    int n = 0;
+    for (; n < 300 && c2.offset() - before < 299.0; ++n) // every later packet 300 ms later than before
+        c2.observe((100 + n) * 50.0 + 310.0, (100 + n) * 50.0);
+    metric("fine_stall_observations", double(n));
+    CHECK_MSG(n <= 140, "%d observations to follow a 300 ms stall", n); // 40 until the window forgets, then 5 ms and 1 ms steps
+}
+
 TEST("interpolation/moving-entities-extrapolate-capped")
 {
     // A creature the server updates every 600 ms while it walks at 1 m/s on x.

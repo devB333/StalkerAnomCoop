@@ -55,6 +55,38 @@ TEST("prediction/correction-moves-newer-records-once")
     CHECK(r.counters().smoothed == 1 && r.counters().snapped == 1);
 }
 
+TEST("prediction/blend-bleeds-small-errors")
+{
+    // B51: a small error is corrected by a fraction per snapshot (and the newer records by the same fraction, so
+    // the remainder is not counted twice); a large one in full, as before.
+    PredictionConfig config;
+    config.tolerance = 0.005f;
+    config.blend_below = 0.15f;
+    config.blend = 0.3f;
+    Reconciler r(config);
+    for (std::uint64_t t = 1; t <= 20; ++t)
+        r.record(t, Vec3{float(t), 0, 0});
+    // The server 10 cm short at tick 4: 3 cm of it now.
+    Correction c = r.reconcile(4, Vec3{3.9f, 0, 0});
+    REQUIRE(c.kind == CorrectionKind::Smooth);
+    CHECK(std::fabs(c.offset.x + 0.03f) < 1e-5f && std::fabs(c.error - 0.1f) < 1e-5f);
+    CHECK(r.counters().blended == 1 && r.counters().smoothed == 1);
+    // The server's actor still 10 cm short of the uncorrected history: 7 cm remain, 30 % of them next.
+    Correction d = r.reconcile(6, Vec3{5.9f, 0, 0});
+    REQUIRE(d.kind == CorrectionKind::Smooth);
+    CHECK(std::fabs(d.error - 0.07f) < 1e-4f && std::fabs(d.offset.x + 0.021f) < 1e-4f);
+    // Repeated, the remainder falls under the tolerance: it converges.
+    std::uint64_t t = 8;
+    Correction e;
+    for (int n = 0; n < 12; ++n, t += 1)
+        e = r.reconcile(t, Vec3{float(t) - 0.1f, 0, 0});
+    CHECK(e.kind == CorrectionKind::None && e.error <= 0.005f);
+    // Over blend_below: in full.
+    Correction f = r.reconcile(t, Vec3{float(t) - 0.1f + 0.5f, 0, 0});
+    REQUIRE(f.kind == CorrectionKind::Smooth);
+    CHECK(std::fabs(Len(f.offset) - f.error) < 1e-4f);
+}
+
 TEST("prediction/wrong-prediction-converges")
 {
     // The client predicts 3 m/s forward for 1.5 s while the server keeps the

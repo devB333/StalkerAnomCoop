@@ -55,8 +55,7 @@
   slews 1 ms, render time is full resolution. bugfix-45 → 49: camera spikes
   17-18 → 0-0.4 a second; the other player's jerk p50 8-10 → 3. Left: a few
   corrections after a frame hitch and at player contact
-  ([S10-T07](../../validation/S10-T07.md) part 23). **Kits not remade**
-  (host-11 / client-8 are the B50 build): after the user's hands-on.
+  ([S10-T07](../../validation/S10-T07.md) part 23).
 - **B52 (patch 0114):** the minimap showed whatever the option said (the
   option's first-update handler never runs on a client); applied at every
   world-live; bugfix-50 pass (off hidden, on shown, screenshots agree). The
@@ -65,11 +64,12 @@
   host-11, the friend joined with client-8 by code over Tailscale from
   100.106.37.43; about ten minutes of play, clean stop, no FATAL. The user:
   "Great we have a working build!" B49 and B50 confirmed hands-on.
-- **Kits for the two-PC test:** **host-11**
-  (`builds/kits/client1HostKit/host-11`), **server-8**
-  (`builds/kits/ServerHostKit/server-8`), **client-8**
-  (`builds/kits/clientKit/client-8.zip`). host-6…10 and server-3…7 hold test
-  players; client-7 and older crash at Join. A choice in the box runs on a
+- **Kits for the next two-PC test (2026-11-04, B51 + B52):** **host-13**
+  (`builds/kits/client1HostKit/host-13`), **server-10**
+  (`builds/kits/ServerHostKit/server-10`), **client-9**
+  (`builds/kits/clientKit/client-9.zip`); kit-19 / kit-20 pass. host-6…12 and
+  server-3…9 hold test players; client-8 and older lack B51/B52, client-7 and
+  older crash at Join. A choice in the box runs on a
   double-click.
 - demo-19's launcher stopped before copying its logs into
   `builds/logs/S10-T07/run-demo-19/` (empty); they are under
@@ -80,9 +80,9 @@
 1. The user's hands-on of B51 (demo-22: "it feels a lot better") and B52: `bash tools/start-coop-demo.sh S10-T07 0 30
    120 0 1` (demo-23: two windows on this PC). Its motion logs are in the
    run's c1/c2 (the checker needs the walk's legs: read them by hand).
-2. If the user says it is smooth: remake the kits (host-12, client-9,
-   server-9) and a second two-PC test; else the next lead (hitch recovery,
-   player contact: no collision between the players' bodies on a client?).
+2. The second two-PC test with host-13 / server-10 / client-9 (the user's);
+   read the logs after. Next smoothing leads if wanted: hitch recovery,
+   contact between the players.
 3. Ask the user whether to close **S11-T00** and **G10**.
 
 ## Picking this up
@@ -107,11 +107,11 @@
 
 - Used: `campaign-334…480`, `client-226…363`, `proto-build-53…66`,
   `st-28…41`, `bugfix-1…50`, `demo-1…22` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, `two-pc-1`, patch checks 77–127, kits host-1…11, friend-1…3,
-  client-4…8, server-1…8.
+  (S11-T00), `kit-1…16`, `kit-19…20`, `two-pc-1`, patch checks 77–127, kits host-1…13, friend-1…3,
+  client-4…9, server-1…10.
 - Next: `campaign-481`, `client-364`, `proto-build-67`, `st-42`,
-  `bugfix-51`, `demo-23`, `menu-11`, `kit-17`, patch check 126, kits host-12,
-  client-9, server-9.
+  `bugfix-51`, `demo-23`, `menu-11`, `kit-21`, patch check 128, kits host-14,
+  client-10, server-11.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

@@ -3,8 +3,8 @@
 ## State (2026-11-04)
 
 - **S10-T07** (bug pass before Stage 11) continues through the user's
-  hands-on demos. engine-work equals the series of **113** patches (patch
-  check 126). Builds **campaign-478 / client-362**, protocol
+  hands-on demos. engine-work equals the series of **114** patches (patch
+  check 127). Builds **campaign-480 / client-363**, protocol
   **proto-build-66** (st-41 124/124). Report: [S10-T07](../../validation/S10-T07.md) parts
   9–22; bug table: [known issues](../../known-issues.md).
 - **B46 (patch 0108):** travel matches vanilla (decision T07-11 in
@@ -57,6 +57,10 @@
   corrections after a frame hitch and at player contact
   ([S10-T07](../../validation/S10-T07.md) part 23). **Kits not remade**
   (host-11 / client-8 are the B50 build): after the user's hands-on.
+- **B52 (patch 0114):** the minimap showed whatever the option said (the
+  option's first-update handler never runs on a client); applied at every
+  world-live; bugfix-50 pass (off hidden, on shown, screenshots agree). The
+  user's demo-22 of B51: "it feels a lot better".
 - **First two-PC test passed (two-pc-1, 2026-11-04):** the user hosted with
   host-11, the friend joined with client-8 by code over Tailscale from
   100.106.37.43; about ten minutes of play, clean stop, no FATAL. The user:
@@ -73,8 +77,8 @@
 
 ## Next
 
-1. The user's hands-on of B51: `bash tools/start-coop-demo.sh S10-T07 0 30
-   120 0 1` (demo-22: two windows on this PC). Its motion logs are in the
+1. The user's hands-on of B51 (demo-22: "it feels a lot better") and B52: `bash tools/start-coop-demo.sh S10-T07 0 30
+   120 0 1` (demo-23: two windows on this PC). Its motion logs are in the
    run's c1/c2 (the checker needs the walk's legs: read them by hand).
 2. If the user says it is smooth: remake the kits (host-12, client-9,
    server-9) and a second two-PC test; else the next lead (hitch recovery,
@@ -101,12 +105,12 @@
 
 ## Run names
 
-- Used: `campaign-334…478`, `client-226…362`, `proto-build-53…66`,
-  `st-28…41`, `bugfix-1…49`, `demo-1…20` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, `two-pc-1`, patch checks 77–126, kits host-1…11, friend-1…3,
+- Used: `campaign-334…480`, `client-226…363`, `proto-build-53…66`,
+  `st-28…41`, `bugfix-1…50`, `demo-1…22` (S10-T07), `menu-1…10`,
+  (S11-T00), `kit-1…16`, `two-pc-1`, patch checks 77–127, kits host-1…11, friend-1…3,
   client-4…8, server-1…8.
-- Next: `campaign-479`, `client-363`, `proto-build-67`, `st-42`,
-  `bugfix-50`, `demo-22`, `menu-11`, `kit-17`, patch check 126, kits host-12,
+- Next: `campaign-481`, `client-364`, `proto-build-67`, `st-42`,
+  `bugfix-51`, `demo-23`, `menu-11`, `kit-17`, patch check 126, kits host-12,
   client-9, server-9.
 
 Preserve the original installation, the reference checkout, the accepted

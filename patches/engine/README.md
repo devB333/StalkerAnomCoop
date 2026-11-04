@@ -861,6 +861,14 @@ resolution. Test tooling: `motion_log = 1` writes `coop-motion-client.csv`
 (`prepare-coop-session.py --smooth`, `compare-coop-smoothness.py`). Single
 player: unchanged (`ShiftPosition` has no other caller).
 
+`0114-minimap-option.patch` (S10-T07, 2026-11-04): B52 (the user: the minimap
+is always on though it is off in the settings). The installed option
+(`video/hud/show_minimap`) is applied by `actor_effects`'
+`actor_on_first_update` (`actor_effects.script:1830`), which a co-op client's
+actor never fires; the client now applies it at every world-live
+(`UIZoneMap.disabled`, the motion icon) and logs `minimap hidden|shown`.
+Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

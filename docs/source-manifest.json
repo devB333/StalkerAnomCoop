@@ -461,6 +461,10 @@
     {
       "path": "patches/engine/0113-smooth-movement.patch",
       "sha256": "695fd379274d9bfc3dafbdbe488d9b07c66bdca729d4f6fd7c283aa177296ac6"
+    },
+    {
+      "path": "patches/engine/0114-minimap-option.patch",
+      "sha256": "8136774803e3852f41394a68b8ef2ec7fc23738f3a1c6403a7a81fe05fad54d7"
     }
   ],
   "submodules": [

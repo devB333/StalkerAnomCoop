@@ -1,0 +1,32 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 5341fed..460924d 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -1267,6 +1267,14 @@ void world_frame()
+ 				"if actor_status and actor_status.activate_hud and not actor_status.HUD then "
+ 				"pcall(actor_status.prepare_boosters_effect) pcall(actor_status.activate_hud) end "
+ 				"__coop_status_hud = actor_status and actor_status.HUD ~= nil "
++				// B52: the minimap's option (video/hud/show_minimap) is applied by actor_effects'
++				// actor_on_first_update (actor_effects.script:1830), which a replica's actor never fires: the HUD
++				// kept its default, the minimap shown whatever the option said
++				"__coop_minimap = nil pcall(function() local mg = ActorMenu.get_maingame() "
++				"if mg and mg.UIZoneMap and ui_options then "
++				"mg.UIZoneMap.disabled = not ui_options.get('video/hud/show_minimap') "
++				"if mg.UIMotionIcon then mg.UIMotionIcon:Show(mg.UIZoneMap.disabled == false) end "
++				"__coop_minimap = mg.UIZoneMap.disabled and 'hidden' or 'shown' end end) "
+ 				"__coop_animations = actor_effects and actor_effects.is_animations_on and actor_effects.is_animations_on() "
+ 				// S10-T03c: the sleep window's button asks the partner (the server
+ 				// skips the world's time once both agree); a forced sleep is the server's
+@@ -1299,6 +1307,12 @@ void world_frame()
+ 			}
+ 			else if (L)
+ 				lua_pop(L, 1);
++			if (L)
++			{
++				lua_getglobal(L, "__coop_minimap"); // B52
++				g_link->log.line("minimap %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "unknown (no zone map)");
++				lua_pop(L, 1);
++			}
+ 		}
+ 		// S06-T08: lightning is the server's from now on
+ 		if (g_pGamePersistent && g_pGamePersistent->Environment().eff_Thunderbolt)

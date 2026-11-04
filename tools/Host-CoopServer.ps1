@@ -49,7 +49,7 @@ Write-Host ''
 Write-Host '  Co-op server starting (about a minute).'
 Write-Host "  Address:   ${address}:$port"
 Write-Host "  Join code: $Code"
-Write-Host '  Players: New game > Join co-op, Host = the address, Password = the join code.'
+Write-Host '  Players: New game > Join co-op, Host address = the address, Join code = the join code.'
 Write-Host '  Stop it with Stop-Server (tools\Stop-CoopServer.ps1); closing this window does not stop the game cleanly.'
 Write-Host ''
 & (Join-Path $PSScriptRoot 'Start-CoopServer.ps1') -Runtime $Runtime -Fsgame $fsgame -Profile $profile -Exe $Exe

@@ -1,10 +1,10 @@
-# Session handoff — S10-T07 bug pass: B48 (torch) and the quest demo in code, the user's hands-on next
+# Session handoff — S11-T00 two-PC test: B50 (Join co-op crash) fixed, new kits ready
 
-## State (2026-11-03)
+## State (2026-11-04)
 
 - **S10-T07** (bug pass before Stage 11) continues through the user's
-  hands-on demos. engine-work equals the series of **111** patches (patch
-  check 124). Builds **campaign-472 / client-355**, protocol
+  hands-on demos. engine-work equals the series of **112** patches (patch
+  check 125). Builds **campaign-473 / client-357**, protocol
   **proto-build-64** (st-39 122/122). Report: [S10-T07](../../validation/S10-T07.md) parts
   9–22; bug table: [known issues](../../known-issues.md).
 - **B46 (patch 0108):** travel matches vanilla (decision T07-11 in
@@ -36,15 +36,21 @@
 - **Decisions waiting on the user's word at G10:** G10-5 revised (B34), B35,
   T07-11 (the user's own choice).
 - **Test kits (2026-11-03):** the user's first try (host-7) found **B49**:
-  New game showed no co-op choice (the installed button bound before the
-  hook; the tests had bypassed the button). Patch **0111** fixes it; build
-  **campaign-472 / client-355**. Kits for the two-PC test: **host-9**
-  (`builds/kits/client1HostKit/host-9`), **server-6**
-  (`builds/kits/ServerHostKit/server-6`), **client-7**
-  (`builds/kits/clientKit/client-7.zip`); checked by **kit-12** (host kit,
-  through the New game button) and **kit-13** (server kit), both pass
-  ([S11-T00](../../validation/S11-T00.md)). host-6…8 and server-3…5 hold
-  test players; not for use. A choice in the box runs on a double-click.
+  New game showed no co-op choice. Patch **0111** fixed it (kit-12/13).
+- **B50 (patch 0112, 2026-11-04):** the friend's client-7 crashed at Join
+  co-op: the installed `message_box_direct_ip` has no text window and
+  `msg_box_ui` sets a text (null `SetText`). Also fixed: `GetHost` turned
+  `host:27515` into `host/port=27515`; the captions now read *Host address* /
+  *Join code* (the code shown as typed). The menu driver's `join` now goes
+  through New game, the box's fields and its OK. Reproduced in **kit-14**,
+  passing in **kit-15** (host-10 + client-8 from its zip) and **kit-16**
+  (server-7 + two client-8), [S11-T00](../../validation/S11-T00.md).
+- **Kits for the two-PC test:** **host-11**
+  (`builds/kits/client1HostKit/host-11`), **server-8**
+  (`builds/kits/ServerHostKit/server-8`), **client-8**
+  (`builds/kits/clientKit/client-8.zip`). host-6…10 and server-3…7 hold test
+  players; client-7 and older crash at Join. A choice in the box runs on a
+  double-click.
 - demo-19's launcher stopped before copying its logs into
   `builds/logs/S10-T07/run-demo-19/` (empty); they are under
   `builds/stage2/test-install/S10-T07/demo-19-*/appdata/logs/`.
@@ -52,10 +58,10 @@
 ## Next
 
 1. The first two-PC test over Tailscale (S11-T00, the user's): this PC runs
-   **host-9** (`Start-Coop.cmd`, New game, double-click Host co-op) or **server-6**
-   (`Start-Server.cmd`, both players join); the friend unzips **client-7.zip**,
-   runs `Setup-Coop.ps1` once, then `Start-Coop.cmd`, New game > Join co-op
-   with the host's Tailscale address and the join code. Afterwards read the
+   **host-11** (`Start-Coop.cmd`, New game, double-click Host co-op) or **server-8**
+   (`Start-Server.cmd`, both players join); the friend unzips **client-8.zip**,
+   runs `Setup-Coop.ps1` once, then `Start-Coop.cmd`, New game > double-click
+   Join co-op, Host address and Join code, OK. Afterwards read the
    logs (host kit: its runtime's `appdata\logs`; friend: theirs) and record
    the result in [S11-T00](../../validation/S11-T00.md).
 2. Remake the kits after any rebuild (a server refuses an older client
@@ -82,14 +88,14 @@
 
 ## Run names
 
-- Used: `campaign-334…472`, `client-226…355`, `proto-build-53…64`,
+- Used: `campaign-334…473`, `client-226…357`, `proto-build-53…64`,
   `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…13`, patch checks 77–124, kits host-1…9, friend-1…3,
-  client-4…7, server-1…6.
-- Next: `campaign-473`, `client-356`, `proto-build-65`, `st-40`,
-  `bugfix-45`, `demo-21`, `menu-11`, `kit-14`, patch check 125, kits host-10,
-  client-8, server-7.
+  (S11-T00), `kit-1…16`, patch checks 77–125, kits host-1…11, friend-1…3,
+  client-4…8, server-1…8.
+- Next: `campaign-474`, `client-358`, `proto-build-65`, `st-40`,
+  `bugfix-45`, `demo-21`, `menu-11`, `kit-17`, patch check 126, kits host-12,
+  client-9, server-9.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before the B48 hands-on](../done/snapshot-before-B48-hands-on.md).
+Previous snapshot: [before the B50 hands-on](../done/snapshot-before-B50-hands-on.md).

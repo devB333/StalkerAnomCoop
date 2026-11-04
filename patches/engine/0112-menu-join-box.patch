@@ -1,0 +1,227 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 2266219..a50934a 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -2524,6 +2524,7 @@ void script_register_context(lua_State* L)
+ 		def("menu_available", &coop_menu_available), // S11-T00
+ 		def("menu_can_host", &coop_menu_can_host),
+ 		def("menu_join", &coop_menu_join),
++		def("menu_join_box_ready", &coop_menu_join_box_ready), // B50
+ 		def("menu_host", &coop_menu_host),
+ 		def("menu_host_info", &coop_menu_host_info),
+ 		def("note_fee", &lua_note_fee),
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 974c9f2..94988fe 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -85,6 +85,9 @@ extern bool g_bDisableAllInput; // Level_input.cpp
+ #include "ui/UITalkWnd.h"
+ #include "ui/UIStatic.h" // S10-T05d2: a custom static's text
+ #include "ui/UILines.h"
++#include "ui/UIMessageBoxEx.h" // B50: the menu test types into the join box
++#include "ui/UIEditBox.h"
++#include "ui/UIButton.h"
+ 
+ ENGINE_API extern float psHUD_FOV; // the camera watch log
+ #include "../xrEngine/xr_input.h"
+@@ -9048,6 +9051,10 @@ LPCSTR coop_menu_join(LPCSTR address, LPCSTR code)
+ 		addr.pop_back();
+ 	while (!addr.empty() && (addr.front() == ' ' || addr.front() == '\t'))
+ 		addr.erase(addr.begin());
++	// B50: the join box's GetHost gives "host:port" as "host/port=port" (CUIMessageBox::GetHost, multiplayer's form)
++	const xr_string::size_type port_at = addr.find("/port=");
++	if (port_at != xr_string::npos)
++		addr.replace(port_at, 6, ":");
+ 	if (addr.empty() || addr.size() > 60)
+ 		return (s_menu_reply += "type the host's address (for example 100.101.102.103)").c_str();
+ 	if (addr.find(':') == xr_string::npos)
+@@ -9157,10 +9164,56 @@ LPCSTR coop_menu_host_info()
+ 	return s_menu_reply.c_str();
+ }
+ 
++// B50: the join box (the installed message_box_direct_ip) on top of the main menu: its captions, its two
++// fields (address, code) and its OK button, in the order CUIMessageBox::InitMessageBox attaches them
++struct JoinBox
++{
++	xr_vector<CUITextWnd*> captions;
++	xr_vector<CUIEditBox*> edits;
++	CUIButton* yes = nullptr;
++};
++
++static bool menu_join_box(JoinBox& jb)
++{
++	CUIMessageBoxEx* box = MainMenu() ? smart_cast<CUIMessageBoxEx*>(MainMenu()->TopInputReceiver()) : nullptr;
++	if (!box || box->GetChildWndList().empty())
++		return false;
++	for (CUIWindow* w : box->GetChildWndList().front()->GetChildWndList())
++	{
++		if (CUIEditBox* e = smart_cast<CUIEditBox*>(w))
++			jb.edits.push_back(e);
++		else if (CUIButton* b = smart_cast<CUIButton*>(w))
++		{
++			if (!jb.yes)
++				jb.yes = b;
++		}
++		else if (CUITextWnd* t = smart_cast<CUITextWnd*>(w))
++			jb.captions.push_back(t);
++	}
++	return jb.edits.size() == 2 && jb.captions.size() == 2 && jb.yes;
++}
++
++// The template's captions are multiplayer strings Anomaly no longer has (they would show as their ids); the
++// code is shown as typed (the template hides it as a password)
++bool coop_menu_join_box_ready()
++{
++	JoinBox jb;
++	if (!menu_join_box(jb))
++	{
++		Msg("! B50 co-op menu: the join box is not on top");
++		return false;
++	}
++	jb.captions[0]->SetText("Host address");
++	jb.captions[1]->SetText("Join code");
++	jb.edits[1]->SetPasswordMode(false);
++	return true;
++}
++
+ // The menu's test driver: what a player's clicks do, through the same Lua (the overridden StartGame with the
+ // creation screen's choices; campaign.menu_join with the host's address and code).
+ static u32 s_menu_test_at = 0;
+ static bool s_menu_test_done = false;
++static u32 s_menu_test_join_stage = 0; // B50: 0 open the join box, 1 type into it and press OK
+ static void coop_menu_test()
+ {
+ 	if (s_menu_test_done || !s_menu.test[0] || (g_link && g_link->active))
+@@ -9212,8 +9265,57 @@ static void coop_menu_test()
+ 			s_menu_test_at = now + 2000; // the host has not written it yet
+ 			return;
+ 		}
+-		xr_sprintf(chunk, "local r = campaign.menu_join('%s', '%s') printf('S11-T00 co-op menu test join: %%s', r)", address,
+-			code);
++		if (s_menu_test_join_stage == 0)
++		{
++			// B50: as a player does it: New game, double-click "Join co-op" (the last choice), then (next step)
++			// type the address and code into the box that opened and press its OK
++			xr_strcpy(chunk,
++				"local m = __coop_main_menu "
++				"if not m then error('no live main menu') end "
++				"__coop_menu_box = nil "
++				"m:OnButton_new_game() "
++				"if not (__coop_menu_box and __coop_menu_acts) then error('no co-op choice box') end "
++				"printf('S11-T00 co-op menu test: the New game button showed the choice box') "
++				"__coop_menu_acts[#__coop_menu_acts]() "
++				"if __coop_menu_box:IsShown() then __coop_menu_box:HideDialog() end "
++				"printf('S11-T00 co-op menu test: Join co-op opened its box')");
++			s_menu_test_join_stage = 1;
++			s_menu_test_at = now + 2000;
++			lua_State* L = ai().script_engine().lua();
++			const int top = lua_gettop(L);
++			const bool ok = luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_menu_test") == 0 && lua_pcall(L, 0, 0, 0) == 0;
++			if (!ok)
++			{
++				Msg("S11-T00 co-op menu test join: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++				s_menu_test_done = true;
++			}
++			lua_settop(L, top);
++			FlushLog();
++			return;
++		}
++		s_menu_test_done = true;
++		// a full collection first: the box must outlive any garbage its opening left behind
++		lua_State* L = ai().script_engine().lua();
++		lua_gc(L, LUA_GCCOLLECT, 0);
++		lua_gc(L, LUA_GCCOLLECT, 0);
++		JoinBox jb;
++		if (!menu_join_box(jb))
++		{
++			Msg("S11-T00 co-op menu test join: no join box (%u fields, %u captions)", u32(jb.edits.size()), u32(jb.captions.size()));
++			FlushLog();
++			return;
++		}
++		Msg("S11-T00 co-op menu test join: the box reads [%s] [%s]", jb.captions[0]->GetText(), jb.captions[1]->GetText());
++		xr_vector<CUIEditBox*>& edits = jb.edits;
++		CUIButton* yes = jb.yes;
++		edits[0]->SetText(address); // as typed: the host's message gives the address with its port
++		edits[1]->SetText(code);
++		Msg("S11-T00 co-op menu test join: typed the address and code, pressing OK");
++		FlushLog();
++		yes->OnClick();
++		Msg("S11-T00 co-op menu test join: %s", g_link && g_link->active ? "the link started" : "no link");
++		FlushLog();
++		return;
+ 	}
+ 	s_menu_test_done = true;
+ 	lua_State* L = ai().script_engine().lua();
+@@ -9268,7 +9370,7 @@ static void coop_menu_frame()
+ 		"  return table.concat(t, '\\n')\n"
+ 		"end\n"
+ 		"local function say(text)\n"
+-		"  pcall(function() ui_dyn_msg_box.msg_box_ui('message_box_ok', true, text) end)\n"
++		"  pcall(function() __coop_say_box = ui_dyn_msg_box.msg_box_ui('message_box_ok', true, text) end)\n"
+ 		"end\n"
+ 		"local function answer(r, what)\n"
+ 		"  local tag, a, b = string.match(r or '', '^([^|]*)|?([^|]*)|?(.*)$')\n"
+@@ -9279,12 +9381,15 @@ static void coop_menu_frame()
+ 		"    say('Joining ' .. a .. '...')\n"
+ 		"  end\n"
+ 		"end\n"
++		// B50: the box's buttons send to its script window (Register sets it as their target): the window is
++		// kept (until the next join box), or a collection would free it under a live box
+ 		"local function join_box()\n"
+-		"  pcall(function()\n"
+-		"    ui_dyn_msg_box.msg_box_ui('message_box_direct_ip', true,\n"
+-		"      'Join co-op: Host = the host\\'s address, Password = the join code',\n"
++		"  local ok, why = pcall(function()\n"
++		"    __coop_join_box = ui_dyn_msg_box.msg_box_ui('message_box_direct_ip', true, '',\n"
+ 		"      function(box) answer(campaign.menu_join(box.message_box:GetHost(), box.message_box:GetPassword()), 'join') end)\n"
++		"    campaign.menu_join_box_ready()\n"
+ 		"  end)\n"
++		"  if not ok then printf('! B50 co-op menu: the join box: %s', tostring(why)) end\n"
+ 		"end\n"
+ 		// B49: the installed menu bound its New game button to OnButton_new_game when it was built, before this
+ 		// runs (ui_main_menu.script:73, AddCallback with the function itself), so a click never reached a
+@@ -9311,7 +9416,7 @@ static void coop_menu_frame()
+ 		"  names[#names + 1] = 'Join co-op (address and join code)'\n"
+ 		"  __coop_menu_acts = acts\n"
+ 		"  __coop_menu_box = ui_dyn_msg_box.multi_choice(acts, unpack(names))\n"
+-		"  printf('S11-T00 co-op menu choice shown (%d choices)', #acts)\n"
++		"  printf(string.format('S11-T00 co-op menu choice shown (%d choices)', #acts))\n"
+ 		"end\n"
+ 		"mm.StartGame = function(self, ...)\n"
+ 		"  if __coop_menu_host == 1 and campaign.menu_available() then\n"
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 38c0f10..0775887 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -27,6 +27,7 @@ void coop_client_app_start();
+ bool coop_menu_available();
+ bool coop_menu_can_host();
+ LPCSTR coop_menu_join(LPCSTR address, LPCSTR code); // "ok|address" or "error|why"
++bool coop_menu_join_box_ready(); // B50: labels the open join box (its template's captions have no text)
+ LPCSTR coop_menu_host(int mode, LPCSTR choices); // 1 new campaign (choices), 2 continue: "ok|address|code" or "error|why"
+ LPCSTR coop_menu_host_info();
+ void coop_client_frame();
+diff --git a/src/xrGame/ui/UIMessageBox.cpp b/src/xrGame/ui/UIMessageBox.cpp
+index c107c3a..905d1e0 100644
+--- a/src/xrGame/ui/UIMessageBox.cpp
++++ b/src/xrGame/ui/UIMessageBox.cpp
+@@ -393,14 +393,17 @@ void CUIMessageBox::SendMessage(CUIWindow* pWnd, s16 msg, void* pData)
+ 	inherited::SendMessage(pWnd, msg, pData);
+ }
+ 
++// B50: a template without message_text (message_box_direct_ip) has no text window; the installed
++// ui_dyn_msg_box.msg_box_ui sets a text on every box
+ void CUIMessageBox::SetText(LPCSTR str)
+ {
+-	m_UIStaticText->SetTextST(str);
++	if (m_UIStaticText)
++		m_UIStaticText->SetTextST(str);
+ }
+ 
+ LPCSTR CUIMessageBox::GetText()
+ {
+-	return m_UIStaticText->GetText();
++	return m_UIStaticText ? m_UIStaticText->GetText() : "";
+ }
+ 
+ LPCSTR CUIMessageBox::GetHost()

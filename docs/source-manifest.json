@@ -453,6 +453,10 @@
     {
       "path": "patches/engine/0111-menu-new-game-click.patch",
       "sha256": "5f7a3e6b5b7e05caa50668cbde3dc8c2d73793e6b60cf61b3396778da2c3168e"
+    },
+    {
+      "path": "patches/engine/0112-menu-join-box.patch",
+      "sha256": "159254cfbff5a8c5b933f69300efc5241c0b963f00b049120cd12c4a8b8e098c"
     }
   ],
   "submodules": [

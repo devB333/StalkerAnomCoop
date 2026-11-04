@@ -832,6 +832,17 @@ menu, and the driver's `host_new` clicks New game through it, picks "Host
 co-op: a new campaign" as its double-click does and starts. Single player:
 unchanged.
 
+`0112-menu-join-box.patch` (S11-T00, 2026-11-04): B50 (the user's friend,
+with kit client-7: Join co-op crashed). The installed `message_box_direct_ip`
+template has no `message_text`, so `CUIMessageBox::SetText` dereferenced a
+null text window when `ui_dyn_msg_box.msg_box_ui` set its text; it is now
+skipped when the template has none (`GetText` gives ""). The join box's script
+window is kept (its buttons send to it), its captions read *Host address* and
+*Join code* (the template's are multiplayer strings Anomaly lacks) and the
+code is shown as typed; `menu_join` undoes `GetHost`'s `host/port=N` form. The
+menu test driver's `join` now clicks New game, opens Join co-op, types into
+the box and presses its OK. Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

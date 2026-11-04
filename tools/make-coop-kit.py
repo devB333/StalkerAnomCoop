@@ -18,7 +18,7 @@ host:   on this PC (the workspace): <kit folder>/<name>/ with a server runtime (
 client: for a friend's PC: <kit folder>/<name>/ (and <name>.zip) with the client build, the runtime's loose files
         and Setup-Coop.ps1. On the friend's PC, unzip anywhere, run Setup-Coop.ps1 once (it asks for the Anomaly
         1.5.3 folder and the player's name, writes fsgame.ltx and coop-menu.ltx), then Start-Coop.cmd; in the
-        game: New game > Join co-op, Host = the host's Tailscale address, Password = the join code.
+        game: New game > Join co-op, Host address = the host's Tailscale address, Join code = the join code.
 Both sides need the same build (this workspace's current client build) and an unmodified Anomaly 1.5.3: the
 server refuses a different build or different game files (the build and content identity).
 """
@@ -128,8 +128,9 @@ In the game: New game asks Single player / Host co-op / Join co-op.
 - Host co-op (host only): a new campaign (the standard creation screen) or the last campaign. The server
   starts on the host's PC in the background (about a minute) and a box shows the address and join code to
   give the friend. Quitting the host's game stops the server.
-- Join co-op: Host = the host's address (its Tailscale address, like 100.101.102.103), Password = the join
-  code (like ABCDE-23456). The first join adds your key to the host's list: later joins need no new code.
+- Join co-op: a box asks for the Host address (the host's Tailscale address, like 100.101.102.103, with or
+  without :27515) and the Join code (like ABCDE-23456); then OK. The first join adds your key to the host's
+  list: later joins need no new code.
 """
 
 

@@ -1,4 +1,4 @@
-# Session handoff — S11-T00 two-PC test: B50 (Join co-op crash) fixed, new kits ready
+# Session handoff — S11-T00: the first two-PC test passed; G10 and S11-T00 wait on the user's word
 
 ## State (2026-11-04)
 
@@ -45,6 +45,10 @@
   through New game, the box's fields and its OK. Reproduced in **kit-14**,
   passing in **kit-15** (host-10 + client-8 from its zip) and **kit-16**
   (server-7 + two client-8), [S11-T00](../../validation/S11-T00.md).
+- **First two-PC test passed (two-pc-1, 2026-11-04):** the user hosted with
+  host-11, the friend joined with client-8 by code over Tailscale from
+  100.106.37.43; about ten minutes of play, clean stop, no FATAL. The user:
+  "Great we have a working build!" B49 and B50 confirmed hands-on.
 - **Kits for the two-PC test:** **host-11**
   (`builds/kits/client1HostKit/host-11`), **server-8**
   (`builds/kits/ServerHostKit/server-8`), **client-8**
@@ -57,16 +61,14 @@
 
 ## Next
 
-1. The first two-PC test over Tailscale (S11-T00, the user's): this PC runs
-   **host-11** (`Start-Coop.cmd`, New game, double-click Host co-op) or **server-8**
-   (`Start-Server.cmd`, both players join); the friend unzips **client-8.zip**,
-   runs `Setup-Coop.ps1` once, then `Start-Coop.cmd`, New game > double-click
-   Join co-op, Host address and Join code, OK. Afterwards read the
-   logs (host kit: its runtime's `appdata\logs`; friend: theirs) and record
-   the result in [S11-T00](../../validation/S11-T00.md).
-2. Remake the kits after any rebuild (a server refuses an older client
-   build); `demo_quest` / `torch_test` remain for hands-on checks.
-3. Close G10 only on the user's word.
+1. Ask the user whether to close **S11-T00** and **G10** (G10 closes only on
+   their word; the decisions G10-5 revised, B35 and T07-11 wait on it), and
+   which Stage 11 task comes next.
+2. More two-PC sessions are the user's: the quest turn-in by hand, a level
+   travel together, a fast travel in combat. Read the friend's logs if they
+   send them.
+3. Remake the kits after any rebuild (a server refuses an older client
+   build).
 
 ## Picking this up
 
@@ -90,7 +92,7 @@
 
 - Used: `campaign-334…473`, `client-226…357`, `proto-build-53…64`,
   `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, patch checks 77–125, kits host-1…11, friend-1…3,
+  (S11-T00), `kit-1…16`, `two-pc-1`, patch checks 77–125, kits host-1…11, friend-1…3,
   client-4…8, server-1…8.
 - Next: `campaign-474`, `client-358`, `proto-build-65`, `st-40`,
   `bugfix-45`, `demo-21`, `menu-11`, `kit-17`, patch check 126, kits host-12,

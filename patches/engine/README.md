@@ -886,6 +886,26 @@ have pointed at the corpse. Fixture `travel_kill_first = 1`
 (`--travel-kill-first`): participant 1 is killed and respawned before the
 travel rounds. Single player: unchanged.
 
+`0116-corpse-bones-flashlight.patch` (S10-T07, 2026-11-05): B54, B55 (the
+user, kits host-15 / client-10: a crash going back to Cordon from Marsh; the
+flashlight would not turn on). B54: a corpse's ragdoll spawns from its saved
+bones (`CSE_PHSkeleton::saved_bones`, world positions; `CPHSkeleton`
+`RestoreNetState`), which 0115's carried corpse kept at the old level's
+coordinates: it appeared under the new level and fell through it. The travel's
+take now moves the bones with it (their box's centre over the arrival point,
+the lowest bone 0.3 m above it; `travel-take-corpse-bones`; profile
+`travel_corpse_bones = 0` keeps the 0115 behaviour for a comparison). Fixture
+`travel_variant = 6`: round 0 travels, then again from the destination back to
+the first level. B55: the handheld flashlight (`device_flashlight`, a
+`CFlashlight` in the detector slot, shown by the detector key) is lit on its
+player's client; the client now tells the server (ActionIntent 30, as the
+torch) and every client shows the partner's light from the holder's left hand
+(TorchState, replayed at a join). A co-op client refuses the "application
+start" pause (`device.cpp`: a level loaded in an unfocused window), which
+stopped the client's clock and left held items' motions unfinished. Fixture
+`flashlight_kit = 1` and client driver `flashlight_test = N`
+(`--flashlight-test c1:N`). Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

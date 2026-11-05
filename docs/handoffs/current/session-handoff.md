@@ -56,6 +56,18 @@
   17-18 → 0-0.4 a second; the other player's jerk p50 8-10 → 3. Left: a few
   corrections after a frame hitch and at player contact
   ([S10-T07](../../validation/S10-T07.md) part 23).
+- **B54, B55 (patch 0116, 2026-11-05):** the user's host-15 / client-10
+  session: player 2's client went silent loading Cordon on the way back from
+  Marsh (its log not received), and the flashlight would not light on L. B54:
+  the carried corpse's ragdoll bones stayed at the old level's coordinates
+  (it spawned under the ground and fell): they move with it now (bugfix-55
+  reproduced, bugfix-56/62 pass; `--travel-variant 6` is the return trip).
+  B55: the handheld flashlight is a detector-slot device (detector key, not
+  L); a level loaded in an unfocused window paused the client ("application
+  start": its clock stopped, held items' motions never ended), now refused on
+  a co-op client; the partner's light is shown from the holder's hand
+  (bugfix-61 pass, `--flashlight-test c1:40,c2:60`)
+  ([S10-T07](../../validation/S10-T07.md) part 26).
 - **B53 (patch 0115):** the user's host-13 / client-9 session: a travel after
   player 1's death stayed on the level (the reload loads object 0's level, the
   corpse's). The corpse now travels with the party, beside the arrival point
@@ -84,7 +96,8 @@
 1. The user's hands-on of B51 (demo-22: "it feels a lot better") and B52: `bash tools/start-coop-demo.sh S10-T07 0 30
    120 0 1` (demo-23: two windows on this PC). Its motion logs are in the
    run's c1/c2 (the checker needs the walk's legs: read them by hand).
-2. The next two-PC test with host-15 / server-12 / client-10 (the user's);
+2. The next two-PC test with the kits after B54/B55 (the user's); ask for
+   the friend's `appdata\logs\xray_*.log` if a client crashes;
    read the logs after. Next smoothing leads if wanted: hitch recovery,
    contact between the players.
 3. Ask the user whether to close **S11-T00** and **G10**.
@@ -109,12 +122,12 @@
 
 ## Run names
 
-- Used: `campaign-334…483`, `client-226…366`, `proto-build-53…66`,
-  `st-28…41`, `bugfix-1…54`, `demo-1…22` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, `kit-19…22`, `two-pc-1`, patch checks 77–128, kits host-1…15, friend-1…3,
+- Used: `campaign-334…490`, `client-226…372`, `proto-build-53…66`,
+  `st-28…41`, `bugfix-1…62`, `demo-1…22` (S10-T07), `menu-1…10`,
+  (S11-T00), `kit-1…16`, `kit-19…22`, `two-pc-1`, patch checks 77–129, kits host-1…15, friend-1…3,
   client-4…10, server-1…12.
-- Next: `campaign-484`, `client-367`, `proto-build-67`, `st-42`,
-  `bugfix-55`, `demo-23`, `menu-11`, `kit-23`, patch check 129, kits host-16,
+- Next: `campaign-491`, `client-373`, `proto-build-67`, `st-42`,
+  `bugfix-63`, `demo-23`, `menu-11`, `kit-23`, patch check 130, kits host-16,
   client-11, server-13.
 
 Preserve the original installation, the reference checkout, the accepted

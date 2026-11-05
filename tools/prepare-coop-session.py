@@ -9,7 +9,7 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
            [--transfer c1,c2 [--transfer-start 20]] [--quest c1,c2 [--quest-start 20]]
            [--use c1,c2 [--use-start 20]] [--stack c1,c2 [--stack-start 20]]
-           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4|5] [--travel-barrier-hold 5]
+           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4|5|6] [--travel-barrier-hold 5]
             [--travel-ready-delay c2:15] [--travel-ready-wrong c2] [--travel-rejoin-delay c2:75]
             [--travel-load-fail c2]] [--talk c1,c2 [--talk-start 20]] [--info c1,c2 [--info-start 20]]
            [--party-task c1,c2 [--party-task-start 20]] [--trade c1,c2 [--trade-start 20]]
@@ -165,6 +165,8 @@ def main():
     parser.add_argument("--travel-kill-first", action="store_true",
                         help="with --travel (B53): participant 1 is killed and respawned before the travel rounds "
                              "(use with --auto-respawn 5)")
+    parser.add_argument("--travel-corpse-bones", type=int, default=1, choices=(0, 1),
+                        help="B54: 1 (default) a carried corpse's ragdoll moves with it; 0 the B53 behaviour")
     parser.add_argument("--travel-approach", default="",
                         help="with --travel (B47): \"x,y,z\" where player 1 stands 5 s before the changer")
     parser.add_argument("--travel-variant", type=int, default=0,
@@ -176,7 +178,8 @@ def main():
                              "barrier (with --travel-barrier-hold), then the party asks again and travels; 4 "
                              "(S09-T04) two agreed travels, the first's publication failed from outside "
                              "(--failpoint checkpoint:after-manifest:3:fail), the second carried out; 5 (B46) round 8 "
-                             "alone: the request and the accept while a boar hunts player 2, then carried out")
+                             "alone: the request and the accept while a boar hunts player 2, then carried out; 6 (B54) "
+                             "round 0 travels, then again on the destination back to the first level (the return trip)")
     parser.add_argument("--talk", default="",
                         help="comma-separated client names running the S10-T04a talk-window rounds at Sidorovich "
                              "(profile script = 8; fixture talk_party)")
@@ -323,6 +326,10 @@ def main():
     parser.add_argument("--torch-test", default="",
                         help="S10-T07 (B48) driver: <client>:<seconds> after its world goes live the client presses "
                              "the torch as the L key does, and again 12 s later")
+    parser.add_argument("--flashlight-test", default="",
+                        help="B55 driver: <client>:<seconds> after its world goes live the client presses the detector "
+                             "key (the handheld flashlight), and again 12 s later; the server gives each player a "
+                             "device_flashlight in the detector slot (flashlight_kit, with arm)")
     parser.add_argument("--relocate-test", default="",
                         help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
                              "same-level fast travel does")
@@ -433,6 +440,7 @@ def main():
     music_fix = {n for n in args.music.split(",") if n}
     relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
     torch_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.torch_test.split(',') if e}
+    flashlight_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.flashlight_test.split(',') if e}
     session_script = {e.split(':')[0]: int(e.split(':')[1]) for e in args.session.split(',') if e}
     companion_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.companion_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
@@ -531,7 +539,8 @@ def main():
                       f"party_id = {party_id}", "save = coop-campaign",
                       f"serve_seconds = {max(3600, args.client_exit_after + 600)}",
                       f"churn = {args.churn}", f"drop = {args.drop}",
-                      f"arm = {1 if combat or encounter else 0}", f"combat_heal = {1 if combat else 0}",
+                      f"arm = {1 if combat or encounter or flashlight_test else 0}",
+                      f"combat_heal = {1 if combat else 0}",
                       f"encounter = {20 if encounter else 0}", f"lethal = {8 if encounter else 0}",
                       f"storm = {10 if weather else 0}",
                       f"surge = {70 if weather and not args.psi_storm else 0}",
@@ -548,6 +557,8 @@ def main():
                       f"travel_changer = {args.travel_changer}",
                       f"travel_approach = {args.travel_approach}",
                       f"travel_kill_first = {1 if args.travel_kill_first else 0}",
+                      f"travel_corpse_bones = {args.travel_corpse_bones}",
+                      f"flashlight_kit = {1 if flashlight_test else 0}",
                       f"travel_barrier_hold = {args.travel_barrier_hold}",
                       f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}",
                       f"info_party = {args.info_start if info else 0}",
@@ -633,6 +644,7 @@ def main():
                       f"travel_load_fail = {1 if name in load_fail else 0}",
                       f"relocate_test = {relocate_test.get(name, 0)}",
                       f"torch_test = {torch_test.get(name, 0)}",
+                      f"flashlight_test = {flashlight_test.get(name, 0)}",
                       f"session_script = {session_script.get(name, 0)}",
                       f"companion_test = {companion_test.get(name, 0)}"]
         profile = runtime / "coop.ltx"

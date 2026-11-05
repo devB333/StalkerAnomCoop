@@ -1,0 +1,597 @@
+diff --git a/src/xrEngine/device.cpp b/src/xrEngine/device.cpp
+index b2151f8..c2099fd 100644
+--- a/src/xrEngine/device.cpp
++++ b/src/xrEngine/device.cpp
+@@ -782,6 +782,14 @@ void CRenderDevice::Pause(BOOL bOn, BOOL bTimer, BOOL bSound, LPCSTR reason)
+ 			bSound ? 1 : 0, refused);
+ 		return;
+ 	}
++	// B55: a co-op client's world runs on the server: the pause after a level load in an unfocused window
++	// ("application start", single player's "press a key") stopped this client's clock, so a held item's motion
++	// never ended (the handheld flashlight stayed half drawn, bugfix-57..59) until the menu was opened and closed
++	if (g_coop_client_live && bOn && reason && !xr_strcmp(reason, "application start"))
++	{
++		Msg("device-pause-refused reason=%s (co-op client)", reason);
++		return;
++	}
+ #ifndef DEDICATED_SERVER
+ 	if (bOn)
+ 	{
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index 5824a6c..fbb0e49 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -952,6 +952,7 @@ void foo()
+ 
+ ENGINE_API bool g_dedicated_server = false;
+ ENGINE_API bool g_campaign_server = false;
++ENGINE_API bool g_coop_client_live = false; // B55
+ // Environment ambience sounds (rain, thunder, ambient beds and effects) not
+ // created because the process has no sound manager.
+ ENGINE_API u32 g_skipped_environment_sounds = 0;
+diff --git a/src/xrEngine/x_ray.h b/src/xrEngine/x_ray.h
+index 8be6806..44de3f9 100644
+--- a/src/xrEngine/x_ray.h
++++ b/src/xrEngine/x_ray.h
+@@ -75,6 +75,7 @@ public:
+ 
+ extern ENGINE_API CApplication* pApp;
+ extern ENGINE_API bool g_campaign_server;
++extern ENGINE_API bool g_coop_client_live; // B55: a co-op client's world is live (it runs on the server)
+ extern ENGINE_API u32 g_skipped_environment_sounds;
+ 
+ //Discord
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 460924d..b32935c 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -64,6 +64,10 @@
+ #include "ai/monsters/pseudogigant/pseudo_gigant.h" // S10-T02e
+ #include "Inventory.h"
+ #include "Torch.h" // S10-T07 (B48)
++#include "Flashlight.h" // B55
++#include "CampaignActorAccess.h" // B55: local_view_actor
++extern ENGINE_API bool g_coop_client_live; // B55 (x_ray.cpp)
++#include "player_hud.h" // B55: the hands in the flashlight test
+ #include "inventory_item.h" // S08-T02
+ #include "eatable_item.h" // S08-T07
+ #include "WeaponAmmo.h" // S08-T08
+@@ -1149,6 +1153,7 @@ void sleep_frame();
+ bool sleep_key_press(int key);
+ void relocate_frame(); // S10-T03d
+ void torch_test_frame(); // S10-T07 (B48)
++void flashlight_test_frame(); // B55
+ void on_talk(const coop::proto::CampaignEvent& event); // S10-T04a
+ void talk_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
+ void talk_session_reset(LPCSTR why);
+@@ -1174,6 +1179,7 @@ void world_frame()
+ 	if (g_link->world == WorldLive && (g_link->quitting || !g_pGameLevel || !ai().get_alife()))
+ 	{
+ 		g_link->world = WorldMenu;
++		g_coop_client_live = false; // B55
+ 		g_link->predicting = false;
+ 		g_link->leaving = false;
+ 		release_presentation(); // S06-T08
+@@ -1194,6 +1200,7 @@ void world_frame()
+ 	if (g_link->world == WorldLoading && g_pGameLevel && g_pGameLevel->bReady && ai().get_alife() && g_actor)
+ 	{
+ 		g_link->world = WorldLive;
++		g_coop_client_live = true; // B55: no load pause from here (device.cpp)
+ 		g_link->live_ms = g_link->wall.GetElapsed_ms();
+ 		const u32 buffered = u32(g_link->buffered.size());
+ 		for (const coop::proto::Message& m : g_link->buffered)
+@@ -1358,6 +1365,7 @@ void world_frame()
+ 		sleep_frame(); // S10-T03c
+ 		relocate_frame(); // S10-T03d
+ 		torch_test_frame(); // S10-T07 (B48)
++		flashlight_test_frame(); // B55
+ 		pickup_frame(); // S08-T01
+ 		layout_frame(); // S08-T07
+ 		amounts_frame(); // S08-T08
+@@ -3891,7 +3899,18 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 	{
+ 		// S10-T07 (B48): a player's torch as the server switched it (the own
+ 		// one and the partner's)
+-		CTorch* torch = smart_cast<CTorch*>(Level().Objects.net_Find(object));
++		CObject* lit = Level().Objects.net_Find(object);
++		CTorch* torch = smart_cast<CTorch*>(lit);
++		if (CFlashlight* hand = torch ? nullptr : smart_cast<CFlashlight*>(lit))
++		{
++			// B55: a handheld flashlight: the partner's is lit from its hand here; the own one is this client's
++			const bool own = hand->H_Parent() && hand->H_Parent() == campaign::local_view_actor();
++			if (!own)
++				hand->coop_remote_light(flags == 1);
++			g_link->log.line("flashlight-state light=%u on=%u parent=%u own=%d serial=%u", u32(object), flags,
++				hand->H_Parent() ? u32(hand->H_Parent()->ID()) : 0xffffu, own ? 1 : 0, serial);
++			break;
++		}
+ 		if (!torch)
+ 		{
+ 			applied = "refused";
+@@ -6869,6 +6888,62 @@ void torch_test_frame()
+ 	}
+ }
+ 
++// B55: an actor's handheld flashlight (detector slot) as this client has it
++void flashlight_line(LPCSTR who, CActor* actor, u32 press)
++{
++	PIItem item = actor ? actor->inventory().ItemFromSlot(DETECTOR_SLOT) : nullptr;
++	CFlashlight* light = item ? smart_cast<CFlashlight*>(item) : nullptr;
++	LPCSTR motion = "-";
++	u32 end_tm = 0;
++	bool running = false;
++	if (light)
++		light->coop_motion_state(motion, end_tm, running);
++	attachable_hud_item* h0 = g_player_hud ? g_player_hud->attached_item(0) : nullptr;
++	attachable_hud_item* h1 = g_player_hud ? g_player_hud->attached_item(1) : nullptr;
++	PIItem active = actor ? actor->inventory().ActiveItem() : nullptr;
++	g_link->log.line("flashlight-test press=%u who=%s actor=%u slot9=%s state=%u working=%d hud=%d visible=%d pending=%d "
++		"motion=%s running=%d end_in_ms=%d processing=%d active=%s hands=%s,%s paused=%d time_global=%u continual=%u "
++		"frame=%u factor=%.3f remote_on=%d", press, who,
++		actor ? u32(actor->ID()) : 0xffffu, item ? item->object().cNameSect().c_str() : "none",
++		light ? light->GetState() : 0xffu, light && light->torch_active() ? 1 : 0,
++		light && light->HudItemData() ? 1 : 0, item && item->object().getVisible() ? 1 : 0,
++		light && light->IsPending() ? 1 : 0, motion, running ? 1 : 0, int(end_tm) - int(Device.dwTimeGlobal),
++		item && item->object().processing_enabled() ? 1 : 0, active ? active->object().cNameSect().c_str() : "none",
++		h0 && h0->m_parent_hud_item ? h0->m_parent_hud_item->object().cNameSect().c_str() : "-",
++		h1 && h1->m_parent_hud_item ? h1->m_parent_hud_item->object().cNameSect().c_str() : "-",
++		Device.Paused() ? 1 : 0, Device.dwTimeGlobal, Device.dwTimeContinual, Device.dwFrame, Device.time_factor(),
++		light && light->coop_remote_on() ? 1 : 0);
++}
++
++// B55 driver: the detector key (kDETECTOR, as installed: CCustomDevice::ToggleDevice shows the detector slot's
++// device) at N s and again 12 s later; the own and the partner's flashlight logged each second for 5 s after
++void flashlight_test_frame()
++{
++	static u32 presses = 0;
++	static u64 last_line_ms = 0;
++	if (!g_link->config.flashlight_test || g_link->world != WorldLive || !g_actor)
++		return;
++	const u64 now = g_link->wall.GetElapsed_ms();
++	const u64 start = g_link->live_ms + u64(g_link->config.flashlight_test) * 1000;
++	if (presses < 2 && now >= start + presses * 12000)
++	{
++		++presses;
++		g_actor->IR_OnKeyboardPress(kDETECTOR);
++		g_actor->IR_OnKeyboardRelease(kDETECTOR);
++		g_link->log.line("flashlight-test press=%u sent=kDETECTOR", presses);
++		last_line_ms = now;
++		return;
++	}
++	if (!presses || now - last_line_ms < 1000 || now > start + (presses - 1) * 12000 + 5000)
++		return;
++	last_line_ms = now;
++	flashlight_line("own", g_actor, presses);
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		if (CActor* other = smart_cast<CActor*>(Level().Objects.o_get_by_iterator(i)))
++			if (other != g_actor && other->g_Alive())
++				flashlight_line("other", other, presses);
++}
++
+ // S10-T03d driver: what a same-level fast travel does, once
+ void relocate_frame()
+ {
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 0d6d882..0fa004d 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -190,6 +190,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		ok = read_string(ini, "new_game_loadout_2", out.new_game_loadout_2, sizeof(out.new_game_loadout_2), false) && ok;
+ 		out.new_game_money_2 = ini.line_exist("coop", "new_game_money_2") ? ini.r_u32("coop", "new_game_money_2") : 0;
+ 		out.travel_kill_first = ini.line_exist("coop", "travel_kill_first") ? ini.r_u32("coop", "travel_kill_first") : 0; // B53
++		out.travel_corpse_bones = ini.line_exist("coop", "travel_corpse_bones") ? ini.r_u32("coop", "travel_corpse_bones") : 1; // B54
++		out.flashlight_kit = ini.line_exist("coop", "flashlight_kit") ? ini.r_u32("coop", "flashlight_kit") : 0; // B55
+ 		out.travel_approach[0] = 0;
+ 		if (ini.line_exist("coop", "travel_approach"))
+ 			read_string(ini, "travel_approach", out.travel_approach, sizeof(out.travel_approach), false);
+@@ -226,6 +228,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_load_fail = ini.line_exist("coop", "travel_load_fail") ? ini.r_u32("coop", "travel_load_fail") : 0;
+ 		out.motion_log = ini.line_exist("coop", "motion_log") ? ini.r_u32("coop", "motion_log") : 0; // B51
+ 		out.torch_test = ini.line_exist("coop", "torch_test") ? ini.r_u32("coop", "torch_test") : 0; // S10-T07 (B48)
++		out.flashlight_test = ini.line_exist("coop", "flashlight_test") ? ini.r_u32("coop", "flashlight_test") : 0; // B55
+ 		out.relocate_test = ini.line_exist("coop", "relocate_test") ? ini.r_u32("coop", "relocate_test") : 0; // S10-T03d
+ 		out.session_script = ini.line_exist("coop", "session_script") ? ini.r_u32("coop", "session_script") : 0; // S10-T06
+ 		out.companion_test = ini.line_exist("coop", "companion_test") ? ini.r_u32("coop", "companion_test") : 0; // S10-T07
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 9856933..b8e4918 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -118,6 +118,9 @@ struct CoopConfig
+ 	string64 travel_approach; // B47 fixture: "x,y,z": participant 1 stands there 5 s before the changer (empty off)
+ 	string64 travel_changer; // B47 fixture: a level changer whose name contains this (empty: the first enabled)
+ 	u32 travel_kill_first; // B53 fixture: 1 participant 1 is killed and respawned before the travel rounds
++	u32 travel_corpse_bones; // B54: 1 (default) a carried corpse's ragdoll moves with it; 0 the B53 behaviour (its
++	                        // bones stay at the old level's coordinates)
++	u32 flashlight_kit; // B55 fixture: 1 each participant gets a handheld flashlight (device_flashlight) in its detector slot
+ 	u32 travel_barrier_hold; // S09-T04 harness: seconds the barrier stays up before the take (0 off)
+ 	u32 talk_party; // S10-T04a fixture: seconds after both attach until the talk rounds start at Sidorovich (0 off)
+ 	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
+@@ -170,6 +173,8 @@ struct CoopConfig
+ 	u32 predict; // S06-T03: 1 predicts the own actor (default), 0 waits for the server
+ 	u32 auto_respawn; // S07-T07 test driver: seconds after the own death until the client confirms the respawn
+ 	u32 motion_log; // B51: 1 writes coop-motion-client.csv (one row per frame: both actors' motion)
++	u32 flashlight_test; // B55 test driver: seconds after the world goes live until this client presses the detector
++	                    // key (kDETECTOR: the handheld flashlight in the detector slot), and again 12 s later
+ 	u32 torch_test; // S10-T07 (B48) test driver: seconds after the world goes live until this client presses the
+ 	                // torch as the L key does (actor_effects.Hit_TorchToggle), and again 12 s later
+ 	u32 relocate_test; // S10-T03d test driver: seconds after the world goes live until this client does what a
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 4bfbaea..f6ba62f 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -33,6 +33,7 @@
+ #include "coop/proto/snapshot.h"
+ #include "CustomMonster.h"
+ #include "Torch.h" // S10-T07 (B48)
++#include "Flashlight.h" // B55
+ #include "PhysicsShellHolder.h"
+ #include "../xrPhysics/PhysicsShell.h"
+ #include "coop/session/server.h"
+@@ -163,6 +164,7 @@ struct PlayerLink
+ 	u64 jump_latched; // presses latched
+ 	u64 actions_accepted, actions_refused;
+ 	bool armed;
++	bool flashlight_given; // B55 fixture
+ 	bool arm_settled; // S06-T07: the pistol put away once it is in slot 2
+ 	u64 snapshot_entities_wanted; // summed over snapshots
+ 	u64 snapshot_skipped_unsent; // entities left out: their Spawn had not gone to this player yet
+@@ -442,6 +444,7 @@ struct Host
+ 	u32 roster_at_start = 0; // S11-T00: 0: a dedicated server (the first player to join owns it)
+ 	u64 field_repairs = 0; // S10-T07 (G10)
+ 	u64 torch_switches = 0; // S10-T07 (B48)
++	xr_set<u16> flashlights_lit; // B55: participants' handheld flashlights their clients have lit
+ 	// S08-T09: the party's tasks as presented to the players
+ 	struct PartyFinished
+ 	{
+@@ -667,6 +670,8 @@ struct Host
+ 			u16 boar = kNoEngineId;
+ 			u64 boar_tick = 0, boar_kill_tick = 0;
+ 			bool boar_set = false;
++			bool returned = false; // B54 (variant 6): the return trip's rounds
++			xr_string start_level; // B54 (variant 6): the level the first trip left
+ 		} fixture;
+ 	} travel;
+ 	// S10-T04a: the talk window
+@@ -8430,6 +8435,27 @@ void send_party_tasks()
+ 			queue_event(link, kEventPresentation, p);
+ 			++torches;
+ 		}
++		// B55: and the lit handheld flashlights still in their players' detector slots
++		for (u16 id : g_host->flashlights_lit)
++		{
++			CFlashlight* hand = smart_cast<CFlashlight*>(Level().Objects.net_Find(id));
++			CActor* holder = hand ? smart_cast<CActor*>(hand->H_Parent()) : nullptr;
++			if (!holder || hand->getDestroy() || holder->inventory().ItemFromSlot(DETECTOR_SLOT) != hand)
++				continue;
++			std::vector<u8> p;
++			put_u8(p, u8(campaign::Presentation::TorchState));
++			put_u16(p, id);
++			put_u32(p, 0);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_u32(p, 1);
++			put_u32(p, 0);
++			put_str(p, "");
++			queue_event(link, kEventPresentation, p);
++			++torches;
++		}
+ 		if (torches)
+ 			g_host->log.line("torches-joined to=%u torches=%u", u32(link.ref.slot), torches);
+ 	}
+@@ -15147,6 +15173,27 @@ void combat_fixtures()
+ 						item->object().cNameSect().c_str());
+ 					break;
+ 				}
++		// B55 fixture: a handheld flashlight (device_flashlight, a CFlashlight in the detector slot: the detector
++		// key shows it, as installed) for each player, once
++		if (g_host->config.flashlight_kit && link.armed && !link.flashlight_given)
++		{
++			const CSE_ALifeDynamicObject* se = ai().alife().objects().object(u16(actor->ID()), true);
++			if (se && se->m_bOnline)
++			{
++				link.flashlight_given = true;
++				give_item(alife, "device_flashlight", actor, se);
++				g_host->log.line("flashlight-kit slot=%u actor=%u +device_flashlight", u32(link.ref.slot), u32(actor->ID()));
++			}
++		}
++		if (g_host->config.flashlight_kit && link.flashlight_given && !actor->inventory().ItemFromSlot(DETECTOR_SLOT))
++			for (PIItem item : actor->inventory().m_ruck)
++				if (smart_cast<CFlashlight*>(item) && actor->inventory().CanPutInSlot(item, DETECTOR_SLOT))
++				{
++					actor->inventory().Slot(DETECTOR_SLOT, item, true);
++					g_host->log.line("flashlight-kit slot=%u actor=%u %s to the detector slot", u32(link.ref.slot),
++						u32(actor->ID()), item->object().cNameSect().c_str());
++					break;
++				}
+ 		// S10-T07 (B48): the demo kit's headlamp (default_to_ruck) to the torch slot
+ 		if (g_host->config.demo_kit && link.armed && !actor->inventory().ItemFromSlot(TORCH_SLOT))
+ 			for (PIItem item : actor->inventory().m_ruck)
+@@ -17421,6 +17468,9 @@ void sweep_fixtures()
+ // travel_variant 5 (B46): round 8 alone: p1 requests and p2 accepts while the
+ // boar hunts p2, and the agreed travel is carried out. Variant 0's nine rounds
+ // predate S09-T02: round 0's agreement now travels, so the rest never run.
++// travel_variant 6 (B54): round 0 travels, as variant 2; once resumed on the
++// destination the fixture starts again there and round 0 travels back through
++// a changer to the first trip's level (the return trip).
+ const u32 kTravelRounds = 9;
+ 
+ void travel_fixtures()
+@@ -17521,8 +17571,9 @@ void travel_fixtures()
+ 			g_host->log.line("fixture-travel changer id=%u name=%s enabled=%d level=%s center=%.2f,%.2f,%.2f radius=%.2f",
+ 				u32(lc->ID()), lc->cName().c_str(), lc->IsLevelChangerEnabled() ? 1 : 0, level.c_str(), VPUSH(center),
+ 				lc->Radius());
+-			if (!chosen && lc->IsLevelChangerEnabled() && level != "?" &&
+-				(!config.travel_changer[0] || strstr(lc->cName().c_str(), config.travel_changer)))
++			const bool wanted = f.returned ? level == f.start_level : // B54: back to the first trip's level
++				(!config.travel_changer[0] || strstr(lc->cName().c_str(), config.travel_changer));
++			if (!chosen && lc->IsLevelChangerEnabled() && level != "?" && wanted)
+ 				chosen = lc;
+ 		}
+ 		if (!chosen)
+@@ -17532,6 +17583,8 @@ void travel_fixtures()
+ 			return;
+ 		}
+ 		f.changer = u16(chosen->ID());
++		if (!f.returned)
++			f.start_level = Level().name().c_str();
+ 		Fvector center;
+ 		chosen->Center(center);
+ 		f.center = center;
+@@ -17582,7 +17635,8 @@ void travel_fixtures()
+ 		return;
+ 	}
+ 	const u32 rounds = config.travel_variant == 5 ? kTravelRounds :
+-		config.travel_variant == 1 || config.travel_variant >= 3 ? 2 : config.travel_variant == 2 ? 1 : kTravelRounds;
++		config.travel_variant == 1 || (config.travel_variant >= 3 && config.travel_variant <= 4) ? 2 :
++		config.travel_variant == 2 || config.travel_variant == 6 ? 1 : kTravelRounds;
+ 	if (f.phase != 2 || f.round >= rounds || g_host->tick < f.round_tick)
+ 		return;
+ 	const u16 C = f.changer;
+@@ -17652,7 +17706,7 @@ void travel_fixtures()
+ 		steps.push_back({0, 11, 0, C, 0xffff, 0xffff, 0, 0});
+ 		// S09-T04 variant 3: the accept, then the connection drops (flags bit 2)
+ 		steps.push_back({1, 12, 100, C, 0xffff, 0xffff, u8(config.travel_variant == 3 ? 4 : 0), 1});
+-		if (config.travel_variant >= 3)
++		if (config.travel_variant >= 3 && config.travel_variant <= 4)
+ 			f.round_tick = g_host->tick + 70 * 50; // the rollback, p2's rejoin, the retry
+ 		break;
+ 	case 1:
+@@ -17866,6 +17920,34 @@ void travel_begin_execution(const coop::proto::Transition& t)
+ 		u32(g_host->quest_answers.size()));
+ }
+ 
++// B54: a saved ragdoll's bones (world positions, saved inside their box) moved by delta, velocities dropped
++void move_saved_bones(SPHBonesData& bones, const Fvector& delta)
++{
++	for (SPHNetState& b : bones.bones)
++	{
++		b.position.add(delta);
++		b.previous_position.add(delta);
++		b.linear_vel.set(0.f, 0.f, 0.f);
++		b.angular_vel.set(0.f, 0.f, 0.f);
++	}
++	bones.set_min_max(Fvector(bones.get_min()).add(delta), Fvector(bones.get_max()).add(delta));
++}
++
++// B54: the bones moved so their box's centre is over at and the lowest 0.3 m above it; returns the move
++Fvector shift_saved_bones(SPHBonesData& bones, const Fvector& at)
++{
++	Fvector lo = {flt_max, flt_max, flt_max}, hi = {-flt_max, -flt_max, -flt_max};
++	for (const SPHNetState& b : bones.bones)
++	{
++		lo.min(b.position);
++		hi.max(b.position);
++	}
++	Fvector delta;
++	delta.set(at.x - (lo.x + hi.x) * 0.5f, at.y + 0.3f - lo.y, at.z - (lo.z + hi.z) * 0.5f);
++	move_saved_bones(bones, delta);
++	return delta;
++}
++
+ // The take: both actors' entities moved as the native change_level moves the
+ // one actor's, the generation taken, the entities restored (the level keeps
+ // running until the publication is done).
+@@ -17953,6 +18035,22 @@ bool travel_take()
+ 			"was not travelling)", u32(flagged->ID), VPUSH(corpse.position), u32(corpse.graph), VPUSH(at));
+ 	}
+ 	Level().ClientSave();
++	// B54: a corpse's ragdoll is spawned from its saved bones (CPHSkeleton::RestoreNetState), world positions
++	// that ClientSave just wrote: unmoved, the corpse appeared on the new level at the old level's coordinates
++	// (the user's host-15 session: in Marsh at Cordon's death spot, 18 m under the ground; back in Cordon, under
++	// it again). The bones move with it: their box's centre over the arrival point, its lowest bone 0.3 m above
++	Fvector bones_delta = {0.f, 0.f, 0.f};
++	const bool bones_move = corpse_travels && g_host->config.travel_corpse_bones &&
++		flagged->_flags.test(CSE_PHSkeleton::flSavedData) && !flagged->saved_bones.bones.empty();
++	if (bones_move)
++	{
++		bones_delta = shift_saved_bones(flagged->saved_bones, flagged->o_Position);
++		g_host->log.line("travel-take-corpse-bones actor=%u bones=%u delta=%.2f,%.2f,%.2f", u32(flagged->ID),
++			u32(flagged->saved_bones.bones.size()), VPUSH(bones_delta));
++	}
++	else if (corpse_travels)
++		g_host->log.line("travel-take-corpse-bones actor=%u moved=0 saved=%d option=%u", u32(flagged->ID),
++			flagged->_flags.test(CSE_PHSkeleton::flSavedData) ? 1 : 0, g_host->config.travel_corpse_bones);
+ 	tv.destination_generation = persistence->next_generation();
+ 	const bool taken = request_publication("travel", true);
+ 	if (corpse_travels)
+@@ -17961,6 +18059,8 @@ bool travel_take()
+ 		flagged->m_tGraphID = corpse.graph;
+ 		flagged->m_tNodeID = corpse.node;
+ 		flagged->o_Position = corpse.position;
++		if (bones_move)
++			move_saved_bones(flagged->saved_bones, Fvector().invert(bones_delta));
+ 	}
+ 	for (Moved& m : moved)
+ 	{
+@@ -18337,6 +18437,17 @@ void travel_resume(LPCSTR why)
+ 		if (l.bound)
+ 			log_actor_weapons("resumed", u8(l.ref.slot), participant_actor(l.ref));
+ 	tv.weapon_probe_tick = g_host->config.arm && g_host->config.travel_party ? g_host->tick + 250 : 0;
++	// B54 fixture (variant 6): the first trip done, the rounds start again on this level for the way back
++	Host::Travel::Fixture& f = tv.fixture;
++	if (g_host->config.travel_party && g_host->config.travel_variant == 6 && !f.returned && f.round >= 1)
++	{
++		f.returned = true;
++		f.phase = 0;
++		f.round = 0;
++		f.both_since = 0;
++		f.changer = kNoEngineId;
++		g_host->log.line("fixture-travel return-trip to=%s", f.start_level.c_str());
++	}
+ }
+ 
+ u16 take_travel_ready(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+@@ -18620,6 +18731,26 @@ u16 take_torch(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 		return reason;
+ 	if (intent.params.size() != 1 || intent.params[0] > 1)
+ 		return coop::proto::kReasonMalformed;
++	// B55: a handheld flashlight (the detector slot's CFlashlight) is shown and lit on its player's client (the
++	// installed detector key and animation); the client says when its light goes on or out and every client is told
++	if (CFlashlight* hand = smart_cast<CFlashlight*>(item))
++	{
++		if (actor->inventory().ItemFromSlot(DETECTOR_SLOT) != item)
++			return coop::proto::kReasonNotUsable;
++		const bool on = intent.params[0] == 1;
++		if (on)
++			g_host->flashlights_lit.insert(item_id);
++		else
++			g_host->flashlights_lit.erase(item_id);
++		campaign::PresentationArgs args;
++		args.flags = on ? 1 : 0;
++		campaign::present_broadcast(campaign::Presentation::TorchState, item_id, "", args);
++		++g_host->torch_switches;
++		g_host->log.line("flashlight slot=%u light=%u section=%s on=%d condition=%.3f", u32(link.ref.slot), u32(item_id),
++			*item->object().cNameSect(), on ? 1 : 0, item->GetCondition());
++		result.revision = g_host->commit;
++		return 0;
++	}
+ 	CTorch* torch = smart_cast<CTorch*>(item);
+ 	if (!torch || actor->inventory().ItemFromSlot(TORCH_SLOT) != item)
+ 		return coop::proto::kReasonNotUsable;
+diff --git a/src/xrGame/Flashlight.cpp b/src/xrGame/Flashlight.cpp
+index 90e6070..e862025 100644
+--- a/src/xrGame/Flashlight.cpp
++++ b/src/xrGame/Flashlight.cpp
+@@ -10,6 +10,10 @@
+ #include "../xrengine/xr_collide_form.h"
+ #include "Level.h"
+ #include "Actor.h"
++#include "CoopReplica.h" // B55
++#include "CampaignActorAccess.h"
++#include "CoopClientLink.h"
++#include "../Include/xrRender/Kinematics.h"
+ 
+ CFlashlight::CFlashlight()
+ {
+@@ -120,6 +124,14 @@ void CFlashlight::UpdateCL()
+ 	if (!actor)
+ 		return;
+ 
++	// B55: the other player's flashlight on this client: never in this client's hands, its light comes from the
++	// holder's hand while the server says it is on
++	if (campaign::replica_active() && actor != campaign::local_view_actor())
++	{
++		coop_remote_update(actor);
++		return;
++	}
++
+ 	if (!IsWorking())
+ 		return;
+ 
+@@ -228,9 +240,50 @@ inline bool CFlashlight::can_use_dynamic_lights()
+ 	return (owner->can_use_dynamic_lights());
+ }
+ 
++// B55: the other player's lit flashlight, from its left hand along its body's facing (slightly down)
++void CFlashlight::coop_remote_update(CActor* holder)
++{
++	const bool lit = m_coop_remote_on && holder->g_Alive() && holder->inventory().ItemFromSlot(DETECTOR_SLOT) == this;
++	if (can_use_dynamic_lights())
++	{
++		light_render->set_active(lit);
++		light_omni->set_active(lit);
++	}
++	glow_render->set_active(lit);
++	if (!lit)
++		return;
++	Fvector pos = holder->Position();
++	pos.y += 1.3f;
++	if (IKinematics* K = smart_cast<IKinematics*>(holder->Visual()))
++	{
++		const u16 bone = K->LL_BoneID("bip01_l_hand");
++		if (bone != BI_NONE)
++		{
++			Fmatrix m;
++			m.mul_43(holder->XFORM(), K->LL_GetTransform(bone));
++			pos = m.c;
++		}
++	}
++	float h, p;
++	holder->XFORM().k.getHP(h, p);
++	Fvector dir;
++	dir.setHP(h, -0.15f);
++	const Fvector& right = holder->XFORM().i;
++	light_render->set_position(pos);
++	light_omni->set_position(pos);
++	glow_render->set_position(pos);
++	light_render->set_rotation(dir, right);
++	light_omni->set_rotation(dir, right);
++	glow_render->set_direction(dir);
++}
++
+ void CFlashlight::TurnDeviceInternal(bool b)
+ {
++	const bool was = m_bWorking;
+ 	inherited::TurnDeviceInternal(b);
++	// B55: the own flashlight lit or put out on a co-op client: the server tells the partner (TorchState)
++	if (was != m_bWorking && campaign::replica_active() && H_Parent() && H_Parent() == campaign::local_view_actor())
++		campaign::coop_client_torch(int(ID()), m_bWorking);
+ 
+ 	if (can_use_dynamic_lights())
+ 	{
+diff --git a/src/xrGame/Flashlight.h b/src/xrGame/Flashlight.h
+index 5bd3304..7be273a 100644
+--- a/src/xrGame/Flashlight.h
++++ b/src/xrGame/Flashlight.h
+@@ -2,6 +2,7 @@
+ #include "customdevice.h"
+ 
+ class CLAItem;
++class CActor;
+ 
+ class CFlashlight : public CCustomDevice
+ {
+@@ -29,6 +30,8 @@ protected:
+ 	shared_str m_light_section;
+ 
+ 	void SwitchLightOnly();
++	bool m_coop_remote_on = false; // B55: the other player's flashlight is on (the server's TorchState)
++	void coop_remote_update(CActor* holder);
+ 
+ public:
+ 	CFlashlight();
+@@ -46,6 +49,8 @@ public:
+ 	void SetLanim(LPCSTR name, bool bFlicker, int flickerChance, float flickerDelay, float framerate);
+ 	void ResetLanim();
+ 	bool torch_active() const;
++	void coop_remote_light(bool on) { m_coop_remote_on = on; } // B55
++	bool coop_remote_on() const { return m_coop_remote_on; }
+ 
+ protected:
+ 	virtual void TurnDeviceInternal(bool b);
+diff --git a/src/xrGame/HudItem.h b/src/xrGame/HudItem.h
+index a1d9731..002a9a6 100644
+--- a/src/xrGame/HudItem.h
++++ b/src/xrGame/HudItem.h
+@@ -148,6 +148,9 @@ public:
+ 	BOOL GetHUDmode();
+ 	void PlayBlendAnm(LPCSTR name, float speed = 1.f, float power = 1.f, bool stop_old = true);
+ 	IC bool IsPending() const { return !!m_huditem_flags.test(fl_pending); }
++	// B55 (diagnostics): the playing motion as the end-of-animation check sees it
++	IC void coop_motion_state(LPCSTR& motion, u32& end_tm, bool& running) const
++	{ motion = m_current_motion.c_str() ? m_current_motion.c_str() : "none"; end_tm = m_dwMotionEndTm; running = m_bStopAtEndAnimIsRunning; }
+ 
+ 	virtual void DeleteHudItemData();
+ 

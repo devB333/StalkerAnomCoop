@@ -465,6 +465,10 @@
     {
       "path": "patches/engine/0114-minimap-option.patch",
       "sha256": "8136774803e3852f41394a68b8ef2ec7fc23738f3a1c6403a7a81fe05fad54d7"
+    },
+    {
+      "path": "patches/engine/0115-travel-after-respawn.patch",
+      "sha256": "2df11b6e4f38713cfc6173318f80cf4f12296b28fc33cfca22cba5928675630f"
     }
   ],
   "submodules": [

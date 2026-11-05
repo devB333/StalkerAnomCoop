@@ -3,8 +3,8 @@
 ## State (2026-11-04)
 
 - **S10-T07** (bug pass before Stage 11) continues through the user's
-  hands-on demos. engine-work equals the series of **114** patches (patch
-  check 127). Builds **campaign-480 / client-363**, protocol
+  hands-on demos. engine-work equals the series of **115** patches (patch
+  check 128). Builds **campaign-483 / client-366**, protocol
   **proto-build-66** (st-41 124/124). Report: [S10-T07](../../validation/S10-T07.md) parts
   9–22; bug table: [known issues](../../known-issues.md).
 - **B46 (patch 0108):** travel matches vanilla (decision T07-11 in
@@ -56,6 +56,11 @@
   17-18 → 0-0.4 a second; the other player's jerk p50 8-10 → 3. Left: a few
   corrections after a frame hitch and at player contact
   ([S10-T07](../../validation/S10-T07.md) part 23).
+- **B53 (patch 0115):** the user's host-13 / client-9 session: a travel after
+  player 1's death stayed on the level (the reload loads object 0's level, the
+  corpse's). The corpse now travels with the party, beside the arrival point
+  (a decision for the user). bugfix-51 reproduced, bugfix-54 pass (7/8: the
+  respawned actor's base PDA stays behind), bugfix-53 (no death) 8/8.
 - **B52 (patch 0114):** the minimap showed whatever the option said (the
   option's first-update handler never runs on a client); applied at every
   world-live; bugfix-50 pass (off hidden, on shown, screenshots agree). The
@@ -64,12 +69,11 @@
   host-11, the friend joined with client-8 by code over Tailscale from
   100.106.37.43; about ten minutes of play, clean stop, no FATAL. The user:
   "Great we have a working build!" B49 and B50 confirmed hands-on.
-- **Kits for the next two-PC test (2026-11-04, B51 + B52):** **host-13**
-  (`builds/kits/client1HostKit/host-13`), **server-10**
-  (`builds/kits/ServerHostKit/server-10`), **client-9**
-  (`builds/kits/clientKit/client-9.zip`); kit-19 / kit-20 pass. host-6…12 and
-  server-3…9 hold test players; client-8 and older lack B51/B52, client-7 and
-  older crash at Join. A choice in the box runs on a
+- **Kits for the next two-PC test (2026-11-04, B51-B53):** **host-15**
+  (`builds/kits/client1HostKit/host-15`), **server-12**
+  (`builds/kits/ServerHostKit/server-12`), **client-10**
+  (`builds/kits/clientKit/client-10.zip`); kit-21 / kit-22 pass. host-6…14 and
+  server-3…11 hold test players; older client kits lack B53. A choice in the box runs on a
   double-click.
 - demo-19's launcher stopped before copying its logs into
   `builds/logs/S10-T07/run-demo-19/` (empty); they are under
@@ -80,7 +84,7 @@
 1. The user's hands-on of B51 (demo-22: "it feels a lot better") and B52: `bash tools/start-coop-demo.sh S10-T07 0 30
    120 0 1` (demo-23: two windows on this PC). Its motion logs are in the
    run's c1/c2 (the checker needs the walk's legs: read them by hand).
-2. The second two-PC test with host-13 / server-10 / client-9 (the user's);
+2. The next two-PC test with host-15 / server-12 / client-10 (the user's);
    read the logs after. Next smoothing leads if wanted: hitch recovery,
    contact between the players.
 3. Ask the user whether to close **S11-T00** and **G10**.
@@ -96,7 +100,7 @@
 - **Travel fixtures:** `--travel c1,c2 --travel-variant 2|5`, optionally
   `--travel-changer <name part> --travel-approach=x,y,z`; check with
   `compare-coop-travel.py --variant 2|5` (`updates` is the B47 check). Others:
-  `--smooth c1,c2` (B51: check with `compare-coop-smoothness.py`), `--sleep`, `--pickup`, `--loot`, `--quest c1,c2 --quest-variant 2
+  `--travel-kill-first --auto-respawn 5` (B53), `--smooth c1,c2` (B51: check with `compare-coop-smoothness.py`), `--sleep`, `--pickup`, `--loot`, `--quest c1,c2 --quest-variant 2
   --auto-respawn 5`; arm with `arm = 1` in the server's `coop.ltx`. Don't
   type in the terminal while a fixture runs.
 - Installed scripts: `python3 tools/xray-db-extract.py -q grep 'pattern'
@@ -105,13 +109,13 @@
 
 ## Run names
 
-- Used: `campaign-334…480`, `client-226…363`, `proto-build-53…66`,
-  `st-28…41`, `bugfix-1…50`, `demo-1…22` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, `kit-19…20`, `two-pc-1`, patch checks 77–127, kits host-1…13, friend-1…3,
-  client-4…9, server-1…10.
-- Next: `campaign-481`, `client-364`, `proto-build-67`, `st-42`,
-  `bugfix-51`, `demo-23`, `menu-11`, `kit-21`, patch check 128, kits host-14,
-  client-10, server-11.
+- Used: `campaign-334…483`, `client-226…366`, `proto-build-53…66`,
+  `st-28…41`, `bugfix-1…54`, `demo-1…22` (S10-T07), `menu-1…10`,
+  (S11-T00), `kit-1…16`, `kit-19…22`, `two-pc-1`, patch checks 77–128, kits host-1…15, friend-1…3,
+  client-4…10, server-1…12.
+- Next: `campaign-484`, `client-367`, `proto-build-67`, `st-42`,
+  `bugfix-55`, `demo-23`, `menu-11`, `kit-23`, patch check 129, kits host-16,
+  client-11, server-13.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

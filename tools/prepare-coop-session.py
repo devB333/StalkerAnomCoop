@@ -162,6 +162,9 @@ def main():
     parser.add_argument("--travel-changer", default="",
                         help="with --travel (B47): use the level changer whose name contains this (e.g. to_marsh_1); "
                              "default: the first enabled")
+    parser.add_argument("--travel-kill-first", action="store_true",
+                        help="with --travel (B53): participant 1 is killed and respawned before the travel rounds "
+                             "(use with --auto-respawn 5)")
     parser.add_argument("--travel-approach", default="",
                         help="with --travel (B47): \"x,y,z\" where player 1 stands 5 s before the changer")
     parser.add_argument("--travel-variant", type=int, default=0,
@@ -544,6 +547,7 @@ def main():
                       f"travel_variant = {args.travel_variant}",
                       f"travel_changer = {args.travel_changer}",
                       f"travel_approach = {args.travel_approach}",
+                      f"travel_kill_first = {1 if args.travel_kill_first else 0}",
                       f"travel_barrier_hold = {args.travel_barrier_hold}",
                       f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}",
                       f"info_party = {args.info_start if info else 0}",

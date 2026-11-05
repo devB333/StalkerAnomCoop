@@ -1,0 +1,118 @@
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 3f39e78..0d6d882 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -189,6 +189,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		ok = read_string(ini, "new_game_faction", out.new_game_faction, sizeof(out.new_game_faction), false) && ok;
+ 		ok = read_string(ini, "new_game_loadout_2", out.new_game_loadout_2, sizeof(out.new_game_loadout_2), false) && ok;
+ 		out.new_game_money_2 = ini.line_exist("coop", "new_game_money_2") ? ini.r_u32("coop", "new_game_money_2") : 0;
++		out.travel_kill_first = ini.line_exist("coop", "travel_kill_first") ? ini.r_u32("coop", "travel_kill_first") : 0; // B53
+ 		out.travel_approach[0] = 0;
+ 		if (ini.line_exist("coop", "travel_approach"))
+ 			read_string(ini, "travel_approach", out.travel_approach, sizeof(out.travel_approach), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index dc318c6..9856933 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -117,6 +117,7 @@ struct CoopConfig
+ 	                    // 2 one agreed travel (S09-T02), 3 partner drops in the barrier then retries, 4 two travels (S09-T04)
+ 	string64 travel_approach; // B47 fixture: "x,y,z": participant 1 stands there 5 s before the changer (empty off)
+ 	string64 travel_changer; // B47 fixture: a level changer whose name contains this (empty: the first enabled)
++	u32 travel_kill_first; // B53 fixture: 1 participant 1 is killed and respawned before the travel rounds
+ 	u32 travel_barrier_hold; // S09-T04 harness: seconds the barrier stays up before the take (0 off)
+ 	u32 talk_party; // S10-T04a fixture: seconds after both attach until the talk rounds start at Sidorovich (0 off)
+ 	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index cf33823..4bfbaea 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -17468,12 +17468,48 @@ void travel_fixtures()
+ 		f.both_since = g_host->tick;
+ 		g_host->log.line("fixture-travel both-attached tick=%I64u", g_host->tick);
+ 	}
++	// B53: participant 1 dies and respawns first (a new actor: the corpse keeps the ALife player flag, so the
++	// travel's reload went to the corpse's level); its client confirms the respawn (profile auto_respawn)
++	static u32 kill_state = 0;
++	static u16 killed = kNoEngineId;
++	static u64 kill_tick = 0;
++	if (config.travel_kill_first && f.phase == 0 && kill_state < 2 &&
++		g_host->tick >= f.both_since + u64(config.travel_party) * 50)
++	{
++		PlayerLink* p1 = nullptr;
++		for (PlayerLink& link : g_host->links)
++			if (link.bound && link.ref.slot == 0)
++				p1 = &link;
++		CActor* a = p1 ? participant_actor(p1->ref) : nullptr;
++		if (kill_state == 0 && a && a->g_Alive())
++		{
++			killed = u16(a->ID());
++			a->KillEntity(a->ID(), TRUE);
++			kill_state = 1;
++			kill_tick = g_host->tick;
++			g_host->log.line("fixture-travel p1-killed actor=%u", u32(killed));
++			return;
++		}
++		if (kill_state == 1)
++		{
++			const bool respawned = a && a->g_Alive() && u16(a->ID()) != killed;
++			if (!respawned && g_host->tick - kill_tick < 90 * 50)
++				return;
++			kill_state = 2;
++			f.both_since = g_host->tick; // the rounds' delay again, from the respawn
++			g_host->log.line("fixture-travel p1-respawned=%d actor=%u waited_ticks=%I64u", respawned ? 1 : 0,
++				a ? u32(a->ID()) : 0xffffu, g_host->tick - kill_tick);
++			return;
++		}
++	}
+ 	if (attached < 2)
+ 		return;
+ 	if (f.phase == 0)
+ 	{
+ 		if (g_host->tick < f.both_since + u64(config.travel_party) * 50)
+ 			return;
++		if (config.travel_kill_first && kill_state < 2)
++			return;
+ 		CLevelChanger* chosen = nullptr;
+ 		for (CLevelChanger* lc : g_lchangers)
+ 		{
+@@ -17892,9 +17928,40 @@ bool travel_take()
+ 	}
+ 	if (moved.empty())
+ 		return false;
++	// B53: the level a reload loads is the ALife player's (the one object flagged M_SPAWN_OBJECT_ASPLAYER,
++	// alife_graph_registry.cpp:55-70): participant 1's first actor, object 0, which is also the server's script
++	// actor (db.actor; the installed scripts key the player on AC_ID = 0: its storage, goodwill, sounds). After
++	// participant 1's death and respawn object 0 is the corpse, left where it died: the reload went to the
++	// corpse's level and found no participant (the user's host-13 session; bugfix-51). The corpse travels with
++	// the party (beside the arrival point, its loot with it), as the script actor has to be on the server's level
++	CSE_ALifeCreatureActor* flagged = ai().alife().graph().actor();
++	bool flagged_travels = false;
++	for (Moved& m : moved)
++		flagged_travels = flagged_travels || m.se == flagged;
++	Moved corpse = {};
++	const bool corpse_travels = flagged && !flagged_travels;
++	if (corpse_travels)
++	{
++		corpse = {flagged, nullptr, flagged->m_tGraphID, flagged->m_tNodeID, flagged->o_Position, flagged->o_Angle,
++			flagged->o_torso, Fvector().set(0.f, 0.f, 0.f), 0, false};
++		Fvector at = tv.position;
++		at.x -= 1.2f;
++		flagged->m_tGraphID = tv.graph_vertex;
++		flagged->m_tNodeID = tv.level_vertex;
++		flagged->o_Position = at;
++		g_host->log.line("travel-take-corpse actor=%u from=%.2f,%.2f,%.2f gvid=%u to=%.2f,%.2f,%.2f (the script actor "
++			"was not travelling)", u32(flagged->ID), VPUSH(corpse.position), u32(corpse.graph), VPUSH(at));
++	}
+ 	Level().ClientSave();
+ 	tv.destination_generation = persistence->next_generation();
+ 	const bool taken = request_publication("travel", true);
++	if (corpse_travels)
++	{
++		// the live level as it was until the reload (only the saved world changes)
++		flagged->m_tGraphID = corpse.graph;
++		flagged->m_tNodeID = corpse.node;
++		flagged->o_Position = corpse.position;
++	}
+ 	for (Moved& m : moved)
+ 	{
+ 		m.se->m_tGraphID = m.graph;

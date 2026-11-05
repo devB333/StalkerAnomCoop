@@ -869,6 +869,23 @@ actor never fires; the client now applies it at every world-live
 (`UIZoneMap.disabled`, the motion icon) and logs `minimap hidden|shown`.
 Single player: unchanged.
 
+`0115-travel-after-respawn.patch` (S10-T07, 2026-11-04): B53 (the user, kits
+host-13 / client-9: a level travel stayed on the same level, no loading
+screen). A reload loads the ALife player's level (the object flagged
+`M_SPAWN_OBJECT_ASPLAYER`, `alife_graph_registry.cpp:55-70`): object 0,
+participant 1's first actor and the server's script actor (`db.actor`; the
+installed scripts key the player on `AC_ID = 0`). After participant 1's death
+and respawn object 0 is the corpse, left where it died: the travel moved the
+two living actors, the reload loaded the corpse's level and found neither
+(`arrived=0`), and the server stopped. The travel's take now also moves the
+corpse (beside the arrival point, its items with it) when it is not
+travelling (`travel-take-corpse`). Moving the flag to the living actor
+instead loaded the destination but its NPCs' scripts ran before `db.actor`
+existed (objects come online in id order) and the scripts' `AC_ID` keys would
+have pointed at the corpse. Fixture `travel_kill_first = 1`
+(`--travel-kill-first`): participant 1 is killed and respawned before the
+travel rounds. Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

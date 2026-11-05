@@ -81,7 +81,12 @@
   host-11, the friend joined with client-8 by code over Tailscale from
   100.106.37.43; about ten minutes of play, clean stop, no FATAL. The user:
   "Great we have a working build!" B49 and B50 confirmed hands-on.
-- **Kits for the next two-PC test (2026-11-04, B51-B53):** **host-15**
+- **Kits after B54/B55 (2026-11-05):** **host-17**
+  (`builds/kits/client1HostKit/host-17`) and **client-11**
+  (`builds/kits/clientKit/client-11.zip`); kit-23 pass. Host and server kits
+  now carry their own server copy (`server-bin`): host-15 broke when the
+  build output was rebuilt under it ("game build differs").
+- **Earlier kits (2026-11-04, B51-B53, no longer match the build):** **host-15**
   (`builds/kits/client1HostKit/host-15`), **server-12**
   (`builds/kits/ServerHostKit/server-12`), **client-10**
   (`builds/kits/clientKit/client-10.zip`); kit-21 / kit-22 pass. host-6…14 and
@@ -124,11 +129,11 @@
 
 - Used: `campaign-334…490`, `client-226…372`, `proto-build-53…66`,
   `st-28…41`, `bugfix-1…62`, `demo-1…22` (S10-T07), `menu-1…10`,
-  (S11-T00), `kit-1…16`, `kit-19…22`, `two-pc-1`, patch checks 77–129, kits host-1…15, friend-1…3,
-  client-4…10, server-1…12.
+  (S11-T00), `kit-1…16`, `kit-19…23`, `two-pc-1`, patch checks 77–129, kits host-1…17, friend-1…3,
+  client-4…11, server-1…12.
 - Next: `campaign-491`, `client-373`, `proto-build-67`, `st-42`,
-  `bugfix-63`, `demo-23`, `menu-11`, `kit-23`, patch check 130, kits host-16,
-  client-11, server-13.
+  `bugfix-63`, `demo-23`, `menu-11`, `kit-24`, patch check 130, kits host-18,
+  client-12, server-13.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.

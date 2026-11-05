@@ -75,6 +75,17 @@ $arch_dir_addons$\t\t= false\t| true \t| $arch_dir$\t | addons\\
 """
 
 
+def server_bin(kit: Path) -> Path:
+    """The kit's own copy of the campaign server (the exe and its DLLs, no PDB): a later rebuild of
+    builds/stage2/campaign no longer changes a kit's server under its client (host-15: "game build differs")."""
+    dest = kit / "server-bin"
+    dest.mkdir(parents=True)
+    for f in server_exe.parent.iterdir():
+        if f.is_file() and f.suffix.lower() in (".exe", ".dll"):
+            shutil.copy2(f, dest / f.name)
+    return dest / server_exe.name
+
+
 def fsgame_rest() -> str:
     """Everything of the accepted runtime's fsgame.ltx from $game_data$ on ($fs_root$-relative: the kit's folder)."""
     text = (accepted / "fsgame.ltx").read_text(errors="replace")
@@ -177,8 +188,9 @@ def main() -> int:
                         "--protocol-build", a.protocol_build, "--dedicated"], check=True, stdout=subprocess.DEVNULL)
         server = workspace / "builds/stage2/test-install/S11-T00" / f"{run}-server"
         kit.mkdir(parents=True)
+        exe = server_bin(kit)
         ps = "@echo off\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "
-        start = ps + f'"{win(workspace / "tools/Host-CoopServer.ps1")}" -Runtime "{win(server)}"'
+        start = ps + f'"{win(workspace / "tools/Host-CoopServer.ps1")}" -Runtime "{win(server)}" -Exe "{win(exe)}"'
         (kit / "Start-Server.cmd").write_text(start + "\r\npause\r\n")
         (kit / "Start-Server-Continue.cmd").write_text(start + " -Continue\r\npause\r\n")
         (kit / "Stop-Server.cmd").write_text(
@@ -204,7 +216,8 @@ def main() -> int:
     menu = ["[coop_menu]", f"name = {player}", f"key = {win(client / 'appdata/player.key')}",
             f"client_log = {win(client / 'appdata/logs/coop-client.log')}",
             f"client_stop = {win(client / 'appdata/coop-stop.txt')}",
-            f"server_exe = {win(server_exe)}", f"server_launcher = {win(workspace / 'tools/Start-CoopServer.ps1')}",
+            f"server_exe = {win(server_bin(kit))}",
+            f"server_launcher = {win(workspace / 'tools/Start-CoopServer.ps1')}",
             f"server_runtime = {win(server)}"]
     (client / "appdata/coop-menu.ltx").write_text("\n".join(menu) + "\n")
     # the prepared session's player 1 is not this kit's player: the roster starts with no one (the host's own key

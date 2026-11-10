@@ -1,0 +1,435 @@
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index a12292a..79b0d82 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -801,6 +801,7 @@ public:
+ 	virtual bool natural_weapon() const { return false; }
+ 	virtual bool natural_detector() const { return false; }
+ 	virtual bool use_center_to_aim() const;
++	u16 coop_last_hitter() const { return m_iLastHitterID; } // S10-T02e: the fauna fixture
+ protected:
+ 	u16 m_iLastHitterID;
+ 	u16 m_iLastHittingWeaponID;
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index cff6aeb..235e08c 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -257,7 +257,8 @@ enum class Presentation : u8
+ 	JointDrive, // S10-T04c: handle: bone id; value: max force; position.x: velocity; position.y: axis (-1 all);
+ 	            // a scripted joint drive on a physics object (ph_door's open and close), applied by every client
+ 	MonsterEffect, // S10-T02d: object: the monster; flags: 1 vampire grab (HUD off, inventory off), 2 vampire camera
+-	               // (position: the bloodsucker's head; value: the time), 3 vampire release (HUD and inventory back)
++	               // (position: the bloodsucker's head; value: the time), 3 vampire release (HUD and inventory back),
++	               // 4 a pseudogigant's threaten kick (value: its strength; S10-T02e)
+ 	ControllerPsyHit, // S10-T02c:object: the controller; flags: phase (1 prepare, 2 glide: position the target point,
+ 	                  // value the glide time; 3 hit, 4 stop, 5 hit sounds off, 6 all tube sounds off, 7 control hit)
+ 	Count,
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index a65795b..1d6594d 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -53,6 +53,7 @@
+ #include "ai/monsters/bloodsucker/bloodsucker.h" // S10-T02d
+ #include "ai/monsters/bloodsucker/bloodsucker_vampire_effector.h"
+ #include "ai/monsters/ai_monster_utils.h"
++#include "ai/monsters/pseudogigant/pseudo_gigant.h" // S10-T02e
+ #include "Inventory.h"
+ #include "inventory_item.h" // S08-T02
+ #include "eatable_item.h" // S08-T07
+@@ -3066,6 +3067,20 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 			HUD().SetRenderable(true);
+ 			viewer->set_inventory_disabled(false);
+ 			break;
++		case 4: // a pseudogigant's threaten kick (S10-T02e), scaled by its strength
++			if (CPseudoGigant* g = smart_cast<CPseudoGigant*>(Level().Objects.net_Find(object)))
++			{
++				const SAttackEffector& e = g->threaten_effector();
++				viewer->Cameras().AddCamEffector(xr_new<CMonsterEffectorHit>(e.ce_time, e.ce_amplitude * value, e.ce_period_number,
++					e.ce_power * value));
++				viewer->Cameras().AddPPEffector(xr_new<CMonsterEffector>(e.ppi, e.time, e.time_attack, e.time_release, value));
++				if (viewer->cam_Active())
++				{
++					viewer->cam_Active()->Move(Random.randI(2) ? kRIGHT : kLEFT, Random.randF(0.3f * value));
++					viewer->cam_Active()->Move(Random.randI(2) ? kUP : kDOWN, Random.randF(0.3f * value));
++				}
++			}
++			break;
+ 		default:
+ 			applied = "refused";
+ 			break;
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index f36e59f..177796b 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -159,6 +159,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.loot_party = ini.line_exist("coop", "loot_party") ? ini.r_u32("coop", "loot_party") : 0; // S10-T02b
+ 		out.psy_party = ini.line_exist("coop", "psy_party") ? ini.r_u32("coop", "psy_party") : 0; // S10-T02c
+ 		out.mutant_party = ini.line_exist("coop", "mutant_party") ? ini.r_u32("coop", "mutant_party") : 0; // S10-T02d
++		out.fauna_party = ini.line_exist("coop", "fauna_party") ? ini.r_u32("coop", "fauna_party") : 0; // S10-T02e
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index e09c0e4..e6d23df 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,7 +120,8 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
+-	u32 mutant_party; // S10-T02d fixture: seconds after both attach until the bloodsucker, burer and poltergeist stages
++	u32 fauna_party; // S10-T02e fixture: seconds after both attach until each generic mutant class is spawned near p2
++	u32 mutant_party; // S10-T02d fixture:seconds after both attach until the bloodsucker, burer and poltergeist stages
+ 	u32 psy_party; // S10-T02c fixture:seconds after both attach until a controller is spawned near p2
+ 	u32 loot_party; // S10-T02b fixture: seconds after both attach until the NPC loot rounds
+ 	u32 npc_party; // S10-T02a fixture: seconds after both attach until the NPC logic evaluation
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 0c140bc..b350224 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -58,6 +58,8 @@
+ #include "ai/monsters/bloodsucker/bloodsucker.h" // S10-T02d: the mutant fixture
+ #include "ai/monsters/poltergeist/poltergeist.h"
+ #include "ai/monsters/anti_aim_ability.h"
++#include "ai/monsters/pseudodog/psy_dog.h" // S10-T02e: the fauna fixture
++#include "CampaignServerLighting.h" // S10-T02e: the lighting counters
+ #include "ai/monsters/basemonster/base_monster.h"
+ #include "relation_registry.h" // S10-T04d
+ #include "character_community.h"
+@@ -749,6 +751,21 @@ struct Host
+ 		u32 failures = 0;
+ 	} mutant_fixture;
+ 	xr_map<xr_string, std::pair<u64, u64>> monster_abilities; // ability -> (on slot 0, on slot 1)
++	// S10-T02e: the fauna fixture (profile fauna_party): each generic mutant class in turn
++	struct FaunaFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u16 monster = 0xffff;
++		bool enemy_p2 = false, enemy_p1 = false, hit_p2 = false;
++		u32 other_hits = 0; // p2's health drops from anything but this stage's monster
++		u16 other_hitter = 0xffff;
++		u64 light_frames = 0, light_tracks = 0, light_picks = 0; // the lighting counters when the fixture began
++		u32 phantoms = 0; // the psy dog's most phantoms at once
++		u64 phantom_tick = 0; // when its first phantom was seen
++		u32 failures = 0, passed = 0;
++	} fauna_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -12297,6 +12314,146 @@ void mutant_fixtures()
+ 	++f.phase;
+ }
+ 
++// ------------------------------------------------------------ S10-T02e
++// The fauna fixture (profile fauna_party, server-driven): p1 moved about 120 m
++// away (p1 only, L58); each generic mutant class spawned in turn 4 m in front
++// of p2, for up to 40 s: the stage passes once the monster's enemy is p2 and p2
++// has taken a hit (p2's health is held at 1 every tick, so a drop below 1 seen
++// before the reset is that monster's hit); p1 must never be its enemy. The
++// monster is killed when its stage ends. compare-coop-fauna.py checks the lines.
++void fauna_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.fauna_party || !ai().get_alife())
++		return;
++	Host::FaunaFixture& f = g_host->fauna_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-fauna both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 999 || g_host->tick < f.both_since + u64(config.fauna_party) * 50)
++		return;
++	if (slots[0] != 0)
++		std::swap(actors[0], actors[1]);
++	CActor* p2 = actors[1];
++	static LPCSTR const sections[] = {"boar_normal", "dog_normal", "flesh_normal", "pseudodog_normal", "psy_dog", "cat_normal_a",
++		"chimera_normal", "fracture_normal", "gigant_normal", "zombie_normal", "snork_normal", "tushkano_normal", "rat_normal"};
++	const u32 count = u32(sizeof(sections) / sizeof(sections[0]));
++	if (p2->g_Alive() && p2->GetfHealth() < 1.f)
++	{
++		// the stage's monster hit p2 only when p2's last hitter is that monster
++		if (f.monster != 0xffff && p2->coop_last_hitter() == f.monster)
++			f.hit_p2 = true;
++		else if (f.monster != 0xffff)
++		{
++			++f.other_hits;
++			f.other_hitter = p2->coop_last_hitter();
++		}
++		p2->SetfHealth(1.f);
++		p2->conditions().ClearWounds(); // no bleeding between hits: each drop is a fresh hit
++	}
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (f.phase == 0)
++	{
++		const campaign::ServerLightingStats& light0 = campaign::server_lighting_stats();
++		f.light_frames = light0.frames;
++		f.light_tracks = light0.actor_tracks;
++		f.light_picks = light0.view_picks;
++		Fvector away;
++		away.sub(actors[0]->Position(), p2->Position());
++		away.y = 0.f;
++		if (away.square_magnitude() < 0.01f)
++			away.set(1.f, 0.f, 0.f);
++		away.normalize();
++		place_beside(actors[0], Fvector().mad(p2->Position(), away, 120.f));
++		g_host->log.line("fixture-fauna p1-away distance=%.1f", actors[0]->Position().distance_to(p2->Position()));
++		f.phase = 1;
++		return;
++	}
++	const u32 stage = (f.phase - 1) / 2, step = (f.phase - 1) % 2;
++	if (stage >= count)
++	{
++		const campaign::ServerLightingStats& light = campaign::server_lighting_stats();
++		g_host->log.line("fixture-fauna done phase=classes failures=%u passed=%u of=%u", f.failures, f.passed, count);
++		// S03-T06's per-participant lighting while the fixture ran (L13): both slots' views picked every frame
++		g_host->log.line("fixture-fauna lighting frames=%I64u actor_tracks=%I64u view_picks=%I64u view_tracks=%I64u "
++			"view_count0=%u view_count1=%u view_object0=%u view_object1=%u", light.frames - f.light_frames,
++			light.actor_tracks - f.light_tracks, light.view_picks - f.light_picks, light.view_tracks,light.last_view_count[0], light.last_view_count[1], u32(light.last_view_object[0]),
++			u32(light.last_view_object[1]));
++		f.phase = 999;
++		return;
++	}
++	if (step == 0)
++	{
++		Fvector forward;
++		forward.setHP(p2->XFORM().k.getH(), 0.f);
++		f.monster = spawn_at(alife, sections[stage], Fvector().mad(p2->Position(), forward, 4.f), u16(p2->ID()));
++		f.enemy_p1 = f.enemy_p2 = f.hit_p2 = false;
++		f.other_hits = 0;
++		f.other_hitter = 0xffff;
++		f.phantoms = 0;
++		f.phantom_tick = 0;
++		f.phase_tick = g_host->tick;
++		g_host->log.line("fixture-fauna spawned stage=%u section=%s monster=%u", stage, sections[stage], u32(f.monster));
++		++f.phase;
++		return;
++	}
++	CBaseMonster* monster = f.monster != 0xffff ? smart_cast<CBaseMonster*>(Level().Objects.net_Find(f.monster)) : nullptr;
++	if (monster && monster->g_Alive())
++	{
++		const CEntityAlive* enemy = monster->EnemyMan.get_enemy();
++		if (enemy == p2)
++			f.enemy_p2 = true;
++		else if (enemy == actors[0])
++			f.enemy_p1 = true;
++	}
++	// the psy dog's stage also waits for its phantoms (they reach the clients), then 8 s, up to the stage's time
++	bool phantoms_shown = true;
++	if (CPsyDog* dog = smart_cast<CPsyDog*>(monster))
++	{
++		if (dog->g_Alive() && dog->get_phantoms_count() > f.phantoms)
++		{
++			f.phantoms = dog->get_phantoms_count();
++			if (!f.phantom_tick)
++				f.phantom_tick = g_host->tick;
++		}
++		phantoms_shown = f.phantom_tick && g_host->tick - f.phantom_tick >= 8 * 50;
++	}
++	// the pseudogigant's stage also waits for its threaten (the stomp), up to the stage's time
++	const bool gigant = !xr_strcmp(sections[stage], "gigant_normal");
++	const bool threatened = g_host->monster_abilities.count("threaten") && g_host->monster_abilities["threaten"].second;
++	const bool done = f.enemy_p2 && f.hit_p2 && (!gigant || threatened) && phantoms_shown;
++	if (!done && g_host->tick - f.phase_tick < 40 * 50)
++		return;
++	const float distance = monster ? monster->Position().distance_to(p2->Position()) : -1.f;
++	if (monster && monster->g_Alive())
++		monster->KillEntity(u16(p2->ID()));
++	const bool pass= f.enemy_p2 && f.hit_p2 && !f.enemy_p1;
++	g_host->log.line("fixture-fauna stage-done stage=%u section=%s monster=%u online=%d enemy_p2=%d hit_p2=%d enemy_p1=%d pass=%d "
++		"seconds=%.1f other_hits=%u other_hitter=%u distance=%.1f phantoms=%u", stage,sections[stage], u32(f.monster), monster ? 1 : 0,
++		f.enemy_p2 ? 1 : 0, f.hit_p2 ? 1 : 0, f.enemy_p1 ? 1 : 0, pass ? 1 : 0, float(g_host->tick - f.phase_tick) / 50.f,
++		f.other_hits, u32(f.other_hitter), distance, f.phantoms);
++	if (pass)
++		++f.passed;
++	else
++		++f.failures;
++	f.monster = 0xffff;
++	++f.phase;
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -15554,6 +15711,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	loot_fixtures(); // S10-T02b
+ 	psy_fixtures(); // S10-T02c
+ 	mutant_fixtures(); // S10-T02d
++	fauna_fixtures(); // S10-T02e
++
+ 
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+diff --git a/src/xrGame/CustomMonster.cpp b/src/xrGame/CustomMonster.cpp
+index b4e79a7..4efbb75 100644
+--- a/src/xrGame/CustomMonster.cpp
++++ b/src/xrGame/CustomMonster.cpp
+@@ -786,8 +786,22 @@ BOOL CCustomMonster::net_Spawn(CSE_Abstract* DC)
+ 	memory().reload(*cNameSect());
+ 	memory().reinit();
+ 
+-	if (!movement().net_Spawn(DC) || !inherited::net_Spawn(DC) || !CScriptEntity::net_Spawn(DC))
++	// S10-T02e: which part refused (a psy dog phantom's replica on a co-op client)
++	if (!movement().net_Spawn(DC))
++	{
++		Msg("! S10-T02e custom-monster spawn refused by movement: %s id=%u", *DC->s_name, u32(DC->ID));
++		return (FALSE);
++	}
++	if (!inherited::net_Spawn(DC))
++	{
++		Msg("! S10-T02e custom-monster spawn refused by the entity: %s id=%u", *DC->s_name, u32(DC->ID));
+ 		return (FALSE);
++	}
++	if (!CScriptEntity::net_Spawn(DC))
++	{
++		Msg("! S10-T02e custom-monster spawn refused by the script entity: %s id=%u", *DC->s_name, u32(DC->ID));
++		return (FALSE);
++	}
+ 
+ 	ISpatial* self = smart_cast<ISpatial*>(this);
+ 	if (self)
+diff --git a/src/xrGame/ai/monsters/pseudodog/psy_dog.cpp b/src/xrGame/ai/monsters/pseudodog/psy_dog.cpp
+index 894da58..11543ef 100644
+--- a/src/xrGame/ai/monsters/pseudodog/psy_dog.cpp
++++ b/src/xrGame/ai/monsters/pseudodog/psy_dog.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "../../../CoopReplica.h" // S10-T02e
+ #include "psy_dog.h"
+ #include "../../../level_graph.h"
+ #include "../../../ai_space.h"
+@@ -192,6 +193,9 @@ u8 CPsyDog::get_phantoms_count()
+ //////////////////////////////////////////////////////////////////////////
+ CPsyDogPhantom::CPsyDogPhantom()
+ {
++	// S10-T02e: read in net_Spawn; a failed spawn reaches net_Destroy first
++	m_particles_appear = nullptr;
++	m_particles_disappear = nullptr;
+ }
+ 
+ CPsyDogPhantom::~CPsyDogPhantom()
+@@ -304,9 +308,13 @@ void CPsyDogPhantom::Hit(SHit* pHDS)
+ 
+ void CPsyDogPhantom::net_Destroy()
+ {
+-	Fvector center;
+-	Center(center);
+-	PlayParticles(m_particles_disappear, center, Fvector().set(0.f, 1.f, 0.f));
++	// S10-T02e: a failed spawn (the client's replica) destroys before net_Spawn read the particle names
++	if (m_particles_disappear && m_particles_disappear[0])
++	{
++		Fvector center;
++		Center(center);
++		PlayParticles(m_particles_disappear, center, Fvector().set(0.f, 1.f, 0.f));
++	}
+ 
+ 	if (m_parent && !is_wait_to_destroy_object())
+ 	{
+@@ -370,3 +378,12 @@ void CPsyDogPhantom::destroy_from_parent()
+ 	u_EventGen(P, GE_DESTROY, ID());
+ 	u_EventSend(P);
+ }
++
++// S10-T02e: on a co-op client the client link drives a creature replica's
++// presentation (CBaseMonster::replica_update_auras); the psy dog's aura is one
++void CPsyDog::replica_update_auras()
++{
++	inherited::replica_update_auras();
++	if (campaign::replica_active() && m_aura)
++		m_aura->update_schedule();
++}
+diff --git a/src/xrGame/ai/monsters/pseudodog/psy_dog.h b/src/xrGame/ai/monsters/pseudodog/psy_dog.h
+index f6894fb..4e05d2a 100644
+--- a/src/xrGame/ai/monsters/pseudodog/psy_dog.h
++++ b/src/xrGame/ai/monsters/pseudodog/psy_dog.h
+@@ -27,6 +27,7 @@ class CPsyDog : public CAI_PseudoDog
+ 	TTime* m_phantoms_die_time;
+ 
+ public:
++	virtual void replica_update_auras(); // S10-T02e: the aura on a co-op client (the replica's schedule does not run)
+ 	CPsyDog();
+ 	virtual ~CPsyDog();
+ 
+diff --git a/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp b/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp
+index 6470269..5e0fd35 100644
+--- a/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp
++++ b/src/xrGame/ai/monsters/pseudodog/psy_dog_aura.cpp
+@@ -69,7 +69,10 @@ void CPsyDogAura::update_schedule()
+ 	if (!m_object->g_Alive())
+ 		return;
+ 
+-	// S02-T06e: no controlled entity, no aura (see reinit).
++	// S02-T06e: no controlled entity, no aura (see reinit). S10-T02e: the
++	// viewer may not exist yet at reinit on a co-op client: looked up again
++	if (!m_actor)
++		m_actor = campaign::local_view_actor();
+ 	if (!m_actor)
+ 		return;
+ 
+diff --git a/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.cpp b/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.cpp
+index 2a683cd..278d296 100644
+--- a/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.cpp
++++ b/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.cpp
+@@ -1,4 +1,6 @@
+ #include "stdafx.h"
++#include "../../../CampaignScriptContext.h"
++#include "../../../CoopServerHost.h" // S10-T02e
+ #include "../../../CampaignActorAccess.h"
+ #include "pseudo_gigant.h"
+ #include "pseudo_gigant_step_effector.h"
+@@ -384,6 +386,21 @@ void CPseudoGigant::on_threaten_execute()
+ 	clamp(hit_value, 0.f, 1.f);
+ 
+ 	// запустить эффектор
++	if (campaign::coop_server_prepared())
++	{
++		// S10-T02e: the kick's camera and post-process effectors on the kicked player's client
++		campaign::ParticipantRef ref;
++		if (campaign::participant_of(pA, ref) == campaign::Refusal::None)
++		{
++			campaign::PresentationArgs args;
++			args.flags = 4;
++			args.value = hit_value;
++			campaign::present(ref, campaign::Presentation::MonsterEffect, u16(ID()), "", args);
++			campaign::coop_server_monster_ability(u16(ID()), u16(pA->ID()), "threaten", hit_value);
++		}
++	}
++	else
++	{
+ 	pA->Cameras().AddCamEffector(xr_new<CMonsterEffectorHit>(m_threaten_effector.ce_time, // S03-T02: the kicked enemy
+ 	                                                              m_threaten_effector.ce_amplitude * hit_value,
+ 	                                                              m_threaten_effector.ce_period_number,
+@@ -398,6 +415,7 @@ void CPseudoGigant::on_threaten_execute()
+ 		pA->cam_Active()->Move(Random.randI(2) ? kRIGHT : kLEFT, Random.randF(0.3f * hit_value));
+ 		pA->cam_Active()->Move(Random.randI(2) ? kUP : kDOWN, Random.randF(0.3f * hit_value));
+ 	}
++	}
+ 
+ 	pA->lock_accel_for(m_time_kick_actor_slow_down); // S03-T02
+ 
+diff --git a/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.h b/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.h
+index 329286d..ed85eac 100644
+--- a/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.h
++++ b/src/xrGame/ai/monsters/pseudogigant/pseudo_gigant.h
+@@ -43,6 +43,7 @@ private:
+ 
+ 
+ public:
++	const SAttackEffector& threaten_effector() const { return m_threaten_effector; } // S10-T02e: the client's threaten presentation
+ 	CPseudoGigant();
+ 	virtual ~CPseudoGigant();
+ 

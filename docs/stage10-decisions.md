@@ -1,0 +1,373 @@
+# Stage 10 — gameplay and scope decisions for approval
+
+Started 2026-10-28 with S10-T01. Stage 10 widens the co-op campaign from the
+covered slices (G06–G09) to the installed content, and every widening needs
+a policy for "the player": R04 (installed scripts use global player state),
+R09 (shared rewards, reputation and dialogue vary by content) and R12 (a
+coverage matrix with explicit exclusions). The decisions below were taken by
+S10-T01 while building the [coverage matrix](campaign-coverage-matrix.md).
+**T01-1…T01-19 approved by the user on 2026-10-28** ("I agree with almost
+all of the decisions" → the dedicated-server/session-control discussion
+added T01-17…T01-19 → "I approve the rest"). They bind Stage 10's children;
+none is implemented yet by S10-T01 itself. Later Stage 10 children add
+their own rows here for approval at G10.
+
+**G10 review, 2026-11-02:** the user approved every later row except these
+revisions, which are implemented before the gate closes (details in
+[G10](validation/G10.md)): **T05b-4** the player who clicked pays a task's
+money cost; **T03b-2** bounty squads come for the player with the worse
+standing; **T04f-2** mechanic lending is always on in co-op, as long as a lent
+item is easy to track; **T03a-2** an absent player's area stays live 5
+minutes, then its character is parked (safe, offline) until it rejoins;
+**T03c-2** both players must be in shelter to sleep. Superseded by later
+fixes: T02a-2, T02c-3, T02d-3, T02f-5, T03f-2, T04a-4, T04f-4.
+
+Decisions D4 (explicit participants; player 2 is not a companion), D5 (party
+travel with both confirmations) and the Stage 8 policies (one party task,
+the anchor, per-player rewards and inventories, T07/T08/T09 rows in
+[Stage 8 decisions](stage8-closing-decisions.md)) bind and are not reopened.
+
+## S10-T01 — scope and the meaning of "the player"
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T01-1 | **Every passage is in scope:** the 98 directed passages between the 33 installed levels must work both ways, proven by an automated sweep (S10-T03e) and a hands-on trial of a few | the campaign is the whole map; a passage that silently fails strands the party (R10) | a bounded set (the loner start region: marsh, Cordon, Garbage, Darkscape, Agroprom) with the rest excluded |
+| T01-2 | **A new game is supported** on the campaign server (S10-T03f): the host starts a new game instead of loading a save, both actors spawn at the start | every other release path starts from a save the host made alone in single player, which is awkward and leaves player 2's start to the host's save | the release starts from a host save only (L51 becomes a product limit) |
+| T01-3 | At a new game **both players are the same faction** (the party faction chosen by the host); each picks their own loadout | the installed faction relations are per community: two factions in one party would make each player's friends the other's enemies, and every NPC-logic rule below would need a per-player relation model | per-player factions (a second model of NPC relations; not in Stage 10) |
+| T01-4 | **Story info portions are party-shared**; a short explicit list of personal portions (sleep state, disguise, drug flags, tutorials, the first-update flags) is per player; the portable store (pstor) is per player | story progress is one world (D4: both players are participants of one campaign); personal flags describe one body | all portions per player (each player plays a separate story in one world; dialogue and task gates diverge) |
+| T01-5 | **NPC and world logic decides against the nearest alive participant** (condlists, meet/greet, usability, danger, combat-ignore, squad relationship and target condlists); presence checks mean **any** participant | the engine's own ALife switching already uses the nearest participant (S03-T04); the NPC should react to the player in front of it, not to whoever is actor 0 | participant 1 always (status quo: an NPC greets the absent anchor) |
+| T01-6 | **Goodwill and reputation are per player** (the native relation registry is keyed by character id); **faction-vs-faction relations are world** (the DoctorX dynamic relations) | the engine already keeps goodwill per character; a faction's war with another is one world's state | party goodwill (one player's crimes are the other's) |
+| T01-7 | **Trade:** each player's money is theirs; a trader's stock and restock are world; the trade window serves **one buyer at a time** (the other player is told the trader is busy); repair and upgrades run on the server in the buyer's context | one stock, two purses; concurrent trades on one stock are the duplicate-money risk R09 names | shared party purse; or two simultaneous trade windows with a conflict rule |
+| T01-8 | **Sleeping needs both players' consent** (the S09 consent flow: one asks, the other accepts within 30 s); the world's time skips once; **passing out from exhaustion takes only that player's control** (a blackout for a few real seconds, no time skip, the installed 5 % death chance kept) | a time skip is world state; one player must not skip the other's night; a forced per-player skip is impossible | no sleeping in co-op; or the first sleeper skips for both |
+| T01-9 | **Guides, fast travel and the backpack travel are party travel requests** under the S09 contract (both consent, both move, the time skips once, the requester pays the fee) | they are level changes by another name; D5 forbids an unconfirmed teleport of the partner | exclude them (the level changers remain the only passages) |
+| T01-10 | **Companions are supported per recruiter:** each player's companions follow and obey their own player; the other player cannot command them | companions are a central Anomaly feature; the installed script keeps slots on `db.actor`, which is the recruiter in context | exclude companions from the release |
+| T01-11 | **Emissions and psi-storms:** one schedule for the world; cover, damage, immunity (`surge_immuned`) and the death camera **per player** | the blowout is world weather; whether a body is in cover is that body's fact | — |
+| T01-12 | **Excluded from the release**, refused or ignored by the server and named in the release notes: Warfare, Azazel, Ironman and survival mode (the optional game modes, L31), vehicles and mounted guns (L52), debug tools, the multiplayer game modes | optional modes replace the campaign's rules; holders assume one actor and have never been exercised | include vehicles (a holder-per-player model and its travel) |
+| T01-13 | **All 17 engine mutant classes must target either player**; the Anomaly config variants (karlik, lurker, psysucker, bibliotekar, rotan, gigant jumper, borya) are covered by their base class and stay labelled untested until a fixture spawns them | the abilities are the remaining global-Actor code (L12); variants add no engine code | require a fixture per variant |
+| T01-14 | **Stashes:** contents are world (first come, journaled as transfers); the marker given for a stash reward goes to both players' maps (as S08-T09's map spots do) | one world, one box; a shared party should see the party's stashes | per-player stash markers |
+| T01-15 | **An NPC talks to one player at a time**; the second player is told the NPC is busy and the window closes when the first ends | the engine's dialogue is one phrase tree per NPC; two speakers would interleave commits | queue the second player; or allow both with independent trees |
+| T01-16 | **Story chains required for release:** the DoctorX storyline (every faction's chain) and Living Legend; Mortal Sin, Operation Afterglow, the Hidden Blade chain and MLR are **untested** (they run, nothing is claimed) until a later child takes them | 218 storyline tasks cannot each be fixture-tested in Stage 10; the two named chains are the ones a new party meets first | all chains required (several more sessions); or none |
+| T01-17 | **Dedicated server, controlled from the clients.** The simulation stays in `AnomalyCampaignServer.exe` on any machine (D8). A client's main menu gets a **Co-op** page: *Create game* (the standard new-game screen: faction, game type, loadout), *Load game* (the server's saved campaigns), *Join session*. Create and Load are **session-control commands** sent to the server, not local game starts; the server starts the native new game (S10-T03f) or loads a saved campaign and both clients attach to it | the user's direction (2026-10-28): players must be able to spin up a new game or load another one from the client, with the standard creation screen, without touching the server machine | a server-side launcher only; or a player-hosted server started by one client |
+| T01-18 | **The creator is the owner.** The first player key a fresh server accepts owns the session: only the owner's client may create, load, save-and-stop or end a campaign; the partner's client is told and follows (its world is replaced the way a travel replaces it). The two keys are pinned to the two slots afterwards, as the session layer already does; a later campaign on the same server keeps the same owner | privileged commands need one accountable key (D1: no client gains authority over the simulation; these commands choose *which* world the server runs, they do not alter outcomes inside it); the partner must not be able to discard the owner's world | both players must consent to a load (as to a travel); or either player may issue the commands |
+| T01-19 | **A joiner joins the creator's game as it was created**: same faction (T01-3) and game type; the joiner skips the creation screen and picks only their own loadout from that faction's list | one party, one faction, one set of rules; the second player's choices must not fork the world | the joiner picks nothing (the creator's loadout for both); or the joiner picks a faction too (per-player factions, not in Stage 10) |
+
+## S10-T04a — the talk window
+
+Taken while routing a client's talk window to the server's dialogue
+([S10-T04a](validation/S10-T04a.md)); T01-15 binds the one-speaker rule.
+Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T04a-1 | **A talking actor is frozen.** While its talk is open on the server, the player's movement and trigger inputs are consumed and dropped (single player ignores the keys while talking, `ActorInput.cpp:49,357`); the talk ends by itself when the actor or the NPC dies or stops talking, the player leaves, or the NPC moves beyond twice the talk reach (6 m) | the native window is modal and the actor stands still; a moving talker would pull the NPC's talk state apart from the window | let the actor walk away (the engine would end the NPC's talk, the window would close a tick later) |
+| T04a-2 | **The busy player is told, not queued.** A USE on an NPC that talks to the other player is refused (reason 33) and shows "*name* is busy talking to the other player." on the HUD; nothing opens, the player tries again when the first talk ends | T01-15 says "told"; a queue would open a window the player did not ask for at that moment | a queue (the window opens when the first talk ends) |
+| T04a-3 | **The dialogue runs in the talking player's context; only the party quest's accept and turn-in phrases are party actions.** A phrase's preconditions, texts and actions see the talking player's actor (its info portions, tasks, money): the story-portion sharing of T01-4 is S10-T04b. The accept phrase (`dialogs.npc_give_task`) and the finish phrase (`dialogs.npc_set_finished_task_complete`) are taken over on the server: the party task is given to, or completed for, the anchor through the S08 party path (committed before the window moves on, answered to nobody). Any other task offered through the window is **not given**: the player is told "Co-op: this task is not supported yet" and the dialogue continues (the NPC's "accepted" line is still spoken: a known blemish) until S10-T05b takes the dynamic task types | a non-party task given to the talking actor would be per player (against the party policy) and, for participant 2, lost on a restart (L32) | give non-party tasks natively to the talking actor |
+| T04a-4 | **Trade and upgrade are off in a co-op talk** (the buttons hidden, the key ignored) until S10-T04c | the trade window would run the engine's trade on the replica | leave the buttons live (a local trade on the replica that the server never sees) |
+
+## S10-T04b — party info portions and actor-2 script state
+
+Taken while making story knowledge the party's and persisting the script
+state of an actor without the installed Lua binder
+([S10-T04b](validation/S10-T04b.md)); T01-4 binds the policy. Awaiting the
+user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T04b-1 | **The personal portions** (per player, never mirrored) are: the UI states the engine sends the actor (`ui_*`: the talk, PDA and news windows), every portion whose id contains `tutorial`, the sleep flags (`actor_is_sleeping`, `sleep_active`, `force_slp`, `force_slp2`) and the starting-equipment flag (`start_equippment_handled`). **Every other portion is the party's**: given to or taken from one participant actor, it is mirrored to the other participant actors on the server, so `has_info` and the dialogue preconditions answer the same for both | T01-4 names sleep, disguise, drugs, tutorials and the first-update flags as personal; the installed scripts keep disguise and drug state in `pstor` (no portions), so the list is what the engine and scripts actually give per body | a larger personal list (every portion with `actor` in its id: too many story flags carry it) |
+| T04b-2 | **`has_alife_info` means the context's player.** The installed `has_alife_info(id)` reads actor 0 by id (`alife():has_info(0, id)`); inside a participant context that read goes to the context player's actor; outside a context (the host's own logic) it stays actor 0 | the installed scripts use `has_alife_info` and `db.actor:has_info` interchangeably for "the player"; after T04b-1 both answer the same for story portions and per player for personal ones | leave it on actor 0 (personal flags of player 2 would read player 1's) |
+| T04b-3 | **An actor without the installed binder keeps its script state through the storage manager, not a second binder.** Participant 2's actor and a respawned body get an `alife_storage_manager` entry when they come online (`m_data.game_object[id]`), so their `pstor` (`save_var` / `load_var`) is saved in the checkpoint and restored on a restart; the installed actor binder stays attached to the script actor only (S03-T03) | a second `actor_binder` would run every per-actor and world system twice (surge, status, achievements) and assumes `db.actor`; the state the party needs durable is the `pstor` and the info portions, which the registry already keeps | bind the installed actor binder to actor 2 too |
+
+## S10-T05b — every quest is a party quest (decided ahead, 2026-10-29)
+
+Taken with the user before S10-T05b started, after S10-T04b ("quests are
+more important" than trade: S10-T05b runs before S10-T04c).
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T05b-1 | **Every task is the party's**, from the main story to a hunt for money: one native task, progress by either player, accept and turn-in by either player (by talking or by the intent); the per-task allow list of S08-T04 goes away in favour of one adapter per progress family (fetch, kill or hunt, eliminate a target, reach or defend or escort, storyline stages) | the user: "ideally every quest should be a party quest"; the engine's task list is one per level already, story info portions are shared (T04b-1) and any actor's script store persists (T04b-3), so only the per-family progress and reward policies were missing | keep the Stage 8 allow list and add tasks one by one |
+| T05b-2 | **The reward goes to both players in full, the same amount each** (money, goodwill, items where the task gives one); nothing is split and nothing depends on who clicked. The Stage 8 fetch rule (money per own items handed in) stays for fetch tasks as approved at G08 unless the user revises it | the user: "do same to both, I don't want them to split it" | split evenly; or the whole sum to whoever turns it in |
+| T05b-3 | **A kill or a hit by a participant actor is "the player's" for the installed callbacks.** `CEntityAlive::Die` and `CHitMemoryManager::add` run the installed death and hit callbacks in the attacker's participant context when the attacker is a participant actor, so `AC_ID` and `db.actor` name the killer (the bounty tag `tagged_by_actor`, `npc_on_death_callback`, statistics); outside the campaign server the scope refuses and nothing changes | the installed `axr_task_manager` credits a bounty to `who:id() == AC_ID` (actor 0 outside a context): player 2's kills would not count as the party's; a bounty completes "anyway" in Anomaly but the tag, the statistics and other mods' callbacks still read the killer | leave the callbacks in actor 0's view (player 2 never "the killer") |
+| T05b-4 | **A money cost or payment inside a task is the anchor's purse** (`db.actor:money()`, `transfer_money` in a task's own check or effect, e.g. DoctorX delivery fees): a **limit** until a per-player rule is chosen with the user; the rewards themselves go to both (T05b-2) **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** the player who clicked pays: during a party accept or turn-in the anchor's purse in Lua is the clicking player's, and money a turn-in gives through `give_money` goes to both (G10-1). | the party has two purses and one task; charging both or splitting a fee needs a decision the matrix did not take | charge the player who clicked; charge both |
+| T05b-5 | **A task scope sees the party's inventory.** While a task's own check or completion runs on the server (`ScriptContextScope(const CGameTask*)`), `GetObjectByName` and `iterate_inventory` on a participant actor also search the other participant actors' inventories, so a fetch-style check (`actor_has_fetch_item`, the lostzone steps, DoctorX item tasks) counts the party's items without editing the installed scripts; outside a task scope each actor's reads are its own (trade, dialogue preconditions) | 206 of 611 task sections count items in `db.actor`'s inventory; one engine rule covers them all; the Stage 8 fetch wrapper (money per own items) stays on top of it | wrap every fetch-style functor in Lua one by one |
+
+## S10-T04c — trade, repair and the use of world objects
+
+Taken while making trade and a client's USE on a world object the server's
+([S10-T04c](validation/S10-T04c.md)); T01-7 binds the trade policy. The
+trade-UI choice and the upgrades split were taken with the user on
+2026-10-29 before the code was written. T04c-6…T04c-8 (technical: the
+partner's animations, the repair condition, the fixture door) were added
+with patch 0066 the same day. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T04c-1 | **The native trade window with the server's prices.** The talk window's Trade button asks the server to open the trade; the server starts the engine's trade session for that buyer in his context (the installed `trade_manager` conditions for him), prices every item of the stock and of the buyer's inventory with `CTrade::GetItemPrice` and sends the table; the client opens the normal drag-and-drop window and its prices read that table. Buy and sell go to the server as one request, re-priced and checked there, journaled as one `trade` record before the engine's own `CTrade::TransferItem` applies it; the clients see the item moves as Reparent and the purse through the needs event. Trade stays inside the talk, so one buyer at a time (T01-15/T01-7); the other player is told "busy" | the user chose the native window (2026-10-29); prices are per buyer (relation, the trader's conditions) and must come from the server, never from a client's replica | a server-generated list UI |
+| T04c-2 | **A USE on a script-usable world object is the server's.** A door, a switch or any object with a script use callback (not an item, a living thing or a level changer, which have their own kinds) sends the use-object intent; the server runs the callback in the player's context, so the installed logic (`ph_door`'s `on_use` condlist, its faction check) decides; a scripted joint drive on a physics object is presented to every client, which applies it to its own copy, so the door swings on both screens. Not journaled: a door's pose is world state the checkpoint holds | the client's local door opened while the server's stayed shut: the server corrected the player back ("an invisible wall", the user's demo) | replicate door poses as object snapshots (bones), or a door-only state message |
+| T04c-3 | **Upgrades are their own child, S10-T04f.** S10-T04c delivers the door, trade and the server-side repair dialogue; the mechanic's upgrade screen (`CInventoryUpgradeManager`, `inventory_upgrades.script`) follows with its own intent and fixture | the user chose the split (2026-10-29): buying ammunition and medkits matters more for a playable demo than a scope mount; the upgrade UI is large | one task covering all four |
+| T04c-4 | **A player's purse is pushed to its client** with the per-player survival event (12) whenever it changes, and applied to the client's actor without an event, so the HUD and the trade window show the server's money | the replica policy drops `GE_MONEY` (S08-T05 note: the HUD money was stale after any server-side payment) | a dedicated money event |
+| T04c-5 | **The trader's money and stock are world; the installed trade callbacks run once, in the buyer's context** (`on_before_sell/buy`, `eTradePerformTradeOperation`: the trader's own bookkeeping); the buyer pays and receives exactly the prices the server computed at the request (a re-price), not the client's table | T01-7 (one stock, two purses); a stale client table must never set a price | trust the client's expected sum |
+| T04c-6 | *(technical)* **The partner's attack, reload, draw and holster animations come from the server's sampled weapon state, held on the replica actor and read by the third-person animation picker only.** The other player's weapon object stays in K1's instant shown/hidden state; an attack state is held at least 350 ms so a single sampled or counted shot shows a swing; the zoom pose is not presented | putting the server's state on the weapon object would run that state on the client (a gun in eFire fires in `CWeaponMagazined::UpdateCL`; a knife strikes at its animation's end); the animation picker is the only consumer that needs it | replicate the torso motion by name (a new event per animation); or run the item's state machine on the client with firing suppressed |
+| T04c-7 | *(technical)* **A repaired item's condition reaches the client in the inventory layout event** (kind 9 gets a `condition` byte per item, condition × 255, included in both layout hashes), so a repair or the wear of a fight shows on the client without a new event; a repair's payment and its condition are durable through the checkpoint only (the mechanic's dialogue is a script action, not a journal record) | the layout event already follows every change of an actor's inventory and reaches a joining client; a byte per item costs 80 bytes per full layout | a dedicated repair event; journaling repairs as records |
+| T04c-8 | *(technical, fixture)* **The door fixture keeps the nearest `ph_door`-scheme object** (a cupboard door 1.3 m from Sidorovich); the bunker door (`physic_object` 15560) takes the same server path and was opened by hand in demo-1 | the fixture proves the use-object intent and the joint-drive presentation, which do not depend on which door; the bunker door's position would need a fixed id in the fixture | target 15560 by id in the fixture |
+
+## S10-T04f — upgrades at mechanics
+
+Taken 2026-10-29 while building the slice ([S10-T04f](validation/S10-T04f.md));
+T01-7 and T04c-3 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T04f-1 | **The native upgrade window on the server's upgrade session.** The talk window's upgrade button asks the server (kind 21); the server sends the upgrade table (which items the mechanic upgrades, each upgrade's install state and price, computed in the player's context with the mechanic as the script speaker); the client's window reads that table; a click or the repair button sends the intent (kind 22); the server checks again, journals one `upgrade` record, installs through the engine's own path (the installed script charges the purse) and tells every client to install the same upgrade on its copy | the same shape as trade (T04c-1): the installed `inventory_upgrades.script` decides tiers, discounts and prices with `db.actor` and `get_speaker()`, which exist only on the server in the player's context | run the upgrade locally and send the result (the client would decide prices and tiers) |
+| T04f-2 | **The mechanic feature (lending) follows the server's option.** The installed script hands an upgraded or repaired item to the mechanic for game hours when the `gameplay/general/mechanic_feature` option is on, and returns it through the mechanic's dialogue; in co-op that option is read on the server (the host's settings) and binds both players; the item's move and return are server-made changes the clients already follow **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** lending is always on in co-op; each lent item remembers its lender, who is told when it is lent and when it is ready, and the mechanic hands back only the asking player's own items (G10-3). | one world, one rule; the option lives in the installed scripts | force it off in co-op (always instant); or per player (the client's own option sent with the intent) |
+| T04f-3 | **A repair at a mechanic is a kind-22 op 2:** the server prices it as the installed script does (cost × (1 − condition) × the repair eco factor), runs the script's repair effect (the charge, the lending) and sets the condition to 1; the condition reaches the client in the layout event (T04c-7) and the purse with the survival event | the repair button's question and affordability text stay the client's (the installed script with the pushed purse); only the effect must be the server's | a dedicated repair kind |
+| T04f-4 | *(technical, limit)* **The client's upgrade tooltip shows the base price** (the installed `get_upgrade_cost` runs on the client with the default discount), while the server charges the mechanic's discounted price from the table; the install result and the purse are the server's | the tooltip text is built by script from `char_ini`; routing the discount needs a per-mechanic value in the table and a script hook | send the discount percent in the table and patch the tooltip |
+| T04f-5 | **Anomaly's trade, repair and upgrade windows are the installed Lua UI (`ui_inventory.script`), reached from the dialogue (`dialogs.npc_is_tech` / `npc_is_trader`: `npc:start_upgrade` / `start_trade`), not the engine's window or its talk-window button** (the character flag `mechanic_mode` is commented out of the installed descriptions; a mechanic is a section of `misc\stalkers_upgrade_info.ltx`). In co-op the server takes those two phrase actions over (the dialogue runs there, S10-T04a) and opens the player's session; the client's Lua window opens when the table arrives; the Lua window's actions reach the server through the script exports it uses: `set_condition` (a repair), `install_upgrade`, `transfer_item` (a trade's exchange, or the mechanic's lending), `give_money` (dropped: the purse is the server's); the window's lists are nudged after a server-made change and the session ends when the window is gone | the installed UI is Lua and must stay the user's standard window (the user: the game's drag-and-drop); hooking the exports keeps the engine patches engine-only (no script overrides) | ship a co-op override of `ui_inventory.script`; or re-enable `mechanic_mode` and the engine's native windows |
+| T04f-6 | *(amends T04c-1)* **A client's trade by hand goes through the same Lua window**: the engine-window hooks of S10-T04c (`UIActorMenuTrade.cpp`) never run in Anomaly; the Lua window's buy and sell call `transfer_item` per item and `give_money`, which the client now turns into one trade intent per click and drops; trade-3/4 proved the server's trade (server-driven fixture), the window path is the user's hands-on | found while building S10-T04f (the fixture found no engine mechanic); the server side of T04c-1 and the price table stand | — |
+
+## S10-T04d — factions and reputation per player
+
+Taken 2026-10-29 while building the slice ([S10-T04d](validation/S10-T04d.md));
+T01-6 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T04d-1 | **Goodwill and reputation are per player through the engine's own registry, unchanged**: community goodwill is keyed by character id, the server's participant contexts already remap the scripts' `AC_ID` to the context's player, and the engine's hit and kill goodwill uses the attacker's id; the three Lua goodwill exports additionally map a literal character 0 to the context's player on the server and to the client's own actor on a client (the installed `set_community_goodwill_for_faction` and the PDA's relations tab pass 0) | T01-6, with no new state model: the registry already holds one row per character | a party goodwill (one player's crimes are the other's) |
+| T04d-2 | **A client's relation registry is fed by the server** (CampaignEvent 18): its own actor's goodwill with every community, the faction-vs-faction table (whole on entering, changed pairs after) and its actor's reputation, sent on change (hooks in `RELATION_REGISTRY::SetCommunityGoodwill`, `SetCommunityRelation`, `CInventoryOwner::SetReputation`) and on entering the world; the client applies them to its own registry, which the PDA's relations tab and the HUD's attitude colours read | a client's registry otherwise holds the spawn-time values only; NPC behaviour is the server's, the client needs the values for display | no mirror (the PDA shows stale relations) |
+| T04d-3 | *(limit)* **Relation changes are durable through the checkpoint only** (the registry is part of the saved game), like info portions and other script state; a crash between a change and the next checkpoint reverts it; the fixture publishes a checkpoint after its changes | the registry has no journal record; journaling every goodwill delta (hits, kills, dialogue) would be noisy for a value the checkpoint already keeps | a `relation` journal record |
+| T04d-4 | **The faction-vs-faction table is saved by the server with the checkpoint** (`m_data.coop_relations` in the storage manager's state, every pair the registry is told about; applied once after a start, before clients join) | the engine does not save that table; the installed `game_relations.script` re-applies its own changes from `db.actor`'s portable store, which inside a participant context is one player's store, so a relation changed by a kill in player 2's context would not come back for the world (relations-1: a relation set through the registry reverted after the restart) | leave it to the installed script's per-actor store |
+
+## S10-T04e — stashes and treasure
+
+Taken 2026-10-29 while building the slice ([S10-T04e](validation/S10-T04e.md));
+T01-14 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T04e-1 | **A client's USE on an inventory box tells the server and opens the client's own loot window.** The use-object intent (17) runs the box's use callback on the server in the player's context, where the installed treasure manager spawns a stash's contents (`try_spawn_treasure`); the client's local use callback still runs, so the installed Lua loot window opens (since patch 0063 a box's USE was swallowed by the intent and no window opened on a client) | boxes are game objects and therefore script-usable; the stash's contents are the server's (T01-14: contents world), the window is the client's | open the window from the server (a presentation) |
+| T04e-2 | **A stash whose contents appear gets a checkpoint** (`stash-opened`, the next tick after the spawn): the spawned items are server-made and not journaled, so a crash before the next checkpoint would offer the stash again while the taken items' transfer records replayed as no-ops | one stash opening is rare and a duplicate stash is the duplication risk R09 names | journal the spawned items as entity records |
+| T04e-3 | **A participant's take from a box fires the box's take callback in the taker's context** (`actor_on_item_take_from_box`: the treasure manager's "stash searched" state, the spot removal, news and statistics), which the engine fires only while a window is open on the same process | the server has no window; without it a looted stash kept its marker on both maps | leave the marker (the installed script never learns of the take) |
+
+## S10-T02a — NPC logic per participant
+
+Taken 2026-10-29 while building the slice ([S10-T02a](validation/S10-T02a.md));
+T01-5 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02a-1 | **An NPC's script logic decides against the nearest alive participant.** While the campaign server runs an NPC's script binder update (a stalker's or a monster's `shedule_Update`), the installed scripts' `db.actor` and `AC_ID` outside a participant context resolve to the participant actor nearest to that NPC (`NpcEvaluationScope`), so its condlists (`xr_logic`, `xr_conditions`), meet and greet (`xr_meet`), danger, combat-ignore and disguise logic see the player in front of it; a participant context (a dialogue, an action) keeps its own actor; the engine's own AI (enemy memory, hits, danger) was already per character | T01-5; the scripts read the one global `db.actor` tens of thousands of times a second and cannot be rewritten per call site; the binder update is the one place every NPC's scheme runs (corrected in S10-T02f: a stalker's scheme *actions*, such as `axr_beh`'s walk, run from its planner, `Think`, so the scope covers that too) | evaluate for participant 1 only (the single-player rule); or for both and merge (two evaluations per NPC) |
+| T02a-2 | *(scope)* **L57 (NPC walking animation on clients) is not this slice's:** replicating an NPC's movement type, body state and aim is presentation and goes to S10-T05d (presentation split) | S10-T02a is the logic rule; the presentation needs its own snapshot fields and fixture | do both here |
+
+## S10-T02b — NPC loot and looting
+
+Taken 2026-10-29 while building the slice ([S10-T02b](validation/S10-T02b.md));
+T08-2 and T01-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02b-1 | **An NPC's loot is the installed scripts' on the server, once:** the death manager fills a body in the killer's context (T05b-3); an NPC's take from a body (`xr_corpse_detection`) runs in that NPC's evaluation scope (T02a-1) and moves the items on the server; the clients see the moves as reparents, which the item-graph points verify. Such moves between non-participant objects are **durable through the checkpoint only** (the server-made change journal watches participant actors' inventories, S08-T08) | world loot and world looting need no new record: a rollback to the last checkpoint keeps the world self-consistent | journal every NPC-to-body move |
+| T02b-2 | **A dead body near either player is kept.** The installed release manager releases a body farther than 75 m from `db.actor` (the host's actor on the server); the ALife release of a dead stalker's or monster's body is refused while the nearest participant is within 75 m (`body-release-kept`); the manager forgets the body, which then stays until the next load | a body the partner loots must not vanish under his hands (T01-5: NPC and world logic against the nearest participant) | leave the host rule (bodies near player 2 vanish once player 1 is 75 m away) |
+
+## S10-T02c — controller and psy auras
+
+Taken 2026-10-30 while building the slice ([S10-T02c](validation/S10-T02c.md));
+T01-13 and T01-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02c-1 | **A controller's psy attack targets its own enemy, either player; the effects go to the hit player alone.** On the server the tube attack (`CControllerPsyHit`) and the control hit pick the controller's enemy when it is a participant actor (before: off entirely with two players, S03-T04); the gameplay (the psy hit, the impulse, the weapon block) runs on the server; the camera glide, the HUD hiding, the tube sounds and the control hit's camera and post-process effectors are sent to that player's client (presentation `ControllerPsyHit`, phase by phase), where the controller replica plays its own sounds and particles | T01-13 (every mutant targets either participant); the effects are a viewer's, the damage is the world's | target participant 1 only |
+| T02c-2 | **A monster's aura (psy, fire, radiation) is each viewer's own:** it is presentation only (a post-process and a looped sound by distance) and runs on each client for its own actor; the server computes none | the aura has no gameplay effect in this engine; each player feels it by his own distance (matrix F3) | compute it on the server and present it per player |
+| T02c-3 | *(limit)* **The controller does not turn the hit player's camera toward itself during the glide** (single player's `CControlledActor` steering) and its "possession" camera steering is not presented; the glide effector itself is | the steering writes the actor's camera every frame; on the server it would fight the client's own input | present the steering as a per-frame camera override |
+
+## S10-T02d — bloodsucker, burer, poltergeist
+
+Taken 2026-10-30 while building the slice ([S10-T02d](validation/S10-T02d.md));
+T01-13 and T01-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02d-1 | **Each mutant ability lands on the monster's own enemy, either player; its viewer effects go to that player's client.** The bloodsucker's vampire grab takes its participant enemy (the hold, the weapon block, the inventory lock and the damage on the server; the HUD hiding, the inventory lock and the camera and post-process effectors on the grabbed player's client, presentation `MonsterEffect`); the anti-aim (the burer and every monster that has it) watches its enemy's aim from that player's input and kicks that player's camera (the existing `CameraEffector` presentation), and the burer's stamina hit and weapon drop land on the same player; the burer's shield reacts to either player reloading | T01-13; the S10-T02c pattern (gameplay on the server, effects to the target's client) | participant 1 only |
+| T02d-2 | **The poltergeist's detection runs against the nearest player on the server; its post-process is each viewer's own.** The detection is gameplay (it gates the telekinesis and the fly-around), so the server measures the nearest participant's distance and speed; the telekinesis throws at that player; each client computes the detection post-process for its own actor (like the auras, T02c-2) | the detection is one value per poltergeist; the nearest player is the one it can sense (T01-5) | per player detection (two values, two throws) |
+| T02d-3 | *(limit)* **The vampire grab does not freeze the grabbed player's movement or turn the camera toward the bloodsucker** (single player's `CControlledActor`); the grab ends when the player leaves the bloodsucker's melee reach. The bloodsucker's alien vision (script-triggered `set_alien_control`) stays off with two players | the steering and the input hold are per-frame camera and input control of the client; no installed script triggers the alien vision in the free play | present the steering and an input hold |
+
+## S10-T02e — generic mutants, phantoms, AI lighting
+
+Taken 2026-10-30 while building the slice ([S10-T02e](validation/S10-T02e.md));
+T01-13 and T01-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02e-1 | **A generic mutant attacks whichever player its own enemy manager picks (the one it sees, by its usual rules); the pseudogigant's stomp kick shakes only the kicked player's screen.** The kick's hit and slowdown stay on the server | the engine's enemy choice is per monster and already sees both actors; the screen effects are that viewer's | a mutant could prefer the host, or split a pack between players (not single-player behaviour) |
+| T02e-2 | **The psy dog's aura and phantoms follow the player they go for**: the phantoms spawn when the psy dog has an enemy (either player) and fly at the nearest player; the aura's post-process is each viewer's own | as T02c-2 (auras are presentation) | the aura only on the host |
+| T02e-3 | **AI lighting keeps the S03-T06 rule**: each player's own light (sun, sky, the level's static lights at that player) and one object in each player's view are refreshed every frame; NPCs outside both views keep their last value; **a flashlight or a campfire does not make a player more visible to AI**, as in single player's DX11 renderer | it matches single player; refreshing every NPC costs server time (user decision 2026-10-19) | count dynamic lights (a player's torch would give it away), or refresh every NPC near a player |
+| T02e-4 | *(limit)* The Anomaly config variants (karlik, lurker, psysucker, bibliotekar, rotan, gigant jumper, borya) run their base class's code and stay **Untested** until a fixture spawns them | the base classes are the tested code | spawn each variant in the fauna fixture (one more run each) |
+
+## S10-T02f — companions per recruiter
+
+Taken 2026-10-30 while building the slice ([S10-T02f](validation/S10-T02f.md));
+T01-10 and T01-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T02f-1 | **A companion belongs to the player who recruited it**: it follows that player, its logic (keep distance, wait, fight) answers for that player, and **the other player is not offered its command dialogue** (it can still talk to it as an NPC) | T01-10 (per player); a companion obeying both would fight over one squad | either player could command any companion |
+| T02f-2 | **With its recruiter away (disconnected or dead), a companion squad holds where it is** (its logic falls back to the nearest player for threats) | it waits for its player instead of walking to the other one | it could follow the remaining player until its own comes back |
+| T02f-3 | **A recruit or a dismissal asks for a checkpoint**, like a stash's spawn | the recruiter is kept in the save; a crash right after recruiting would otherwise lose it | journal it as its own record (a new journal kind) |
+| T02f-4 | **The companion cap is shared**: Anomaly's `max_actor_squad_size` (2 by default) counts every companion of both players together, because the installed script keeps one list | the scripts' own rule, unchanged | a cap per player (each player could have 2) |
+| T02f-5 | *(limit)* The companion hotkeys and the companion wheel (`axr_companions` `on_key_release`, `start_CW`: all-companion modes, per-squad settings, move-to-point) run in the pressing client's Lua and do not reach the server; orders through a companion's dialogue do | the keys and the wheel are client UI over server-owned companions | route them as an action intent to the server, applied to that player's own companions |
+
+## S10-T03a — ALife switching and respawn across travel, disconnect and restart
+
+Taken 2026-10-30 while building the slice ([S10-T03a](validation/S10-T03a.md));
+matrix rule F7 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03a-1 | **No squad respawns beside either player**: a smart terrain's respawn guard (no respawn while "the actor" is within its `respawn_radius`, 150 m by default) measures the nearest player, and so does a squad's `dist_to_actor` (task markers, survival help); the installed scripts measured actor 0, player 1, only | matrix rule F7 (the nearest participant, never actor 0); a squad must not appear out of thin air in front of player 2 | keep the single-player rule (player 2 unprotected) |
+| T03a-2 | **A disconnected player's area stays online**: its actor stays in the world (S09 detached-actor policy), so the ALife keeps the creatures around it online and running while the player is away **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** the area stays live 5 minutes after the leave, then the character is parked (no area online, unseen by NPCs, unhurt, condition kept) until its player is back in the world (G10-4). | the actor is still there and vulnerable; switching its area offline would freeze NPCs that may be fighting it | take the area offline while the player is away (L53 would then not apply to a disconnect) |
+| T03a-3 | *(scope)* Respawn timing (`respawn_idle`, game time) and population are the world's, shared by both players; nothing about respawn is per player | one world, one clock (S10-T03c owns the clock) | — |
+
+## S10-T03b — offline combat and squad targets
+
+Taken 2026-10-30 while building the slice ([S10-T03b](validation/S10-T03b.md));
+matrix rule F8 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03b-1 | **A squad sent at "the actor" goes for the nearest player**, chosen again at every squad update (so it turns to whichever player is closer): Anomaly's bounty hit squads, the measuring task's escort and any squad whose script target is `"actor"` | matrix rule F8; the installed code sends every such squad at actor 0, player 1, even when player 2 is beside it | the player whose rank or task caused it (needs a per-squad owner) |
+| T03b-2 | ***(your call)* Bounty hit squads are triggered by player 1's rank and reputation**: the installed timer (`sim_squad_bounty.spawn_timer`) reads `db.actor`, which outside a player's context is player 1; player 2's rank and reputation (per player since S10-T04d) do not count. Proposed: trigger on either player (the worse of the two); not changed yet **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** either player, by the worse standing: the installed bounty timers run in the context of the player whose rank and reputation call for more squads (G10-2). | the hunt itself is fixed by T03b-1; who *attracts* hunters is a gameplay choice | keep player 1's (the host's) values; or count both players' values together |
+| T03b-3 | *(scope)* Offline combat between squads is unchanged: `sim_offline_combat.script` never reads the actor; its results follow single player's rules by construction | no participant input to adapt | — |
+
+## S10-T03c — world time and sleep
+
+Taken 2026-10-30 while building the slice ([S10-T03c](validation/S10-T03c.md));
+T01-8 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03c-1 | **Sleeping follows the travel consent's rules**: the sleep window's button asks the partner (*"Player N wants to sleep N hours. USE to sleep too, DROP to refuse."*), 30 s to answer, the requester's DROP cancels; no partner in the world, no sleep; combat, a death or a disconnect cancels it | T01-8; one consent flow for both players to learn | a separate sleep vote window |
+| T03c-2 | **Only the player who asks must be fit and sheltered**: the installed window's shelter or tent check runs on that player's client, and the server refuses a request while that player bleeds, is irradiated or is passed out; the partner sleeps wherever it stands **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** both players must be in shelter: the server checks the requester and the partner's USE (G10-5). | the time skip is instant (no NPC acts during it); asking the partner to find shelter too would make sleeping awkward in co-op | both players must be sheltered and fit |
+| T03c-3 | **One sleep rests both players**: the world's time skips once by the asked hours; both players' sleep need and stamina recover as from that sleep; the world's sleep listeners (emission timers, Ironman's sleep count) run once | one world, one night | the partner does not recover (it only waited) |
+| T03c-4 | **Passing out is a blackout of 8 real seconds**: that player's screen fades and its input is held, its sleep need recovers by the hours it was out (3–9, the script's number), the world's time does not move; the installed 5 % death chance on passing out from thirst stays | T01-8; a forced per-player skip is impossible in one world | a longer blackout (the partner waits); or skip time for both |
+| T03c-5 | *(scope)* The sleep's save (`dream_callback2` saves "<name> - sleep") becomes the server's checkpoint after the skip | the server owns saving in co-op (S07) | — |
+
+## S10-T03d — guides, fast travel and backpack travel as party travel
+
+Taken 2026-10-30 while building the slice ([S10-T03d](validation/S10-T03d.md));
+T01-9 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03d-1 | **A guide's trip, a fast travel and a backpack travel are party travel proposals to a point**: the partner gets the travel prompt (USE goes, DROP refuses), and when agreed both players arrive side by side at the point, by the same load as a level changer's travel, on the same level too | T01-9; D5 (no unconfirmed teleport of the partner); one executor that already survives crashes and disconnects | a same-level jump without a load (faster, but the long server-side move crashed a client, L58) |
+| T03d-2 | **The trip's time skips once, when it is agreed**; refused or expired, no time passes | the installed scripts skip before they travel; in co-op the skip waits for the partner | skip at the request (time lost on a refusal) |
+| T03d-3 | **A guide's fee is paid by the player who asks, once; it comes back if the partner refuses** (or the request is refused) | T01-9 (requester pays); paying for a trip that did not happen would feel like a bug | no refund (the guide keeps it) |
+| T03d-4 | *(trust)* **A fast travel's or backpack's destination comes from the asking player's client** (its PDA's discovered markers and backpack stashes are client-side map spots); the server checks it is a real place in the game graph and that the party may travel (partner present, no combat), not that the marker was discovered | the markers live in the client's PDA; moving them to the server is S10-T05d's presentation work | refuse fast travel in co-op until the markers are the server's |
+| T03d-5 | *(scope)* **A script's time skip in a player's context that no travel follows** (an anabiotic, a script's own skip) is applied one tick late, as the script asked, for the whole world | the world has one clock; deciding which skips are personal is per item and not this slice's | — |
+
+## S10-T03e — passage sweep over every level changer
+
+Taken 2026-10-31 while building the slice ([S10-T03e](validation/S10-T03e.md));
+T01-1 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03e-1 | *(test only)* **The sweep's own travel requests skip the "at the changer" and combat checks, and the sweep turns on god mode for the party**; a player's request keeps every check | the fixture cannot walk the party to each of 99 changers or fight its way out; the checks are S09's and tested there (tv-1…tv-26) | walk the party to every changer (a pathing fixture per level; slower and fragile) |
+| T03e-2 | **The passage scope is the spawn data's own graph: 99 directed passages** between the 33 levels (T01-1 said 98, from a string scan) | the server's level changers are what the players can use; the scan misnamed two levels and skipped two changers | keep the scan's table as the list |
+| T03e-3 | **A failed identity check after a load is retried after 10 more ticks, up to 3 times, before the server stops** | an object ALife has just released keeps its level object until its destroy event is processed (one frame); a real mismatch is still there after 30 ticks and still stops the server | stop at once (sweep-4 and sweep-6 stopped on a harmless timing gap) |
+
+## S10-T03f — new game on the campaign server
+
+Taken 2026-10-31 while building the slice ([S10-T03f](validation/S10-T03f.md));
+T01-2, T01-3 and T01-19 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T03f-1 | **Creating the game is the consent for the start move**: the installed new-game script's `ChangeLevel` from the spawn's stub level (`fake_start`) to the faction's start is carried out as an agreed party travel, with no prompt, before or while the players join | nobody is in the world yet to answer; the move is part of starting the game the creator asked for | prompt the partner (nobody to ask; the game would sit on `fake_start`) |
+| T03f-2 | **Player 1's choices come from the server's `axr_options.ltx` [character_creation]** (the file the creation screen writes in single player), **player 2's loadout and money from the server profile** (`new_game_loadout_2`, `new_game_money_2`) until S10-T06's Co-op menu sends both from the clients (T01-17, T01-19) | the installed `on_game_load` reads the creator's choices unchanged; the menu that collects them from two clients is S10-T06 | build the menu first (S10-T06 depends on this slice) |
+| T03f-3 | **Player 2 is created when it joins the start level**, of the creator's community, with its own name and money; its loadout is given once (as the creation screen does: each item once, a weapon's ammo per `new_game_loadouts.ltx`), or the faction's kit when none is set | T01-3 (one faction), T01-19 (own loadout); the same path as any join (G07) | spawn player 2 at the start move (no client to own it yet) |
+
+## S10-T05a — emission and psi-storm gameplay per participant
+
+Taken 2026-10-31 while building the slice ([S10-T05a](validation/S10-T05a.md));
+T01-11 binds it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T05a-1 | **One emission for the world, its effect on each player that player's own**: the schedule, the sky, the time factor and the NPCs' deaths happen once; each player's cover, psy hits, waves (starting 250 m ahead of that player, as in single player), the kill or the survive, the sounds, earthquakes, post-process and death camera are computed for and shown to that player only | T01-11; a body in cover is that body's fact; showing one player's effects to both (S06-T08, L28/L29) was wrong for the other | — |
+| T05a-2 | **An absent player's character stays in the emission**: while a player's client is away its actor is still in the world, and outside cover it is hurt and can die like the present player's **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** an absent player is safe once parked (T03a-2): the emission's per-player pass skips a parked player. | the world does not pause for a missing player (as for monsters); the actor is where the player left it | make an absent player's actor immune (a protected body nobody else has) |
+| T05a-3 | **A psi-storm's vortices come down around each player in turn**; each vortex hits every player near it who is not in cover (psi within 200 m, shock within 50 m, as installed) | the installed storm drops them around "the actor"; around player 1 only, player 2 would never be hit | around the party's middle (vortices far from both when the players are apart) |
+| T05a-4 | *(scope)* **The emission's world flow follows player 1's script state**: whether it starts (the story condlist), the hide task, the loop while `surge_immuned` is set for a task, and the NPC sweep of the world's own wave; a player's own immunity (`surge_immuned`, the psi helmet, Monolith) applies to that player's hits and kill | those are world decisions in the installed script with one actor's flags; the per-player ones are the damage | a party rule per flag (any or all players) |
+| T05a-5 | **A player who joins during an emission gets its current phase**: the earthquake, rumble, post-process and waves from then on, positioned as if from the start; its one-shot sounds older than 3 s (the start, the siren, the impact, a wave's sound) are not played late | a late joiner must see and feel the emission it is in; a burst of past sounds would be noise | replay nothing (S06-T08: a late join missed the effects until their next change) |
+
+## S10-T05c — storyline chains (DoctorX, Living Legend)
+
+Taken 2026-10-31 while building the slice ([S10-T05c](validation/S10-T05c.md));
+T01-4, T01-16 and T05b-1 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T05c-1 | **The DoctorX storyline's own state is the party's**: its script variables (`drx_sl_*`: the current honcho, the step number, the current task, the task givers, the money tasks' targets) are kept on the host actor whichever player's dialogue or task writes or reads them, so either player talking to the next honcho moves the one shared chain | the installed scripts keep them on "the actor" (`save_var(db.actor, …)`); in player 2's context that was player 2's actor, so the chain split in two (one per player) and player 2's half was not the one the tasks read | one chain per player (two storylines in one world, each honcho's tasks given twice) |
+| T05c-2 | **A story variable's change asks for a checkpoint** (published once nothing else is), since these variables live only in the save; a crash between a step and that checkpoint loses the step's variables while its task and info changes are kept by the journal | keep the window to the seconds a publication takes | journal every script variable (a record kind per Lua value) |
+| T05c-3 | *(scope)* **Only the DoctorX and Living Legend chains are tested**; the other Lost Zone chains (Hermann, Mirage, Operation Afterglow) and MLR use the same party info portions, party tasks and party inventory and are **Untested** (T01-16) | T01-16 named these two | test all five |
+
+## S10-T05d — presentation split
+
+Taken 2026-10-31 while building d1 ([S10-T05d](validation/S10-T05d.md));
+T01-11 and T05a-5 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T05d-1 | **A player joining the world hears the looped sounds already playing for everyone** (the level's wind and drone loops, any routed loop), at their current volume; one-shot sounds, effectors and particles already running are not replayed | the level's ambient loops start before anyone joins, so without a replay nobody ever heard them; a one-shot replayed late would be out of place (as T05a-5 for the surge) | replay nothing (silent ambience), or replay one-shots too |
+| T05d-2 | **Each player hears the surge's looped sounds (rumble, wave, earthquake) from its own pass**, started at its own position at its own stage; the world's muted run plays nothing for the players | the installed surge shares one sound object per sound; shared, player 1 never heard the rumble and player 2 heard it restarted | one rumble for both, at player 1 |
+| T05d-3 | **A sound or effector change the clients have no use for is not sent**: an unchanged volume, a volume or position for a sound that stopped, a remove or factor for an effector that is not on, a stop or volume from another player's context for a sound played to one player | the installed scripts do these every update (free in single-player); in co-op each was a network message per player (about 250 a second per client) and filled the outboxes | send everything and let the client ignore it |
+| T05d-4 | **A HUD message or indicator a script shows in a player's context is that player's alone** (the emission's psi indicator, a script timer, a quest message in a dialogue or task): each player has its own set on the server, its client shows it and its text; a player rejoining gets the ones still shown. One shown outside any context (actor 0's binder: `actor_effects`' helmet overlay and vignette, the scripts' HUD for "the actor") is not shown to anyone | the server has one HUD for two players; shared, one player's indicator was taken away by the other's pass | show every static to both players |
+| T05d-5 | **Statistics and achievements are the party's**: the installed counters (`game_statistics.actor_statistics`, kills, artefacts, levels visited, achievements) are one table on the server; the rank and reputation they give go to the player whose context earns them (`db.actor`). A client's PDA statistics page shows that table as it was at the player's last join | Anomaly keeps them in one Lua table saved with the game; two tables would need a per-player save format the installed scripts do not have | a table per player |
+
+## S10-T06 — co-op menu and session control
+
+Taken 2026-10-31 while building the slice ([S10-T06](validation/S10-T06.md));
+T01-17…T01-19 bind it. Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T06-1 | **A new game or a load from the menu restarts the server process on that campaign**: the server checkpoints the current campaign, tells both clients, exits and its launcher starts it again; the clients show the loading screen and join the new world | one process serving one campaign keeps every campaign's state apart (no leftover of one world in the next) and reuses the proven start and recovery paths | switch campaigns inside one running process |
+| T06-2 | **The partner's New game keeps only its loadout**: the partner uses the same creation screen, but only its loadout is kept for the owner's next new game (checked against the owner's faction; one that does not fit gives the faction's kit); faction, start and modes are the owner's | T01-19 (one party, one faction); the standard screen, no separate window | a loadout-only window for the partner |
+| T06-3 | **The server checks the creation choices by the creation screen's own rules** (faction, start, the loadout's items, counts and points) and **sets the starting money from the faction**, whatever the client sent; a create that breaks a rule is refused with a message **Revised at G10 (2026-11-02), implemented in S10-T07 (patch 0093):** co-op is story mode only for now: the screen hides Ironman, Azazel, Survival and Warfare and the server refuses them (G10-8). | a client must not be able to give itself items or money the screen would not (D1) | trust the client's screen |
+| T06-4 | **Joining is the client's start**: a co-op client connects to its configured server when it starts; there is no server browser | the session layer already admits only the roster's two players | a join button with an address field |
+| T06-5 | **Load lists the server's campaigns (the 8 newest) in the standard load window**; a client cannot delete a campaign | the window the players know; deleting a world is the operator's | delete from the client (owner only) |
+| T06-6 | **The owner is the first player key the server ever accepted** and stays the owner for every campaign that server runs; the operator deletes `coop-owner.txt` to change it | T01-18; one accountable key | the owner per campaign |
+
+## S10-T07 — the G10 revisions (2026-11-02)
+
+How the nine revisions of the user's G10 review were implemented
+([S10-T07](validation/S10-T07.md), patch 0093). These are the choices made
+while implementing them; they await the user's word when G10 closes.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| G10-1 | **The clicker's purse** (T05b-4): while a party accept or turn-in runs in the anchor's context, and while that turn-in's completion runs in the task's scope, the anchor's `money()`, `give_money` and `transfer_money` in Lua act on the clicking player's actor; money a turn-in gives through `give_money` (DoctorX defense, multifetch payouts) goes to **both**, the same sum (T05b-2); in any other task check a player's money reads as the party's best purse (a money task shows ready when either player could pay; the one who turns it in pays) | the player who acts pays; rewards stay in full to both | the anchor's purse in checks too |
+| G10-2 | **Bounty squads hunt the worse-standing player** (T03b-2): every 5 minutes the server compares both players' danger (the installed rank and reputation tables, `plugins\bounty_squad.ltx`) and runs the installed timers in that player's context: its enemies, spawned around it; a tie goes to player 1; the safe-level and safe-smart pause follows the same player | the installed logic, run for the player who attracts the hunters | count both players' danger together |
+| G10-3 | **Lending, easy to track** (T04f-2, the user's OK on Discord 2026-11-02): always on; each lent item remembers its lender's slot (saved with the item); a news line at the lend ("… left with <mechanic>: ready in about N min") and when it is ready; the mechanic's "are my items ready" talk lists, times and hands back only the asking player's own items; an item lent before this (no lender recorded) can be collected by either | the installed list is per mechanic, not per player, and gives no notice | keep lending off in co-op |
+| G10-4 | **Parking** (T03a-2): 5 minutes after the leave (or after the server's start for a player who has not joined since) the character is parked: no area online around it, NPCs and monsters do not see it, it takes no hits, its condition and needs stay as they were, the emission skips it; it is unparked when its player is back in the world (while its client loads it stays parked). With both players away the engine's fallback keeps player 1's area online (parked, safe) | the user's "make sure the disconnected player's area doesn't keep simulating forever"; a loading client cannot defend itself | unpark at the join |
+| G10-5 | **Shelter to sleep** (T03c-2): a sleep zone (the installed 25), an emission cover, an underground level, or within 1.5 m of a set-up tent (any player's: the installed tents have no owner) **Proposed after demo-10 (B34, patch 0100), the user's OK pending:** within **3 m** of a tent in co-op (1.5 m from its origin held one player, not both and a sleeping bag) | the installed window's own shelter rule, for both players | only the player's own tent |
+| G10-6 | **Items a turn-in creates go to both**: any item the turn-in's effects create on a participant (stored rewards, a letter) is created there and given to the other too | T05b-2, the user's "to both players" | rewards only (items named `reward`) |
+| G10-7 | **A failed or cancelled task's goodwill penalty is both players'**: any goodwill change on a participant while the installed fail paths run is applied to every participant | the user's revision | the anchor only |
+| G10-8 | **Story mode only** (L60): the creation screen hides Ironman (and its lives and regeneration), Azazel, Survival and Warfare; the server refuses a create that asks for one; the story checkbox itself (story on, or free play) stays | the user's "this mod should just be story at first" names the four modes | force the story checkbox on too |
+| G10-9 | **Donate and repair kits through the server**: the trade window's donate is a free transfer to the trader (journaled as a trade with no money); a repair kit opens its window on the player's own client and its Repair button asks the server, which checks and applies the installed window's rules (the kit's range, items and parts, one use or the kit's wear). The **workbench** (`ui_workshop`: part replacement, crafting, upgrades at a bench) is **not** covered | today the client sent a donation as a sale (paid at the buy price), and a kit used on a client opened no window (its use went to the server, where the window cannot show) | also route the workbench (a larger change: its part data lives in the server's scripts) |
+
+## S10-T07 — the bug pass (part 1)
+
+Taken 2026-10-31 and 2026-11-01 while fixing the bug list ([S10-T07](validation/S10-T07.md)).
+Awaiting the user's approval at G10.
+
+| # | Decision | Why | Alternative |
+|---|---|---|---|
+| T07-1 | **The companion hotkeys and the wheel order only the presser's own companions** (all of them, one squad, or move to a point) | each companion follows its recruiter (T02f-1) | one order for every companion of the party |
+| T07-2 | **The combat music is each player's own**: it starts when a stalker fights that player, whatever the partner does | the music follows "the actor"; shared, it played on player 1's fights for both | one shared music (either player's fight) |
+| T07-3 | **The ambient wind, drone and rain on the helmet are each player's own** (its own cover; for player 2 "mask on" is a helmet in the helmet slot) | they follow "the actor"; shared, player 2 indoors heard player 1's outdoor wind | keep them player 1's for both |
+| T07-4 | **When the server is gone for a minute, a client goes back to the main menu with a message and keeps trying** (two and a half minutes after a campaign switch) | B16: the clients sat on the loading screen for good | quit the client; or wait silently |
+| T07-5 | **A zone's state (a campfire lit or out, an anomaly disabled) is the server's on every client**; the installed scripts' own turn on and off on a client apply too, as presentation | B23: every campfire burned on every client (the state change was refused on a replica) | keep zones client-local (the save's state only) |
+| T07-6 | **A task's or script's map marker on an object a client does not hold stands at the server's place** (level, position, game vertex sent with the task and the spot) | B2: no marker at all for the server's quest corpse or an NPC on another level | spawn the object's ALife record on every client |
+| T07-7 | **A dead player's map icon goes at its death**; the respawned actor has its own | B2: one more icon per death | keep the body's icon until its cleanup |
+| T07-8 | **A jump press is latched on the server for up to 10 ticks** until the actor's state shows the jump; a jump is committed (lockout, stamina) only when the physics can take it, in single player too | B22: a tap on a tick without ground contact or on a dropped tick was lost | the per-tick level as before |
+| T07-9 | **The partner's zoom is shown** (the input's zoom bit): its aim pose, and the server's actor walks and does not jump while aiming, as the aiming player's own does | B7 | zoom stays the aiming player's own |
+| T07-10 | **Every campfire burns in co-op; the server never turns one** (the scripts' and NPCs' turn on and off do nothing there), and **on a client a campfire casts no shadow by default** (game console: `coop_campfire_shadow <m>` for a shadow near the camera, `coop_campfire_light 0` for none; part 4 had 20 m, demo-4 still stalled near a fire) | the user, 2026-11-02, demo-3: "I want the fires to remain but better performance/lighting" (with single-player's turning only 10-11 of 46 Cordon fires burned); 46 shadowed point lights cost the frame rate | turn them as single-player does (most fires out); or every fire shadowed |
+| T07-11 | **Combat blocks only a PDA fast travel and a backpack jump**, as the installed scripts do by default; a level changer, a guide's trip and another script's `ChangeLevel` are taken in combat (both players still agree). Revises G09's T01-5 ([Stage 9 decisions](stage9-decisions.md)). **The user's choice, 2026-11-03** ("match vanilla") | B46: a Marsh renegade kept player 2 as its enemy for 84 s at any distance and every request back to Cordon was refused; the installed game has no combat check at a level changer (`CLevelChanger::feel_touch_new`) or a guide (`ka_travel.script`) | keep T01-5 for every travel; or count only an enemy within ~50 m or one that hit or saw a player recently |

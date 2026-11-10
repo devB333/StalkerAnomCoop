@@ -32,7 +32,9 @@ enum class TravelState : std::uint8_t
     Cancelled = 5, // by the requester
     Aborted = 6,   // by the world: see TravelAbort
     // 8 is used on the wire only (CampaignEvent 13): S09-T02 `committed`: the destination generation is
-    // published and both clients rejoin on the new level
+    // published and both clients rejoin on the new level; 9 (S09-T03) `resumed`: the hold on the destination
+    // level ended (abort field 9: at its deadline); 10 (S09-T04) `held`: sent to a client whose world went live
+    // during the hold without having been told the transition (it rejoined or restarted), so it reports ready
 };
 
 enum class TravelAnswer : std::uint8_t

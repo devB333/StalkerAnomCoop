@@ -1,0 +1,2022 @@
+diff --git a/src/xrGame/AI_PhraseDialogManager.cpp b/src/xrGame/AI_PhraseDialogManager.cpp
+index 97b6229..4f4abff 100644
+--- a/src/xrGame/AI_PhraseDialogManager.cpp
++++ b/src/xrGame/AI_PhraseDialogManager.cpp
+@@ -32,6 +32,7 @@ void CAI_PhraseDialogManager::ReceivePhrase(DIALOG_SHARED_PTR& phrase_dialog)
+ #include "uigamesp.h"
+ #include "level.h"
+ #include "ui/UItalkWnd.h"
++#include "CoopServerHost.h" // S10-T04a: the campaign server has no talk window
+ 
+ void CAI_PhraseDialogManager::AnswerPhrase(DIALOG_SHARED_PTR& phrase_dialog)
+ {
+@@ -71,8 +72,14 @@ void CAI_PhraseDialogManager::AnswerPhrase(DIALOG_SHARED_PTR& phrase_dialog)
+ 
+ 		shared_str phrase_id = phrase_dialog->PhraseList()[phrase_num]->GetID();
+ 
+-		CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());
+-		pGameSP->TalkMenu->AddAnswer(phrase_dialog->GetPhraseText(phrase_id), pInvOwner->Name());
++		// S10-T04a: on the campaign server the reply goes to the talking player's
++		// window over the link; single player (and a co-op client) shows it here
++		if (!campaign::coop_server_dialogue_answer(pInvOwner, phrase_dialog->GetPhraseText(phrase_id)))
++		{
++			CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());
++			if (pGameSP)
++				pGameSP->TalkMenu->AddAnswer(phrase_dialog->GetPhraseText(phrase_id), pInvOwner->Name());
++		}
+ 
+ 		CPhraseDialogManager::SayPhrase(phrase_dialog, phrase_id);
+ 	}
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 61221ca..a330f0e 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -58,6 +58,8 @@
+ #include "Weapon.h"
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
++#include "UIGameSP.h" // S10-T04a: the talk window
++#include "ui/UITalkWnd.h"
+ 
+ ENGINE_API extern float psHUD_FOV; // the camera watch log
+ #include "../xrEngine/xr_input.h"
+@@ -67,6 +69,7 @@ ENGINE_API extern float psHUD_FOV; // the camera watch log
+ #include "coop/session/crypto.h"
+ 
+ #include <memory>
++#include <algorithm> // S10-T04a
+ 
+ using namespace campaign;
+ 
+@@ -377,6 +380,23 @@ struct Link
+ 		bool drop_on_result = false;
+ 		u64 held_notices = 0, hold_overs = 0, hold_voids = 0;
+ 	} travel;
++	// S10-T04a: the talk window on the server's dialogue (one talk at a time)
++	struct Talk
++	{
++		bool open = false; // the server said the talk is open (the window is up)
++		bool pending = false; // a start was sent, no answer yet
++		u16 npc = 0xffff; // the partner (this client's engine id)
++		coop::proto::EntityRef npc_ref;
++		bool topic_mode = true;
++		xr_vector<xr_string> ids; // the current list's ids (topics: dialog ids; else phrase ids)
++		u32 opened_ms = 0;
++		u64 starts = 0, says = 0, ends = 0, opens = 0, closes = 0, answers = 0, lists = 0, busy = 0, refused = 0;
++		u64 resets = 0;
++		// the step driver's path (script 8, action 15): 1 the task accept, 2 the turn-in, 3 an unknown id
++		u8 path = 0;
++		u32 path_round = 0, path_step = 0xffffffff, path_says = 0, path_skips = 0;
++		xr_string last_npc_text; // the NPC's last reply (the driver reads the offer it is made)
++	} talk;
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+ 	u64 transfer_steps_unlinked = 0;
+@@ -954,6 +974,11 @@ void on_amounts(const coop::proto::CampaignEvent& event); // S08-T08
+ void on_party_tasks(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_needs(const coop::proto::CampaignEvent& event); // S08-T09
+ void on_travel(const coop::proto::CampaignEvent& event); // S09-T01
++void on_talk(const coop::proto::CampaignEvent& event); // S10-T04a
++void talk_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
++void talk_session_reset(LPCSTR why);
++void talk_driver_choose();
++u64 talk_send_say(LPCSTR id, u32 round, u32 step, bool player);
+ void travel_hud(LPCSTR text, int seconds);
+ void travel_session_reset();
+ void travel_frame();
+@@ -972,6 +997,7 @@ void world_frame()
+ 		g_link->predicting = false;
+ 		g_link->leaving = false;
+ 		release_presentation(); // S06-T08
++		talk_session_reset("world-ended"); // S10-T04a
+ 		campaign::replica_end();
+ 		g_link->log.line("world-ended quitting=%d level=%d", g_link->quitting ? 1 : 0, g_pGameLevel ? 1 : 0);
+ 		return;
+@@ -2649,6 +2675,20 @@ struct PayloadReader
+ 		at += sizeof(v);
+ 		return v;
+ 	}
++	// S10-T04a: a text with a u16 length (a dialogue paragraph)
++	void str16(char* out, size_t capacity)
++	{
++		out[0] = 0;
++		const u16 n = get<u16>();
++		if (!ok || at + n > p.size() || size_t(n) + 1 > capacity)
++		{
++			ok = false;
++			return;
++		}
++		memcpy(out, p.data() + at, n);
++		out[n] = 0;
++		at += n;
++	}
+ 	void str(char* out, size_t capacity)
+ 	{
+ 		out[0] = 0;
+@@ -3243,6 +3283,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 11: on_party_tasks(*event); break; // S08-T09
+ 			case 12: on_needs(*event); break; // S08-T09
+ 			case 13: on_travel(*event); break; // S09-T01
++			case 14: on_talk(*event); break; // S10-T04a
+ 			default: break;
+ 			}
+ 		}
+@@ -3306,6 +3347,7 @@ void on_event(const coop::session::ClientEvent& e)
+ 		const coop::proto::Welcome& w = e.welcome;
+ 		++g_link->welcomes;
+ 		travel_session_reset(); // S09-T01: a proposal from the last connection is void
++		talk_session_reset("welcome"); // S10-T04a: a new connection holds no talk
+ 		g_link->log.line("welcomed slot=%u slot_generation=%u epoch=%I64u server_tick=%I64u tick_hz=%u snapshot_hz=%u "
+ 			"session=%s player=%s resumed=%d",
+ 			u32(w.slot), w.slot_generation, w.authority_epoch, w.server_tick, u32(w.tick_rate_hz),
+@@ -3601,7 +3643,9 @@ u64 request_ownership(u16 action, const coop::proto::EntityRef& target, const xr
+ 		action == coop::proto::kActionPickup ? "pickup" : action == coop::proto::kActionDrop ? "drop" :
+ 		action == coop::proto::kActionEquip ? "equip" : action == coop::proto::kActionUse ? "use" :
+ 		action == coop::proto::kActionQuest ? "quest" : action == coop::proto::kActionTravelRequest ? "travel-request" :
+-		action == coop::proto::kActionTravelAnswer ? "travel-answer" : action == coop::proto::kActionTravelReady ? "travel-ready" : "transfer",
++		action == coop::proto::kActionTravelAnswer ? "travel-answer" : action == coop::proto::kActionTravelReady ? "travel-ready" :
++		action == coop::proto::kActionTalkStart ? "talk-start" : action == coop::proto::kActionTalkSay ? "talk-say" :
++		action == coop::proto::kActionTalkEnd ? "talk-end" : "transfer",
+ 		why, p.operation, target.id, target.generation, int(round), int(kind), expected);
+ 	return p.operation;
+ }
+@@ -3652,6 +3696,10 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 			if (p.action == coop::proto::kActionTravelRequest || p.action == coop::proto::kActionTravelAnswer ||
+ 				p.action == coop::proto::kActionTravelReady)
+ 				travel_result(p, result); // S09-T01, S09-T03
++			const bool talk_action = p.action == coop::proto::kActionTalkStart || p.action == coop::proto::kActionTalkSay ||
++				p.action == coop::proto::kActionTalkEnd;
++			if (talk_action)
++				talk_result(p, result); // S10-T04a
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+ 			{
+ 				// S08-T07: the use's first-person presentation, as single player plays it
+@@ -3667,7 +3715,7 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 					result.reason == coop::proto::kReasonPlaceRefused ? "It doesn't fit there." :
+ 					result.reason == coop::proto::kReasonNotUsable ? "You can't use that." :
+ 					result.reason == coop::proto::kReasonItemGone ? "It's gone." : "You can't do that now.");
+-			else if (p.player && !accepted)
++			else if (p.player && !accepted && !talk_action)
+ 				pickup_message(result.reason == coop::proto::kReasonItemTaken ? "Someone else took it." :
+ 					result.reason == coop::proto::kReasonOutOfReach ? "Too far away." :
+ 					result.reason == coop::proto::kReasonStale ? "It was moved in the meantime." :
+@@ -4947,6 +4995,60 @@ void start_transfer_step(Link::TransferStepRun& st, u32 now)
+ 		pickup_csv_line("equip-sent", st.round, 0, 0, st.item, 0, 0, 0, st.action, st.step);
+ 		break;
+ 	}
++	case coop::proto::kActionTalkStart:
++	{
++		// S10-T04a: the talk with the giver (item); the window opens on the server's word
++		Link::Talk& t = g_link->talk;
++		t.pending = true;
++		t.npc_ref = st.item;
++		t.npc = item;
++		++t.starts;
++		st.operation = request_ownership(coop::proto::kActionTalkStart, st.item, xr_vector<u8>(), 0, st.round, 0, false, "driver");
++		g_link->pickup_pending.back().step = st.step;
++		st.linked = true;
++		pickup_csv_line("talk-sent", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
++		break;
++	}
++	case coop::proto::kActionTalkSay:
++	{
++		// S10-T04a: extra: the path through the lists (1 the task accept, 2 the
++		// turn-in, 3 an unknown id); with no talk open one say goes out as it is
++		// (the not-talking refusal)
++		Link::Talk& t = g_link->talk;
++		if (!t.open || st.extra == 3)
++		{
++			st.operation = talk_send_say(st.extra == 3 ? "zzz" : "0", st.round, st.step, false);
++			st.linked = true;
++			break;
++		}
++		t.path = st.extra;
++		t.path_round = st.round;
++		t.path_step = st.step;
++		t.path_says = 0;
++		t.path_skips = 0;
++		st.linked = true; // its says carry the step
++		pickup_csv_line("talk-path", st.round, 0, 0, st.item, 0, 0, 0, st.action, st.step);
++		talk_driver_choose();
++		break;
++	}
++	case coop::proto::kActionTalkEnd:
++	{
++		// S10-T04a: the end intent, then the window (no second end from its close)
++		Link::Talk& t = g_link->talk;
++		const bool was_open = t.open;
++		t.open = false;
++		t.path = 0;
++		++t.ends;
++		st.operation = request_ownership(coop::proto::kActionTalkEnd, was_open ? t.npc_ref : st.item, xr_vector<u8>(), 0,
++			st.round, 0, false, "driver");
++		g_link->pickup_pending.back().step = st.step;
++		st.linked = true;
++		if (was_open)
++			if (CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI()))
++				ui->TalkMenu->RemoteClose();
++		pickup_csv_line("talk-sent", st.round, 0, st.operation, st.item, 0, 0, 0, st.action, st.step);
++		break;
++	}
+ 	case coop::proto::kActionTravelRequest:
+ 		// S09-T01: the request names the changer; the server decides
+ 		st.operation = request_travel(st.item, st.round, false, "driver");
+@@ -5394,6 +5496,300 @@ void run_script8(u32 t)
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T04a
++// The talk window on the server's dialogue (docs/validation/S10-T04a.md).
++// The USE key on an NPC sends the talk-start intent (14); the server's
++// CampaignEvent 14 drives the window: state 1 open (the window opens in its
++// remote mode), 3 an answer (a said phrase, the NPC's or ours), 4 a list of
++// topics or phrases (u8 part flags: bit 0 first part, bit 1 last; u8 topic
++// mode; the dialog id; u8 count; count x (id, text, u8 finalizer)), 2 closed
++// (the why). A click is the say intent (15) with the clicked id; closing the
++// window is the end intent (16). Texts are string-table ids or script
++// texts, translated here as the native window translates them.
++
++void talk_hud(LPCSTR text)
++{
++	pickup_message(text);
++	g_link->log.line("talk-hud text=\"%s\"", text);
++}
++
++CUITalkWnd* talk_window()
++{
++	CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++	return ui ? ui->TalkMenu : nullptr;
++}
++
++u64 talk_send_say(LPCSTR id, u32 round, u32 step, bool player)
++{
++	Link::Talk& t = g_link->talk;
++	xr_vector<u8> params;
++	const u32 n = _min(u32(xr_strlen(id)), 64u);
++	params.push_back(u8(n));
++	params.insert(params.end(), id, id + n);
++	const u64 operation = request_ownership(coop::proto::kActionTalkSay, t.npc_ref, params, 0, round, 0, player,
++		player ? "player" : "driver");
++	if (step != 0xffffffff)
++		g_link->pickup_pending.back().step = step;
++	++t.says;
++	g_link->log.line("talk-say-sent id=%s round=%d step=%d operation=%I64x open=%d", id, int(round), int(step),
++		operation, t.open ? 1 : 0);
++	return operation;
++}
++
++// The step driver's path through the lists: the task dialog's ids are the
++// dialog manager's numbers (dm_init_dynamic_task_dialog: n%10 == 2 accept,
++// 4 thanks, 0 next task, 8 exit; the completed dialog: 2 thanks).
++void talk_driver_choose()
++{
++	Link::Talk& t = g_link->talk;
++	if (!t.path || !t.open)
++		return;
++	xr_string pick;
++	if (t.topic_mode)
++	{
++		if (t.path_says)
++		{
++			// back in topic mode: the path ended
++			g_link->log.line("talk-path-done path=%u round=%u step=%u says=%u", u32(t.path), t.path_round, t.path_step,
++				t.path_says);
++			t.path = 0;
++			return;
++		}
++		LPCSTR want = t.path == 1 ? "dm_ordered_task_dialog" : "dm_ordered_task_completed_dialog";
++		for (const xr_string& id : t.ids)
++			if (id == want || (t.path == 1 && id == "dm_ordered_task_dialog2" && pick.empty()))
++				pick = id;
++	}
++	else
++	{
++		// the accept path takes the party task (its offer names the patches) and asks
++		// for the next task otherwise, as a player reading the offer would
++		bool offered_party = true;
++		if (t.path == 1)
++		{
++			xr_string lower = t.last_npc_text;
++			std::transform(lower.begin(), lower.end(), lower.begin(), [](char c) { return char(tolower(u8(c))); });
++			offered_party = lower.find("patch") != xr_string::npos;
++		}
++		int best = -1;
++		for (const xr_string& id : t.ids)
++		{
++			const int n = atoi(id.c_str());
++			int rank = n % 10 == 2 ? 4 : n % 10 == 4 ? 3 : (n > 0 && n % 10 == 0) ? 2 : n % 10 == 8 ? 1 : 0;
++			if (rank == 4 && !offered_party && t.path_skips < 6)
++				rank = 0; // not the party task: skip it
++			if (rank == 2 && !offered_party && t.path_skips < 6)
++				rank = 5;
++			if (rank > best)
++			{
++				best = rank;
++				pick = id;
++			}
++		}
++	}
++	if (pick.empty() || t.path_says >= 12)
++	{
++		g_link->log.line("talk-path-stuck path=%u round=%u step=%u says=%u topic=%d ids=%u", u32(t.path), t.path_round,
++			t.path_step, t.path_says, t.topic_mode ? 1 : 0, u32(t.ids.size()));
++		t.path = 0;
++		return;
++	}
++	++t.path_says;
++	if (!t.topic_mode && atoi(pick.c_str()) > 0 && atoi(pick.c_str()) % 10 == 0)
++		++t.path_skips;
++	talk_send_say(pick.c_str(), t.path_round, t.path_step, false);
++	if (CUITalkWnd* w = talk_window())
++		w->RemoteQuestions(false, t.topic_mode); // as a click: nothing else until the next list
++}
++
++void talk_session_reset(LPCSTR why)
++{
++	Link::Talk& t = g_link->talk;
++	if (!t.open && !t.pending)
++		return;
++	++t.resets;
++	g_link->log.line("talk-reset why=%s open=%d pending=%d npc=%u", why, t.open ? 1 : 0, t.pending ? 1 : 0, u32(t.npc));
++	t.open = false;
++	t.pending = false;
++	t.path = 0;
++	t.ids.clear();
++	if (g_pGameLevel)
++		if (CUITalkWnd* w = talk_window())
++			w->RemoteClose();
++}
++
++void talk_result(const Link::PickupPending& p, const coop::proto::ActionResult& result)
++{
++	Link::Talk& t = g_link->talk;
++	const bool accepted = result.outcome == coop::proto::ActionOutcome::Accepted;
++	g_link->log.line("talk-result kind=%u round=%d step=%d operation=%I64x outcome=%u reason=%u", u32(p.action),
++		int(p.round), int(p.step), p.operation, u32(result.outcome), u32(result.reason));
++	if (!accepted && result.outcome == coop::proto::ActionOutcome::Rejected)
++		++t.refused;
++	if (p.action == coop::proto::kActionTalkStart)
++	{
++		if (!accepted)
++		{
++			t.pending = false;
++			if (result.reason == coop::proto::kReasonTalkBusy)
++			{
++				++t.busy;
++				CInventoryOwner* npc = smart_cast<CInventoryOwner*>(Level().Objects.net_Find(id_of(p.target)));
++				string256 text;
++				xr_sprintf(text, "%s is busy talking to the other player.", npc ? npc->Name() : "They");
++				if (p.player)
++					talk_hud(text);
++				else
++					g_link->log.line("talk-busy npc=%u", u32(id_of(p.target)));
++			}
++			else if (p.player)
++				talk_hud(result.reason == coop::proto::kReasonOutOfReach ? "Too far away." :
++					result.reason == coop::proto::kReasonNoTalk ? "They won't talk now." : "You can't talk now.");
++		}
++		return;
++	}
++	if (p.action == coop::proto::kActionTalkSay)
++	{
++		if (!accepted)
++		{
++			if (CUITalkWnd* w = talk_window())
++				w->RemoteQuestions(false, t.topic_mode); // the click is answered: another may go
++			if (t.path && p.step == t.path_step && p.round == t.path_round)
++				t.path = 0; // the driver's path ends on a refusal
++			if (result.reason == coop::proto::kReasonNotTalking && t.open)
++				talk_session_reset("not-talking");
++		}
++		return;
++	}
++}
++
++void on_talk(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.size() < 14)
++		return;
++	coop::proto::EntityRef ref;
++	for (int i = 0; i < 8; ++i)
++		ref.id |= u64(b[i]) << (8 * i);
++	for (int i = 0; i < 4; ++i)
++		ref.generation |= u32(b[8 + i]) << (8 * i);
++	PayloadReader r(b);
++	r.at = 12;
++	const u8 state = r.get<u8>(); // the body after it is the state's own
++	Link::Talk& t = g_link->talk;
++	const u16 npc_id = id_of(ref);
++	if (state == 1)
++	{
++		const u8 flags = r.get<u8>();
++		t.pending = false;
++		CInventoryOwner* partner = npc_id != 0xffff ? smart_cast<CInventoryOwner*>(Level().Objects.net_Find(npc_id)) : nullptr;
++		CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++		if (!partner || !ui || !g_actor)
++		{
++			g_link->log.line("talk-open-failed npc=%I64u/%u local=%u partner=%d ui=%d", ref.id, ref.generation, u32(npc_id),
++				partner ? 1 : 0, ui ? 1 : 0);
++			// the server holds a talk this client cannot show: end it
++			t.npc_ref = ref;
++			request_ownership(coop::proto::kActionTalkEnd, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, false, "unshowable");
++			return;
++		}
++		if (t.open && t.npc_ref == ref)
++			return; // told twice
++		t.open = true;
++		t.npc = npc_id;
++		t.npc_ref = ref;
++		t.topic_mode = true;
++		t.ids.clear();
++		t.opened_ms = g_link->wall.GetElapsed_ms();
++		++t.opens;
++		if (ui->TopInputReceiver())
++			ui->TopInputReceiver()->HideDialog();
++		ui->TalkMenu->RemoteBegin(partner);
++		ui->StartTalk((flags & 1) != 0);
++		g_link->log.line("talk-open npc=%u name=%s no_break=%d shown=%d", u32(npc_id), partner->Name(), flags & 1,
++			ui->TalkMenu->IsShown() ? 1 : 0);
++		return;
++	}
++	if (!t.open || !(t.npc_ref == ref))
++	{
++		if (state != 2)
++			g_link->log.line("talk-event-stale state=%u npc=%u open=%d", u32(state), u32(npc_id), t.open ? 1 : 0);
++		return;
++	}
++	CUITalkWnd* w = talk_window();
++	if (state == 2)
++	{
++		string64 why;
++		r.str(why, sizeof(why));
++		t.open = false;
++		t.path = 0;
++		++t.closes;
++		if (w)
++			w->RemoteClose();
++		g_link->log.line("talk-closed npc=%u why=%s after_ms=%u", u32(npc_id), why, g_link->wall.GetElapsed_ms() - t.opened_ms);
++		return;
++	}
++	if (state == 3)
++	{
++		const u8 ours = r.get<u8>();
++		string1024 text;
++		r.str16(text, sizeof(text));
++		if (!r.ok)
++			return;
++		++t.answers;
++		if (!ours)
++			t.last_npc_text = text;
++		if (w)
++			w->RemoteAnswer(text, ours != 0);
++		g_link->log.line("talk-answer npc=%u ours=%u text=%s", u32(npc_id), u32(ours), text);
++		return;
++	}
++	if (state == 4)
++	{
++		const u8 part = r.get<u8>();
++		const u8 topic = r.get<u8>();
++		string128 dialog;
++		r.str(dialog, sizeof(dialog));
++		const u8 count = r.get<u8>();
++		if (!r.ok)
++			return;
++		if (part & 1)
++		{
++			t.ids.clear();
++			t.topic_mode = topic != 0;
++			if (w)
++				w->RemoteQuestions(true, t.topic_mode);
++		}
++		string512 ids = "";
++		for (u32 i = 0; i < count && r.ok; ++i)
++		{
++			string128 id;
++			string1024 text;
++			r.str(id, sizeof(id));
++			r.str16(text, sizeof(text));
++			const u8 finalizer = r.get<u8>();
++			if (!r.ok)
++				break;
++			t.ids.push_back(xr_string(id));
++			if (w)
++				w->RemoteAddQuestion(text, id, finalizer != 0);
++			if (xr_strlen(ids) < 400)
++			{
++				xr_strcat(ids, " ");
++				xr_strcat(ids, id);
++			}
++		}
++		if (part & 2)
++		{
++			++t.lists;
++			g_link->log.line("talk-list npc=%u topic=%u dialog=%s count=%u ids=[%s ]", u32(npc_id), u32(topic), dialog,
++				u32(t.ids.size()), ids);
++			talk_driver_choose();
++		}
++		return;
++	}
++}
++
+ } // namespace
+ 
+ namespace campaign
+@@ -5406,6 +5802,55 @@ void coop_client_level_changer(u16 changer, u16 actor, LPCSTR level, LPCSTR invi
+ 		travel_changer_touched(changer, actor, level, invite); // S09-T01
+ }
+ 
++// S10-T04a: see the talk section above.
++bool coop_client_talk_start(CInventoryOwner* partner)
++{
++	if (!g_link || !g_link->active)
++		return false;
++	Link::Talk& t = g_link->talk;
++	++t.starts;
++	if (g_link->world != WorldLive || !g_actor)
++		return true; // nothing talks locally on a replica
++	CGameObject* go = smart_cast<CGameObject*>(partner);
++	coop::proto::EntityRef ref;
++	if (!go || !ref_of(u16(go->ID()), ref))
++	{
++		g_link->log.line("talk-start-unknown npc=%u", go ? u32(go->ID()) : 0xffffu);
++		return true;
++	}
++	if (t.open || t.pending)
++	{
++		g_link->log.line("talk-start-ignored npc=%u open=%d pending=%d", u32(go->ID()), t.open ? 1 : 0, t.pending ? 1 : 0);
++		return true;
++	}
++	t.pending = true;
++	t.npc = u16(go->ID());
++	t.npc_ref = ref;
++	request_ownership(coop::proto::kActionTalkStart, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
++	return true;
++}
++
++void coop_client_talk_say(LPCSTR id)
++{
++	if (!g_link || !g_link->active || !g_link->talk.open || !id || !id[0])
++		return;
++	talk_send_say(id, 0xffffffff, 0xffffffff, true);
++}
++
++void coop_client_talk_closed()
++{
++	if (!g_link || !g_link->active)
++		return;
++	Link::Talk& t = g_link->talk;
++	if (!t.open)
++		return; // the server's close, or the driver's end: already told
++	t.open = false;
++	t.path = 0;
++	++t.ends;
++	request_ownership(coop::proto::kActionTalkEnd, t.npc_ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("talk-end-sent npc=%u after_ms=%u", u32(t.npc), g_link->wall.GetElapsed_ms() - t.opened_ms);
++}
++
+ // S08-T01: see the pickup section above.
+ bool coop_client_pickup(u16 who, u16 what)
+ {
+@@ -5639,6 +6084,11 @@ void coop_client_frame()
+ 				g_link->transfer_steps_unlinked, u32(g_link->pickup_pending.size()));
+ 			g_link->log.line("item-graph-summary matches=%I64u mismatches=%I64u own_inventory_mismatches=%I64u",
+ 				g_link->item_graph_matches, g_link->item_graph_mismatches, g_link->own_inventory_mismatches);
++			g_link->log.line("talk-summary starts=%I64u says=%I64u ends=%I64u opens=%I64u closes=%I64u answers=%I64u "
++				"lists=%I64u busy=%I64u refused=%I64u resets=%I64u open=%d", // S10-T04a
++				g_link->talk.starts, g_link->talk.says, g_link->talk.ends, g_link->talk.opens, g_link->talk.closes,
++				g_link->talk.answers, g_link->talk.lists, g_link->talk.busy, g_link->talk.refused, g_link->talk.resets,
++				g_link->talk.open ? 1 : 0);
+ 			g_link->log.line("inventory-summary equips=%I64u uses=%I64u ignored=%I64u local_eats_blocked=%I64u "
+ 				"presented=%I64u layouts=%I64u/%I64u/%I64u moves=%I64u layout_points=%I64u/%I64u "
+ 				"amounts=%I64u/%I64u/%I64u", // S08-T07, S08-T08
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 587590c..5d619c7 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -47,6 +47,14 @@ bool coop_client_eat(CInventoryOwner* owner, CInventoryItem* item);
+ // S09-T01: a level changer touched on a co-op client (CLevelChanger::feel_touch_new
+ // and its 5-s invitation): the travel prompt for the own actor; nothing changes level.
+ void coop_client_level_changer(u16 changer, u16 actor, LPCSTR level, LPCSTR invite);
++// S10-T04a: the talk window drives the server's dialogue. CActor::RunTalkDialog
++// on a co-op client: true when the link took the talk (the talk-start intent
++// for the partner; the window opens when the server says the talk is open).
++bool coop_client_talk_start(CInventoryOwner* partner);
++// The remote talk window (CUITalkWnd in its remote mode): a clicked topic or
++// phrase becomes the say intent; closing the window ends the talk.
++void coop_client_talk_say(LPCSTR id);
++void coop_client_talk_closed();
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 1604bea..976ae2e 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -146,6 +146,8 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_party = ini.line_exist("coop", "travel_party") ? ini.r_u32("coop", "travel_party") : 0; // S09-T01
+ 		out.travel_variant = ini.line_exist("coop", "travel_variant") ? ini.r_u32("coop", "travel_variant") : 0;
+ 		out.travel_barrier_hold = ini.line_exist("coop", "travel_barrier_hold") ? ini.r_u32("coop", "travel_barrier_hold") : 0; // S09-T04
++		out.talk_party = ini.line_exist("coop", "talk_party") ? ini.r_u32("coop", "talk_party") : 0; // S10-T04a
++		out.talk_variant = ini.line_exist("coop", "talk_variant") ? ini.r_u32("coop", "talk_variant") : 0;
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 7cc5ea2..164b891 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -44,7 +44,9 @@
+ //                 retry; 4 two agreed travels, the first's publication failed
+ //                 from outside), travel_barrier_hold (S09-T04 harness: seconds
+ //                 the barrier stays up before the take, so a disconnect can
+-//                 land in it; 0 off)
++//                 land in it; 0 off), talk_party (S10-T04a fixture: seconds
++//                 after both attach until the talk rounds at Sidorovich
++//                 start; 0 off)
+ //                 checkpoint_seconds (S07-T02: seconds between periodic
+ //                 checkpoint generations; 0 off; joins and a clean stop
+ //                 always publish one),
+@@ -113,6 +115,8 @@ struct CoopConfig
+ 	u32 travel_variant; // S09-T01 fixture: 0 every round, 1 the crash run (rounds 0, 1; failpoint travel:after-propose),
+ 	                    // 2 one agreed travel (S09-T02), 3 partner drops in the barrier then retries, 4 two travels (S09-T04)
+ 	u32 travel_barrier_hold; // S09-T04 harness: seconds the barrier stays up before the take (0 off)
++	u32 talk_party; // S10-T04a fixture: seconds after both attach until the talk rounds start at Sidorovich (0 off)
++	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 5e7dc23..47a97ae 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -56,6 +56,9 @@
+ #include "xrServer_svclient_validation.h"
+ #include "GameTask.h" // S08-T04: the party quest
+ #include "GametaskManager.h"
++#include "PhraseDialog.h" // S10-T04a: the talk window on the server's dialogue
++#include "PhraseDialogManager.h"
++#include "phrase.h"
+ #include "eatable_item.h" // S08-T07: use
+ #include "WeaponAmmo.h" // S08-T08: stacks
+ #include "alife_registry_wrappers.h" // S08-T09: info portions
+@@ -156,6 +159,12 @@ struct PlayerLink
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+ 	float needs_last[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+ 	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
++	// S10-T04a: the open talk (one per player)
++	u16 talk_npc = 0xffff; // the partner (0xffff: no talk)
++	DIALOG_SHARED_PTR talk_dialog; // the current dialog (empty: topic mode)
++	u64 talk_since = 0;
++	u64 talk_says_now = 0; // says in the open talk
++	u64 talks = 0, talk_says = 0, talk_lists = 0, talk_inputs_held = 0;
+ };
+ 
+ enum WorldState : u8
+@@ -578,6 +587,21 @@ struct Host
+ 			bool boar_set = false;
+ 		} fixture;
+ 	} travel;
++	// S10-T04a: the talk window
++	u64 talks_started = 0, talks_busy = 0, talks_refused = 0, talk_says = 0, talk_say_refused = 0, talks_closed = 0;
++	u64 talk_quest_routed = 0, talk_actions_blocked = 0, talk_answers = 0;
++	struct TalkFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0; // 0 waiting, 1 placed, 2 rounds
++		u64 phase_tick = 0;
++		u32 round = 0;
++		u64 round_tick = 0;
++		u16 giver = 0xffff;
++		u16 actors[2] = {0xffff, 0xffff};
++		xr_vector<u16> patches[2];
++		bool spawned = false;
++	} talk_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -1715,6 +1739,18 @@ void apply_inputs()
+ 			}
+ 			continue;
+ 		}
++		// S10-T04a: a talking actor takes no movement or trigger, as single
++		// player gives it none (ActorInput.cpp:49,357); the input is consumed
++		if (actor->IsTalking())
++		{
++			++link.talk_inputs_held;
++			if (link.fire_down)
++			{
++				actor_input_release(context, kWPN_FIRE);
++				link.fire_down = false;
++			}
++			continue;
++		}
+ 		// S06-T04: the fire key. The player's input holds it or not; the
+ 		// server presses and releases the native key on the player's own
+ 		// actor, so the weapon decides whether, when and how it fires (state,
+@@ -6431,6 +6467,59 @@ bool quest_turnin_phrases(CActor* actor, CGameObject* npc)
+ 	return true;
+ }
+ 
++// S08-T04/T05, shared with the talk window (S10-T04a): the accepted party
++// task is recorded, its instance saved with the anchor, both players told,
++// and the answer waits for the published generation that holds it
++// (operation 0: a talk's accept, no answer to send).
++void party_task_accepted(PlayerLink& link, LPCSTR task, u16 giver_id, CActor* anchor, u64 operation_id)
++{
++	Host::PartyTask nt;
++	nt.id = task;
++	nt.holder_slot = 0;
++	nt.holder = u16(anchor->ID());
++	nt.accepted_by = link.ref.slot;
++	nt.giver = giver_id;
++	nt.instance = ++g_host->quest_instances;
++	nt.accepted_tick = g_host->tick;
++	g_host->party_tasks.push_back(nt);
++	{
++		// S08-T06: the instance lives with the task in the anchor's portable
++		// store (the native save holds it), so a restart rebuilds the party's task
++		luabind::functor<void> save_var;
++		if (ai().script_engine().functor("_G.save_var", save_var))
++			save_var(anchor->lua_game_object(), (xr_string(task) + "_coop_instance").c_str(), int(nt.instance));
++	}
++	luabind::functor<void> set_task;
++	if (ai().script_engine().functor("campaign_party_set_task", set_task))
++		set_task(task, int(anchor->ID()));
++	s32 need = -1;
++	lua_call_ok("campaign_party_need", need, (LPCSTR)task);
++	++g_host->quests_accepted;
++	g_host->log.line("quest-accepted slot=%u task=%s instance=%I64u holder=%u giver=%u need=%d source=%s", u32(link.ref.slot),
++		task, nt.instance, u32(nt.holder), u32(giver_id), need, operation_id ? "intent" : "talk");
++	string128 news;
++	xr_sprintf(news, "Party task accepted by Player %u: bring %d bandit patches to Sidorovich", u32(link.ref.slot) + 1,
++		need);
++	party_news(news);
++	const u64 revision = ++g_host->commit;
++	StoredOutcome stored = {u8(coop::proto::ActionOutcome::Accepted), 0, revision};
++	if (g_host->persistence && operation_id)
++		g_host->persistence->remember(link.player, operation_id, stored);
++	coop::proto::ActionResult result;
++	result.operation_id = operation_id;
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.reason = 0;
++	result.commit_id = revision;
++	result.revision = revision;
++	result.server_tick = g_host->tick;
++	coop::store::failpoint("quest:after-accept");
++	Host::QuestAnswer answer;
++	answer.w = {link.player, link.join_serial, result, link.ref.slot};
++	answer.since_tick = g_host->tick;
++	answer.what = operation_id ? "accept" : "talk-accept";
++	g_host->quest_answers.push_back(answer);
++}
++
+ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+ {
+ 	CoopPersistence* persistence = g_host->persistence;
+@@ -6515,50 +6604,7 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 			campaign::refusal_name(opened), ok ? 1 : 0, native ? 1 : 0);
+ 		if (!ok || !native)
+ 			return coop::proto::kReasonQuestNotOffered;
+-		Host::PartyTask nt;
+-		nt.id = task;
+-		nt.holder_slot = 0;
+-		nt.holder = u16(anchor->ID());
+-		nt.accepted_by = link.ref.slot;
+-		nt.giver = giver_id;
+-		nt.instance = ++g_host->quest_instances;
+-		nt.accepted_tick = g_host->tick;
+-		g_host->party_tasks.push_back(nt);
+-		{
+-			// S08-T06: the instance lives with the task in the anchor's portable
+-			// store (the native save holds it), so a restart rebuilds the party's task
+-			luabind::functor<void> save_var;
+-			if (ai().script_engine().functor("_G.save_var", save_var))
+-				save_var(anchor->lua_game_object(), (xr_string(task) + "_coop_instance").c_str(), int(nt.instance));
+-		}
+-		luabind::functor<void> set_task;
+-		if (ai().script_engine().functor("campaign_party_set_task", set_task))
+-			set_task(task, int(anchor->ID()));
+-		s32 need = -1;
+-		lua_call_ok("campaign_party_need", need, (LPCSTR)task);
+-		++g_host->quests_accepted;
+-		g_host->log.line("quest-accepted slot=%u task=%s instance=%I64u holder=%u giver=%u need=%d", u32(link.ref.slot),
+-			task, nt.instance, u32(nt.holder), u32(giver_id), need);
+-		string128 news;
+-		xr_sprintf(news, "Party task accepted by Player %u: bring %d bandit patches to Sidorovich", u32(link.ref.slot) + 1,
+-			need);
+-		party_news(news);
+-		const u64 revision = ++g_host->commit;
+-		stored.outcome = u8(coop::proto::ActionOutcome::Accepted);
+-		stored.reason = 0;
+-		stored.revision = revision;
+-		if (persistence)
+-			persistence->remember(link.player, intent.operation_id, stored);
+-		result.outcome = coop::proto::ActionOutcome::Accepted;
+-		result.reason = 0;
+-		result.commit_id = revision;
+-		result.revision = revision;
+-		coop::store::failpoint("quest:after-accept");
+-		Host::QuestAnswer answer;
+-		answer.w = {link.player, link.join_serial, result, link.ref.slot};
+-		answer.since_tick = g_host->tick;
+-		answer.what = "accept";
+-		g_host->quest_answers.push_back(answer);
++		party_task_accepted(link, task, giver_id, anchor, intent.operation_id);
+ 		return kQuestPending;
+ 	}
+ 	// op 2: turn in
+@@ -6793,7 +6839,7 @@ void quest_tick()
+ 				answer.what = "complete";
+ 				g_host->quest_answers.push_back(answer);
+ 			}
+-			else
++			else if (result.operation_id) // S10-T04a: a talk's turn-in (operation 0) has no answer to send
+ 			{
+ 				result.outcome = coop::proto::ActionOutcome::Rejected;
+ 				result.reason = coop::proto::kReasonQuestNotFinished;
+@@ -6979,6 +7025,14 @@ void answer_quests(u32 generation, bool ok)
+ 		}
+ 		result.server_tick = g_host->tick;
+ 		coop::store::failpoint("quest:before-ack");
++		if (!result.operation_id)
++		{
++			// S10-T04a: a talk's accept or turn-in: durable now, nothing to answer
++			g_host->log.line("quest-talk-%s player=%s (quest %s durable after generation %u, %I64u ticks)",
++				ok ? "durable" : "lost", coop_uuid_hex(a.w.player).c_str(), a.what.c_str(), generation, g_host->tick - a.since_tick);
++			g_host->quest_answers.erase(g_host->quest_answers.begin() + i);
++			continue;
++		}
+ 		g_host->server->send(a.w.player, coop::proto::Message(result));
+ 		g_host->log.line("intent-%s player=%s operation=%I64u kind=8 reason=%u (quest %s answered after generation %u, "
+ 			"%I64u ticks)", ok ? "accepted" : "refused", coop_uuid_hex(a.w.player).c_str(), result.operation_id,
+@@ -8075,6 +8129,791 @@ void quest_fixtures()
+ 		holder, u32(steps.size()), detail);
+ }
+ 
++// ------------------------------------------------------------ S10-T04a
++// The talk window on the server's dialogue (decision T01-15: one speaker per
++// NPC). A talk is one player's open dialogue with one NPC: started by
++// ActionIntent 14 (campaign::dialogue_open in the player's script context,
++// then the NPC's start dialog as CUITalkWnd::InitOthersStartDialog runs it),
++// driven by 15 (a clicked topic or phrase, as CUITalkWnd::AskQuestion and
++// UpdateQuestions run it, the dummy auto-say included), ended by 16 or by
++// the world (the actor or the NPC stops talking or dies, the player leaves,
++// the NPC walks out of reach). Every change goes to that player as
++// CampaignEvent 14 (the NPC's entity ref, u8 state, u8 flags or the body):
++// 1 open (flags bit 0: no break), 2 closed (the why), 3 an answer (u8 ours,
++// the text), 4 a list (u8 part flags: bit 0 first, bit 1 last; u8 topic
++// mode; the dialog id; u8 count; count x (id, text, u8 finalizer)). The
++// dialogue's preconditions, actions and texts run in the talking player's
++// context (its info portions, its db.actor); the party quest's accept and
++// turn-in actions are taken over (campaign::coop_server_dialogue_action)
++// and run through the S08 party path in the anchor's context, so the task
++// is the party's and durable; the NPC's replies reach the player through
++// campaign::coop_server_dialogue_answer (the server has no talk window). A
++// talking actor takes no movement input (apply_inputs), as in single player.
++
++// A text on the wire has a u16 length (a script text is a paragraph: the
++// task offers run past 240 bytes); an answer may take the event, a list
++// entry leaves room for the list's header (ref + state 13, part, topic,
++// the dialog id <= 101, count) inside kMaxEventPayload (1024)
++const u32 kTalkTextMax = 1000;
++const u32 kTalkListTextMax = 800;
++const u32 kTalkEventMax = 1000; // body bytes per list event (the ref and the state come before it)
++static PlayerLink* s_talk_link = nullptr; // the link whose dialogue operation runs now (the hooks)
++
++static void put_text(std::vector<u8>& p, LPCSTR v, u32 max)
++{
++	const u32 n = v ? _min(u32(xr_strlen(v)), max) : 0u;
++	p.push_back(u8(n));
++	if (n)
++		p.insert(p.end(), v, v + n);
++}
++
++static void put_text16(std::vector<u8>& p, LPCSTR v, u32 max)
++{
++	const u32 n = v ? _min(u32(xr_strlen(v)), max) : 0u;
++	put_u16(p, u16(n));
++	if (n)
++		p.insert(p.end(), v, v + n);
++}
++
++static void talk_event(PlayerLink& link, u8 state, const std::vector<u8>& body)
++{
++	std::vector<u8> payload;
++	put_ref(payload, link.talk_npc);
++	put_u8(payload, state);
++	payload.insert(payload.end(), body.begin(), body.end());
++	queue_event(link, 14, payload);
++}
++
++static void talk_answer(PlayerLink& link, bool ours, LPCSTR text)
++{
++	if (!text || !text[0])
++		return; // as CUITalkWnd::AddAnswer: nothing for an empty phrase
++	std::vector<u8> p;
++	put_u8(p, ours ? 1 : 0);
++	put_text16(p, text, kTalkTextMax);
++	talk_event(link, 3, p);
++	++g_host->talk_answers;
++	string256 shown;
++	strncpy_s(shown, sizeof(shown), text, 120);
++	g_host->log.line("talk-answer slot=%u ours=%d text=%s", u32(link.ref.slot), ours ? 1 : 0, shown);
++}
++
++static CInventoryOwner* talk_partner(const PlayerLink& link, CGameObject** object = nullptr)
++{
++	CGameObject* npc = link.talk_npc != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(link.talk_npc)) : nullptr;
++	if (object)
++		*object = npc;
++	return npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++}
++
++// As CUITalkWnd::SayPhrase: our text, then the phrase said (its action, the
++// NPC's reply through CAI_PhraseDialogManager::AnswerPhrase and the hooks).
++static void talk_say_phrase(PlayerLink& link, CPhraseDialogManager* ours, const shared_str& id)
++{
++	talk_answer(link, true, link.talk_dialog->GetPhraseText(id));
++	PlayerLink* outer = s_talk_link;
++	s_talk_link = &link;
++	ours->SayPhrase(link.talk_dialog, id);
++	s_talk_link = outer;
++	if (link.talk_dialog && link.talk_dialog->IsFinished())
++		link.talk_dialog = DIALOG_SHARED_PTR((CPhraseDialog*)NULL);
++}
++
++// As CUITalkWnd::UpdateQuestions: the topics (topic mode) or the phrases the
++// player may say now, after the dummies said by themselves; to the player in
++// parts that fit an event.
++static void talk_send_list(PlayerLink& link, CPhraseDialogManager* ours, CPhraseDialogManager* theirs)
++{
++	struct Entry
++	{
++		shared_str id;
++		xr_string text;
++		bool finalizer;
++	};
++	xr_vector<Entry> entries;
++	bool topic = false;
++	for (int guard = 0; guard < 8; ++guard)
++	{
++		entries.clear();
++		if (!link.talk_dialog)
++		{
++			topic = true;
++			ours->UpdateAvailableDialogs(theirs);
++			for (const DIALOG_SHARED_PTR& d : ours->AvailableDialogs())
++			{
++				Entry e;
++				e.id = d->GetDialogID();
++				e.text = d->DialogCaption();
++				e.finalizer = d->GetPhrase("0")->IsFinalizer();
++				entries.push_back(e);
++			}
++			break;
++		}
++		if (!link.talk_dialog->IsWeSpeaking(ours))
++			break; // the NPC's turn: its reply is synchronous, so this does not come up
++		if (!link.talk_dialog->PhraseList().empty() && link.talk_dialog->allIsDummy())
++		{
++			// only dummies to say: said by itself, the player does nothing
++			CPhrase* phrase = link.talk_dialog->PhraseList()[Random.randI(link.talk_dialog->PhraseList().size())];
++			talk_say_phrase(link, ours, phrase->GetID());
++			if (link.talk_npc == 0xffff)
++				return; // closed meanwhile
++			continue;
++		}
++		for (CPhrase* phrase : link.talk_dialog->PhraseList())
++		{
++			Entry e;
++			e.id = phrase->GetID();
++			e.text = link.talk_dialog->GetPhraseText(phrase->GetID());
++			e.finalizer = phrase->IsFinalizer();
++			entries.push_back(e);
++		}
++		break;
++	}
++	const shared_str dialog = link.talk_dialog ? link.talk_dialog->GetDialogID() : shared_str("");
++	size_t at = 0;
++	bool first = true;
++	do
++	{
++		std::vector<u8> p;
++		put_u8(p, 0); // the part flags, set below
++		put_u8(p, topic ? 1 : 0);
++		put_text(p, dialog.c_str(), 100);
++		const size_t count_at = p.size();
++		put_u8(p, 0);
++		u32 count = 0;
++		while (at < entries.size() && count < 255)
++		{
++			std::vector<u8> one;
++			put_text(one, entries[at].id.c_str(), 64);
++			put_text16(one, entries[at].text.c_str(), kTalkListTextMax);
++			put_u8(one, entries[at].finalizer ? 1 : 0);
++			if (p.size() + one.size() > kTalkEventMax && count)
++				break;
++			p.insert(p.end(), one.begin(), one.end());
++			++count;
++			++at;
++		}
++		p[count_at] = u8(count);
++		p[0] = u8((first ? 1 : 0) | (at >= entries.size() ? 2 : 0));
++		talk_event(link, 4, p);
++		first = false;
++	} while (at < entries.size());
++	++link.talk_lists;
++	string512 ids = "";
++	for (const Entry& e : entries)
++		if (xr_strlen(ids) + e.id.size() < 400)
++		{
++			xr_strcat(ids, " ");
++			xr_strcat(ids, e.id.c_str());
++		}
++	g_host->log.line("talk-list slot=%u topic=%d dialog=%s count=%u ids=[%s ]", u32(link.ref.slot), topic ? 1 : 0,
++		dialog.c_str(), u32(entries.size()), ids);
++}
++
++void talk_close(PlayerLink& link, LPCSTR why, bool notify = true)
++{
++	if (link.talk_npc == 0xffff)
++		return;
++	CActor* actor = participant_actor(link.ref);
++	CGameObject* npc = nullptr;
++	CInventoryOwner* owner = talk_partner(link, &npc);
++	if (notify && link.session)
++	{
++		std::vector<u8> p;
++		put_text(p, why, 60);
++		talk_event(link, 2, p);
++	}
++	g_host->log.line("talk-close slot=%u npc=%u why=%s says=%I64u ticks=%I64u", u32(link.ref.slot), u32(link.talk_npc), why,
++		link.talk_says_now, g_host->tick - link.talk_since);
++	link.talk_npc = 0xffff;
++	link.talk_dialog = DIALOG_SHARED_PTR((CPhraseDialog*)NULL);
++	++g_host->talks_closed;
++	CInventoryOwner* me = actor ? smart_cast<CInventoryOwner*>(actor) : nullptr;
++	if (actor && owner && owner->IsTalking() && owner->GetTalkPartner() == me)
++		campaign::dialogue_close(actor, owner); // both stop talking, the menu mode, in the player's context
++	else if (actor && actor->IsTalking())
++		actor->StopTalk(); // the NPC already stopped (or talks to the other player now)
++}
++
++u16 take_talk_start(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	CActor* actor = context_actor(context, Scope::Self, &why);
++	if (!actor || !actor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	const u16 npc_id = engine_id_of(intent.target);
++	CGameObject* npc = npc_id != kNoEngineId ? smart_cast<CGameObject*>(Level().Objects.net_Find(npc_id)) : nullptr;
++	CEntityAlive* alive = npc ? smart_cast<CEntityAlive*>(npc) : nullptr;
++	CInventoryOwner* owner = npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++	if (!npc || !alive || !alive->g_Alive() || !owner || smart_cast<CActor*>(npc) || !owner->IsTalkEnabled())
++	{
++		++g_host->talks_refused;
++		g_host->log.line("talk-refused slot=%u npc=%u why=no-talk present=%d alive=%d owner=%d", u32(link.ref.slot),
++			u32(npc_id), npc ? 1 : 0, alive && alive->g_Alive() ? 1 : 0, owner ? 1 : 0);
++		return coop::proto::kReasonNoTalk;
++	}
++	if (link.talk_npc == npc_id)
++		return 0; // told twice: the talk is open
++	if (link.talk_npc != 0xffff)
++		talk_close(link, "restarted"); // one talk per player: the old one ends
++	// one speaker per NPC (T01-15)
++	CInventoryOwner* me = smart_cast<CInventoryOwner*>(actor);
++	if (owner->IsTalking() && owner->GetTalkPartner() != me)
++	{
++		CGameObject* partner = owner->GetTalkPartner() ? smart_cast<CGameObject*>(owner->GetTalkPartner()) : nullptr;
++		++g_host->talks_busy;
++		g_host->log.line("talk-busy slot=%u npc=%u partner=%u", u32(link.ref.slot), u32(npc_id),
++			partner ? u32(partner->ID()) : 0xffffu);
++		return coop::proto::kReasonTalkBusy;
++	}
++	const float distance = pickup_distance(actor, npc);
++	if (distance > kGiverReach)
++	{
++		++g_host->talks_refused;
++		g_host->log.line("talk-refused slot=%u npc=%u why=out-of-reach distance=%.2f", u32(link.ref.slot), u32(npc_id), distance);
++		return coop::proto::kReasonOutOfReach;
++	}
++	const campaign::Refusal opened = campaign::dialogue_open(actor, owner, owner->bDisableBreakDialog);
++	if (opened != campaign::Refusal::None)
++	{
++		++g_host->talks_refused;
++		g_host->log.line("talk-refused slot=%u npc=%u why=dialogue-open:%s", u32(link.ref.slot), u32(npc_id),
++			campaign::refusal_name(opened));
++		return coop::proto::kReasonNoTalk;
++	}
++	link.talk_npc = npc_id;
++	link.talk_since = g_host->tick;
++	link.talk_says_now = 0;
++	link.talk_dialog = DIALOG_SHARED_PTR((CPhraseDialog*)NULL);
++	++link.talks;
++	++g_host->talks_started;
++	std::vector<u8> p;
++	put_u8(p, owner->bDisableBreakDialog ? 1 : 0);
++	talk_event(link, 1, p);
++	g_host->log.line("talk-start slot=%u actor=%u npc=%u section=%s name=%s distance=%.2f no_break=%d", u32(link.ref.slot),
++		u32(actor->ID()), u32(npc_id), *npc->cNameSect(), owner->Name(), distance, owner->bDisableBreakDialog ? 1 : 0);
++	{
++		// as CUITalkWnd::InitTalkDialog: the NPC's start dialog, then the lists
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "talk-open");
++		CPhraseDialogManager* ours = smart_cast<CPhraseDialogManager*>(actor);
++		CPhraseDialogManager* theirs = smart_cast<CPhraseDialogManager*>(npc);
++		theirs->UpdateAvailableDialogs(ours);
++		if (!theirs->AvailableDialogs().empty())
++		{
++			link.talk_dialog = theirs->AvailableDialogs().front();
++			theirs->InitDialog(ours, link.talk_dialog);
++			talk_answer(link, false, link.talk_dialog->GetPhraseText("0"));
++			PlayerLink* outer = s_talk_link;
++			s_talk_link = &link;
++			theirs->SayPhrase(link.talk_dialog, "0");
++			s_talk_link = outer;
++			if (!link.talk_dialog || link.talk_dialog->IsFinished())
++				link.talk_dialog = DIALOG_SHARED_PTR((CPhraseDialog*)NULL);
++		}
++		if (link.talk_npc != 0xffff)
++			talk_send_list(link, ours, theirs);
++	}
++	result.revision = g_host->commit;
++	return 0;
++}
++
++u16 take_talk_say(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (intent.params.size() < 2 || intent.params[0] == 0 || intent.params[0] > 64 ||
++		intent.params.size() != size_t(1 + intent.params[0]))
++		return coop::proto::kReasonMalformed;
++	string128 id;
++	memcpy(id, intent.params.data() + 1, intent.params[0]);
++	id[intent.params[0]] = 0;
++	if (link.talk_npc == 0xffff)
++	{
++		++g_host->talk_say_refused;
++		g_host->log.line("talk-say-refused slot=%u id=%s why=not-talking", u32(link.ref.slot), id);
++		return coop::proto::kReasonNotTalking;
++	}
++	CActor* actor = participant_actor(link.ref);
++	CGameObject* npc = nullptr;
++	CInventoryOwner* owner = talk_partner(link, &npc);
++	if (!actor || !actor->g_Alive() || !owner || !actor->IsTalking())
++	{
++		talk_close(link, "say-without-talk");
++		return coop::proto::kReasonNotTalking;
++	}
++	campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "talk-say");
++	CPhraseDialogManager* ours = smart_cast<CPhraseDialogManager*>(actor);
++	CPhraseDialogManager* theirs = smart_cast<CPhraseDialogManager*>(npc);
++	const shared_str said(id);
++	if (!link.talk_dialog)
++	{
++		// topic mode (CUITalkWnd::AskQuestion): the chosen dialog, its first phrase
++		if (!ours->HaveAvailableDialog(said))
++		{
++			++g_host->talk_say_refused;
++			g_host->log.line("talk-say-refused slot=%u id=%s why=no-such-topic", u32(link.ref.slot), id);
++			return coop::proto::kReasonWrongPhrase;
++		}
++		link.talk_dialog = ours->GetDialogByID(said);
++		ours->InitDialog(theirs, link.talk_dialog);
++		talk_say_phrase(link, ours, "0");
++	}
++	else
++	{
++		bool listed = false;
++		if (link.talk_dialog->IsWeSpeaking(ours))
++			for (CPhrase* phrase : link.talk_dialog->PhraseList())
++				listed = listed || phrase->GetID() == said;
++		if (!listed)
++		{
++			++g_host->talk_say_refused;
++			g_host->log.line("talk-say-refused slot=%u id=%s why=not-in-list dialog=%s", u32(link.ref.slot), id,
++				link.talk_dialog->GetDialogID().c_str());
++			return coop::proto::kReasonWrongPhrase;
++		}
++		talk_say_phrase(link, ours, said);
++	}
++	++link.talk_says;
++	++link.talk_says_now;
++	++g_host->talk_says;
++	g_host->log.line("talk-say slot=%u id=%s dialog=%s finished=%d", u32(link.ref.slot), id,
++		link.talk_dialog ? link.talk_dialog->GetDialogID().c_str() : "-", link.talk_dialog ? 0 : 1);
++	if (link.talk_npc == 0xffff)
++		return 0; // the dialogue closed the talk
++	if (!actor->IsTalking() || !owner->IsTalking())
++	{
++		talk_close(link, "dialogue-ended");
++		return 0;
++	}
++	talk_send_list(link, ours, theirs);
++	result.revision = g_host->commit;
++	return 0;
++}
++
++u16 take_talk_end(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (link.talk_npc == 0xffff)
++		return coop::proto::kReasonNotTalking;
++	talk_close(link, "player");
++	return 0;
++}
++
++// Every tick: a talk ends with its actor, its NPC or its reach.
++void talk_tick()
++{
++	for (PlayerLink& link : g_host->links)
++	{
++		if (link.talk_npc == 0xffff)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		CGameObject* npc = nullptr;
++		CInventoryOwner* owner = talk_partner(link, &npc);
++		CEntityAlive* alive = npc ? smart_cast<CEntityAlive*>(npc) : nullptr;
++		CInventoryOwner* me = actor ? smart_cast<CInventoryOwner*>(actor) : nullptr;
++		LPCSTR why = nullptr;
++		if (!actor || !actor->g_Alive())
++			why = "actor-dead";
++		else if (!npc || !alive || !alive->g_Alive() || !owner)
++			why = "npc-gone";
++		else if (!actor->IsTalking() || actor->GetTalkPartner() != owner)
++			why = "actor-stopped";
++		else if (!owner->IsTalking() || owner->GetTalkPartner() != me)
++			why = "npc-stopped";
++		else if (pickup_distance(actor, npc) > kGiverReach * 2.f)
++			why = "out-of-reach";
++		if (why)
++			talk_close(link, why);
++	}
++}
++
++void log_talk_summary()
++{
++	u32 open = 0;
++	u64 held = 0;
++	for (const PlayerLink& link : g_host->links)
++	{
++		open += link.talk_npc != 0xffff ? 1 : 0;
++		held += link.talk_inputs_held;
++	}
++	g_host->log.line("talk-summary started=%I64u busy=%I64u refused=%I64u says=%I64u say_refused=%I64u closed=%I64u "
++		"quest_routed=%I64u actions_blocked=%I64u answers=%I64u inputs_held=%I64u open=%u",
++		g_host->talks_started, g_host->talks_busy, g_host->talks_refused, g_host->talk_says, g_host->talk_say_refused,
++		g_host->talks_closed, g_host->talk_quest_routed, g_host->talk_actions_blocked, g_host->talk_answers, held, open);
++}
++
++// The task the installed dialog functions read for the NPC
++// (axr_task_manager.available_tasks / finished_tasks [npc][1]).
++static bool talk_npc_task(LPCSTR list_name, u16 npc_id, string128& out)
++{
++	lua_State* L = ai().script_engine().lua();
++	luabind::object axr = luabind::get_globals(L)["axr_task_manager"];
++	if (axr.type() != LUA_TTABLE)
++		return false;
++	luabind::object list = axr[list_name];
++	luabind::object mine = list.type() == LUA_TTABLE ? luabind::object(list[int(npc_id)]) : luabind::object(L);
++	luabind::object head = mine.type() == LUA_TTABLE ? luabind::object(mine[1]) : luabind::object(L);
++	if (head.type() != LUA_TSTRING)
++		return false;
++	xr_strcpy(out, sizeof(out), luabind::object_cast<LPCSTR>(head));
++	return true;
++}
++
++static CActor* party_anchor()
++{
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot == 0)
++			return participant_actor(l.ref);
++	return nullptr;
++}
++
++// The accept phrase's action (dialogs.npc_give_task) of a talk: the S08 party
++// accept in the anchor's context (take_quest op 1 without the intent).
++static u16 talk_quest_accept(PlayerLink& link, CGameObject* npc)
++{
++	string128 task;
++	if (!talk_npc_task("available_tasks", u16(npc->ID()), task))
++		return coop::proto::kReasonQuestNotOffered;
++	if (!party_task_supported(task) || !g_host->party_adapter)
++	{
++		++g_host->talk_actions_blocked;
++		g_host->log.line("talk-quest-blocked slot=%u op=accept task=%s why=not-a-party-task", u32(link.ref.slot), task);
++		return coop::proto::kReasonQuestUnsupported;
++	}
++	sync_party_actors();
++	if (party_task(task))
++		return coop::proto::kReasonQuestActive;
++	CActor* anchor = party_anchor();
++	if (!anchor || !anchor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	bool ok = false;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "party-quest-accept-talk");
++		ok = scope.entered() && quest_accept_phrases(anchor, npc, task);
++	}
++	CGameTask* native = Level().GameTaskManager().HasGameTask(shared_str(task), true);
++	g_host->log.line("quest-accept slot=%u task=%s dialogue=talk ok=%d native=%d", u32(link.ref.slot), task, ok ? 1 : 0,
++		native ? 1 : 0);
++	if (!ok || !native)
++		return coop::proto::kReasonQuestNotOffered;
++	party_task_accepted(link, task, u16(npc->ID()), anchor, 0);
++	return 0;
++}
++
++// The finish phrase's action (dialogs.npc_set_finished_task_complete) of a
++// talk: the S08 party turn-in in the holder's context (take_quest op 2
++// without the intent); the completion is applied by quest_tick.
++static u16 talk_quest_turn_in(PlayerLink& link, CGameObject* npc)
++{
++	// the ordered dialog's finish (dm_init_dynamic_task_completed_dialog) names
++	// its task through axr_task_manager.get_first_finished_task(npc), computed
++	// on the fly in the holder's context (db.actor:get_task), not a table
++	CActor* holder = party_anchor();
++	if (!holder || !holder->g_Alive())
++	{
++		g_host->log.line("quest-turnin-anchor-dead slot=%u source=talk", u32(link.ref.slot));
++		return coop::proto::kReasonQuestNotActive;
++	}
++	string128 task = "";
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-finished-talk");
++		luabind::functor<luabind::object> first;
++		if (scope.entered() && ai().script_engine().functor("axr_task_manager.get_first_finished_task", first))
++		{
++			luabind::object r = first(npc->lua_game_object());
++			if (r.type() == LUA_TSTRING)
++				xr_strcpy(task, sizeof(task), luabind::object_cast<LPCSTR>(r));
++		}
++	}
++	if (!task[0])
++	{
++		g_host->log.line("talk-quest-blocked slot=%u op=finish why=no-finished-task", u32(link.ref.slot));
++		return coop::proto::kReasonQuestNotActive;
++	}
++	sync_party_actors();
++	Host::PartyTask* t = party_task(task);
++	if (!t)
++	{
++		++g_host->talk_actions_blocked;
++		g_host->log.line("talk-quest-blocked slot=%u op=finish task=%s why=not-a-party-task", u32(link.ref.slot), task);
++		return coop::proto::kReasonQuestUnsupported;
++	}
++	coop::proto::ActionResult none;
++	none.operation_id = 0;
++	for (Host::PendingTurnIn& p : g_host->turn_ins)
++		if (p.task == task)
++		{
++			p.waiters.push_back({link.player, link.join_serial, none, link.ref.slot});
++			g_host->log.line("quest-turnin-joined slot=%u task=%s waiters=%u source=talk", u32(link.ref.slot), task,
++				u32(p.waiters.size()));
++			return 0;
++		}
++	s32 stage = -1;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
++		lua_call_ok("campaign_party_check", stage, (LPCSTR)task);
++	}
++	if (stage != 1)
++	{
++		g_host->log.line("quest-not-finished slot=%u task=%s stage=%d count=%d need=%d source=talk", u32(link.ref.slot), task,
++			stage, t->count, t->need);
++		return coop::proto::kReasonQuestNotFinished;
++	}
++	luabind::functor<void> begin;
++	if (ai().script_engine().functor("campaign_party_begin_turnin", begin))
++		begin((LPCSTR)task);
++	bool ok = false;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-turnin-talk");
++		ok = scope.entered() && quest_turnin_phrases(holder, npc);
++	}
++	g_host->log.line("quest-turnin slot=%u task=%s holder=%u dialogue=talk ok=%d", u32(link.ref.slot), task,
++		u32(t->holder), ok ? 1 : 0);
++	if (!ok)
++	{
++		lua_call_void("campaign_party_end_turnin");
++		return coop::proto::kReasonQuestNotFinished;
++	}
++	Host::PendingTurnIn pending;
++	pending.waiters.push_back({link.player, link.join_serial, none, link.ref.slot});
++	pending.task = task;
++	pending.since_tick = g_host->tick;
++	pending.slot = link.ref.slot;
++	g_host->turn_ins.push_back(pending);
++	return 0;
++}
++
++// campaign::coop_server_dialogue_action for the talking player: true when the
++// action is the party quest's accept or turn-in (taken over); the player is
++// told a refusal as news.
++static bool talk_quest_action(PlayerLink& link, LPCSTR action, const CGameObject* speaker, const CGameObject* listener,
++	LPCSTR dialog_id, LPCSTR phrase_id)
++{
++	const bool accept = !xr_strcmp(action, "dialogs.npc_give_task");
++	const bool finish = !xr_strcmp(action, "dialogs.npc_set_finished_task_complete");
++	if (!accept && !finish)
++		return false;
++	const CGameObject* npc_const = smart_cast<const CActor*>(speaker) ? listener : speaker;
++	CGameObject* npc = const_cast<CGameObject*>(npc_const);
++	if (!npc || smart_cast<CActor*>(npc))
++		return false;
++	++g_host->talk_quest_routed;
++	const u16 reason = accept ? talk_quest_accept(link, npc) : talk_quest_turn_in(link, npc);
++	g_host->log.line("talk-quest slot=%u op=%s npc=%u dialog=%s phrase=%s reason=%u", u32(link.ref.slot),
++		accept ? "accept" : "finish", u32(npc->ID()), dialog_id, phrase_id, u32(reason));
++	if (reason)
++		if (CActor* actor = participant_actor(link.ref))
++			campaign::present_to_actor(actor, campaign::Presentation::News, 0,
++				reason == coop::proto::kReasonQuestActive ? "Co-op: the party already has this task" :
++				reason == coop::proto::kReasonQuestUnsupported ? "Co-op: this task is not supported yet" :
++				reason == coop::proto::kReasonQuestNotFinished ? "Co-op: the party's task is not finished yet" :
++				reason == coop::proto::kReasonQuestNotActive ? "Co-op: the party does not have this task" :
++				reason == coop::proto::kReasonNoActor ? "Co-op: Player 1 must be alive to take the task" :
++				"Co-op: the task was not given");
++	return true;
++}
++
++// The talk fixture (profile talk_party): once both players are in the world,
++// both actors are placed beside Sidorovich (as the quest fixture) and rounds
++// run through the step driver (CampaignEvent 7, client script 8; actions 14
++// start, 15 say-path (extra: 1 the task accept, 2 the turn-in, 3 an unknown
++// id; with no talk open one say as it is), 16 end; item = the giver):
++//   0  p1 starts, walks the accept path, ends          -> the party task accepted by talking
++//   1  p1 starts; p2 starts while p1 talks; p1 ends    -> p2 refused 33 (busy)
++//   2  p2 starts, walks the accept path, ends          -> the accept action refused 16 (the party has it), news
++//   3  the patches appear beside each actor; each picks up its half
++//   4  p1 starts, walks the turn-in path, ends         -> the party task completed by talking
++//      (talk_variant 1: p2, who did not accept, turns it in)
++//   5  p1 says with no talk open (34); p1 starts, says an unknown id (35);
++//      p2 starts (33); p1 ends; p2 ends with no talk (34)
++const u32 kTalkRounds = 6;
++
++void talk_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.talk_party || !ai().get_alife())
++		return;
++	Host::TalkFixture& f = g_host->talk_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-talk both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2)
++		return;
++	if (f.phase == 0)
++	{
++		if (g_host->tick < f.both_since + u64(config.talk_party) * 50)
++			return;
++		f.giver = find_giver();
++		CObject* giver = f.giver != 0xffff ? Level().Objects.net_Find(f.giver) : nullptr;
++		if (!giver)
++		{
++			if (g_host->tick - f.both_since > u64(config.talk_party) * 50 + 30 * 50)
++			{
++				g_host->log.line("fixture-talk giver-missing");
++				f.phase = 99;
++			}
++			return;
++		}
++		const Fvector g = giver->Position();
++		for (u32 k = 0; k < 2; ++k)
++		{
++			f.actors[k] = u16(actors[k]->ID());
++			Fvector at = g;
++			at.x += k ? -1.2f : 1.2f;
++			place_beside(actors[k], at);
++			g_host->log.line("fixture-talk placed slot=%u actor=%u giver=%u at=%.2f,%.2f,%.2f", k, u32(f.actors[k]),
++				u32(f.giver), VPUSH(at));
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 5 * 50)
++			return;
++		f.phase = 2;
++		f.round_tick = g_host->tick;
++		return;
++	}
++	if (f.phase != 2 || f.round >= kTalkRounds || g_host->tick < f.round_tick)
++		return;
++	const u16 G = f.giver;
++	xr_vector<TransferStep> steps;
++	if (f.round == 3)
++	{
++		const Host::PartyTask* t = party_task("esc_m_trader_task_3");
++		if (!f.spawned)
++		{
++			if (!t)
++			{
++				g_host->log.line("fixture-talk no-task-after-round-0");
++				f.round = kTalkRounds;
++				return;
++			}
++			CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++			const s32 need = t->need > 0 ? t->need : 6;
++			for (s32 i = 0; i < need; ++i)
++			{
++				const u32 k = u32(i) < u32(need + 1) / 2 ? 0 : 1;
++				Fvector at = actors[k]->Position();
++				at.x += 0.3f * float(i % 3) - 0.3f;
++				at.z += 0.4f;
++				at.y += 0.3f;
++				const CSE_ALifeDynamicObject* anchor = ai().alife().objects().object(f.actors[k], true);
++				CSE_Abstract* patch = anchor ? alife->spawn_item("bandit_patch", at, actors[k]->ai_location().level_vertex_id(),
++					anchor->m_tGraphID, u16(-1)) : nullptr;
++				if (patch)
++					f.patches[k].push_back(patch->ID);
++			}
++			f.spawned = true;
++			f.phase_tick = g_host->tick;
++			g_host->log.line("fixture-talk patches need=%d p0=%u p1=%u", need, u32(f.patches[0].size()), u32(f.patches[1].size()));
++			return;
++		}
++		bool all = true;
++		for (u32 k = 0; k < 2; ++k)
++			for (u16 id : f.patches[k])
++				all = all && delivered(id);
++		if (!all && g_host->tick - f.phase_tick < 15 * 50)
++			return;
++		u16 offset = 0;
++		for (u32 k = 0; k < 2; ++k)
++			for (u16 id : f.patches[k])
++			{
++				steps.push_back({u8(k), 5, offset, id, 0xffff, f.actors[k], 0, 0});
++				offset = u16(offset + 15);
++			}
++		f.round_tick = g_host->tick + 20 * 50 + u64(offset);
++	}
++	else
++		f.round_tick = g_host->tick + 12 * 50;
++	const u32 round = f.round++;
++	switch (round)
++	{
++	case 0:
++	case 4:
++	{
++		const u8 who = round == 4 && config.talk_variant == 1 ? 1 : 0;
++		steps.push_back({who, 14, 0, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({who, 15, 50, G, 0xffff, 0xffff, 0, u8(round == 0 ? 1 : 2)});
++		steps.push_back({who, 16, 400, G, 0xffff, 0xffff, 0, 0});
++		break;
++	}
++	case 1:
++		steps.push_back({0, 14, 0, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 14, 50, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({0, 16, 150, G, 0xffff, 0xffff, 0, 0});
++		break;
++	case 2:
++		steps.push_back({1, 14, 0, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 15, 50, G, 0xffff, 0xffff, 0, 1});
++		steps.push_back({1, 16, 400, G, 0xffff, 0xffff, 0, 0});
++		break;
++	case 3:
++		break; // the pickups above
++	default:
++		steps.push_back({0, 15, 0, G, 0xffff, 0xffff, 0, 3});
++		steps.push_back({0, 14, 50, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({0, 15, 100, G, 0xffff, 0xffff, 0, 3});
++		steps.push_back({1, 14, 150, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({0, 16, 200, G, 0xffff, 0xffff, 0, 0});
++		steps.push_back({1, 16, 250, G, 0xffff, 0xffff, 0, 0});
++		break;
++	}
++	const u64 claim_tick = g_host->tick + 100;
++	std::vector<u8> payload;
++	put_u8(payload, u8(round));
++	put_u8(payload, u8(round));
++	for (int b = 0; b < 8; ++b)
++		payload.push_back(u8(claim_tick >> (8 * b)));
++	put_u8(payload, u8(steps.size()));
++	string512 detail = "";
++	for (const TransferStep& st : steps)
++	{
++		put_u8(payload, st.slot);
++		put_u8(payload, st.action);
++		put_u16(payload, st.offset);
++		put_ref(payload, st.item);
++		put_ref(payload, st.from);
++		put_ref(payload, st.to);
++		put_u8(payload, st.flags);
++		put_u8(payload, st.extra);
++		string64 one;
++		xr_sprintf(one, " %u:%u@%u:%u:x%u", u32(st.slot), u32(st.action), u32(st.offset), u32(st.item), u32(st.extra));
++		xr_strcat(detail, one);
++	}
++	broadcast_event(7, payload);
++	g_host->log.line("fixture-talk-round round=%u claim_tick=%I64u steps=%u%s", round, claim_tick, u32(steps.size()), detail);
++}
++
+ void pickup_fixtures()
+ {
+ 	const CoopConfig& config = g_host->config;
+@@ -9877,6 +10716,7 @@ void on_left(const coop::session::SessionEvent& e)
+ 		detached = g_campaign_identity->detach_session(g_campaign_identity->authority(), link->session, Device.dwFrame);
+ 	link->session = 0;
+ 	travel_on_left(*link); // S09-T01: a proposal it is party to is aborted
++	talk_close(*link, "left", false); // S10-T04a: the NPC is free again
+ 	// Detached-actor policy: the actor stays, vulnerable, and moves only by
+ 	// input, which arrives only on an attached session.
+ 	CActor* actor = participant_actor(link->ref);
+@@ -9948,6 +10788,12 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_travel_answer(*link, *intent, result); // S09-T01
+ 		else if (intent->kind == coop::proto::kActionTravelReady)
+ 			reason = take_travel_ready(*link, *intent, result); // S09-T03
++		else if (intent->kind == coop::proto::kActionTalkStart)
++			reason = take_talk_start(*link, *intent, result); // S10-T04a
++		else if (intent->kind == coop::proto::kActionTalkSay)
++			reason = take_talk_say(*link, *intent, result);
++		else if (intent->kind == coop::proto::kActionTalkEnd)
++			reason = take_talk_end(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionQuest)
+ 		{
+ 			reason = take_quest(*link, *intent, result); // S08-T04
+@@ -10251,6 +11097,26 @@ bool coop_server_friendly_fire()
+ 	return !g_host || g_host->config.friendly_fire != 0;
+ }
+ 
++// S10-T04a: see the talk section.
++bool coop_server_dialogue_action(LPCSTR action, const CGameObject* speaker, const CGameObject* listener, LPCSTR dialog_id,
++	LPCSTR phrase_id)
++{
++	if (!g_host || !g_host->started || !s_talk_link)
++		return false;
++	return talk_quest_action(*s_talk_link, action, speaker, listener, dialog_id, phrase_id);
++}
++
++bool coop_server_dialogue_answer(CInventoryOwner* speaker, LPCSTR text)
++{
++	if (!g_host || !g_host->started)
++		return false;
++	if (s_talk_link)
++		talk_answer(*s_talk_link, false, text);
++	else
++		g_host->log.line("talk-answer-orphan text=%s", text ? text : "");
++	return true; // the server has no talk window
++}
++
+ void coop_server_on_death(CEntityAlive* victim, CObject* killer)
+ {
+ 	if (!g_host || !g_host->started || !victim || !ai().get_alife())
+@@ -10842,6 +11708,8 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	send_party_tasks(); // S08-T09
+ 	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
+ 	quest_fixtures(); // S08-T04
++	talk_tick(); // S10-T04a: a talk ends with its actor, its NPC or its reach
++	talk_fixtures();
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+ 	travel_hold_tick(); // S09-T03: the resume once both clients are ready
+@@ -10928,6 +11796,7 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 			poll_publications(true);
+ 		}
+ 		log_status("final");
++		log_talk_summary(); // S10-T04a
+ 		log_pickup_state("final"); // S08-T01
+ 		log_inventory_state("final"); // S08-T07
+ 		log_container_state("final"); // S08-T08
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 538e950..6c26b65 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -20,6 +20,8 @@
+ 
+ class CEntityAlive;
+ class CObject;
++class CGameObject;
++class CInventoryOwner;
+ 
+ namespace campaign
+ {
+@@ -41,4 +43,14 @@ bool coop_server_friendly_fire();
+ // (docs/persistence-contract.md §6 `death`): committed to the journal from
+ // CEntityAlive::Die. No-op on a client or in single-player.
+ void coop_server_on_death(::CEntityAlive* victim, ::CObject* killer);
++// S10-T04a: a dialogue phrase's script action about to run on the campaign
++// server (CDialogScriptHelper::Action): true when the server took it over
++// (the party quest's accept and turn-in run through the S08 party path
++// instead of the talking player's context). False elsewhere: it runs natively.
++bool coop_server_dialogue_action(LPCSTR action, const ::CGameObject* speaker, const ::CGameObject* listener,
++	LPCSTR dialog_id, LPCSTR phrase_id);
++// S10-T04a: an NPC's reply in a dialogue (CAI_PhraseDialogManager::AnswerPhrase):
++// true when the campaign server recorded it for the talking player's window
++// (there is no talk window in the server process). False elsewhere.
++bool coop_server_dialogue_answer(::CInventoryOwner* speaker, LPCSTR text);
+ } // namespace campaign
+diff --git a/src/xrGame/PhraseScript.cpp b/src/xrGame/PhraseScript.cpp
+index 90bbe53..aa15700 100644
+--- a/src/xrGame/PhraseScript.cpp
++++ b/src/xrGame/PhraseScript.cpp
+@@ -11,6 +11,7 @@
+ #include "ai_debug.h"
+ #include "ui/xrUIXmlParser.h"
+ #include "actor.h"
++#include "CoopServerHost.h" // S10-T04a: the campaign server's dialogue hook
+ 
+ 
+ //загрузка из XML файла
+@@ -261,6 +262,10 @@ void CDialogScriptHelper::Action(const CGameObject* pSpeakerGO1, const CGameObje
+ 	{
+ 		::luabind::functor<void> lua_function;
+ 		THROW(*Actions()[i]);
++		// S10-T04a: on the campaign server the party quest's accept and turn-in
++		// actions of a player's talk run through the party path, not here
++		if (campaign::coop_server_dialogue_action(*Actions()[i], pSpeakerGO1, pSpeakerGO2, dialog_id, phrase_id))
++			continue;
+ 
+ #ifdef DIALOG_UPGRADE
+ 		::luabind::object parameters_table = ::luabind::newtable(ai().script_engine().lua());
+diff --git a/src/xrGame/actor_communication.cpp b/src/xrGame/actor_communication.cpp
+index 5bdb38b..53273b4 100644
+--- a/src/xrGame/actor_communication.cpp
++++ b/src/xrGame/actor_communication.cpp
+@@ -2,6 +2,7 @@
+ #include "actor.h"
+ #include "CampaignActorAccess.h"
+ #include "CampaignScriptContext.h"
++#include "CoopClientLink.h" // S10-T04a: a co-op client's talk
+ #include "UIGameSP.h"
+ #include "PDA.h"
+ #include "level.h"
+@@ -132,6 +133,11 @@ void CActor::RunTalkDialog(CInventoryOwner* talk_partner, bool disable_break)
+ 		campaign::dialogue_open(this, talk_partner, talk_partner->bDisableBreakDialog);
+ 		return;
+ 	}
++	// S10-T04a: a co-op client's talk is the server's dialogue: the USE key
++	// becomes the talk-start intent and the window opens on the server's word
++	// (CoopClientLink: the remote talk window); nothing runs locally
++	if (campaign::coop_client_talk_start(talk_partner))
++		return;
+ 	//предложить поговорить с нами
+ 	if (talk_partner->OfferTalk(this))
+ 	{
+diff --git a/src/xrGame/ui/UITalkWnd.cpp b/src/xrGame/ui/UITalkWnd.cpp
+index 62d71e0..98e1e2f 100644
+--- a/src/xrGame/ui/UITalkWnd.cpp
++++ b/src/xrGame/ui/UITalkWnd.cpp
+@@ -19,6 +19,7 @@
+ #include "../../xrEngine/cameraBase.h"
+ #include "UIXmlInit.h"
+ #include "UI3tButton.h"
++#include "../CoopClientLink.h" // S10-T04a: the remote mode
+ 
+ CUITalkWnd::CUITalkWnd()
+ {
+@@ -35,6 +36,10 @@ CUITalkWnd::CUITalkWnd()
+ 	InitTalkWnd();
+ 	m_bNeedToUpdateQuestions = false;
+ 	b_disable_break = false;
++	m_remote = false;
++	m_remote_waiting = false;
++	m_remote_count = 0;
++	m_remote_partner = NULL;
+ }
+ 
+ CUITalkWnd::~CUITalkWnd()
+@@ -54,6 +59,36 @@ void CUITalkWnd::InitTalkWnd()
+ 
+ void CUITalkWnd::InitTalkDialog()
+ {
++	if (m_remote)
++	{
++		// S10-T04a: the server's dialogue: no dialog managers here; the local
++		// actor and the partner replica take the talking state single player
++		// gives them (no input to the actor while the window is up)
++		m_pActor = Actor();
++		m_pOurInvOwner = smart_cast<CInventoryOwner*>(m_pActor);
++		m_pOthersInvOwner = m_remote_partner;
++		m_pOurDialogManager = NULL;
++		m_pOthersDialogManager = NULL;
++		if (!m_pActor || !m_pOurInvOwner || !m_pOthersInvOwner)
++		{
++			m_remote = false;
++			return;
++		}
++		UITalkDialogWnd->UICharacterInfoLeft.InitCharacter(m_pOurInvOwner->object_id());
++		UITalkDialogWnd->UICharacterInfoRight.InitCharacter(m_pOthersInvOwner->object_id());
++		UITalkDialogWnd->ClearAll();
++		ToTopicMode();
++		m_bNeedToUpdateQuestions = false;
++		m_remote_waiting = false;
++		m_remote_count = 0;
++		m_pOthersInvOwner->StartTalk(m_pOurInvOwner);
++		m_pActor->StartTalk(m_pOthersInvOwner);
++		UITalkDialogWnd->mechanic_mode = false;
++		UITalkDialogWnd->SetOsoznanieMode(false);
++		UITalkDialogWnd->Show();
++		UITalkDialogWnd->UpdateButtonsLayout(b_disable_break, false);
++		return;
++	}
+ 	m_pActor = Actor();
+ 	if (m_pActor && !m_pActor->IsTalking()) return;
+ 
+@@ -108,6 +143,14 @@ void CUITalkWnd::NeedUpdateQuestions()
+ 
+ void CUITalkWnd::UpdateQuestions()
+ {
++	if (m_remote)
++	{
++		// S10-T04a: the lists come from the server; the native refresh (flagged by
++		// CActor::OnReceiveInfo for the ui_talk_show portion, ReceivePhrase) has
++		// no dialog managers here
++		m_bNeedToUpdateQuestions = false;
++		return;
++	}
+ 	UITalkDialogWnd->ClearQuestions();
+ 
+ 	//если нет активного диалога, то
+@@ -161,11 +204,13 @@ void CUITalkWnd::SendMessage(CUIWindow* pWnd, s16 msg, void* pData)
+ {
+ 	if (pWnd == UITalkDialogWnd && msg == TALK_DIALOG_TRADE_BUTTON_CLICKED)
+ 	{
+-		SwitchToTrade();
++		if (!m_remote) // S10-T04a: trade is S10-T04c
++			SwitchToTrade();
+ 	}
+ 	else if (pWnd == UITalkDialogWnd && msg == TALK_DIALOG_UPGRADE_BUTTON_CLICKED)
+ 	{
+-		SwitchToUpgrade();
++		if (!m_remote)
++			SwitchToUpgrade();
+ 	}
+ 	else if (pWnd == UITalkDialogWnd && msg == TALK_DIALOG_QUESTION_CLICKED)
+ 	{
+@@ -221,9 +266,11 @@ void CUITalkWnd::Update()
+ 		UpdateQuestions();
+ 	}
+ 	inherited::Update();
++	if (!m_pOthersInvOwner)
++		return; // S10-T04a: hidden this frame
+ 	UpdateCameraDirection(smart_cast<CGameObject*>(m_pOthersInvOwner));
+ 
+-	UITalkDialogWnd->UpdateButtonsLayout(b_disable_break, m_pOthersInvOwner->IsTradeEnabled());
++	UITalkDialogWnd->UpdateButtonsLayout(b_disable_break, !m_remote && m_pOthersInvOwner->IsTradeEnabled());
+ 
+ 	if (playing_sound())
+ 	{
+@@ -260,9 +307,64 @@ void CUITalkWnd::Show(bool status)
+ 
+ 			m_pActor = NULL;
+ 		}
++		if (m_remote)
++		{
++			// S10-T04a: the partner replica's talking state ends with the window;
++			// a close by the player (not the server's) sends the end intent
++			if (m_pOthersInvOwner && m_pOthersInvOwner->IsTalking())
++				m_pOthersInvOwner->StopTalk();
++			m_remote = false;
++			m_remote_partner = NULL;
++			m_pOthersInvOwner = NULL;
++			m_pOurInvOwner = NULL;
++			campaign::coop_client_talk_closed();
++		}
+ 	}
+ }
+ 
++// S10-T04a ------------------------------------------------------------------
++
++void CUITalkWnd::RemoteBegin(CInventoryOwner* partner)
++{
++	m_remote = true;
++	m_remote_partner = partner;
++}
++
++void CUITalkWnd::RemoteQuestions(bool clear, bool topic_mode)
++{
++	if (!m_remote)
++		return;
++	if (clear)
++	{
++		UITalkDialogWnd->ClearQuestions();
++		m_remote_count = 0;
++	}
++	m_remote_waiting = false;
++	(void)topic_mode;
++}
++
++void CUITalkWnd::RemoteAddQuestion(LPCSTR text, LPCSTR id, bool b_finalizer)
++{
++	if (!m_remote)
++		return;
++	AddQuestion(shared_str(text), shared_str(id), m_remote_count++, b_finalizer);
++}
++
++void CUITalkWnd::RemoteAnswer(LPCSTR text, bool ours)
++{
++	if (!m_remote || !text || !text[0] || !m_pOurInvOwner || !m_pOthersInvOwner)
++		return;
++	PlaySnd(text);
++	UITalkDialogWnd->AddAnswer(ours ? m_pOurInvOwner->Name() : m_pOthersInvOwner->Name(), *CStringTable().translate(text),
++		ours);
++}
++
++void CUITalkWnd::RemoteClose()
++{
++	if (m_remote && IsShown())
++		HideDialog();
++}
++
+ bool CUITalkWnd::TopicMode()
+ {
+ 	return NULL == m_pCurrentDialog.get();
+@@ -275,6 +377,15 @@ void CUITalkWnd::ToTopicMode()
+ 
+ void CUITalkWnd::AskQuestion()
+ {
++	if (m_remote)
++	{
++		// S10-T04a: the click is the say intent; the next list comes from the server
++		if (m_remote_waiting)
++			return;
++		m_remote_waiting = true;
++		campaign::coop_client_talk_say(UITalkDialogWnd->m_ClickedQuestionID.c_str());
++		return;
++	}
+ 	if (m_bNeedToUpdateQuestions) return; //quick dblclick:(
+ 	shared_str phrase_id;
+ 
+@@ -335,6 +446,8 @@ void CUITalkWnd::AddAnswer(const shared_str& text, LPCSTR SpeakerName)
+ 
+ void CUITalkWnd::SwitchToTrade()
+ {
++	if (m_remote)
++		return; // S10-T04a: trade is S10-T04c
+ 	if (m_pOurInvOwner->IsTradeEnabled() && m_pOthersInvOwner->IsTradeEnabled())
+ 	{
+ 		CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());
+@@ -351,6 +464,8 @@ void CUITalkWnd::SwitchToTrade()
+ 
+ void CUITalkWnd::SwitchToUpgrade()
+ {
++	if (m_remote)
++		return; // S10-T04a
+ 	//if ( m_pOurInvOwner->IsInvUpgradeEnabled() && m_pOthersInvOwner->IsInvUpgradeEnabled() )
+ 	{
+ 		CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());
+diff --git a/src/xrGame/ui/UITalkWnd.h b/src/xrGame/ui/UITalkWnd.h
+index d187adf..d6216c3 100644
+--- a/src/xrGame/ui/UITalkWnd.h
++++ b/src/xrGame/ui/UITalkWnd.h
+@@ -57,6 +57,19 @@ public:
+ 	void SwitchToUpgrade();
+ 	void AddIconedMessage(LPCSTR caption, LPCSTR text, LPCSTR texture_name, LPCSTR templ_name);
+ 
++	// S10-T04a: the remote mode on a co-op client: the dialogue runs on the
++	// campaign server (CoopClientLink); this window shows the lists and the
++	// answers the server sends and sends what the player clicks. No local
++	// dialog managers, no trade or upgrade. RemoteBegin before ShowDialog;
++	// the lists and answers come in as CampaignEvent 14; RemoteClose hides
++	// the window on the server's word (a close by the player sends the end).
++	void RemoteBegin(CInventoryOwner* partner);
++	void RemoteQuestions(bool clear, bool topic_mode);
++	void RemoteAddQuestion(LPCSTR text, LPCSTR id, bool b_finalizer);
++	void RemoteAnswer(LPCSTR text, bool ours);
++	void RemoteClose();
++	bool Remote() const { return m_remote; }
++
+ protected:
+ 	//диалог
+ 	void InitTalkDialog();
+@@ -85,4 +98,10 @@ protected:
+ 	DIALOG_SHARED_PTR m_pCurrentDialog;
+ 	bool TopicMode();
+ 	void ToTopicMode();
++
++	// S10-T04a
++	bool m_remote;
++	bool m_remote_waiting; // a click was sent; the next list is awaited (no double sends)
++	int m_remote_count; // questions in the current list
++	CInventoryOwner* m_remote_partner;
+ };

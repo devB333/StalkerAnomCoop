@@ -1,0 +1,566 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index fefb757..2266219 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -827,6 +827,7 @@ LPCSTR presentation_name(Presentation kind)
+ 	case Presentation::HudStaticText: return "hud-static-text";
+ 	case Presentation::SoundTail: return "sound-tail"; // S10-T07
+ 	case Presentation::ZoneState: return "zone-state"; // S10-T07 (B23)
++	case Presentation::TorchState: return "torch-state"; // S10-T07 (B48)
+ 	default: return "?";
+ 	}
+ }
+@@ -2519,6 +2520,7 @@ void script_register_context(lua_State* L)
+ 		def("client_companion_order", &coop_client_companion_order), // S10-T07 (B12)
+ 		def("client_trade_donate", &coop_client_trade_donate), // S10-T07 (G10)
+ 		def("client_field_repair", &coop_client_field_repair),
++		def("client_torch", &coop_client_torch), // S10-T07 (B48)
+ 		def("menu_available", &coop_menu_available), // S11-T00
+ 		def("menu_can_host", &coop_menu_can_host),
+ 		def("menu_join", &coop_menu_join),
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 2165c84..ac37ffd 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -304,6 +304,7 @@ enum class Presentation : u8
+ 	HudStaticText, // detail: "<name>|<text>" (cut to 127 characters)
+ 	SoundTail, // S10-T07 (B18): handle; detail: the next sound chained after it (sound_object:attach_tail)
+ 	ZoneState, // S10-T07 (B23): object: the zone; flags: its EZoneState (CCustomZone::OnStateSwitch on the server)
++	TorchState, // S10-T07 (B48): object: a player's torch; flags: 1 on, 0 off (take_torch on the server)
+ 	Count,
+ };
+ 
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 53585b4..7811427 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -63,6 +63,7 @@
+ #include "ai/monsters/ai_monster_utils.h"
+ #include "ai/monsters/pseudogigant/pseudo_gigant.h" // S10-T02e
+ #include "Inventory.h"
++#include "Torch.h" // S10-T07 (B48)
+ #include "inventory_item.h" // S08-T02
+ #include "eatable_item.h" // S08-T07
+ #include "WeaponAmmo.h" // S08-T08
+@@ -1131,6 +1132,7 @@ void on_sleep(const coop::proto::CampaignEvent& event); // S10-T03c
+ void sleep_frame();
+ bool sleep_key_press(int key);
+ void relocate_frame(); // S10-T03d
++void torch_test_frame(); // S10-T07 (B48)
+ void on_talk(const coop::proto::CampaignEvent& event); // S10-T04a
+ void talk_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
+ void talk_session_reset(LPCSTR why);
+@@ -1324,6 +1326,7 @@ void world_frame()
+ 		travel_frame(); // S09-T01
+ 		sleep_frame(); // S10-T03c
+ 		relocate_frame(); // S10-T03d
++		torch_test_frame(); // S10-T07 (B48)
+ 		pickup_frame(); // S08-T01
+ 		layout_frame(); // S08-T07
+ 		amounts_frame(); // S08-T08
+@@ -3700,6 +3703,21 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 				zone->cNameSect().c_str(), flags, on ? 1 : 0, serial);
+ 		break;
+ 	}
++	case campaign::Presentation::TorchState:
++	{
++		// S10-T07 (B48): a player's torch as the server switched it (the own
++		// one and the partner's)
++		CTorch* torch = smart_cast<CTorch*>(Level().Objects.net_Find(object));
++		if (!torch)
++		{
++			applied = "refused";
++			break;
++		}
++		torch->Switch(flags == 1);
++		g_link->log.line("torch-state torch=%u on=%u parent=%u serial=%u", u32(object), flags,
++			torch->H_Parent() ? u32(torch->H_Parent()->ID()) : 0xffffu, serial);
++		break;
++	}
+ 	case campaign::Presentation::HudStaticAdd:
+ 	case campaign::Presentation::HudStaticRemove:
+ 	case campaign::Presentation::HudStaticText:
+@@ -4614,6 +4632,13 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 						"The repair was refused: an item is no longer in your inventory.", 5);
+ 				g_link->log.line("field-repair-result outcome=%u reason=%u", u32(result.outcome), u32(result.reason));
+ 			}
++			if (p.action == coop::proto::kActionTorch)
++			{
++				// S10-T07 (B48)
++				if (result.outcome == coop::proto::ActionOutcome::Rejected)
++					travel_hud("The torch did not switch: put a torch in your torch slot.", 4);
++				g_link->log.line("torch-result outcome=%u reason=%u", u32(result.outcome), u32(result.reason));
++			}
+ 			if ((p.action == coop::proto::kActionSleepRequest || p.action == coop::proto::kActionSleepAnswer) &&
+ 				result.outcome == coop::proto::ActionOutcome::Rejected)
+ 			{
+@@ -4645,7 +4670,7 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				p.action == coop::proto::kActionSleepAnswer || p.action == coop::proto::kActionTravelRequest ||
+ 				p.action == coop::proto::kActionTravelAnswer || p.action == coop::proto::kActionTravelReady ||
+ 				p.action == coop::proto::kActionRelocate || p.action == coop::proto::kActionSession ||
+-				p.action == coop::proto::kActionFieldRepair;
++				p.action == coop::proto::kActionFieldRepair || p.action == coop::proto::kActionTorch;
+ 			if (p.action == coop::proto::kActionUpgradeOpen || p.action == coop::proto::kActionUpgrade)
+ 				upgrade_result(p, result); // S10-T04f
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+@@ -6624,6 +6649,42 @@ bool relocate_actor(CActor* actor, const Fvector& at)
+ 	return relocate_request(at, lvid, gvid, 1);
+ }
+ 
++// S10-T07 (B48) driver: the L key's torch press (the installed
++// actor_effects.Hit_TorchToggle, its animation included), and again 12 s later
++void torch_test_frame()
++{
++	static u32 presses = 0;
++	if (!g_link->config.torch_test || presses >= 2 || g_link->world != WorldLive || !g_actor ||
++		g_link->wall.GetElapsed_ms() < g_link->live_ms + (g_link->config.torch_test + presses * 12) * 1000)
++		return;
++	++presses;
++	LPCSTR chunk = "local t = db.actor:item_in_slot(10) "
++		"coop_torch_test_slot = t and t:section() or 'none' "
++		"actor_effects.Hit_TorchToggle()";
++	lua_State* L = ai().script_engine().lua();
++	bool ok = false;
++	if (L && luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_torch_test") == 0)
++	{
++		ok = lua_pcall(L, 0, 0, 0) == 0;
++		if (!ok)
++		{
++			g_link->log.line("torch-test-error %s", lua_tostring(L, -1));
++			lua_pop(L, 1);
++		}
++	}
++	else if (L)
++		lua_pop(L, 1);
++	LPCSTR slot = "?";
++	if (L)
++	{
++		lua_getglobal(L, "coop_torch_test_slot");
++		if (lua_isstring(L, -1))
++			slot = lua_tostring(L, -1);
++		g_link->log.line("torch-test press=%u ran=%d slot10=%s", presses, ok ? 1 : 0, slot);
++		lua_pop(L, 1);
++	}
++}
++
+ // S10-T03d driver: what a same-level fast travel does, once
+ void relocate_frame()
+ {
+@@ -7813,6 +7874,17 @@ void session_menu_install()
+ 		"    self:OnCancel() "
+ 		"  end "
+ 		"end "
++		// S10-T07 (B48): the L key's torch (actor_effects.Hit_TorchToggle, its animation as installed) asks the
++		// server for the opposite of the light this client shows; the installed toggle keeps its own state
++		"local idv_ok, IDV = pcall(function() return item_device end) "
++		"if idv_ok and type(IDV) == 'table' and IDV.toggle_torch and campaign.client_torch then "
++		"  local toggle = IDV.toggle_torch "
++		"  IDV.toggle_torch = function(...) "
++		"    toggle(...) "
++		"    local torch = db.actor and db.actor:item_in_slot(10) "
++		"    if torch then campaign.client_torch(torch:id(), not torch:torch_enabled()) end "
++		"  end "
++		"end "
+ 		"__coop_session_menu = true "
+ 		"end";
+ 	session_lua(chunk, "coop_session_menu");
+@@ -8480,6 +8552,25 @@ bool coop_client_field_repair(int kit, int item, int part, int expected_pct)
+ 	return true;
+ }
+ 
++// S10-T07 (B48): the L key's torch switch (item_device.toggle_torch, wrapped
++// in the session chunk) asks the server; the light comes back as TorchState
++bool coop_client_torch(int torch, bool on)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || torch < 0 || torch >= 0xffff)
++		return false;
++	coop::proto::EntityRef ref;
++	if (!ref_of(u16(torch), ref))
++	{
++		g_link->log.line("torch-unknown torch=%d", torch);
++		return false;
++	}
++	xr_vector<u8> params;
++	params.push_back(on ? 1 : 0);
++	request_ownership(coop::proto::kActionTorch, ref, params, 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("torch-sent torch=%d on=%d", torch, on ? 1 : 0);
++	return true;
++}
++
+ bool coop_client_trade_donate(bool on)
+ {
+ 	if (!g_link || !g_link->active)
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 1b617fe..38c0f10 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -83,6 +83,7 @@ void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16
+ bool coop_client_trade_donate(bool on);
+ // G10: a repair kit's window (item_repair) asks the server for the repair (ActionIntent 29); part -1: none
+ bool coop_client_field_repair(int kit, int item, int part, int expected_pct);
++bool coop_client_torch(int torch, bool on); // S10-T07 (B48)
+ void coop_client_trade_closed();
+ // S10-T04f: the upgrade window on the server's upgrade session. The remote
+ // talk window's upgrade button asks the server to open it (the native window
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 600324f..a8a645f 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -162,6 +162,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.talk_variant = ini.line_exist("coop", "talk_variant") ? ini.r_u32("coop", "talk_variant") : 0;
+ 		out.info_party = ini.line_exist("coop", "info_party") ? ini.r_u32("coop", "info_party") : 0; // S10-T04b
+ 		out.task_party = ini.line_exist("coop", "task_party") ? ini.r_u32("coop", "task_party") : 0; // S10-T05b
++		out.demo_quest = ini.line_exist("coop", "demo_quest") ? ini.r_u32("coop", "demo_quest") : 0; // demo aid
+ 		out.place_giver = ini.line_exist("coop", "place_giver") ? ini.r_u32("coop", "place_giver") : 0; // demo aid
+ 		out.trade_party = ini.line_exist("coop", "trade_party") ? ini.r_u32("coop", "trade_party") : 0; // S10-T04c
+ 		out.upgrade_party = ini.line_exist("coop", "upgrade_party") ? ini.r_u32("coop", "upgrade_party") : 0; // S10-T04f
+@@ -222,6 +223,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_ready_wrong = ini.line_exist("coop", "travel_ready_wrong") ? ini.r_u32("coop", "travel_ready_wrong") : 0;
+ 		out.travel_rejoin_delay = ini.line_exist("coop", "travel_rejoin_delay") ? ini.r_u32("coop", "travel_rejoin_delay") : 0; // S09-T04
+ 		out.travel_load_fail = ini.line_exist("coop", "travel_load_fail") ? ini.r_u32("coop", "travel_load_fail") : 0;
++		out.torch_test = ini.line_exist("coop", "torch_test") ? ini.r_u32("coop", "torch_test") : 0; // S10-T07 (B48)
+ 		out.relocate_test = ini.line_exist("coop", "relocate_test") ? ini.r_u32("coop", "relocate_test") : 0; // S10-T03d
+ 		out.session_script = ini.line_exist("coop", "session_script") ? ini.r_u32("coop", "session_script") : 0; // S10-T06
+ 		out.companion_test = ini.line_exist("coop", "companion_test") ? ini.r_u32("coop", "companion_test") : 0; // S10-T07
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 01b7940..b9bdd40 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -122,6 +122,8 @@ struct CoopConfig
+ 	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
++	u32 demo_quest; // S10-T07 hands-on aid: with place_giver, the party accepts Sidorovich's "Mobbing the Mob" and
++	                // carries its bandit patches, ready to turn in (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
+ 	u32 companion_party; // S10-T02f fixture: seconds after both attach until p2 recruits a companion (or a restored one is checked)
+ 	u32 alife_party; // S10-T03a fixture: seconds after both attach until the ALife identity fixture starts (or a restored one is checked)
+@@ -166,6 +168,8 @@ struct CoopConfig
+ 	u32 script; // 1: S05-T03 look/walk/screenshot driver; 2: S06-T01 movement validation program
+ 	u32 predict; // S06-T03: 1 predicts the own actor (default), 0 waits for the server
+ 	u32 auto_respawn; // S07-T07 test driver: seconds after the own death until the client confirms the respawn
++	u32 torch_test; // S10-T07 (B48) test driver: seconds after the world goes live until this client presses the
++	                // torch as the L key does (actor_effects.Hit_TorchToggle), and again 12 s later
+ 	u32 relocate_test; // S10-T03d test driver: seconds after the world goes live until this client does what a
+ 	                   // same-level fast travel does (a 1 h skip, then the own actor's set_actor_position 150 m away)
+ 	u32 travel_ready_delay; // S09-T03 test driver: seconds after arriving on a travel's destination level until the
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 5311550..cf33823 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -32,6 +32,7 @@
+ #include "coop/proto/input_queue.h"
+ #include "coop/proto/snapshot.h"
+ #include "CustomMonster.h"
++#include "Torch.h" // S10-T07 (B48)
+ #include "PhysicsShellHolder.h"
+ #include "../xrPhysics/PhysicsShell.h"
+ #include "coop/session/server.h"
+@@ -440,6 +441,7 @@ struct Host
+ 	xr_string join_code_text; // ...as the file holds it
+ 	u32 roster_at_start = 0; // S11-T00: 0: a dedicated server (the first player to join owns it)
+ 	u64 field_repairs = 0; // S10-T07 (G10)
++	u64 torch_switches = 0; // S10-T07 (B48)
+ 	// S08-T09: the party's tasks as presented to the players
+ 	struct PartyFinished
+ 	{
+@@ -726,6 +728,8 @@ struct Host
+ 	// the hands-on aid place_giver (start-coop-demo.sh)
+ 	u64 demo_place_since = 0;
+ 	bool demo_placed = false;
++	u64 demo_quest_at = 0; // S10-T07: demo_quest, once
++	bool demo_quest_done = false;
+ 	// S10-T04c: the door and trade fixture
+ 	struct TradeFixture
+ 	{
+@@ -8405,6 +8409,29 @@ void send_party_tasks()
+ 		}
+ 		if (zones)
+ 			g_host->log.line("zone-states-joined to=%u zones=%u", u32(link.ref.slot), zones);
++		// S10-T07 (B48): the players' lit torches
++		u32 torches = 0;
++		for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		{
++			CTorch* torch = smart_cast<CTorch*>(Level().Objects.o_get_by_iterator(i));
++			if (!torch || torch->getDestroy() || !torch->torch_active() || !smart_cast<CActor*>(torch->H_Parent()))
++				continue;
++			std::vector<u8> p;
++			put_u8(p, u8(campaign::Presentation::TorchState));
++			put_u16(p, u16(torch->ID()));
++			put_u32(p, 0);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_f32(p, 0.f);
++			put_u32(p, 1);
++			put_u32(p, 0);
++			put_str(p, "");
++			queue_event(link, kEventPresentation, p);
++			++torches;
++		}
++		if (torches)
++			g_host->log.line("torches-joined to=%u torches=%u", u32(link.ref.slot), torches);
+ 	}
+ }
+ 
+@@ -11752,6 +11779,96 @@ void demo_place_tick()
+ 	}
+ }
+ 
++// A hands-on aid (start-coop-demo.sh, profile demo_quest = 1 with place_giver):
++// 5 s after both actors stand in front of Sidorovich, the party accepts his
++// "Mobbing the Mob" (esc_m_trader_task_3) as a talk would (the installed
++// accept phrases in participant 1's context, take_quest's path), and the
++// bandit patches it asks for go into the players' inventories, split between
++// them (the turn-in takes from both, S08-T04): the task is ready to turn in.
++void demo_quest_tick()
++{
++	const CoopConfig& config = g_host->config;
++	static u64 check_at = 0;
++	if (check_at && g_host->tick >= check_at)
++	{
++		// what a turn-in checks first (take_quest op 2): stage 1 is finished
++		check_at = 0;
++		CActor* holder = nullptr;
++		for (PlayerLink& l : g_host->links)
++			if (l.bound && l.ref.slot == 0)
++				holder = participant_actor(l.ref);
++		s32 stage = -1;
++		if (holder)
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "demo-quest-check");
++			lua_call_ok("campaign_party_check", stage, (LPCSTR)"esc_m_trader_task_3");
++		}
++		const Host::PartyTask* t = party_task("esc_m_trader_task_3");
++		g_host->log.line("demo-quest ready stage=%d count=%d need=%d", stage, t ? t->count : -1, t ? t->need : -1);
++	}
++	if (!config.demo_quest || !g_host->demo_placed || g_host->demo_quest_done || !ai().get_alife())
++		return;
++	if (!g_host->demo_quest_at)
++		g_host->demo_quest_at = g_host->tick + 5 * 50;
++	if (g_host->tick < g_host->demo_quest_at)
++		return;
++	g_host->demo_quest_done = true;
++	LPCSTR task = "esc_m_trader_task_3";
++	PlayerLink* first = nullptr;
++	CActor* actors[2] = {nullptr, nullptr};
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot < 2)
++		{
++			actors[l.ref.slot] = participant_actor(l.ref);
++			if (l.ref.slot == 0)
++				first = &l;
++		}
++	const u16 giver_id = find_giver();
++	CGameObject* npc = giver_id != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(giver_id)) : nullptr;
++	CInventoryOwner* owner = npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++	if (!first || !actors[0] || !actors[1] || !owner || party_task(task))
++	{
++		g_host->log.line("demo-quest skipped first=%d actors=%d,%d giver=%d active=%d", first ? 1 : 0, actors[0] ? 1 : 0,
++			actors[1] ? 1 : 0, owner ? 1 : 0, party_task(task) ? 1 : 0);
++		return;
++	}
++	sync_party_actors();
++	bool ok = false;
++	const campaign::Refusal opened = campaign::dialogue_open(actors[0], owner, false);
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actors[0]), "demo-quest-accept");
++		ok = opened == campaign::Refusal::None && quest_accept_phrases(actors[0], npc, task);
++	}
++	campaign::dialogue_close(actors[0], owner);
++	CGameTask* native = Level().GameTaskManager().HasGameTask(shared_str(task), true);
++	if (!ok || !native)
++	{
++		g_host->log.line("demo-quest not-offered dialogue=%s ok=%d native=%d", campaign::refusal_name(opened), ok ? 1 : 0,
++			native ? 1 : 0);
++		return;
++	}
++	party_task_accepted(*first, task, giver_id, actors[0], 0);
++	// the number the task asks for (the party task's own count is filled later)
++	s32 need = -1;
++	lua_call_ok("campaign_party_need", need, task);
++	if (need <= 0)
++		need = 12; // the fetch's most (setup_supplies_fetch_task_lostzone_patch 6:12)
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	u32 given[2] = {0, 0};
++	for (s32 i = 0; i < need; ++i)
++	{
++		const u32 k = u32(i) % 2;
++		const CSE_ALifeDynamicObject* se = ai().alife().objects().object(u16(actors[k]->ID()), true);
++		if (!se)
++			continue;
++		give_item(alife, "bandit_patch", actors[k], se);
++		++given[k];
++	}
++	g_host->log.line("demo-quest accepted task=%s giver=%u need=%d patches=%u,%u", task, u32(giver_id), need, given[0],
++		given[1]);
++	check_at = g_host->tick + 5 * 50;
++}
++
+ // ------------------------------------------------------------ S10-T04c
+ // The door and trade fixture (profile trade_party; a server kill and restart
+ // between its two halves, -ServerKill / -ServerRestartAfter, no publication
+@@ -15010,6 +15127,12 @@ void combat_fixtures()
+ 					give_item(alife, "ammo_5.45x39_fmj", actor, se);
+ 				g_host->log.line("demo-kit slot=%u actor=%u +cleaning_kit_p +itm_tent +itm_sleepbag +wpn_ak74 +3x ammo_5.45x39_fmj",
+ 					u32(link.ref.slot), u32(actor->ID()));
++				// S10-T07 (B48): a headlamp for the L key
++				if (!actor->inventory().ItemFromSlot(TORCH_SLOT))
++				{
++					give_item(alife, "device_torch_dummy", actor, se);
++					g_host->log.line("demo-kit slot=%u actor=%u +device_torch_dummy", u32(link.ref.slot), u32(actor->ID()));
++				}
+ 			}
+ 			g_host->log.line("arm slot=%u actor=%u %s +2x ammo_9x18_fmj", u32(link.ref.slot), u32(actor->ID()),
+ 				has ? actor->inventory().ItemFromSlot(INV_SLOT_2)->object().cNameSect().c_str() : "wpn_pm");
+@@ -15024,6 +15147,16 @@ void combat_fixtures()
+ 						item->object().cNameSect().c_str());
+ 					break;
+ 				}
++		// S10-T07 (B48): the demo kit's headlamp (default_to_ruck) to the torch slot
++		if (g_host->config.demo_kit && link.armed && !actor->inventory().ItemFromSlot(TORCH_SLOT))
++			for (PIItem item : actor->inventory().m_ruck)
++				if (smart_cast<CTorch*>(item) && actor->inventory().CanPutInSlot(item, TORCH_SLOT))
++				{
++					actor->inventory().Slot(TORCH_SLOT, item, true);
++					g_host->log.line("demo-kit slot=%u actor=%u %s to the torch slot", u32(link.ref.slot), u32(actor->ID()),
++						item->object().cNameSect().c_str());
++					break;
++				}
+ 		// S06-T07: both players start with the pistol put away. A new actor
+ 		// (participant 2) took its pistol into empty hands and drew it; the
+ 		// saved actor's was in its slot (act-1)
+@@ -18394,6 +18527,72 @@ u16 take_field_repair(PlayerLink& link, const coop::proto::ActionIntent& intent,
+ 	return 0;
+ }
+ 
++// ------------------------------------------------------------ S10-T07 (B48)
++// A player's torch. The installed L key (actor_effects.Hit_TorchToggle ->
++// item_device.toggle_torch) runs on the player's client; the light itself is
++// item_device's binder's, from one script-wide torch_active that cannot hold
++// two players' torches, and on the server it kept every player's torch off.
++// The client asks (ActionIntent 30), the server switches the torch in its
++// player's own torch slot, the NPCs see it there, and every client shows it
++// (Presentation TorchState). Scripts no longer switch a player's torch
++// (torch_script_gate), except off when its battery is at its critical level.
++void torch_present(CTorch* torch, bool on)
++{
++	campaign::PresentationArgs args;
++	args.flags = on ? 1 : 0;
++	campaign::present_broadcast(campaign::Presentation::TorchState, u16(torch->ID()), "", args);
++}
++
++u16 take_torch(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CActor* actor = nullptr;
++	coop::proto::EntityRef actor_ref;
++	u16 item_id = kNoEngineId;
++	CInventoryItem* item = nullptr;
++	if (const u16 reason = own_inventory_item(link, intent, actor, actor_ref, item_id, item))
++		return reason;
++	if (intent.params.size() != 1 || intent.params[0] > 1)
++		return coop::proto::kReasonMalformed;
++	CTorch* torch = smart_cast<CTorch*>(item);
++	if (!torch || actor->inventory().ItemFromSlot(TORCH_SLOT) != item)
++		return coop::proto::kReasonNotUsable;
++	const bool on = intent.params[0] == 1;
++	const bool was = torch->torch_active();
++	torch->Switch(on);
++	torch_present(torch, on);
++	++g_host->torch_switches;
++	g_host->log.line("torch slot=%u torch=%u section=%s on=%d was=%d condition=%.3f", u32(link.ref.slot), u32(item_id),
++		*item->object().cNameSect(), on ? 1 : 0, was ? 1 : 0, item->GetCondition());
++	result.revision = g_host->commit;
++	return 0;
++}
++
++// A script's enable_torch on the campaign server (CScriptGameObject::enable_torch):
++// true when it is a participant's torch, which only its player switches; a
++// switch off at the battery's critical level (item_device's power_critical,
++// 0.05 by default) goes through and is shown on every client.
++bool torch_script_gate(CTorch* torch, bool value)
++{
++	if (!g_host || !torch || !smart_cast<CActor*>(torch->H_Parent()))
++		return false;
++	if (!value && torch->torch_active())
++	{
++		const float critical = READ_IF_EXISTS(pSettings, r_float, torch->cNameSect(), "power_critical", 0.05f);
++		if (torch->GetCondition() <= critical)
++		{
++			torch->Switch(false);
++			torch_present(torch, false);
++			g_host->log.line("torch-battery-off torch=%u condition=%.3f critical=%.3f", u32(torch->ID()),
++				torch->GetCondition(), critical);
++			return true;
++		}
++	}
++	static u32 ignored = 0;
++	if (torch->torch_active() != value && ++ignored <= 20)
++		g_host->log.line("torch-script-ignored torch=%u on=%d ignored=%u", u32(torch->ID()), value ? 1 : 0, ignored);
++	return true;
++}
++
+ // ------------------------------------------------------------ S10-T07 (B12)
+ // A companion order (ActionIntent 28) from the hotkeys or the companion wheel: the installed axr_companions function
+ // runs on the server in the player's context, on that player's own companions only (each companion follows its
+@@ -19541,6 +19740,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_companion(*link, *intent, result); // S10-T07 (B12)
+ 		else if (intent->kind == coop::proto::kActionFieldRepair)
+ 			reason = take_field_repair(*link, *intent, result); // S10-T07 (G10)
++		else if (intent->kind == coop::proto::kActionTorch)
++			reason = take_torch(*link, *intent, result); // S10-T07 (B48)
+ 		else if (intent->kind == coop::proto::kActionTalkStart)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
+ 		else if (intent->kind == coop::proto::kActionUseObject)
+@@ -19786,6 +19987,12 @@ void disable_power_throttling()
+ }
+ } // namespace
+ 
++// S10-T07 (B48): CScriptGameObject::enable_torch on the campaign server
++bool coop_torch_script(CTorch* torch, bool value)
++{
++	return torch_script_gate(torch, value);
++}
++
+ extern "C" LPCSTR __cdecl xrCoopServer_SaveName();
+ 
+ namespace campaign
+@@ -20911,6 +21118,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 
+ 
+ 	demo_place_tick(); // the hands-on aid
++	demo_quest_tick(); // the hands-on aid: a quest ready to turn in
+ 	update_stall_tick(); // B47: objects near a player whose UpdateCL stopped
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	sleep_tick(); // S10-T03c: the sleep proposal's, and the blackouts
+diff --git a/src/xrGame/script_game_object_inventory_owner.cpp b/src/xrGame/script_game_object_inventory_owner.cpp
+index ba48a09..b4a8a7a 100644
+--- a/src/xrGame/script_game_object_inventory_owner.cpp
++++ b/src/xrGame/script_game_object_inventory_owner.cpp
+@@ -4,6 +4,9 @@
+ 
+ #include "pch_script.h"
+ #include "CoopClientLink.h" // S10-T04f
++#include "CoopReplica.h" // S10-T07 (B48)
++class CTorch;
++bool coop_torch_script(CTorch* torch, bool value); // CoopServerHost.cpp (B48)
+ #include "script_game_object.h"
+ #include "CampaignActorAccess.h"
+ #include "CampaignScriptContext.h"
+@@ -1454,6 +1457,16 @@ void CScriptGameObject::enable_torch(bool value)
+ 		                                "CTorch : cannot access class member enable_torch!");
+ 		return;
+ 	}
++	// S10-T07 (B48): a co-op player's torch is the player's own action (ActionIntent 30): on the server
++	// coop_torch_script decides; on a client the server's TorchState shows it, and the client's own
++	// item_device binder (its one script-wide torch_active) does not switch any actor's torch
++	if (campaign::process_role() == campaign::Role::Server)
++	{
++		if (coop_torch_script(torch, value))
++			return;
++	}
++	else if (campaign::replica_active() && smart_cast<CActor*>(torch->H_Parent()))
++		return;
+ 	torch->Switch(value);
+ }
+ 

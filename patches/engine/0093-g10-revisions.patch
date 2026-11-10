@@ -1,0 +1,1665 @@
+diff --git a/src/xrGame/Actor.cpp b/src/xrGame/Actor.cpp
+index e0bedc0..48e23e5 100644
+--- a/src/xrGame/Actor.cpp
++++ b/src/xrGame/Actor.cpp
+@@ -560,6 +560,8 @@ struct playing_pred
+ 
+ void CActor::Hit(SHit* pHDS)
+ {
++	if (campaign::participant_parked_id(u16(ID())))
++		return; // S10-T07 (G10, T03a-2): a parked player's character cannot be hurt
+ 	bool b_initiated = pHDS->aim_bullet; // physics strike by poltergeist
+ 
+ 	pHDS->aim_bullet = false;
+diff --git a/src/xrGame/ActorCondition.cpp b/src/xrGame/ActorCondition.cpp
+index 99041c7..03ef438 100644
+--- a/src/xrGame/ActorCondition.cpp
++++ b/src/xrGame/ActorCondition.cpp
+@@ -1,6 +1,7 @@
+ #include "pch_script.h"
+ #include "actorcondition.h"
+ #include "actor.h"
++#include "CampaignActorAccess.h" // S10-T07 (G10)
+ #include "actorEffector.h"
+ #include "inventory.h"
+ #include "level.h"
+@@ -195,6 +196,8 @@ float CActorCondition::GetZoneMaxPower(ALife::EHitType hit_type) const
+ 
+ void CActorCondition::UpdateCondition()
+ {
++	if (m_object && campaign::participant_parked_id(u16(m_object->ID())))
++		return; // S10-T07 (G10, T03a-2): a parked player's condition stays as it was
+ 	float v_alcohol = IsSleeping() ? m_fV_AlcoholSleep : m_fV_Alcohol;
+ 	
+ 	if (psActorFlags.test(AF_GODMODE_RT))
+diff --git a/src/xrGame/CampaignActorAccess.cpp b/src/xrGame/CampaignActorAccess.cpp
+index 97b0104..5b9c54a 100644
+--- a/src/xrGame/CampaignActorAccess.cpp
++++ b/src/xrGame/CampaignActorAccess.cpp
+@@ -216,6 +216,32 @@ u32 participant_actors(xr_vector<CActor*>& out)
+ 	return u32(out.size());
+ }
+ 
++// S10-T07 (G10, T03a-2): the parked participant actors (at most one per slot)
++static xr_vector<u16> s_parked;
++
++void set_participant_parked(u16 actor_id, bool parked)
++{
++	xr_vector<u16>::iterator it = std::find(s_parked.begin(), s_parked.end(), actor_id);
++	if (parked && it == s_parked.end())
++		s_parked.push_back(actor_id);
++	else if (!parked && it != s_parked.end())
++		s_parked.erase(it);
++}
++
++bool participant_parked_id(u16 actor_id)
++{
++	return !s_parked.empty() && std::find(s_parked.begin(), s_parked.end(), actor_id) != s_parked.end();
++}
++
++u32 active_participant_actors(xr_vector<CActor*>& out)
++{
++	participant_actors(out);
++	if (!s_parked.empty())
++		out.erase(std::remove_if(out.begin(), out.end(),
++			[](CActor* a) { return !a || participant_parked_id(u16(a->ID())); }), out.end());
++	return u32(out.size());
++}
++
+ u32 participant_actor_entities(xr_vector<CSE_ALifeCreatureActor*>& out)
+ {
+ 	out.clear();
+@@ -229,6 +255,8 @@ u32 participant_actor_entities(xr_vector<CSE_ALifeCreatureActor*>& out)
+ 		if (registry.current_participant(slot, ref) != Refusal::None ||
+ 			registry.participant_actor_key(ref, key) != Refusal::None)
+ 			continue;
++		if (participant_parked_id(key.id))
++			continue; // G10 (T03a-2): a parked actor keeps no area online
+ 		CSE_ALifeCreatureActor* entity = smart_cast<CSE_ALifeCreatureActor*>(Level().Server->ID_to_entity(key.id));
+ 		if (entity)
+ 			out.push_back(entity);
+@@ -239,7 +267,7 @@ u32 participant_actor_entities(xr_vector<CSE_ALifeCreatureActor*>& out)
+ CActor* nearest_participant_actor(const Fvector& from, ParticipantRef* who, float* distance)
+ {
+ 	xr_vector<CActor*> actors;
+-	participant_actors(actors);
++	active_participant_actors(actors); // G10 (T03a-2): not a parked one
+ 	CActor* best = nullptr;
+ 	float best_distance = flt_max;
+ 	for (u32 i = 0; i < actors.size(); ++i)
+diff --git a/src/xrGame/CampaignActorAccess.h b/src/xrGame/CampaignActorAccess.h
+index 1d1844a..e52af47 100644
+--- a/src/xrGame/CampaignActorAccess.h
++++ b/src/xrGame/CampaignActorAccess.h
+@@ -53,6 +53,14 @@ u32 participant_actors(xr_vector<CActor*>& out);
+ // switch rules measure from), in slot order; empty on a client.
+ u32 participant_actor_entities(xr_vector<CSE_ALifeCreatureActor*>& out);
+ CActor* nearest_participant_actor(const Fvector& from, ParticipantRef* who = nullptr, float* distance = nullptr);
++// S10-T07 (G10, T03a-2): a parked participant actor (its player has been away
++// for 5 minutes): it keeps no area online, NPCs and monsters ignore it, it
++// cannot be hurt and its condition stays as it was until the player rejoins.
++// Set by the campaign server only; never on a client.
++void set_participant_parked(u16 actor_id, bool parked);
++bool participant_parked_id(u16 actor_id);
++// participant_actors without the parked ones (the AI's view of the players)
++u32 active_participant_actors(xr_vector<CActor*>& out);
+ CActor* context_actor(const ActionContext& context, Scope scope, Refusal* why = nullptr);
+ // The participant actor among two dialogue speakers (either order), else null.
+ CActor* dialog_actor(const CGameObject* speaker1, const CGameObject* speaker2);
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 5091ca9..e17c02d 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -345,6 +345,144 @@ bool party_inventory_view()
+ 	return s_task_scope_depth > 0 && server_role();
+ }
+ 
++// --- S10-T07 (G10, T05b-4): the clicking player's purse -------------------------
++namespace
++{
++struct PartyPurse
++{
++	u16 anchor = 0xffff;
++	u16 payer = 0xffff;
++	bool share = false;
++};
++PartyPurse s_purse; // the innermost PartyPurseScope
++u32 s_purse_depth = 0;
++PartyPurse s_pending; // a pending turn-in's completion
++shared_str s_pending_task;
++u32 s_pending_depth = 0; // task scopes of that task entered now
++
++const PartyPurse* active_purse()
++{
++	if (!server_role())
++		return nullptr;
++	if (s_purse_depth)
++		return &s_purse;
++	if (s_pending_depth && s_pending.anchor != 0xffff)
++		return &s_pending;
++	return nullptr;
++}
++
++CInventoryOwner* owner_by_id(u16 id)
++{
++	CObject* o = g_pGameLevel && id != 0xffff ? Level().Objects.net_Find(id) : nullptr;
++	return o ? smart_cast<CInventoryOwner*>(o) : nullptr;
++}
++
++void add_money(CInventoryOwner* owner, int money)
++{
++	const u32 have = owner->get_money();
++	if (money >= 0)
++		owner->set_money(have + u32(money) < have ? u32(-1) : have + u32(money), true);
++	else
++		owner->set_money(u32(-money) > have ? 0 : have - u32(-money), true);
++}
++} // namespace
++
++PartyPurseScope::PartyPurseScope(u16 anchor, u16 payer, bool share_income)
++	: m_anchor(s_purse.anchor), m_payer(s_purse.payer), m_share(s_purse.share), m_depth(s_purse_depth)
++{
++	s_purse.anchor = anchor;
++	s_purse.payer = payer;
++	s_purse.share = share_income;
++	++s_purse_depth;
++}
++
++PartyPurseScope::~PartyPurseScope()
++{
++	s_purse.anchor = m_anchor;
++	s_purse.payer = m_payer;
++	s_purse.share = m_share;
++	s_purse_depth = m_depth;
++}
++
++void set_pending_party_purse(LPCSTR task, u16 anchor, u16 payer)
++{
++	if (!task || !task[0])
++	{
++		s_pending_task = nullptr;
++		s_pending = PartyPurse();
++		return;
++	}
++	s_pending_task = task;
++	s_pending.anchor = anchor;
++	s_pending.payer = payer;
++	s_pending.share = true;
++}
++
++LPCSTR pending_party_purse_task()
++{
++	return s_pending_task.size() ? s_pending_task.c_str() : "";
++}
++
++CInventoryOwner* party_purse_owner(CInventoryOwner* owner)
++{
++	const PartyPurse* p = active_purse();
++	if (!p || !owner || p->anchor == p->payer || owner->object_id() != p->anchor)
++		return owner;
++	CInventoryOwner* payer = owner_by_id(p->payer);
++	return payer ? payer : owner;
++}
++
++bool party_purse_money(CInventoryOwner* owner, u32& out)
++{
++	if (!owner || !server_role())
++		return false;
++	if (active_purse())
++	{
++		CInventoryOwner* purse = party_purse_owner(owner);
++		if (purse == owner)
++			return false;
++		out = purse->get_money();
++		return true;
++	}
++	if (!party_inventory_view() || !is_participant_actor(g_pGameLevel ? Level().Objects.net_Find(owner->object_id()) : nullptr))
++		return false;
++	xr_vector<CActor*> actors;
++	participant_actors(actors);
++	out = owner->get_money();
++	for (CActor* a : actors)
++		if (a)
++			out = _max(out, a->get_money());
++	return true;
++}
++
++bool party_purse_give(CInventoryOwner* owner, int money)
++{
++	const PartyPurse* p = active_purse();
++	if (!p || !owner || money == 0 || owner->object_id() != p->anchor)
++		return false;
++	if (money > 0 && p->share)
++	{
++		// T05b-2: money a turn-in gives is the same sum to every participant actor
++		xr_vector<CActor*> actors;
++		participant_actors(actors);
++		u32 paid = 0;
++		for (CActor* a : actors)
++			if (a)
++			{
++				add_money(a, money);
++				++paid;
++			}
++		Msg("coop party-purse shared %d RU to %u participant actors (anchor %u)", money, paid, u32(p->anchor));
++		return paid > 0;
++	}
++	CInventoryOwner* payer = party_purse_owner(owner);
++	if (payer == owner)
++		return false;
++	add_money(payer, money);
++	Msg("coop party-purse %d RU on %u instead of the anchor %u", money, u32(payer->object_id()), u32(p->anchor));
++	return true;
++}
++
+ ScriptContextScope::ScriptContextScope(const CGameTask* task, LPCSTR entry) : m_refusal(Refusal::WrongRole), m_token(0)
+ {
+ 	ScriptContextStack* stack = script_contexts();
+@@ -370,6 +508,11 @@ ScriptContextScope::ScriptContextScope(const CGameTask* task, LPCSTR entry) : m_
+ 		++s_stats.task_scopes;
+ 		m_task = true;
+ 		++s_task_scope_depth;
++		if (s_pending_task.size() && task->m_ID == s_pending_task)
++		{
++			m_purse = true; // S10-T07 (T05b-4): the pending turn-in's completion
++			++s_pending_depth;
++		}
+ 		sync_lua(true);
+ 	}
+ }
+@@ -394,6 +537,8 @@ ScriptContextScope::~ScriptContextScope()
+ {
+ 	if (m_task && s_task_scope_depth)
+ 		--s_task_scope_depth;
++	if (m_purse && s_pending_depth)
++		--s_pending_depth;
+ 	if (m_refusal != Refusal::None || !s_stack)
+ 		return;
+ 	const Refusal left = s_stack->leave(m_token);
+@@ -1027,8 +1172,8 @@ double lua_enter_slot(int slot)
+ 		return 0;
+ 	CActor* actor = slot_actor(u8(slot));
+ 	ActionContext context;
+-	if (!actor || !actor_context(actor, context))
+-		return 0;
++	if (!actor || participant_parked_id(u16(actor->ID())) || !actor_context(actor, context))
++		return 0; // S10-T07 (G10, T03a-2): a parked player's per-player passes are skipped
+ 	u32 token = 0;
+ 	if (s_stack->enter(context, Scope::Self, "emission", token) != Refusal::None)
+ 		return 0;
+@@ -1041,6 +1186,12 @@ bool lua_slot_in_world(int slot)
+ 	return server_role() && slot >= 0 && slot <= 0xff && coop_server_slot_in_world(u8(slot));
+ }
+ 
++void lua_log(LPCSTR text) // S10-T07 (G10)
++{
++	if (server_role() && text)
++		coop_server_log(text);
++}
++
+ void lua_note(LPCSTR text)
+ {
+ 	if (server_role() && text)
+@@ -2238,10 +2389,13 @@ void script_register_context(lua_State* L)
+ 		def("client_session_entries", &coop_client_session_entries),
+ 		def("client_session_version", &coop_client_session_version),
+ 		def("client_companion_order", &coop_client_companion_order), // S10-T07 (B12)
++		def("client_trade_donate", &coop_client_trade_donate), // S10-T07 (G10)
++		def("client_field_repair", &coop_client_field_repair),
+ 		def("note_fee", &lua_note_fee),
+ 		def("enter_slot", &lua_enter_slot), // S10-T05a
+ 		def("slot_in_world", &lua_slot_in_world),
+ 		def("note", &lua_note),
++		def("log", &lua_log), // S10-T07 (G10)
+ 		def("mute", &lua_mute),
+ 		def("story_changed", &lua_story_changed), // S10-T05c
+ 		def("present", &lua_present)
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index 2a900dd..2165c84 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -159,6 +159,7 @@ private:
+ 	Refusal m_refusal;
+ 	u32 m_token;
+ 	bool m_task = false; // S10-T05b: a task scope (party_inventory_view)
++	bool m_purse = false; // S10-T07 (T05b-4): the pending turn-in's purse is active
+ };
+ 
+ // The server's own context for a participant (server-internal, Self, the
+@@ -179,6 +180,32 @@ u16 info_actor_id(u16 id);
+ // (a task scope): the task owner's inventory reads see every participant
+ // actor's inventory, so a fetch-style check counts the party's items.
+ bool party_inventory_view();
++// S10-T07 (G10, T05b-4): the player who clicked pays a party task's money.
++// While a party accept or turn-in runs in the anchor's context (and while a
++// pending turn-in's completion runs in that task's scope), the anchor actor's
++// purse in Lua (money, give_money, transfer_money) is the clicking player's;
++// money given during a turn-in goes to every participant actor (T05b-2). In
++// any other task scope a participant actor's money reads as the party's best
++// purse (the party sees whether one of them can pay). Server only.
++class PartyPurseScope
++{
++public:
++	PartyPurseScope(u16 anchor, u16 payer, bool share_income);
++	~PartyPurseScope();
++private:
++	u16 m_anchor, m_payer;
++	bool m_share;
++	u32 m_depth;
++};
++// A pending turn-in's purse, active inside that task's own scope (null task clears).
++void set_pending_party_purse(LPCSTR task, u16 anchor, u16 payer);
++LPCSTR pending_party_purse_task();
++// The purse a Lua money call on `owner` uses (the owner itself when no purse applies).
++CInventoryOwner* party_purse_owner(CInventoryOwner* owner);
++// A Lua money read: true with the amount when a purse or the party view applies.
++bool party_purse_money(CInventoryOwner* owner, u32& out);
++// A Lua give_money: true when the purse took it (paid by the payer, or shared).
++bool party_purse_give(CInventoryOwner* owner, int money);
+ // The native bindings' rule: the context's actor; outside a context the
+ // single-actor compatibility accessor (null and counted with two actors).
+ CActor* gameplay_script_actor(LPCSTR purpose);
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 61b6a29..29acf0c 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -490,6 +490,8 @@ struct Link
+ 		u8 parts_seen = 0;
+ 		u32 refresh_at_ms = 0, opened_ms = 0;
+ 		xr_vector<u16> lua_bought, lua_sold; // S10-T04f: the installed Lua trade window's transfers, sent once per frame
++		xr_vector<u16> lua_donated; // G10: the window's donate (a free transfer to the trader)
++		bool donating = false;
+ 		u64 opens = 0, performs = 0, accepted = 0, refused = 0, price_events = 0, refreshes = 0;
+ 	} trade;
+ 	struct Upgrade // S10-T04f: the upgrade window on the server's upgrade session
+@@ -4410,6 +4412,15 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				g_link->log.line("session-result op=%u outcome=%u reason=%u revision=%I64u", u32(op), u32(result.outcome),
+ 					u32(r), result.revision);
+ 			}
++			if (p.action == coop::proto::kActionFieldRepair)
++			{
++				// G10: a repair kit's repair, in plain words when refused
++				if (result.outcome == coop::proto::ActionOutcome::Rejected)
++					travel_hud(result.reason == coop::proto::kReasonUpgradeRefused ?
++						"The repair was refused: this kit cannot repair that (or with that part)." :
++						"The repair was refused: an item is no longer in your inventory.", 5);
++				g_link->log.line("field-repair-result outcome=%u reason=%u", u32(result.outcome), u32(result.reason));
++			}
+ 			if ((p.action == coop::proto::kActionSleepRequest || p.action == coop::proto::kActionSleepAnswer) &&
+ 				result.outcome == coop::proto::ActionOutcome::Rejected)
+ 			{
+@@ -4419,6 +4430,9 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				travel_hud(r == coop::proto::kReasonCannotSleep ? "You cannot sleep while bleeding or irradiated." :
+ 					r == coop::proto::kReasonPartnerUnavailable ? "Your partner is not here: you sleep together." :
+ 					r == coop::proto::kReasonInCombat ? "You cannot sleep in combat." :
++					r == coop::proto::kReasonNoShelter ? (p.action == coop::proto::kActionSleepAnswer ?
++						"Find shelter first (a sleeping area or your tent), then press USE again." :
++						"You need shelter to sleep (a sleeping area or your tent).") :
+ 					r == coop::proto::kReasonTravelBusy ? "A travel or sleep request is already up." :
+ 					"The sleep request was refused.", 5);
+ 				g_link->log.line("sleep-refused kind=%u reason=%u", u32(p.action), u32(r));
+@@ -7458,11 +7472,27 @@ void session_menu_install()
+ {
+ 	LPCSTR chunk =
+ 		"if not __coop_session_menu and campaign and campaign.client_session_create then "
+-		"local keys = {'new_game_difficulty','new_game_economy','new_game_economy_treasure','new_game_hardcore_mode',"
+-		"'new_game_hardcore_mode_lives','new_game_hardcore_mode_regenerate','new_game_story_mode','new_game_azazel_mode',"
+-		"'new_game_survival_mode','new_game_campfire_mode','new_game_conditions_mode','new_game_opened_routes',"
+-		"'new_game_warfare','new_game_timer_mode','new_game_character_name','new_game_faction','new_game_icon',"
++		// G10 (the user, 2026-11-02): co-op is story mode only; Ironman, Azazel, Survival and Warfare are not sent
++		"local keys = {'new_game_difficulty','new_game_economy','new_game_economy_treasure','new_game_story_mode',"
++		"'new_game_campfire_mode','new_game_conditions_mode','new_game_opened_routes',"
++		"'new_game_timer_mode','new_game_character_name','new_game_faction','new_game_icon',"
+ 		"'new_game_loadout','new_game_map','new_game_money'} "
++		// ...and their controls are hidden on the creation screen
++		"local nf_ok, NF = pcall(function() return ui_mm_faction_select end) "
++		"if nf_ok and type(NF) == 'table' and NF.UINewGame and NF.UINewGame.Main_Controls then "
++		"  local mc = NF.UINewGame.Main_Controls "
++		"  NF.UINewGame.Main_Controls = function(self, ...) "
++		"    mc(self, ...) "
++		"    for _, n in ipairs({'ck_hardcore','ck_azazel_mode','ck_survival','ck_warfare'}) do "
++		"      local c = self[n] if c then c:SetCheck(false) c:Enable(false) c:Show(false) end "
++		"      local cap = self[n .. '_cap'] if cap then cap:Show(false) end "
++		"    end "
++		"    for _, n in ipairs({'list_hardcore_lives','list_hardcore_regen'}) do "
++		"      local c = self[n] if c then c:Enable(false) c:Show(false) end "
++		"      local cap = self[n .. '_cap'] if cap then cap:Show(false) end "
++		"    end "
++		"  end "
++		"end "
+ 		"coop_session_choices = function() "
+ 		"  local t = {} "
+ 		"  for _, k in ipairs(keys) do "
+@@ -7527,6 +7557,29 @@ void session_menu_install()
+ 		"  end "
+ 		"  D.OnButton_del_clicked = function(self) end "
+ 		"end "
++		// G10: the trade window's donate goes to the server as a donation (not a sale)
++		"local inv_ok, INV = pcall(function() return ui_inventory end) "
++		"if inv_ok and type(INV) == 'table' and INV.UIInventory and INV.UIInventory.Action_Donate and campaign.client_trade_donate then "
++		"  local don = INV.UIInventory.Action_Donate "
++		"  INV.UIInventory.Action_Donate = function(self, ...) "
++		"    campaign.client_trade_donate(true) "
++		"    local ok, err = pcall(don, self, ...) "
++		"    campaign.client_trade_donate(false) "
++		"    if not ok then error(err, 0) end "
++		"  end "
++		"end "
++		// G10: a repair kit's Repair button asks the server
++		"local ir_ok, IR = pcall(function() return item_repair end) "
++		"if ir_ok and type(IR) == 'table' and IR.UIRepair and campaign.client_field_repair then "
++		"  IR.UIRepair.OnRepair = function(self) "
++		"    local o1 = self.CC[1]:GetCell_Selected(true) "
++		"    local o2 = self.CC[2]:GetCell_Selected(true) "
++		"    if not (o1 and self.obj and self.con_val[4]) then return end "
++		"    campaign.client_field_repair(self.obj:id(), o1:id(), o2 and o2:id() or -1, self.con_val[4]) "
++		"    if self.use_actor_effects and actor_effects then pcall(actor_effects.play_item_fx, self.section .. '_dummy') end "
++		"    self:OnCancel() "
++		"  end "
++		"end "
+ 		"__coop_session_menu = true "
+ 		"end";
+ 	session_lua(chunk, "coop_session_menu");
+@@ -7954,7 +8007,7 @@ bool coop_client_script_transfer_item(CInventoryItem* item, CGameObject* from, C
+ 		}
+ 		if (from->ID() == me && to->ID() == t.npc)
+ 		{
+-			t.lua_sold.push_back(u16(item->object().ID()));
++			(t.donating ? t.lua_donated : t.lua_sold).push_back(u16(item->object().ID()));
+ 			return true;
+ 		}
+ 	}
+@@ -8116,7 +8169,37 @@ bool coop_client_trade_price(const CInventoryItem* item, bool trader_buying, u32
+ 	return true;
+ }
+ 
+-void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold)
++bool coop_client_field_repair(int kit, int item, int part, int expected_pct)
++{
++	if (!g_link || !g_link->active || g_link->world != WorldLive || kit < 0 || kit >= 0xffff || item < 0 ||
++		item >= 0xffff || part >= 0xffff)
++		return false;
++	coop::proto::EntityRef kit_ref, item_ref, part_ref;
++	if (!ref_of(u16(kit), kit_ref) || !ref_of(u16(item), item_ref) || (part >= 0 && !ref_of(u16(part), part_ref)))
++	{
++		g_link->log.line("field-repair-unknown kit=%d item=%d part=%d", kit, item, part);
++		return false;
++	}
++	xr_vector<u8> params;
++	push_ref(params, kit_ref);
++	params.push_back(part >= 0 ? 1 : 0);
++	if (part >= 0)
++		push_ref(params, part_ref);
++	params.push_back(u8(_max(0, _min(expected_pct, 100))));
++	request_ownership(coop::proto::kActionFieldRepair, item_ref, params, 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("field-repair-sent kit=%d item=%d part=%d expected=%d", kit, item, part, expected_pct);
++	return true;
++}
++
++bool coop_client_trade_donate(bool on)
++{
++	if (!g_link || !g_link->active)
++		return false;
++	g_link->trade.donating = on;
++	return true;
++}
++
++void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold, bool donate)
+ {
+ 	if (!coop_client_trade_active() || !g_actor)
+ 		return;
+@@ -8148,10 +8231,13 @@ void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16
+ 		}
+ 	for (int b = 0; b < 4; ++b)
+ 		params.push_back(u8(expected >> (8 * b)));
++	if (donate)
++		params.push_back(1); // G10: the sold items are a donation
+ 	t.pending_perform = true;
+ 	++t.performs;
+ 	request_ownership(coop::proto::kActionTrade, t.npc_ref, params, 0, 0xffffffff, 0xffffffff, true, "player");
+-	g_link->log.line("trade-sent npc=%u bought=%u sold=%u", u32(t.npc), u32(bought.size()), u32(sold.size()));
++	g_link->log.line("trade-sent npc=%u bought=%u sold=%u donate=%d", u32(t.npc), u32(bought.size()), u32(sold.size()),
++		donate ? 1 : 0);
+ }
+ 
+ void coop_client_trade_closed()
+@@ -8167,6 +8253,8 @@ void coop_client_trade_closed()
+ 	t.pending_perform = false;
+ 	t.buy.clear();
+ 	t.sell.clear();
++	t.lua_donated.clear(); // G10
++	t.donating = false;
+ 	if (was_open)
+ 		request_ownership(coop::proto::kActionTradeClose, t.npc_ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, false, "player");
+ 	g_link->log.line("trade-closed npc=%u", u32(t.npc));
+@@ -8316,6 +8404,19 @@ bool coop_client_eat(CInventoryOwner* owner, CInventoryItem* item)
+ 	if (!g_link || !g_link->active || !campaign::replica_active() || campaign::replica_permitted())
+ 		return false;
+ 	++g_link->local_eats_blocked;
++	if (g_link->world == WorldLive && g_actor && item && owner == smart_cast<CInventoryOwner*>(g_actor) &&
++		pSettings->line_exist(item->object().cNameSect(), "repair_tool") &&
++		pSettings->r_bool(item->object().cNameSect(), "repair_tool"))
++	{
++		// G10: a repair kit opens its window here (item_repair.start, as its use
++		// callback does in single player); the window's Repair button asks the
++		// server (coop_client_field_repair). Using it spends nothing by itself.
++		luabind::functor<void> start;
++		if (ai().script_engine().functor("item_repair.start", start))
++			start(item->object().lua_game_object(), item->object().cNameSect().c_str());
++		g_link->log.line("field-repair-window kit=%u section=%s", u32(item->object().ID()), *item->object().cNameSect());
++		return true;
++	}
+ 	coop::proto::EntityRef item_ref;
+ 	if (g_link->world == WorldLive && g_actor && item && owner == smart_cast<CInventoryOwner*>(g_actor) &&
+ 		ref_of(u16(item->object().ID()), item_ref))
+@@ -8474,6 +8575,13 @@ void coop_client_frame()
+ 		g_link->trade.lua_sold.clear();
+ 		campaign::coop_client_trade_perform(bought, sold);
+ 	}
++	else if (g_link->trade.open && !g_link->trade.pending_perform && !g_link->trade.lua_donated.empty())
++	{
++		// G10: the window's donate, its own intent (the trader pays nothing)
++		const xr_vector<u16> donated = g_link->trade.lua_donated;
++		g_link->trade.lua_donated.clear();
++		campaign::coop_client_trade_perform(xr_vector<u16>(), donated, true);
++	}
+ 	if (g_link->trade.open && g_link->trade.refresh_at_ms && now >= g_link->trade.refresh_at_ms)
+ 	{
+ 		g_link->trade.refresh_at_ms = 0;
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 9c3950e..8ec6da3 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -70,7 +70,11 @@ bool coop_client_use_object(CGameObject* object, CGameObject* who);
+ bool coop_client_trade_open(CInventoryOwner* partner);
+ bool coop_client_trade_active();
+ bool coop_client_trade_price(const CInventoryItem* item, bool trader_buying, u32& price);
+-void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold);
++void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold, bool donate = false);
++// G10: the trade window's donate (ui_inventory Action_Donate) runs between on and off: its transfer is a donation
++bool coop_client_trade_donate(bool on);
++// G10: a repair kit's window (item_repair) asks the server for the repair (ActionIntent 29); part -1: none
++bool coop_client_field_repair(int kit, int item, int part, int expected_pct);
+ void coop_client_trade_closed();
+ // S10-T04f: the upgrade window on the server's upgrade session. The remote
+ // talk window's upgrade button asks the server to open it (the native window
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 8a235d2..e19188d 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -188,6 +188,11 @@ struct PlayerLink
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+ 	float needs_last[7] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f}; // S10-T04c: + money
+ 	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
++	// S10-T07 (G10, T03a-2): away since (wall ms, 0 while attached); parked after 5 minutes
++	u32 absent_since_ms = 0;
++	bool parked = false;
++	u16 parked_actor = 0xffff;
++	u32 parks = 0;
+ 	u64 sleep_sent_id = 0; // S10-T03c: the live sleep proposal this player was told
+ 	u64 blackout_until_tick = 0; // S10-T03c: a passed-out player's input is held until then
+ 	u8 blackout_hours = 0; // its sleep, recovered when the blackout ends
+@@ -427,6 +432,7 @@ struct Host
+ 	};
+ 	xr_vector<QuestAnswer> quest_answers;
+ 	bool party_adapter = false;
++	u64 field_repairs = 0; // S10-T07 (G10)
+ 	// S08-T09: the party's tasks as presented to the players
+ 	struct PartyFinished
+ 	{
+@@ -5716,8 +5722,8 @@ void drive_needs()
+ 		if (!link.bound)
+ 			continue;
+ 		CActor* actor = participant_actor(link.ref);
+-		if (!actor || !actor->g_Alive())
+-			continue;
++		if (!actor || !actor->g_Alive() || campaign::participant_parked_id(u16(actor->ID())))
++			continue; // G10 (T03a-2): a parked player's needs stay as they were
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "needs-update");
+ 		if (!scope.entered())
+ 			continue;
+@@ -7068,8 +7074,425 @@ LPCSTR const party_source =
+ 	"end\n"
+ 	"P.installed = true\n";
+ 
++// ------------------------------------------------------------ S10-T07 (G10)
++// The user's G10 review (2026-11-02), the revisions done in the server's Lua
++// adapter (installed after party_source; the installed scripts not edited):
++//  - item rewards to both (T05b-2): an item a party turn-in creates on a
++//    participant actor (xr_effects.give_reward's stored rewards, any
++//    alife_create_item outside reward_item) is created there natively and
++//    given to every other participant actor by apply_party_effects;
++//  - a failed or cancelled task's goodwill penalty to both: while the installed
++//    fail paths run, a goodwill change on one participant actor applies to all;
++//  - bounty hit squads by the worse standing (T03b-2): the installed
++//    sim_squad_bounty timers run in the context of the player whose rank and
++//    reputation call for more squads (plugins\bounty_squad.ltx);
++//  - the sleep shelter check (T03c-2): campaign_sleep_shelter() in a player's
++//    context (a sleep zone, an emission cover, underground, a tent within 1.5 m).
++//  - a repair kit's repair (take_field_repair): campaign_field_repair() applies
++//    the installed window's rules in the player's context;
++//  - mechanic lending always on (T04f-2): each lent item remembers its lender,
++//    the mechanic hands back and talks about the talking player's own items
++//    only, and the lender is told when it is lent and when it is ready.
++LPCSTR const g10_source =
++	"local P = rawget(_G, '__campaign_party')\n"
++	"if type(P) ~= 'table' or P.g10 then return end\n"
++	"P.g10 = true\n"
++	"P.failing = 0\n"
++	"local function obj(id) if id and id >= 0 and id < 65535 then return level.object_by_id(id) end return nil end\n"
++	"local function say(text) if campaign and campaign.log then campaign.log(text) end end\n"
++	"local function party_actor(id)\n"
++	"  for _, aid in ipairs(P.actors) do if aid == id then return true end end\n"
++	"  return false\n"
++	"end\n"
++	"local function turnin_on()\n"
++	"  local id = P.turnin\n"
++	"  return id and P.tasks[id] and P.effects and true or false\n"
++	"end\n"
++	"-- Item rewards to both (T05b-2): an item a party turn-in creates on a participant\n"
++	"-- actor (xr_effects.give_reward's stored rewards, any alife_create_item outside\n"
++	"-- reward_item) is created natively there and given to every other participant actor.\n"
++	"local function owner_id(o)\n"
++	"  if type(o) == 'number' then return o end\n"
++	"  if type(o) ~= 'userdata' then return nil end\n"
++	"  local ok, id = pcall(function() if type(o.id) == 'function' then return o:id() end return o.id end)\n"
++	"  if ok and type(id) == 'number' then return id end\n"
++	"  return nil\n"
++	"end\n"
++	"local create = rawget(_G, 'alife_create_item')\n"
++	"if create then\n"
++	"  rawset(_G, 'alife_create_item', function(section, o, t, ...)\n"
++	"    local se = create(section, o, t, ...)\n"
++	"    if turnin_on() and type(section) == 'string' then\n"
++	"      local id = owner_id(o)\n"
++	"      if id and party_actor(id) then\n"
++	"        P.effects.give = P.effects.give or {}\n"
++	"        for _, aid in ipairs(P.actors) do\n"
++	"          if aid ~= id then P.effects.give[#P.effects.give + 1] = { actor = aid, section = section, amount = 1 } end\n"
++	"        end\n"
++	"        say(string.format('quest-item-shared task=%s section=%s created_on=%d', tostring(P.turnin), section, id))\n"
++	"      end\n"
++	"    end\n"
++	"    return se\n"
++	"  end)\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"-- A failed or cancelled party task's goodwill penalty to both players: while the\n"
++	"-- installed fail paths run (task_manager.task_callback with task.fail,\n"
++	"-- CGeneralTask:deactivate_task of a failed task), a goodwill change on one\n"
++	"-- participant actor is applied to every participant actor.\n"
++	"local function failing(f, ...)\n"
++	"  P.failing = P.failing + 1\n"
++	"  local r = { pcall(f, ...) }\n"
++	"  P.failing = P.failing - 1\n"
++	"  if not r[1] then error(r[2], 0) end\n"
++	"  return unpack(r, 2)\n"
++	"end\n"
++	"local tm = task_manager\n"
++	"if tm and tm.task_callback and task and task.fail then\n"
++	"  local orig = tm.task_callback\n"
++	"  tm.task_callback = function(tsk, state, ...)\n"
++	"    if state ~= task.fail then return orig(tsk, state, ...) end\n"
++	"    return failing(orig, tsk, state, ...)\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"local cls = task_objects and task_objects.CGeneralTask\n"
++	"if cls and cls.deactivate_task then\n"
++	"  local orig = cls.deactivate_task\n"
++	"  cls.deactivate_task = function(self, ...)\n"
++	"    if self.last_check_task ~= 'fail' then return orig(self, ...) end\n"
++	"    return failing(orig, self, ...)\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"local gr = game_relations\n"
++	"if gr and gr.change_factions_community_num then\n"
++	"  local real = gr.change_factions_community_num\n"
++	"  gr.change_factions_community_num = function(community, aid, delta, ...)\n"
++	"    if P.failing > 0 and #P.actors > 1 and party_actor(aid) then\n"
++	"      for _, other in ipairs(P.actors) do real(community, other, delta, ...) end\n"
++	"      say(string.format('quest-fail-goodwill community=%s delta=%s actors=%d', tostring(community), tostring(delta), #P.actors))\n"
++	"      return\n"
++	"    end\n"
++	"    return real(community, aid, delta, ...)\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"-- Bounty hit squads (T03b-2): either player, by the worse standing. The installed\n"
++	"-- timers run in the context of the player whose rank and reputation call for the\n"
++	"-- most squads (plugins\\bounty_squad.ltx), so the squad is spawned around that\n"
++	"-- player, by that player's enemies.\n"
++	"local sb = sim_squad_bounty\n"
++	"if sb and sb.spawn_timer and sb.state_timer and campaign and campaign.enter_slot then\n"
++	"  local ranks_t, reps_t = {}, {}\n"
++	"  local ini = ini_file('plugins\\\\bounty_squad.ltx')\n"
++	"  local function read(sec, t)\n"
++	"    if not ini:section_exist(sec) then return end\n"
++	"    for i = 0, ini:line_count(sec) - 1 do\n"
++	"      local _, k, v = ini:r_line_ex(sec, i, '', '')\n"
++	"      if k and v then t[k] = tonumber(v) or 0 end\n"
++	"    end\n"
++	"  end\n"
++	"  read('danger_ranks', ranks_t)\n"
++	"  read('danger_reputations', reps_t)\n"
++	"  local function danger(a)\n"
++	"    local n = ranks_t[ranks.get_obj_rank_name(a)] or 0\n"
++	"    return n + (reps_t[utils_obj.get_reputation_name(a:character_reputation())] or 0)\n"
++	"  end\n"
++	"  local function hunted()\n"
++	"    local best, bn, first = nil, -1, nil\n"
++	"    for sl = 0, 1 do\n"
++	"      if campaign.slot_in_world(sl) then\n"
++	"        local a = obj(campaign.slot_actor_id(sl))\n"
++	"        if a and a:alive() then\n"
++	"          first = first or sl\n"
++	"          local n = danger(a)\n"
++	"          if n > bn then best, bn = sl, n end\n"
++	"        end\n"
++	"      end\n"
++	"    end\n"
++	"    return best or first, bn\n"
++	"  end\n"
++	"  P.bounty_slot = -1\n"
++	"  local function as_hunted(orig, name, delay)\n"
++	"    return function(...)\n"
++	"      local sl, n = hunted()\n"
++	"      if sl == nil then ResetTimeEvent('cycle', name, delay) return false end\n"
++	"      local tok = campaign.enter_slot(sl)\n"
++	"      if tok == 0 then ResetTimeEvent('cycle', name, delay) return false end\n"
++	"      local r = { pcall(orig, ...) }\n"
++	"      campaign.leave(tok)\n"
++	"      if sl ~= P.bounty_slot then\n"
++	"        P.bounty_slot = sl\n"
++	"        say(string.format('bounty-hunted slot=%d danger=%d', sl, n))\n"
++	"      end\n"
++	"      if not r[1] then error(r[2], 0) end\n"
++	"      return unpack(r, 2)\n"
++	"    end\n"
++	"  end\n"
++	"  sb.spawn_timer = as_hunted(sb.spawn_timer, 'bounty_squad_spawn', 300)\n"
++	"  sb.state_timer = as_hunted(sb.state_timer, 'bounty_squad_state', 10)\n"
++	"  if RemoveTimeEvent and CreateTimeEvent then\n"
++	"    RemoveTimeEvent('cycle', 'bounty_squad_spawn')\n"
++	"    CreateTimeEvent('cycle', 'bounty_squad_spawn', 300, sb.spawn_timer)\n"
++	"    RemoveTimeEvent('cycle', 'bounty_squad_state')\n"
++	"    CreateTimeEvent('cycle', 'bounty_squad_state', 10, sb.state_timer)\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"-- Sleep shelter (T03c-2), in a player's context: 1 a sleep zone (the installed\n"
++	"-- ui_sleep_dialog.sleep_zones), 2 an emission cover (misc\\surge_manager.ltx, the\n"
++	"-- installed window's current_safe_cover), 3 underground, 4 within 1.5 m of a\n"
++	"-- set-up tent (item_tent.get_nearby_tent); 0 none.\n"
++	"local sleep_zones = {\n"
++	"  'actor_surge_hide_2', 'agr_army_sleep', 'agr_sr_sleep_tunnel', 'agr_sr_sleep_wagon', 'bar_actor_sleep_zone',\n"
++	"  'cit_merc_sleep', 'ds_farmhouse_sleep', 'esc_basement_sleep_area', 'esc_secret_sleep', 'gar_angar_sleep',\n"
++	"  'gar_dolg_sleep', 'jup_a6_sr_sleep', 'mar_a3_sr_sleep', 'mil_freedom_sleep', 'mil_smart_terran_2_4_sleep',\n"
++	"  'pri_a16_sr_sleep', 'pri_monolith_sleep', 'pri_room27_sleep', 'rad_sleep_room', 'ros_vagon_sleep',\n"
++	"  'val_abandoned_house_sleep', 'val_vagon_sleep', 'yan_bunker_sleep_restrictor', 'zat_a2_sr_sleep', 'pol_secret_sleep' }\n"
++	"local covers = nil\n"
++	"function campaign_sleep_shelter()\n"
++	"  local a = db.actor\n"
++	"  if not a then return 0 end\n"
++	"  local pos = a:position()\n"
++	"  local zones = db.zone_by_name or {}\n"
++	"  for _, name in ipairs(sleep_zones) do\n"
++	"    local z = zones[name]\n"
++	"    if z and z:inside(pos) then return 1 end\n"
++	"  end\n"
++	"  if not covers then\n"
++	"    local ok, list = pcall(function() return utils_data.collect_section(ini_file('misc\\\\surge_manager.ltx'), 'list', true) end)\n"
++	"    covers = ok and type(list) == 'table' and list or {}\n"
++	"  end\n"
++	"  for name in pairs(covers) do\n"
++	"    local z = zones[name]\n"
++	"    if z and z:inside(pos) then return 2 end\n"
++	"  end\n"
++	"  if GetEvent and GetEvent('underground') then return 3 end\n"
++	"  if item_tent and item_tent.get_nearby_tent and item_tent.get_nearby_tent(1.5) then return 4 end\n"
++	"  return 0\n"
++	"end\n"
++	"-- The fixture's shelter: the nearest installed sleep zone to the context's player ('' when none is online).\n"
++	"function campaign_sleep_shelter_point()\n"
++	"  local a = db.actor\n"
++	"  if not a then return '' end\n"
++	"  local zones = db.zone_by_name or {}\n"
++	"  local best, bd = nil, nil\n"
++	"  for _, name in ipairs(sleep_zones) do\n"
++	"    local z = zones[name]\n"
++	"    if z then\n"
++	"      local d = z:position():distance_to(a:position())\n"
++	"      if not bd or d < bd then best, bd = z, d end\n"
++	"    end\n"
++	"  end\n"
++	"  if not best then return '' end\n"
++	"  local p = best:position()\n"
++	"  return string.format('%.3f %.3f %.3f %s', p.x, p.y, p.z, best:name())\n"
++	"end\n"
++	"-- Field repair (a repair kit's window, item_repair.UIRepair): the installed\n"
++	"-- window's rules (Reset, InitInventory, OnItemSelect, OnRepair), checked and\n"
++	"-- applied here in the player's context. The new condition in %, or < 0:\n"
++	"-- -1 no actor, -2 an object gone, -3 not the player's, -4 not a repair kit,\n"
++	"-- -5 the kit does not repair this item, -6 the condition is out of the kit's\n"
++	"-- range, -7 the part is not accepted.\n"
++	"function campaign_field_repair(kit_id, item_id, part_id)\n"
++	"  local a = db.actor\n"
++	"  if not a then return -1 end\n"
++	"  local kit, itm = obj(kit_id), obj(item_id)\n"
++	"  local part = part_id >= 0 and obj(part_id) or nil\n"
++	"  if not (kit and itm) or (part_id >= 0 and not part) then return -2 end\n"
++	"  local function mine(o) local p = o and o:parent() return p and p:id() == a:id() end\n"
++	"  if not (mine(kit) and mine(itm)) or (part and not mine(part)) then return -3 end\n"
++	"  local ksec = kit:section()\n"
++	"  if not IsItem('repair', ksec) or kit_id == item_id then return -4 end\n"
++	"  local min_c = ini_sys:r_float_ex(ksec, 'repair_min_condition') or 0\n"
++	"  local max_c = ini_sys:r_float_ex(ksec, 'repair_max_condition') or 0\n"
++	"  local add_c = ini_sys:r_float_ex(ksec, 'repair_add_condition') or 0\n"
++	"  local part_bonus = ini_sys:r_float_ex(ksec, 'repair_part_bonus') or 0\n"
++	"  local use_parts = ini_sys:r_bool_ex(ksec, 'repair_use_parts') or false\n"
++	"  local repair_only = parse_list(ini_sys, ksec, 'repair_only', true)\n"
++	"  local parts_multi = ini_sys:r_float_ex(ksec, 'repair_parts_multi') or 1\n"
++	"  local parts_sections = parse_list(ini_sys, ksec, 'repair_parts_sections', true)\n"
++	"  local parts_match = ini_sys:r_bool_ex(ksec, 'repair_parts_match', false)\n"
++	"  local sec = itm:section()\n"
++	"  local main_section = ini_sys:r_string_ex(sec, 'repair_type') or sec\n"
++	"  if not (repair_only and repair_only[main_section]) then return -5 end\n"
++	"  local con = math.ceil(itm:condition() * 100)\n"
++	"  if con < min_c * 100 or con > max_c * 100 then return -6 end\n"
++	"  local bonus = 0\n"
++	"  if part then\n"
++	"    if not use_parts or part_id == item_id or part_id == kit_id then return -7 end\n"
++	"    local psec = part:section()\n"
++	"    local b\n"
++	"    if parts_match and psec == sec then b = part:condition()\n"
++	"    elseif parts_sections and parts_sections[psec] then b = ini_sys:r_float_ex(psec, 'repair_part_bonus') or part_bonus\n"
++	"    else return -7 end\n"
++	"    if game_achievements and game_achievements.has_achievement('mechanized_warfare') then b = b + 0.02 end\n"
++	"    bonus = clamp(math.floor(b * 100) * parts_multi, 0, 100)\n"
++	"  end\n"
++	"  local total = clamp(con + bonus + math.floor(add_c * 100), 0, 100)\n"
++	"  if IsItem('part', nil, itm) then total = utils_item.get_cond_static(total) end\n"
++	"  itm:set_condition(total / 100)\n"
++	"  if part then utils_item.discharge(part) end\n"
++	"  if IsItem('multiuse', nil, kit) then utils_item.discharge(kit) else utils_item.degrade(kit, 0.2) end\n"
++	"  if game_statistics then game_statistics.increment_statistic('self_repairs') end\n"
++	"  return total\n"
++	"end\n"
++	"-- Mechanic lending (T04f-2): always on in co-op, easy to track. The installed\n"
++	"-- feature (inventory_upgrades: the item stays with the mechanic for a while)\n"
++	"-- keeps one list per mechanic; here each lent item also remembers its lender's\n"
++	"-- slot (se_save_var 'coop_lent_slot', kept in the save), the mechanic's\n"
++	"-- dialogue (has/dont_has/give_repaired_items, dm_repair_not_done) sees only the\n"
++	"-- talking player's own items, and the lender is told when it is lent (with\n"
++	"-- the time) and when it is ready (campaign_lending_tick).\n"
++	"local uo = ui_options\n"
++	"if uo and uo.get then\n"
++	"  local get = uo.get\n"
++	"  uo.get = function(id, ...)\n"
++	"    if id == 'gameplay/general/mechanic_feature' then return true end\n"
++	"    return get(id, ...)\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"local iu = inventory_upgrades\n"
++	"local function repair_list()\n"
++	"  if not (iu and iu.save_state) then return nil end\n"
++	"  local t = {}\n"
++	"  iu.save_state(t)\n"
++	"  return t.RepairItemList\n"
++	"end\n"
++	"local function lent_slot(id)\n"
++	"  local o = obj(id)\n"
++	"  local se = alife_object(id)\n"
++	"  local name = o and o:name() or (se and se:name())\n"
++	"  if not name then return nil end\n"
++	"  return se_load_var(id, name, 'coop_lent_slot')\n"
++	"end\n"
++	"local function context_slot()\n"
++	"  local a = db.actor\n"
++	"  return a and campaign and campaign.participant_slot_of and campaign.participant_slot_of(a) or -1\n"
++	"end\n"
++	"local function ready_in(t)\n"
++	"  local ok, left = pcall(function() return t.rt - game.get_game_time():diffSec(utils_data.CTime_from_table(t.gt)) end)\n"
++	"  return ok and math.max(0, left) or 0\n"
++	"end\n"
++	"local function mechanic_name(sec)\n"
++	"  local npc = get_story_object(sec)\n"
++	"  local ok, n = pcall(function() return npc and npc:character_name() end)\n"
++	"  return ok and n or sec\n"
++	"end\n"
++	"P.lent_told = P.lent_told or {}\n"
++	"if iu and iu.lend_item_for_repair and iu.save_state then\n"
++	"  local lend = iu.lend_item_for_repair\n"
++	"  iu.lend_item_for_repair = function(itm, mechanic, rt, ...)\n"
++	"    local slot = context_slot()\n"
++	"    local id, name, sec = itm and itm:id(), itm and itm:name(), itm and itm:section()\n"
++	"    local r = lend(itm, mechanic, rt, ...)\n"
++	"    local list = repair_list()\n"
++	"    local t = list and list[mechanic] and id and list[mechanic][id]\n"
++	"    if t then\n"
++	"      if slot >= 0 then se_save_var(id, name, 'coop_lent_slot', slot) end\n"
++	"      P.lent_told[id] = nil\n"
++	"      local mins = math.ceil(ready_in(t) / 60)\n"
++	"      if campaign and campaign.present then\n"
++	"        campaign.present('news', string.format('%s left with %s: ready in about %d min. Ask %s for it.',\n"
++	"          ui_item.get_sec_name(sec), mechanic_name(mechanic), mins, mechanic_name(mechanic)))\n"
++	"      end\n"
++	"      say(string.format('mechanic-lent slot=%d item=%d section=%s mechanic=%s ready_s=%d', slot, id, sec, mechanic, ready_in(t)))\n"
++	"    end\n"
++	"    return r\n"
++	"  end\n"
++	"  -- the dialogue functions see the talking player's own items (and any with no lender)\n"
++	"  local function own_view(n, f)\n"
++	"    return function(a, b, ...)\n"
++	"      local npc = dialogs.who_is_npc(a, b)\n"
++	"      local list = repair_list()\n"
++	"      local sec = npc and npc:section()\n"
++	"      local all = list and sec and list[sec]\n"
++	"      if not all then return f(a, b, ...) end\n"
++	"      local me = context_slot()\n"
++	"      local mine = {}\n"
++	"      for id, t in pairs(all) do\n"
++	"        local s = lent_slot(id)\n"
++	"        if s == nil or s == me then mine[id] = t end\n"
++	"      end\n"
++	"      if next(mine) == nil then\n"
++	"        if n == 'has_repair_info' or n == 'has_repaired_items' then return false end\n"
++	"        if n == 'dm_repair_not_done' then return 'You have nothing with me.' end\n"
++	"      end\n"
++	"      list[sec] = mine\n"
++	"      local r = { pcall(f, a, b, ...) }\n"
++	"      local now = list[sec] or {}\n"
++	"      for id, t in pairs(all) do\n"
++	"        if mine[id] and not now[id] then all[id] = nil P.lent_told[id] = nil end\n"
++	"      end\n"
++	"      list[sec] = all\n"
++	"      if next(all) ~= nil then give_info(sec .. '_is_repairing') end\n"
++	"      if not r[1] then error(r[2], 0) end\n"
++	"      return unpack(r, 2)\n"
++	"    end\n"
++	"  end\n"
++	"  for _, n in ipairs({ 'has_repair_info', 'has_repaired_items', 'dont_has_repaired_items', 'give_repaired_items',\n"
++	"      'dm_repair_not_done' }) do\n"
++	"    if iu[n] then iu[n] = own_view(n, iu[n]) end\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"-- Every few seconds (the server): a lent item that is ready is told to its lender once.\n"
++	"function campaign_lending_tick()\n"
++	"  local list = repair_list()\n"
++	"  if not list then return 0 end\n"
++	"  local told = 0\n"
++	"  for mech, items in pairs(list) do\n"
++	"    for id, t in pairs(items) do\n"
++	"      if not P.lent_told[id] and ready_in(t) <= 0 then\n"
++	"        local slot = lent_slot(id)\n"
++	"        if slot ~= nil and campaign.slot_in_world(slot) then\n"
++	"          local tok = campaign.enter_slot(slot)\n"
++	"          if tok ~= 0 then\n"
++	"            local se = alife_object(id)\n"
++	"            pcall(function()\n"
++	"              campaign.present('news', string.format('%s is ready: ask %s for it.',\n"
++	"                se and ui_item.get_sec_name(se:section_name()) or 'Your item', mechanic_name(mech)))\n"
++	"            end)\n"
++	"            campaign.leave(tok)\n"
++	"            P.lent_told[id] = true\n"
++	"            told = told + 1\n"
++	"            say(string.format('mechanic-ready slot=%d item=%d mechanic=%s', slot, id, mech))\n"
++	"          end\n"
++	"        elseif slot == nil then\n"
++	"          P.lent_told[id] = true\n"
++	"        end\n"
++	"      end\n"
++	"    end\n"
++	"  end\n"
++	"  return told\n"
++	"end\n"
++	"-- The task fixture's probe of the fail penalty: a fail path's goodwill loss on every participant actor.\n"
++	"function campaign_party_probe_fail(community, amount)\n"
++	"  local function gw()\n"
++	"    local t = {}\n"
++	"    for _, aid in ipairs(P.actors) do t[#t + 1] = relation_registry.community_goodwill(community, aid) end\n"
++	"    return t\n"
++	"  end\n"
++	"  local before = gw()\n"
++	"  P.failing = P.failing + 1\n"
++	"  local ok = pcall(xr_effects.fail_task_dec_goodwill, nil, nil, { tostring(amount), community })\n"
++	"  P.failing = P.failing - 1\n"
++	"  local after = gw()\n"
++	"  local parts, both, delta = {}, #after > 1, nil\n"
++	"  for i = 1, #after do\n"
++	"    local d = (after[i] or 0) - (before[i] or 0)\n"
++	"    parts[#parts + 1] = string.format('%d>%d', before[i] or -1, after[i] or -1)\n"
++	"    if d >= 0 or (delta and d ~= delta) then both = false end\n"
++	"    delta = delta or d\n"
++	"  end\n"
++	"  return string.format('ok=%d both=%d goodwill=%s', ok and 1 or 0, both and 1 or 0, table.concat(parts, ','))\n"
++	"end\n";
++
+ void sync_party_actors();
+ Host::PartyTask* party_task(LPCSTR id);
++void party_purse_pending(LPCSTR task, CActor* holder, CActor* clicker); // G10 (T05b-4)
+ bool party_task_supported(LPCSTR id);
+ 
+ // S08-T06: after a restart, the party's task as the recovered world holds it:
+@@ -7162,6 +7585,12 @@ void install_party_adapter()
+ 		return;
+ 	}
+ 	g_host->party_adapter = true;
++	// S10-T07 (G10): the review's revisions on top of the party adapter
++	if (luaL_loadbuffer(L, g10_source, xr_strlen(g10_source), "campaign_g10") != 0 || lua_pcall(L, 0, 0, 0) != 0)
++	{
++		g_host->log.line("g10-adapter-failed error=%s", lua_tostring(L, -1));
++		lua_pop(L, 1);
++	}
+ 	luabind::object P = luabind::get_globals(L)["__campaign_party"];
+ 	const int wrapped = P.type() == LUA_TTABLE && luabind::object(P["wrapped"]).type() == LUA_TNUMBER ?
+ 		luabind::object_cast<int>(P["wrapped"]) : -1;
+@@ -7429,6 +7858,7 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 		bool ok = false;
+ 		const campaign::Refusal opened = campaign::dialogue_open(anchor, owner, false);
+ 		{
++			campaign::PartyPurseScope purse(u16(anchor->ID()), u16(actor->ID()), false); // G10 (T05b-4)
+ 			campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "party-quest-accept");
+ 			ok = opened == campaign::Refusal::None && quest_accept_phrases(anchor, npc, task);
+ 		}
+@@ -7468,6 +7898,7 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	}
+ 	s32 stage = -1;
+ 	{
++		campaign::PartyPurseScope purse(u16(holder->ID()), u16(actor->ID()), true); // G10 (T05b-4)
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
+ 		lua_call_ok("campaign_party_check", stage, (LPCSTR)task);
+ 	}
+@@ -7483,6 +7914,7 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	bool ok = false;
+ 	const campaign::Refusal opened = campaign::dialogue_open(holder, owner, false);
+ 	{
++		campaign::PartyPurseScope purse(u16(holder->ID()), u16(actor->ID()), true); // G10 (T05b-4)
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-turnin");
+ 		ok = opened == campaign::Refusal::None && quest_turnin_phrases(holder, npc);
+ 	}
+@@ -7500,12 +7932,24 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	pending.since_tick = g_host->tick;
+ 	pending.slot = link.ref.slot;
+ 	g_host->turn_ins.push_back(pending);
++	party_purse_pending(task, holder, actor);
+ 	return kQuestPending;
+ }
+ 
+ PlayerLink* link_of(const coop::proto::Uuid128& player);
+ u16 give_to(CALifeSimulator* alife, LPCSTR section, u16 parent);
+ 
++// G10 (T05b-4): the pending turn-in's completion (its on_complete in the task's
++// scope, the native task manager's next update) charges the clicking player
++void party_purse_pending(LPCSTR task, CActor* holder, CActor* clicker)
++{
++	if (!holder)
++		return;
++	const u16 payer = clicker ? u16(clicker->ID()) : u16(holder->ID());
++	campaign::set_pending_party_purse(task, u16(holder->ID()), payer);
++	g_host->log.line("quest-purse task=%s anchor=%u payer=%u", task, u32(holder->ID()), u32(payer));
++}
++
+ // The resolved effects of a completed party turn-in, applied by the server:
+ // the patches leave their owners' inventories, each player is paid for his
+ // own (dialogs.relocate_money in that player's context: the money and its
+@@ -7630,6 +8074,11 @@ void quest_tick()
+ 		return;
+ 	if (g_host->tick % 25 == 0)
+ 		sync_party_actors();
++	if (g_host->tick % 250 == 125)
++	{
++		s32 told = 0; // G10 (T04f-2): a lent item ready is told to its lender
++		lua_call_ok("campaign_lending_tick", told);
++	}
+ 	for (Host::PartyTask& t : g_host->party_tasks)
+ 		if (g_host->tick % 50 == 0)
+ 		{
+@@ -7660,6 +8109,8 @@ void quest_tick()
+ 			continue;
+ 		}
+ 		lua_call_void("campaign_party_end_turnin");
++		if (!xr_strcmp(campaign::pending_party_purse_task(), p.task.c_str()))
++			campaign::set_pending_party_purse(nullptr, 0xffff, 0xffff); // G10 (T05b-4)
+ 		if (done)
+ 		{
+ 			++g_host->commit;
+@@ -8797,6 +9248,8 @@ u16 find_giver()
+ 	return 0xffff;
+ }
+ 
++bool sleep_lua(CActor* actor, LPCSTR chunk, LPCSTR label); // S10-T03c
++
+ void place_beside(CActor* actor, const Fvector& at)
+ {
+ 	Fmatrix F = actor->XFORM();
+@@ -9613,7 +10066,13 @@ u16 take_trade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	if (intent.params.size() < 2)
+ 		return coop::proto::kReasonMalformed;
+ 	const u32 nbuy = intent.params[0], nsell = intent.params[1];
+-	if (nbuy + nsell == 0 || nbuy + nsell > 32 || intent.params.size() != 2 + 12 * (nbuy + nsell) + 4)
++	const size_t base = 2 + 12 * (nbuy + nsell) + 4;
++	if (nbuy + nsell == 0 || nbuy + nsell > 32 || (intent.params.size() != base && intent.params.size() != base + 1))
++		return coop::proto::kReasonMalformed;
++	// G10: a trailing flags byte, bit 0: the sold items are a donation (the
++	// window's donate: given to the trader for nothing, Action_Donate)
++	const bool donate = intent.params.size() == base + 1 && (intent.params[base] & 1);
++	if (donate && nbuy)
+ 		return coop::proto::kReasonMalformed;
+ 	struct Line
+ 	{
+@@ -9645,7 +10104,7 @@ u16 take_trade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 				u32(npc_id), u32(l.id), u32(l.se->ID_Parent), u32(expected_parent));
+ 			return coop::proto::kReasonTradeRefused;
+ 		}
+-		if (!l.bought && (l.item->IsQuestItem() || !l.item->CanTrade()))
++		if (!l.bought && (l.item->IsQuestItem() || (!donate && !l.item->CanTrade())))
+ 		{
+ 			++g_host->trades_refused;
+ 			g_host->log.line("trade-refused slot=%u npc=%u why=not-tradeable item=%u section=%s", u32(link.ref.slot),
+@@ -9662,6 +10121,8 @@ u16 take_trade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 		trade->StartTradeEx(me);
+ 		for (Line& l : lines)
+ 		{
++			if (donate)
++				continue; // free
+ 			l.price = trade->GetItemPrice(l.item, !l.bought, false);
+ 			if (!l.price)
+ 			{
+@@ -9734,17 +10195,18 @@ u16 take_trade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	coop::store::failpoint("trade:after-flush");
+ 	++g_host->trades_committed;
+ 	g_host->log.line("trade-committed revision=%I64u slot=%u operation=%I64u npc=%u bought=%u sold=%u pay=%u get=%u "
+-		"money=%u->%u", revision, u32(link.ref.slot), intent.operation_id, u32(npc_id), nbuy, nsell, pay, get, money,
+-		record.actor_money_after);
++		"money=%u->%u donate=%d", revision, u32(link.ref.slot), intent.operation_id, u32(npc_id), nbuy, nsell, pay, get,
++		money, record.actor_money_after, donate ? 1 : 0);
+ 	// 5. Apply: the engine's own trade in the buyer's context.
+ 	{
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "trade-apply");
+-		trade->OnPerformTrade(pay, get);
++		if (!donate)
++			trade->OnPerformTrade(pay, get);
+ 		for (const Line& l : lines)
+ 		{
+-			trade->TransferItem(l.item, !l.bought); // from the trader's side: it buys the sold items
++			trade->TransferItem(l.item, !l.bought, donate); // from the trader's side: it buys the sold items
+ 			g_host->log.line("trade-item revision=%I64u item=%u item_entity=%I64u section=%s %s price=%u", revision, u32(l.id),
+-				l.ref.id, *l.item->object().cNameSect(), l.bought ? "bought" : "sold", l.price);
++				l.ref.id, *l.item->object().cNameSect(), donate ? "donated" : l.bought ? "bought" : "sold", l.price);
+ 		}
+ 		actor->set_money(record.actor_money_after, false);
+ 	}
+@@ -10502,6 +10964,8 @@ static u16 party_accept_task(PlayerLink& link, CGameObject* npc, LPCSTR task, LP
+ 		return coop::proto::kReasonNoActor;
+ 	bool ok = false;
+ 	{
++		CActor* clicker = participant_actor(link.ref);
++		campaign::PartyPurseScope purse(u16(anchor->ID()), clicker ? u16(clicker->ID()) : u16(anchor->ID()), false); // G10
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "party-quest-accept-talk");
+ 		ok = scope.entered() && quest_accept_phrases(anchor, npc, task);
+ 	}
+@@ -10554,8 +11018,11 @@ static u16 party_turn_in_task(PlayerLink& link, CGameObject* npc, LPCSTR task, L
+ 				u32(p.waiters.size()), source);
+ 			return 0;
+ 		}
++	CActor* clicker = participant_actor(link.ref);
++	const u16 payer = clicker ? u16(clicker->ID()) : u16(holder->ID()); // G10 (T05b-4): the player who clicked pays
+ 	s32 stage = -1;
+ 	{
++		campaign::PartyPurseScope purse(u16(holder->ID()), payer, true);
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
+ 		lua_call_ok("campaign_party_check", stage, (LPCSTR)task);
+ 	}
+@@ -10570,6 +11037,7 @@ static u16 party_turn_in_task(PlayerLink& link, CGameObject* npc, LPCSTR task, L
+ 		begin((LPCSTR)task);
+ 	bool ok = false;
+ 	{
++		campaign::PartyPurseScope purse(u16(holder->ID()), payer, true);
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-turnin-talk");
+ 		ok = scope.entered() && quest_turnin_phrases(holder, npc);
+ 	}
+@@ -10586,6 +11054,7 @@ static u16 party_turn_in_task(PlayerLink& link, CGameObject* npc, LPCSTR task, L
+ 	pending.since_tick = g_host->tick;
+ 	pending.slot = link.ref.slot;
+ 	g_host->turn_ins.push_back(pending);
++	party_purse_pending(task, holder, clicker);
+ 	return 0;
+ }
+ 
+@@ -14034,6 +14503,41 @@ void task_fixtures()
+ 				luabind::functor<void> probe;
+ 				if (scope.entered() && ai().script_engine().functor("campaign_party_probe_reward_item", probe))
+ 					probe("bandage");
++				// G10: an item created on the anchor during a turn-in reaches the other player too
++				if (scope.entered())
++					sleep_lua(nullptr, "alife_create_item('bread', db.actor)", "fixture-create-probe");
++			}
++			// G10 (T05b-4): the clicker's purse (p2 clicked): a fee from p2, a payment to both
++			if (actors[1] && anchor != actors[1])
++			{
++				const u32 a0 = anchor->get_money(), p0 = actors[1]->get_money();
++				{
++					campaign::PartyPurseScope purse(u16(anchor->ID()), u16(actors[1]->ID()), true);
++					campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "fixture-purse");
++					if (scope.entered())
++						sleep_lua(nullptr, "db.actor:give_money(-100) db.actor:give_money(50)", "fixture-purse");
++				}
++				const u32 a1 = anchor->get_money(), p1 = actors[1]->get_money();
++				const bool ok = a1 == a0 + 50 && p1 + 50 == p0;
++				g_host->log.line("fixture-task purse-probe anchor=%u->%u clicker=%u->%u pass=%d", a0, a1, p0, p1, ok ? 1 : 0);
++				if (!ok)
++					++f.failures;
++			}
++			// G10: a fail path's goodwill penalty on both players
++			{
++				campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "fixture-fail");
++				luabind::functor<luabind::object> fail;
++				string256 said = "none";
++				if (scope.entered() && ai().script_engine().functor("campaign_party_probe_fail", fail))
++				{
++					luabind::object r = fail("stalker", 10);
++					if (r.type() == LUA_TSTRING)
++						xr_strcpy(said, luabind::object_cast<LPCSTR>(r));
++				}
++				const bool ok = strstr(said, "ok=1 both=1") != nullptr;
++				g_host->log.line("fixture-task fail-probe %s pass=%d", said, ok ? 1 : 0);
++				if (!ok)
++					++f.failures;
+ 			}
+ 			Host::PendingTurnIn dummy;
+ 			dummy.task = "probe";
+@@ -15055,6 +15559,19 @@ bool sleep_lua(CActor* actor, LPCSTR chunk, LPCSTR label)
+ 	return ok;
+ }
+ 
++// G10 (T03c-2): both players sleep only in shelter (the installed window's
++// rule, now for the partner too): 1 a sleep zone, 2 an emission cover,
++// 3 underground, 4 a set-up tent within 1.5 m; 0 none; -1 not known (the
++// adapter is missing: allowed, logged)
++int sleep_shelter(CActor* actor)
++{
++	s32 kind = -1;
++	campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "sleep-shelter");
++	if (!scope.entered() || !lua_call_ok("campaign_sleep_shelter", kind))
++		return -1;
++	return kind;
++}
++
+ double sleep_game_hours()
+ {
+ 	return double(ai().get_alife() ? ai().alife().time_manager().game_time() : 0) / 3600000.0;
+@@ -15137,6 +15654,12 @@ u16 take_sleep_request(PlayerLink& link, const coop::proto::ActionIntent& intent
+ 			radiation, g_host->tick < link.blackout_until_tick ? 1 : 0);
+ 		return coop::proto::kReasonCannotSleep;
+ 	}
++	const int shelter = sleep_shelter(actor);
++	if (shelter == 0)
++	{
++		g_host->log.line("sleep-no-shelter slot=%u role=requester", u32(link.ref.slot));
++		return coop::proto::kReasonNoShelter;
++	}
+ 	if (g_host->travel.coordinator && g_host->travel.coordinator->live())
+ 		return coop::proto::kReasonTravelBusy;
+ 	PlayerLink* partner = travel_partner(link.ref.slot);
+@@ -15153,6 +15676,7 @@ u16 take_sleep_request(PlayerLink& link, const coop::proto::ActionIntent& intent
+ 		return coop::proto::kReasonInCombat;
+ 	}
+ 	coop::proto::Transition t;
++	g_host->log.line("sleep-shelter slot=%u role=requester kind=%d", u32(link.ref.slot), shelter);
+ 	const coop::proto::TravelVerdict verdict = g_host->sleep.coordinator->propose(link.ref.slot, partner->ref.slot, hours,
+ 		g_host->wall.GetElapsed_ms(), t);
+ 	if (verdict == coop::proto::TravelVerdict::Busy)
+@@ -15201,6 +15725,11 @@ u16 take_sleep_answer(PlayerLink& link, const coop::proto::ActionIntent& intent,
+ 		string256 who;
+ 		if (party_in_combat(who))
+ 			return coop::proto::kReasonInCombat;
++		// G10 (T03c-2): the partner's USE counts only in shelter; the proposal stays up
++		const int shelter = sleep_shelter(actor);
++		g_host->log.line("sleep-shelter slot=%u role=partner kind=%d", u32(link.ref.slot), shelter);
++		if (shelter == 0)
++			return coop::proto::kReasonNoShelter;
+ 	}
+ 	coop::proto::Transition out;
+ 	const coop::proto::TravelVerdict v =
+@@ -15412,6 +15941,58 @@ void sleep_fixtures()
+ 	u64 rev = 0;
+ 	if (f.phase == 0)
+ 	{
++		// G10 (T03c-2): out of shelter the request and the partner's USE are
++		// refused (47); then both players are placed in the nearest sleep zone
++		actors[1]->conditions().ChangeRadiation(-actors[1]->conditions().GetRadiation());
++		const int k1 = sleep_shelter(actors[0]), k2 = sleep_shelter(actors[1]);
++		u64 id = 0;
++		const u16 out2 = k2 == 0 ? sleep_fixture_intent(l2, coop::proto::kActionSleepRequest, std::vector<u8>(1, 3), id) : 0;
++		string256 point = "";
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actors[1]), "fixture-shelter");
++			luabind::functor<luabind::object> where;
++			if (scope.entered() && ai().script_engine().functor("campaign_sleep_shelter_point", where))
++			{
++				luabind::object r = where();
++				if (r.type() == LUA_TSTRING)
++					xr_strcpy(point, luabind::object_cast<LPCSTR>(r));
++			}
++		}
++		Fvector at = {0.f, 0.f, 0.f};
++		string128 zone = "";
++		const bool found = sscanf(point, "%f %f %f %127s", &at.x, &at.y, &at.z, zone) == 4;
++		if (found)
++			place_beside(actors[1], at);
++		const int k2b = found ? sleep_shelter(actors[1]) : -1;
++		u16 req = 0, partner_out = 0, cancel = 0;
++		if (k1 == 0 && k2b > 0)
++		{
++			req = sleep_fixture_intent(l2, coop::proto::kActionSleepRequest, std::vector<u8>(1, 3), id);
++			partner_out = sleep_fixture_intent(l1, coop::proto::kActionSleepAnswer, sleep_answer_params(id, 1), rev);
++			cancel = sleep_fixture_intent(l2, coop::proto::kActionSleepAnswer, sleep_answer_params(id, 3), rev);
++		}
++		if (found)
++		{
++			Fvector beside = at;
++			beside.x += 0.6f;
++			place_beside(actors[0], beside);
++		}
++		const int k1b = found ? sleep_shelter(actors[0]) : -1;
++		const bool pass = found && k2b > 0 && k1b > 0 && (k2 != 0 || out2 == coop::proto::kReasonNoShelter) &&
++			(k1 != 0 || (req == 0 && partner_out == coop::proto::kReasonNoShelter && cancel == 0));
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-sleep shelter-round p1=%d p2=%d p2_request_out=%u zone=%s p2_in=%d request=%u "
++			"p1_accept_out=%u cancel=%u p1_in=%d pass=%d", k1, k2, u32(out2), found ? zone : "-", k2b, u32(req),
++			u32(partner_out), u32(cancel), k1b, pass ? 1 : 0);
++		f.phase = 100;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 100)
++	{
++		if (g_host->tick - f.phase_tick < 2 * 50)
++			return;
+ 		actors[1]->conditions().ChangeRadiation(-actors[1]->conditions().GetRadiation());
+ 		needs_set(0, "actor_status_sleep", "last_sleep", 5000.f);
+ 		needs_set(1, "actor_status_sleep", "last_sleep", 5000.f);
+@@ -17446,6 +18027,117 @@ void on_joined(const coop::session::SessionEvent& e)
+ 	give_actor(*link);
+ }
+ 
++// ------------------------------------------------------------ S10-T07 (G10, T03a-2)
++// An absent player's character (the user's review: "make sure the disconnected
++// player's area doesn't keep simulating forever"): for 5 minutes after the
++// leave it stays as before (live, vulnerable); then it is parked: it keeps no
++// area online (the ALife switch anchors and the respawn guards skip it), NPCs
++// and monsters do not see it (no STYPE_VISIBLEFORAI; the AI's participant
++// lists skip it), it cannot be hurt (CActor::Hit), its condition and needs
++// stay as they were, and the per-player script passes (the emission's) skip
++// it. It is unparked as it was once its player is back in the world. The
++// clock starts at the leave, or at the server's start for a player who has
++// not joined since.
++const u32 kParkAfterMs = 5 * 60 * 1000;
++
++void park_set(PlayerLink& link, CActor* actor, bool park, LPCSTR why)
++{
++	const u16 id = park ? u16(actor->ID()) : link.parked_actor;
++	CActor* a = park ? actor : smart_cast<CActor*>(Level().Objects.net_Find(id));
++	if (a)
++	{
++		if (park)
++			a->spatial.type &= ~STYPE_VISIBLEFORAI;
++		else
++			a->spatial.type |= STYPE_VISIBLEFORAI;
++	}
++	campaign::set_participant_parked(id, park);
++	link.parked = park;
++	link.parked_actor = park ? id : 0xffff;
++	if (park)
++		++link.parks;
++	g_host->log.line("%s slot=%u actor=%u why=%s away_ms=%u health=%.3f", park ? "parked" : "unparked", u32(link.ref.slot),
++		u32(id), why, link.absent_since_ms ? g_host->wall.GetElapsed_ms() - link.absent_since_ms : 0,
++		a ? a->conditions().GetHealth() : -1.f);
++}
++
++void park_tick()
++{
++	const u32 now = g_host->wall.GetElapsed_ms();
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		if (link.session)
++		{
++			link.absent_since_ms = 0;
++			if (link.parked && client_in_world(link))
++				park_set(link, nullptr, false, "back-in-world");
++			continue;
++		}
++		if (!link.absent_since_ms)
++			link.absent_since_ms = now ? now : 1;
++		if (link.parked || now - link.absent_since_ms < kParkAfterMs)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (actor && actor->g_Alive())
++			park_set(link, actor, true, "away-5-minutes");
++	}
++}
++
++// ------------------------------------------------------------ S10-T07 (G10)
++// A field repair (ActionIntent 29): a repair kit's window (item_repair) runs on
++// the player's own client (its use is not sent: the window spends nothing);
++// its Repair button sends the kit, the item and the support part. The server
++// checks that all are in the player's own inventory and applies the installed
++// window's rules in the player's context (campaign_field_repair: the kit's
++// range and accepted items and parts, the new condition, one use of the part
++// and the kit or the kit's wear). The condition and uses reach the clients
++// through the inventory layout; durable through the checkpoint (as the
++// mechanic's repair, L61).
++u16 take_field_repair(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CActor* actor = nullptr;
++	coop::proto::EntityRef actor_ref;
++	u16 item_id = kNoEngineId;
++	CInventoryItem* item = nullptr;
++	if (const u16 reason = own_inventory_item(link, intent, actor, actor_ref, item_id, item))
++		return reason;
++	const std::vector<u8>& p = intent.params;
++	if (p.size() != 14 && p.size() != 26)
++		return coop::proto::kReasonMalformed;
++	coop::proto::EntityRef kit_ref, part_ref;
++	if (!read_ref(p, 0, kit_ref) || (p[12] != 0 && p[12] != 1) || (p[12] == 1) != (p.size() == 26) ||
++		(p[12] == 1 && !read_ref(p, 13, part_ref)))
++		return coop::proto::kReasonMalformed;
++	const int expected = p.back();
++	const u16 kit = engine_id_of(kit_ref);
++	const u16 part = p[12] == 1 ? engine_id_of(part_ref) : 0xffff;
++	auto owned = [actor](u16 id) {
++		CObject* o = id != kNoEngineId ? Level().Objects.net_Find(id) : nullptr;
++		CSE_Abstract* se = id != kNoEngineId ? Level().Server->ID_to_entity(id) : nullptr;
++		return o && se && !o->getDestroy() && o->H_Parent() == actor && se->ID_Parent == actor->ID() &&
++			!g_host->use_consumed.count(id);
++	};
++	if (!owned(kit) || (part != 0xffff && !owned(part)))
++		return coop::proto::kReasonNotDroppable;
++	const float before = item->GetCondition();
++	s32 total = -9;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "field-repair");
++		if (scope.entered())
++			lua_call_ok("campaign_field_repair", total, int(kit), int(item_id), part == 0xffff ? -1 : int(part));
++	}
++	g_host->log.line("field-repair slot=%u item=%u section=%s kit=%u part=%d condition=%.3f->%.3f result=%d expected=%d",
++		u32(link.ref.slot), u32(item_id), *item->object().cNameSect(), u32(kit), part == 0xffff ? -1 : int(part), before,
++		item->GetCondition(), total, expected);
++	if (total < 0)
++		return coop::proto::kReasonUpgradeRefused;
++	++g_host->field_repairs;
++	result.revision = g_host->commit;
++	return 0;
++}
++
+ // ------------------------------------------------------------ S10-T07 (B12)
+ // A companion order (ActionIntent 28) from the hotkeys or the companion wheel: the installed axr_companions function
+ // runs on the server in the player's context, on that player's own companions only (each companion follows its
+@@ -18042,6 +18734,16 @@ static bool session_check_creation(const xr_map<xr_string, xr_string>& kv, xr_ve
+ 		why = "the start is not one of the faction's";
+ 		return false;
+ 	}
++	// G10 (the user, 2026-11-02): co-op is story mode only, for now
++	for (LPCSTR mode : {"new_game_hardcore_mode", "new_game_azazel_mode", "new_game_survival_mode", "new_game_warfare"})
++	{
++		const xr_string v = get(mode);
++		if (v == "true" || v == "1")
++		{
++			why = "co-op is story mode only (Ironman, Azazel, Survival and Warfare are not offered)";
++			return false;
++		}
++	}
+ 	const int economy = _max(1, _min(9, atoi(get("new_game_economy").c_str())));
+ 	const int difficulty = _max(1, _min(9, atoi(get("new_game_difficulty").c_str())));
+ 	if (!session_check_loadout(faction.c_str(), economy, get("new_game_loadout"), why))
+@@ -18054,14 +18756,13 @@ static bool session_check_creation(const xr_map<xr_string, xr_string>& kv, xr_ve
+ 	clean.emplace_back("new_game_difficulty", session_num(difficulty));
+ 	clean.emplace_back("new_game_economy", session_num(economy));
+ 	clean.emplace_back("new_game_economy_treasure", session_num(economy));
+-	for (LPCSTR flag : {"new_game_hardcore_mode", "new_game_story_mode", "new_game_azazel_mode", "new_game_survival_mode",
+-			 "new_game_campfire_mode", "new_game_conditions_mode", "new_game_opened_routes", "new_game_warfare"})
++	for (LPCSTR flag : {"new_game_story_mode", "new_game_campfire_mode", "new_game_conditions_mode", "new_game_opened_routes"})
+ 	{
+ 		const xr_string v = get(flag);
+ 		if (v == "true" || v == "1")
+ 			clean.emplace_back(flag, "true");
+ 	}
+-	for (LPCSTR number : {"new_game_hardcore_mode_lives", "new_game_hardcore_mode_regenerate", "new_game_timer_mode"})
++	for (LPCSTR number : {"new_game_timer_mode"})
+ 	{
+ 		const xr_string v = get(number);
+ 		if (!v.empty())
+@@ -18427,8 +19128,11 @@ void on_left(const coop::session::SessionEvent& e)
+ 	travel_on_left(*link); // S09-T01: a proposal it is party to is aborted
+ 	sleep_on_left(*link); // S10-T03c
+ 	talk_close(*link, "left", false); // S10-T04a: the NPC is free again
++	link->absent_since_ms = g_host->wall.GetElapsed_ms(); // G10 (T03a-2): parked after 5 minutes (park_tick)
++	if (!link->absent_since_ms)
++		link->absent_since_ms = 1;
+ 	// Detached-actor policy: the actor stays, vulnerable, and moves only by
+-	// input, which arrives only on an attached session.
++	// input, which arrives only on an attached session; parked after 5 minutes.
+ 	CActor* actor = participant_actor(link->ref);
+ 	g_host->log.line("left player=%s participant=%u/%u reason=%u detail=%s detach=%s actor=%u actor_alive=%d",
+ 		coop_uuid_hex(e.player).c_str(), u32(link->ref.slot), link->ref.generation, u32(e.reason), e.detail.c_str(),
+@@ -18508,6 +19212,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_session(*link, *intent, result); // S10-T06
+ 		else if (intent->kind == coop::proto::kActionCompanion)
+ 			reason = take_companion(*link, *intent, result); // S10-T07 (B12)
++		else if (intent->kind == coop::proto::kActionFieldRepair)
++			reason = take_field_repair(*link, *intent, result); // S10-T07 (G10)
+ 		else if (intent->kind == coop::proto::kActionTalkStart)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
+ 		else if (intent->kind == coop::proto::kActionUseObject)
+@@ -18862,6 +19568,13 @@ bool coop_server_slot_in_world(u8 slot)
+ 	return false;
+ }
+ 
++// S10-T07 (G10): a line from the server's Lua adapter (campaign.log)
++void coop_server_log(LPCSTR text)
++{
++	if (g_host && g_host->started && text)
++		g_host->log.line("%s", text);
++}
++
+ void coop_server_note(LPCSTR text)
+ {
+ 	if (g_host && g_host->started)
+@@ -19730,6 +20443,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	quest_tick(); // S08-T04
+ 	send_party_tasks(); // S08-T09
+ 	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
++	park_tick(); // S10-T07 (G10, T03a-2)
+ 	send_relations(); // S10-T04d
+ 	stash_watch_tick(); // S10-T04e
+ 	quest_fixtures(); // S08-T04
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 9ee75f9..6397c57 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -78,6 +78,8 @@ void coop_server_monster_ability(u16 monster, u16 target, LPCSTR ability, float
+ void coop_server_companion_changed(u16 npc, int slot);
+ // S10-T03c: the player in `slot` passed out (no time skip; its blackout)
+ void coop_server_blackout(u8 slot, u8 hours);
++// S10-T07 (G10): a line from the server's Lua adapter (campaign.log)
++void coop_server_log(LPCSTR text);
+ // S10-T03d: a script asked a player's level change (ChangeLevel in its context:
+ // a guide): a party travel request to that point. False when refused.
+ bool coop_server_relocate(u8 slot, const Fvector& position, u32 level_vertex, u16 game_vertex);
+diff --git a/src/xrGame/ai/monsters/monster_enemy_memory.cpp b/src/xrGame/ai/monsters/monster_enemy_memory.cpp
+index fc916c5..f6db092 100644
+--- a/src/xrGame/ai/monsters/monster_enemy_memory.cpp
++++ b/src/xrGame/ai/monsters/monster_enemy_memory.cpp
+@@ -39,7 +39,7 @@ void CMonsterEnemyMemory::update()
+ 	// They run against every participant actor: on a client that is the one
+ 	// local actor as before, on the server both players.
+ 	xr_vector<CActor*> participants;
+-	campaign::participant_actors(participants);
++	campaign::active_participant_actors(participants); // G10 (T03a-2): not a parked one
+ 
+ 	CMonsterHitMemory& monster_hit_memory = monster->HitMemory;
+ 
+diff --git a/src/xrGame/ai/monsters/poltergeist/poltergeist.cpp b/src/xrGame/ai/monsters/poltergeist/poltergeist.cpp
+index 368bbed..60c4d9c 100644
+--- a/src/xrGame/ai/monsters/poltergeist/poltergeist.cpp
++++ b/src/xrGame/ai/monsters/poltergeist/poltergeist.cpp
+@@ -360,7 +360,7 @@ void CPoltergeist::UpdateCL()
+ 	// S03-T04: any participant actor watching within 85 m (was the one
+ 	// global player, a null dereference with two participants on the server).
+ 	xr_vector<CActor*> participants;
+-	campaign::participant_actors(participants);
++	campaign::active_participant_actors(participants); // G10 (T03a-2): not a parked one
+ 	for (u32 i = 0; i < participants.size(); ++i)
+ 	{
+ 		if (participants[i]->memory().visual().visible_now(this) &&
+diff --git a/src/xrGame/script_game_object_inventory_owner.cpp b/src/xrGame/script_game_object_inventory_owner.cpp
+index 473c15d..ba48a09 100644
+--- a/src/xrGame/script_game_object_inventory_owner.cpp
++++ b/src/xrGame/script_game_object_inventory_owner.cpp
+@@ -716,6 +716,9 @@ u32 CScriptGameObject::Money()
+ {
+ 	CInventoryOwner* pOurOwner = smart_cast<CInventoryOwner*>(&object());
+ 	VERIFY(pOurOwner);
++	u32 purse = 0;
++	if (campaign::party_purse_money(pOurOwner, purse))
++		return purse; // S10-T07 (T05b-4): a party task's purse is the clicking player's
+ 	return pOurOwner->get_money();
+ }
+ 
+@@ -757,6 +760,7 @@ void CScriptGameObject::TransferMoney(int money, CScriptGameObject* pForWho)
+ 	VERIFY(pOurOwner);
+ 	CInventoryOwner* pOtherOwner = smart_cast<CInventoryOwner*>(&pForWho->object());
+ 	VERIFY(pOtherOwner);
++	pOurOwner = campaign::party_purse_owner(pOurOwner); // S10-T07 (T05b-4)
+ 
+ 	if (pOurOwner->get_money() < money)
+ 	{
+@@ -777,6 +781,8 @@ void CScriptGameObject::GiveMoney(int money)
+ 	VERIFY(pOurOwner);
+ 	if (campaign::coop_client_script_give_money(pOurOwner, money))
+ 		return; // S10-T04f: the installed Lua trade or repair window: the purse is the server's
++	if (campaign::party_purse_give(pOurOwner, money))
++		return; // S10-T07 (T05b-4, T05b-2): the clicking player pays; a turn-in's money to every player
+ 
+     GiveMoneySafe(pOurOwner, money, true);
+ }
+diff --git a/src/xrGame/stalker_property_evaluators.cpp b/src/xrGame/stalker_property_evaluators.cpp
+index 12624dc..f79eefe 100644
+--- a/src/xrGame/stalker_property_evaluators.cpp
++++ b/src/xrGame/stalker_property_evaluators.cpp
+@@ -418,7 +418,7 @@ _value_type CStalkerPropertyEvaluatorPlayerOnThePath::evaluate()
+ 
+ 	// S03-T02: any participant actor on the path, not one global player.
+ 	xr_vector<CActor*> actors;
+-	campaign::participant_actors(actors);
++	campaign::active_participant_actors(actors); // G10 (T03a-2): not a parked one
+ 	for (u32 i = 0; i < actors.size(); ++i)
+ 	{
+ 		CActor* actor = actors[i];

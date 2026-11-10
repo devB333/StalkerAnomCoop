@@ -1,0 +1,1858 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index b1fc354..24dd991 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -1,5 +1,6 @@
+ #include "pch_script.h"
+ #include "CoopClientLink.h"
++#include "inventory_upgrade_manager.h" // S10-T04f
+ 
+ // S05-T01: see CoopClientLink.h.
+ 
+@@ -413,9 +414,27 @@ struct Link
+ 		xr_map<u16, u32> buy, sell; // item id -> what this player pays for the trader's item / gets for its own
+ 		u32 actor_money = 0, trader_money = 0;
+ 		u8 parts_seen = 0;
+-		u32 refresh_at_ms = 0;
++		u32 refresh_at_ms = 0, opened_ms = 0;
++		xr_vector<u16> lua_bought, lua_sold; // S10-T04f: the installed Lua trade window's transfers, sent once per frame
+ 		u64 opens = 0, performs = 0, accepted = 0, refused = 0, price_events = 0, refreshes = 0;
+ 	} trade;
++	struct Upgrade // S10-T04f: the upgrade window on the server's upgrade session
++	{
++		bool open = false; // the window is up (the first table arrived)
++		bool pending_open = false, pending = false;
++		u16 npc = 0xffff;
++		coop::proto::EntityRef npc_ref;
++		struct Item
++		{
++			u8 can_upgrade = 0;
++			xr_map<shared_str, std::pair<u8, u32>> ups; // upgrade id -> (install state result, price)
++		};
++		xr_map<u16, Item> table; // item id -> the server's table
++		u32 actor_money = 0, opened_ms = 0;
++		u8 parts_seen = 0;
++		u64 opens = 0, installs = 0, repairs = 0, accepted = 0, refused = 0, table_events = 0, installed_events = 0;
++	} upgrade;
++	u32 lua_ui_check_ms = 0; // S10-T04f: the installed Lua inventory window's presence, checked twice a second
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+ 	u64 transfer_steps_unlinked = 0;
+ 	u64 item_graph_matches = 0, item_graph_mismatches = 0, own_inventory_mismatches = 0; // S08-T03
+@@ -924,8 +943,13 @@ void apply_despawn(const coop::proto::Despawn& d)
+ 
+ void apply_reparent(const coop::proto::Reparent& r, bool retry = false); // S08-T01
+ void on_trade_prices(const coop::proto::CampaignEvent& event); // S10-T04c
++void on_upgrade_table(const coop::proto::CampaignEvent& event); // S10-T04f
++void on_upgrade_installed(const coop::proto::CampaignEvent& event); // S10-T04f
+ static void trade_refresh_menu();
++static void lua_ui_refresh(); // S10-T04f
++static bool lua_ui_shown(); // S10-T04f
+ static void trade_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
++static void upgrade_result(const Link::PickupPending& p, const coop::proto::ActionResult& result); // S10-T04f
+ 
+ void apply_lifecycle(const coop::proto::Message& m)
+ {
+@@ -3378,6 +3402,8 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 13: on_travel(*event); break; // S09-T01
+ 			case 14: on_talk(*event); break; // S10-T04a
+ 			case 15: on_trade_prices(*event); break; // S10-T04c
++			case 16: on_upgrade_table(*event); break; // S10-T04f
++			case 17: on_upgrade_installed(*event); break; // S10-T04f
+ 			default: break;
+ 			}
+ 		}
+@@ -3801,6 +3827,8 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				p.action == coop::proto::kActionTradeClose;
+ 			if (trade_action)
+ 				trade_result(p, result); // S10-T04c
++			if (p.action == coop::proto::kActionUpgradeOpen || p.action == coop::proto::kActionUpgrade)
++				upgrade_result(p, result); // S10-T04f
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+ 			{
+ 				// S08-T07: the use's first-person presentation, as single player plays it
+@@ -4795,6 +4823,8 @@ u32 apply_layout(u64 actor_entity, Link::ActorLayout& l, u32& moves)
+ 						*item->object().cNameSect(), u32(shown), u32(e.condition));
+ 				item->SetCondition(float(e.condition) / 255.f);
+ 				++moves;
++				if (g_link->upgrade.open)
++					lua_ui_refresh(); // S10-T04f: the repair window's condition bar
+ 			}
+ 			if (item->CurrPlace() == e.place && (e.place != 1 || item->CurrSlot() == e.slot))
+ 				continue;
+@@ -6024,11 +6054,393 @@ void on_trade_prices(const coop::proto::CampaignEvent& event)
+ 		return;
+ 	}
+ 	t.open = true;
++	t.opened_ms = g_link->wall.GetElapsed_ms();
+ 	++t.opens;
+ 	ui->StartTrade(smart_cast<CInventoryOwner*>(g_actor), partner);
+ 	g_link->log.line("trade-open npc=%u name=%s mode=%d", u32(npc_id), partner->Name(), int(ui->GetActorMenu().GetMenuMode()));
+ }
+ 
++// ------------------------------------------------------------ S10-T04f
++// The upgrade window on the server's upgrade session (T04c-3). The remote
++// talk window's upgrade button asks the server to open the session (kind 21);
++// the native upgrade window opens when the table (CampaignEvent 16) arrives
++// and reads it: which items the mechanic upgrades (CUIActorMenu::CanUpgradeItem)
++// and each upgrade's install state (Upgrade::can_install). A click's install
++// (Manager::upgrade_install) and the repair button send the intent (kind 22)
++// instead of running here; CampaignEvent 17 installs the upgrade on this
++// client's copy in loading mode (no charge), the purse comes with the
++// per-player survival event and the condition with the layout.
++void on_upgrade_table(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.size() < 12 + 2 + 4 + 1)
++		return;
++	coop::proto::EntityRef ref;
++	for (int i = 0; i < 8; ++i)
++		ref.id |= u64(b[i]) << (8 * i);
++	for (int i = 0; i < 4; ++i)
++		ref.generation |= u32(b[8 + i]) << (8 * i);
++	PayloadReader r(b);
++	r.at = 12;
++	const u8 part = r.get<u8>();
++	const u8 parts = r.get<u8>();
++	const u32 actor_money = r.get<u32>();
++	const u8 count = r.get<u8>();
++	Link::Upgrade& t = g_link->upgrade;
++	const u16 npc_id = id_of(ref);
++	if (!r.ok || npc_id == 0xffff || !parts || part >= parts)
++		return;
++	++t.table_events;
++	if (part == 0 || t.npc != npc_id)
++	{
++		t.table.clear();
++		t.parts_seen = 0;
++	}
++	u32 unknown = 0, installable = 0;
++	for (u8 i = 0; i < count && r.ok; ++i)
++	{
++		coop::proto::EntityRef item_ref;
++		item_ref.id = r.get<u64>();
++		item_ref.generation = r.get<u32>();
++		Link::Upgrade::Item entry;
++		entry.can_upgrade = r.get<u8>();
++		const u8 n = r.get<u8>();
++		for (u8 k = 0; k < n && r.ok; ++k)
++		{
++			string256 id;
++			r.str(id, sizeof(id));
++			const u8 result = r.get<u8>();
++			const u32 cost = r.get<u32>();
++			if (!r.ok)
++				break;
++			entry.ups[shared_str(id)] = std::make_pair(result, cost);
++			if (result == 0)
++				++installable;
++		}
++		if (!r.ok)
++			break;
++		const u16 item = id_of(item_ref);
++		if (item == 0xffff)
++		{
++			++unknown;
++			continue;
++		}
++		t.table[item] = entry;
++	}
++	t.npc = npc_id;
++	t.npc_ref = ref;
++	t.actor_money = actor_money;
++	++t.parts_seen;
++	if (part + 1 < parts)
++		return;
++	t.pending_open = false;
++	t.pending = false;
++	if (g_actor && g_actor->get_money() != actor_money)
++		g_actor->set_money(actor_money, false);
++	CInventoryOwner* partner = smart_cast<CInventoryOwner*>(Level().Objects.net_Find(npc_id));
++	g_link->log.line("upgrade-table npc=%u parts=%u items=%u installable=%u unknown=%u money=%u open=%d", u32(npc_id),
++		u32(parts), u32(t.table.size()), installable, unknown, actor_money, t.open ? 1 : 0);
++	CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++	if (t.open)
++	{
++		if (ui)
++			ui->GetActorMenu().CoopUpgradeRefresh();
++		return;
++	}
++	if (!partner || !ui || !g_actor)
++	{
++		g_link->log.line("upgrade-open-failed npc=%u partner=%d ui=%d", u32(npc_id), partner ? 1 : 0, ui ? 1 : 0);
++		request_ownership(coop::proto::kActionUpgradeClose, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, false, "unshowable");
++		return;
++	}
++	t.open = true;
++	t.opened_ms = g_link->wall.GetElapsed_ms();
++	++t.opens;
++	{
++		// the installed Lua window (ui_inventory.script, repair mode) evaluates the
++		// upgrades with get_speaker(), i.e. the used_npc_id event a USE sets
++		luabind::functor<void> put;
++		if (ai().script_engine().functor("_G.SetEvent", put))
++			put("used_npc_id", u32(npc_id));
++	}
++	ui->StartUpgrade(smart_cast<CInventoryOwner*>(g_actor), partner);
++	g_link->log.line("upgrade-open npc=%u name=%s mode=%d", u32(npc_id), partner->Name(), int(ui->GetActorMenu().GetMenuMode()));
++}
++
++// CampaignEvent 17: an upgrade installed on an item (op 1: the same install
++// here, loading mode) or its repair (op 2: the condition comes with the layout)
++void on_upgrade_installed(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	coop::proto::EntityRef ref;
++	ref.id = r.get<u64>();
++	ref.generation = r.get<u32>();
++	const u8 op = r.get<u8>();
++	string256 id;
++	r.str(id, sizeof(id));
++	if (!r.ok)
++		return;
++	Link::Upgrade& t = g_link->upgrade;
++	++t.installed_events;
++	const u16 item_id = id_of(ref);
++	CObject* object = item_id != 0xffff ? Level().Objects.net_Find(item_id) : nullptr;
++	CInventoryItem* item = object ? smart_cast<CInventoryItem*>(object) : nullptr;
++	bool installed = false;
++	if (item && op == 1 && id[0])
++	{
++		const shared_str uid(id);
++		installed = item->has_upgrade(uid) || ai().alife().inventory_upgrade_manager().upgrade_install(*item, uid, true);
++	}
++	g_link->log.line("upgrade-installed item=%u item_entity=%I64u section=%s op=%u upgrade=%s present=%d installed=%d", u32(item_id),
++		ref.id, item ? *item->object().cNameSect() : "-", u32(op), id, item ? 1 : 0, installed ? 1 : 0);
++	CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++	if (t.open && ui)
++	{
++		ui->GetActorMenu().CoopUpgradeRefresh();
++		lua_ui_refresh();
++	}
++}
++
++// S10-T04f: Anomaly's inventory, trade and repair windows are the installed
++// Lua UI (ui_inventory.script, opened through the engine's StartTrade /
++// StartUpgrade script hooks), not the engine's CUIActorMenu. Its item lists are
++// nudged after a server-made change, and its presence tells when a session's
++// window is gone (it never reaches the engine menu's deinit).
++static luabind::object lua_ui_object()
++{
++	luabind::object globals = luabind::get_globals(ai().script_engine().lua());
++	luabind::object module = globals["ui_inventory"];
++	if (module.type() != LUA_TTABLE)
++		return luabind::object();
++	return module["GUI"];
++}
++
++static void lua_ui_refresh()
++{
++	luabind::object gui = lua_ui_object();
++	if (gui.type() == LUA_TNIL)
++		return;
++	luabind::object update = gui["On_Item_Update"];
++	if (update.type() == LUA_TFUNCTION)
++		luabind::call_function<void>(update, gui);
++}
++
++static bool lua_ui_shown()
++{
++	luabind::object gui = lua_ui_object();
++	if (gui.type() == LUA_TNIL)
++		return false;
++	luabind::object shown = gui["IsShown"];
++	return shown.type() == LUA_TFUNCTION && luabind::call_function<bool>(shown, gui);
++}
++
++static void upgrade_result(const Link::PickupPending& p, const coop::proto::ActionResult& result)
++{
++	Link::Upgrade& t = g_link->upgrade;
++	const bool accepted = result.outcome == coop::proto::ActionOutcome::Accepted;
++	if (p.action == coop::proto::kActionUpgradeOpen)
++	{
++		if (!accepted)
++		{
++			t.pending_open = false;
++			_give_news(result.reason == coop::proto::kReasonNoMechanic ? "Co-op: this character is not a mechanic" :
++				"Co-op: the upgrade window could not be opened", "", "ui_inGame2_Mesta_evakuatsii", 0, 6000, 0);
++		}
++		g_link->log.line("upgrade-open-result outcome=%u reason=%u", u32(result.outcome), u32(result.reason));
++		return;
++	}
++	if (p.action == coop::proto::kActionUpgrade)
++	{
++		t.pending = false;
++		++(accepted ? t.accepted : t.refused);
++		if (!accepted)
++			_give_news(result.reason == coop::proto::kReasonNoMoney ? "Co-op: not enough money" :
++				"Co-op: the mechanic refused", "", "ui_inGame2_Mesta_evakuatsii", 0, 6000, 0);
++		g_link->log.line("upgrade-result outcome=%u reason=%u commit=%I64u", u32(result.outcome), u32(result.reason),
++			result.commit_id);
++	}
++}
++
++} // namespace
++
++namespace campaign
++{
++// S10-T04f: see the upgrade section above.
++bool coop_client_upgrade_open(CInventoryOwner* partner)
++{
++	if (!g_link || !g_link->active)
++		return false;
++	Link::Upgrade& t = g_link->upgrade;
++	if (g_link->world != WorldLive || !g_actor)
++		return true; // nothing upgrades locally on a replica
++	CGameObject* go = smart_cast<CGameObject*>(partner);
++	coop::proto::EntityRef ref;
++	if (!go || !ref_of(u16(go->ID()), ref))
++	{
++		g_link->log.line("upgrade-open-unknown npc=%u", go ? u32(go->ID()) : 0xffffu);
++		return true;
++	}
++	if (t.open || t.pending_open)
++	{
++		g_link->log.line("upgrade-open-ignored npc=%u open=%d pending=%d", u32(go->ID()), t.open ? 1 : 0, t.pending_open ? 1 : 0);
++		return true;
++	}
++	t.pending_open = true;
++	t.npc = u16(go->ID());
++	t.npc_ref = ref;
++	request_ownership(coop::proto::kActionUpgradeOpen, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("upgrade-open-sent npc=%u", u32(go->ID()));
++	return true;
++}
++
++bool coop_client_upgrade_active()
++{
++	return g_link && g_link->active && g_link->upgrade.open;
++}
++
++bool coop_client_upgrade_can(const CInventoryItem* item, bool& can)
++{
++	if (!coop_client_upgrade_active() || !item)
++		return false;
++	const Link::Upgrade& t = g_link->upgrade;
++	const auto it = t.table.find(u16(item->object().ID()));
++	can = it != t.table.end() && it->second.can_upgrade != 0;
++	return true;
++}
++
++bool coop_client_upgrade_state(const CInventoryItem* item, LPCSTR upgrade_id, u8& result)
++{
++	if (!coop_client_upgrade_active() || !item || !upgrade_id)
++		return false;
++	const Link::Upgrade& t = g_link->upgrade;
++	result = 1; // result_e_unknown until the table says otherwise
++	const auto it = t.table.find(u16(item->object().ID()));
++	if (it == t.table.end())
++		return true;
++	const auto up = it->second.ups.find(shared_str(upgrade_id));
++	if (up != it->second.ups.end())
++		result = up->second.first;
++	return true;
++}
++
++static bool upgrade_send(const CInventoryItem* item, u8 op, LPCSTR upgrade_id)
++{
++	Link::Upgrade& t = g_link->upgrade;
++	if (t.pending)
++	{
++		g_link->log.line("upgrade-send-ignored why=pending op=%u", u32(op));
++		return true;
++	}
++	coop::proto::EntityRef ref;
++	if (!ref_of(u16(item->object().ID()), ref))
++	{
++		g_link->log.line("upgrade-send-unknown item=%u", u32(item->object().ID()));
++		return true;
++	}
++	xr_vector<u8> params;
++	params.push_back(op);
++	const u32 len = upgrade_id ? _min<u32>(u32(xr_strlen(upgrade_id)), 128u) : 0u;
++	params.push_back(u8(len));
++	params.insert(params.end(), upgrade_id, upgrade_id + len);
++	t.pending = true;
++	++(op == 1 ? t.installs : t.repairs);
++	request_ownership(coop::proto::kActionUpgrade, ref, params, 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("upgrade-sent op=%u item=%u section=%s upgrade=%s", u32(op), u32(item->object().ID()),
++		*item->object().cNameSect(), upgrade_id ? upgrade_id : "");
++	return true;
++}
++
++bool coop_client_upgrade_install(const CInventoryItem* item, LPCSTR upgrade_id)
++{
++	if (!coop_client_upgrade_active() || !item || !upgrade_id || !upgrade_id[0])
++		return false;
++	return upgrade_send(item, 1, upgrade_id);
++}
++
++bool coop_client_upgrade_repair(const CInventoryItem* item)
++{
++	if (!coop_client_upgrade_active() || !item)
++		return false;
++	return upgrade_send(item, 2, "");
++}
++
++void coop_client_upgrade_closed()
++{
++	if (!g_link || !g_link->active)
++		return;
++	Link::Upgrade& t = g_link->upgrade;
++	if (!t.open && !t.pending_open)
++		return;
++	const bool was_open = t.open;
++	t.open = false;
++	t.pending_open = false;
++	t.pending = false;
++	t.table.clear();
++	if (was_open)
++		request_ownership(coop::proto::kActionUpgradeClose, t.npc_ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, false, "player");
++	g_link->log.line("upgrade-closed npc=%u", u32(t.npc));
++}
++
++// The installed Lua windows act through script exports; while a session is
++// open on this client those calls are the server's (see the hooks in
++// CScriptGameObject).
++bool coop_client_script_set_condition(CInventoryItem* item, float value)
++{
++	if (!coop_client_upgrade_active() || !item || !g_actor || item->object().H_Parent() != g_actor)
++		return false;
++	if (value <= item->GetCondition() + 0.001f)
++		return false; // wear, not a repair
++	g_link->log.line("upgrade-lua-repair item=%u section=%s condition=%.2f->%.2f", u32(item->object().ID()),
++		*item->object().cNameSect(), item->GetCondition(), value);
++	upgrade_send(item, 2, "");
++	return true;
++}
++
++bool coop_client_script_give_money(CInventoryOwner* owner, int money)
++{
++	if (!g_link || !g_link->active || !g_actor || (!g_link->trade.open && !g_link->upgrade.open))
++		return false;
++	CGameObject* go = smart_cast<CGameObject*>(owner);
++	const u16 id = go ? u16(go->ID()) : 0xffff;
++	const bool party = id == u16(g_actor->ID()) || (g_link->trade.open && id == g_link->trade.npc) ||
++		(g_link->upgrade.open && id == g_link->upgrade.npc);
++	if (!party)
++		return false;
++	g_link->log.line("lua-money-skipped owner=%u money=%d trade=%d upgrade=%d", u32(id), money, g_link->trade.open ? 1 : 0,
++		g_link->upgrade.open ? 1 : 0); // the purse comes from the server
++	return true;
++}
++
++bool coop_client_script_transfer_item(CInventoryItem* item, CGameObject* from, CGameObject* to)
++{
++	if (!g_link || !g_link->active || !g_actor || !item || !from || !to)
++		return false;
++	const u16 me = u16(g_actor->ID());
++	if (g_link->upgrade.open && from->ID() == me)
++	{
++		g_link->log.line("upgrade-lua-lend-skipped item=%u to=%u", u32(item->object().ID()), u32(to->ID()));
++		return true; // the mechanic feature's lending is the server's (T04f-2)
++	}
++	if (g_link->trade.open)
++	{
++		Link::Trade& t = g_link->trade;
++		if (from->ID() == t.npc && to->ID() == me)
++		{
++			t.lua_bought.push_back(u16(item->object().ID()));
++			return true;
++		}
++		if (from->ID() == me && to->ID() == t.npc)
++		{
++			t.lua_sold.push_back(u16(item->object().ID()));
++			return true;
++		}
++	}
++	return false;
++}
++} // namespace campaign
++
++namespace
++{
+ static void trade_result(const Link::PickupPending& p, const coop::proto::ActionResult& result)
+ {
+ 	Link::Trade& t = g_link->trade;
+@@ -6233,6 +6645,8 @@ void coop_client_talk_closed()
+ {
+ 	if (!g_link || !g_link->active)
+ 		return;
++	coop_client_trade_closed(); // S10-T04f: the sessions live inside the talk
++	coop_client_upgrade_closed();
+ 	Link::Talk& t = g_link->talk;
+ 	if (!t.open)
+ 		return; // the server's close, or the driver's end: already told
+@@ -6449,10 +6863,33 @@ void coop_client_frame()
+ 	}
+ 	log_weather_client(); // S06-T08
+ 	const u32 now = g_link->wall.GetElapsed_ms();
++	if (g_link->trade.open && (!g_link->trade.lua_bought.empty() || !g_link->trade.lua_sold.empty()))
++	{
++		// S10-T04f: the installed Lua trade window's buy or sell, one intent per click
++		const xr_vector<u16> bought = g_link->trade.lua_bought, sold = g_link->trade.lua_sold;
++		g_link->trade.lua_bought.clear();
++		g_link->trade.lua_sold.clear();
++		campaign::coop_client_trade_perform(bought, sold);
++	}
+ 	if (g_link->trade.open && g_link->trade.refresh_at_ms && now >= g_link->trade.refresh_at_ms)
+ 	{
+ 		g_link->trade.refresh_at_ms = 0;
+ 		trade_refresh_menu(); // S10-T04c
++		lua_ui_refresh(); // S10-T04f
++	}
++	if ((g_link->trade.open || g_link->upgrade.open) && now - g_link->lua_ui_check_ms >= 500)
++	{
++		// S10-T04f: the installed Lua window closed without the engine menu's deinit
++		g_link->lua_ui_check_ms = now;
++		CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++		const bool native_shown = ui && ui->GetActorMenu().IsShown();
++		if (!native_shown && !lua_ui_shown())
++		{
++			if (g_link->trade.open && now - g_link->trade.opened_ms > 1500)
++				campaign::coop_client_trade_closed();
++			if (g_link->upgrade.open && now - g_link->upgrade.opened_ms > 1500)
++				campaign::coop_client_upgrade_closed();
++		}
+ 	}
+ 	if (now - g_link->last_status_ms >= 5000)
+ 	{
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index b521c4a..bed4e2f 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -71,6 +71,29 @@ bool coop_client_trade_active();
+ bool coop_client_trade_price(const CInventoryItem* item, bool trader_buying, u32& price);
+ void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold);
+ void coop_client_trade_closed();
++// S10-T04f: the upgrade window on the server's upgrade session. The remote
++// talk window's upgrade button asks the server to open it (the native window
++// opens when the upgrade table arrives); CUIActorMenu::CanUpgradeItem and
++// Upgrade::can_install read that table on a co-op client (true: answered
++// here); an install or the repair button sends the intent (true: sent,
++// nothing runs locally); closing the window tells the server.
++bool coop_client_upgrade_open(CInventoryOwner* partner);
++bool coop_client_upgrade_active();
++bool coop_client_upgrade_can(const CInventoryItem* item, bool& can);
++bool coop_client_upgrade_state(const CInventoryItem* item, LPCSTR upgrade_id, u8& result);
++bool coop_client_upgrade_install(const CInventoryItem* item, LPCSTR upgrade_id);
++bool coop_client_upgrade_repair(const CInventoryItem* item);
++void coop_client_upgrade_closed();
++// S10-T04f: Anomaly's inventory, trade and repair windows are the installed Lua
++// UI (ui_inventory.script), which acts through these script exports; while a
++// trade or upgrade session is open on this client they are the server's (true:
++// handled here, the export does nothing locally): a repair's set_condition
++// becomes the repair intent, give_money is dropped (the purse comes from the
++// server), transfer_item between the player and the trader becomes the trade
++// intent and a lending transfer to the mechanic is dropped.
++bool coop_client_script_set_condition(CInventoryItem* item, float value);
++bool coop_client_script_give_money(CInventoryOwner* owner, int money);
++bool coop_client_script_transfer_item(CInventoryItem* item, CGameObject* from, CGameObject* to);
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 45737da..8ac7fe4 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -152,6 +152,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.task_party = ini.line_exist("coop", "task_party") ? ini.r_u32("coop", "task_party") : 0; // S10-T05b
+ 		out.place_giver = ini.line_exist("coop", "place_giver") ? ini.r_u32("coop", "place_giver") : 0; // demo aid
+ 		out.trade_party = ini.line_exist("coop", "trade_party") ? ini.r_u32("coop", "trade_party") : 0; // S10-T04c
++		out.upgrade_party = ini.line_exist("coop", "upgrade_party") ? ini.r_u32("coop", "upgrade_party") : 0; // S10-T04f
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 951c31c..73af397 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,6 +120,7 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
++	u32 upgrade_party; // S10-T04f fixture: seconds after both attach until the upgrade and repair rounds at the mechanic
+ 	u32 trade_party; // S10-T04c fixture: seconds after both attach until the door and trade rounds at Sidorovich (0 off)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+index e399bae..819af20 100644
+--- a/src/xrGame/CoopPersistence.cpp
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -218,6 +218,41 @@ bool decode_trade(const std::vector<u8>& payload, TradeRecord& out)
+ 	return at == payload.size();
+ }
+ 
++// S10-T04f
++std::vector<u8> encode_upgrade(const UpgradeRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.npc_entity);
++	put<u64>(out, r.actor_entity);
++	put<u64>(out, r.item_entity);
++	put<u8>(out, r.op);
++	put<u16>(out, u16(r.upgrade_id.size()));
++	out.insert(out.end(), r.upgrade_id.begin(), r.upgrade_id.end());
++	put<u32>(out, r.price);
++	put<u32>(out, r.actor_money_after);
++	return out;
++}
++
++bool decode_upgrade(const std::vector<u8>& payload, UpgradeRecord& out)
++{
++	size_t at = 0;
++	u16 length = 0;
++	if (!(get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++			get(payload, at, out.operation) && get(payload, at, out.npc_entity) && get(payload, at, out.actor_entity) &&
++			get(payload, at, out.item_entity) && get(payload, at, out.op) && get(payload, at, length)) ||
++		!out.actor_entity || !out.item_entity || (out.op != 1 && out.op != 2) || length > 128 || at + length > payload.size())
++		return false;
++	out.upgrade_id.assign(reinterpret_cast<const char*>(payload.data() + at), length);
++	at += length;
++	if (!(get(payload, at, out.price) && get(payload, at, out.actor_money_after)))
++		return false;
++	return at == payload.size();
++}
++
+ // S08-T07
+ std::vector<u8> encode_equip(const EquipRecord& r)
+ {
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+index 363907d..655b012 100644
+--- a/src/xrGame/CoopPersistence.h
++++ b/src/xrGame/CoopPersistence.h
+@@ -146,6 +146,27 @@ struct TradeRecord
+ std::vector<u8> encode_trade(const TradeRecord& r);
+ bool decode_trade(const std::vector<u8>& payload, TradeRecord& out);
+ 
++// S10-T04f: an upgrade installed on an item or its repair at a mechanic
++// (contract §6 `upgrade`): the item, the upgrade id (empty for a repair),
++// the price and the purse after it. Replay installs the upgrade again on
++// the restored item (loading mode: no second charge) or sets the condition
++// to 1, and sets the purse.
++struct UpgradeRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 npc_entity;
++	u64 actor_entity;
++	u64 item_entity;
++	u8 op; // 1 install, 2 repair
++	xr_string upgrade_id;
++	u32 price;
++	u32 actor_money_after;
++};
++std::vector<u8> encode_upgrade(const UpgradeRecord& r);
++bool decode_upgrade(const std::vector<u8>& payload, UpgradeRecord& out);
++
+ // S08-T07: the equip record (contract §6 `equip`): an item's place in its
+ // participant actor's inventory, as absolute post-state (the engine's
+ // CInventory::Slot/Belt/Ruck at replay).
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 2a799f2..509e559 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -52,6 +52,11 @@
+ #include "inventory_item.h" // S08-T01: pickup
+ #include "InventoryBox.h" // S08-T02: transfers
+ #include "InventoryOwner.h"
++#include "inventory_upgrade_manager.h" // S10-T04f
++#include "inventory_upgrade_root.h"
++#include "inventory_upgrade.h"
++#include "xrServer_Objects_ALife_Monsters.h" // S10-T04f fixture: an offline mechanic
++#include "specific_character.h"
+ #include "Missile.h"
+ #include "ExplosiveRocket.h"
+ #include "xrServer_svclient_validation.h"
+@@ -166,6 +171,7 @@ struct PlayerLink
+ 	// S10-T04a: the open talk (one per player)
+ 	u16 talk_npc = 0xffff; // the partner (0xffff: no talk)
+ 	u16 trade_npc = 0xffff; // S10-T04c: the open trade, inside the talk (0xffff: none)
++	u16 upgrade_npc = 0xffff; // S10-T04f: the open upgrade session, inside the talk (0xffff: none)
+ 	DIALOG_SHARED_PTR talk_dialog; // the current dialog (empty: topic mode)
+ 	u64 talk_since = 0;
+ 	u64 talk_says_now = 0; // says in the open talk
+@@ -597,6 +603,7 @@ struct Host
+ 	u64 talk_quest_routed = 0, talk_actions_blocked = 0, talk_answers = 0;
+ 	u64 uses_object = 0, uses_object_refused = 0; // S10-T04c
+ 	u64 trades_opened = 0, trades_committed = 0, trades_refused = 0, trades_replayed = 0, trade_prices_sent = 0;
++	u64 upgrades_opened = 0, upgrades_committed = 0, upgrades_refused = 0, upgrades_replayed = 0, upgrade_tables_sent = 0; // S10-T04f
+ 	struct TalkFixture
+ 	{
+ 		u64 both_since = 0;
+@@ -651,6 +658,18 @@ struct Host
+ 		u64 ops = 0;
+ 		u32 failures = 0;
+ 	} trade_fixture;
++	// S10-T04f: the upgrade and repair fixture at a mechanic (profile upgrade_party)
++	struct UpgradeFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		bool recovered = false;
++		u16 mechanic = 0xffff, item = 0xffff, worn = 0xffff;
++		xr_string upgrade;
++		u64 ops = 0;
++		u32 failures = 0, moves = 0;
++	} upgrade_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -8518,12 +8537,16 @@ static void talk_send_list(PlayerLink& link, CPhraseDialogManager* ours, CPhrase
+ }
+ 
+ void trade_close(PlayerLink& link, LPCSTR why); // S10-T04c
++void upgrade_close(PlayerLink& link, LPCSTR why); // S10-T04f
++u16 upgrade_open_for(PlayerLink& link, u16 npc_id, CActor* actor); // S10-T04f
++u16 trade_open_for(PlayerLink& link, u16 npc_id, CActor* actor); // S10-T04f
+ 
+ void talk_close(PlayerLink& link, LPCSTR why, bool notify = true)
+ {
+ 	if (link.talk_npc == 0xffff)
+ 		return;
+ 	trade_close(link, "talk-closed"); // S10-T04c: the trade lives inside the talk
++	upgrade_close(link, "talk-closed"); // S10-T04f
+ 	CActor* actor = participant_actor(link.ref);
+ 	CGameObject* npc = nullptr;
+ 	CInventoryOwner* owner = talk_partner(link, &npc);
+@@ -8761,16 +8784,10 @@ static bool trade_context_actor(PlayerLink& link, CActor*& actor)
+ 	return actor && actor->g_Alive();
+ }
+ 
+-u16 take_trade_open(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++// the trade session for a player and the NPC he talks to (the talk window's
++// button, kind 18, or the dialogue phrase dialogs.npc_is_trader on the server)
++u16 trade_open_for(PlayerLink& link, u16 npc_id, CActor* actor)
+ {
+-	if (!link.session)
+-		return coop::proto::kReasonNoActor;
+-	if (!intent.params.empty())
+-		return coop::proto::kReasonMalformed;
+-	CActor* actor = nullptr;
+-	if (!trade_context_actor(link, actor))
+-		return coop::proto::kReasonNoActor;
+-	const u16 npc_id = engine_id_of(intent.target);
+ 	if (npc_id == kNoEngineId || link.talk_npc != npc_id)
+ 	{
+ 		++g_host->trades_refused;
+@@ -8801,10 +8818,23 @@ u16 take_trade_open(PlayerLink& link, const coop::proto::ActionIntent& intent, c
+ 			trader->Name());
+ 	}
+ 	trade_send_prices(link, "open");
+-	result.revision = g_host->commit;
+ 	return 0;
+ }
+ 
++u16 take_trade_open(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	CActor* actor = nullptr;
++	if (!trade_context_actor(link, actor))
++		return coop::proto::kReasonNoActor;
++	const u16 reason = trade_open_for(link, engine_id_of(intent.target), actor);
++	result.revision = g_host->commit;
++	return reason;
++}
++
+ u16 take_trade_close(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+ {
+ 	if (!link.session)
+@@ -8995,6 +9025,480 @@ u16 take_trade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	return 0;
+ }
+ 
++// ------------------------------------------------------------ S10-T04f
++// Upgrades and repairs at a mechanic (T04c-3, T01-7: on the server in the
++// buyer's context). The talk window's upgrade button opens an upgrade session
++// (kind 21) inside the talk; the server sends the upgrade table (CampaignEvent
++// 16): for every item of the player's inventory that has an upgrade scheme,
++// whether this mechanic upgrades it (the installed `can_upgrade_item`) and
++// each upgrade's install state (`Upgrade::can_install`: the installed
++// precondition functor reads the player's purse and the mechanic's tiers) and
++// price. The client's native upgrade window reads that table. An install or a
++// repair (kind 22) is checked again here, journaled as one `upgrade` record,
++// then applied through the engine's own path (`Manager::upgrade_install`,
++// whose effect functor charges the purse; the repair effect functor and
++// SetCondition(1)); CampaignEvent 17 tells every client to install the same
++// upgrade on its copy (loading mode, no charge). The installed scripts read
++// the mechanic through `get_speaker()`, i.e. the `used_npc_id` event a USE
++// sets in single player: it is set around every scripted step here.
++struct UpgradeSpeaker
++{
++	luabind::object saved;
++	bool set = false;
++	UpgradeSpeaker(CGameObject* npc)
++	{
++		luabind::functor<luabind::object> get;
++		luabind::functor<void> put;
++		if (npc && ai().script_engine().functor("_G.GetEvent", get) && ai().script_engine().functor("_G.SetEvent", put))
++		{
++			// initialised from the call: an assignment into a default object (no
++			// Lua state) pushed the call proxy itself and crashed (upgrade-4)
++			luabind::object previous = get("used_npc_id");
++			saved = previous;
++			put("used_npc_id", u32(npc->ID()));
++			set = true;
++		}
++	}
++	~UpgradeSpeaker()
++	{
++		luabind::functor<void> put;
++		if (set && ai().script_engine().functor("_G.SetEvent", put))
++			put("used_npc_id", saved);
++	}
++};
++
++static CInventoryOwner* upgrade_partner(const PlayerLink& link, CGameObject** object = nullptr)
++{
++	CGameObject* npc = link.upgrade_npc != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(link.upgrade_npc)) :
++		nullptr;
++	if (object)
++		*object = npc;
++	return npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++}
++
++void upgrade_close(PlayerLink& link, LPCSTR why)
++{
++	if (link.upgrade_npc == 0xffff)
++		return;
++	g_host->log.line("upgrade-close slot=%u npc=%u why=%s", u32(link.ref.slot), u32(link.upgrade_npc), why);
++	link.upgrade_npc = 0xffff;
++}
++
++// inventory_upgrades.get_upgrade_cost returns a text; the price it shows is
++// char_ini cost x cur_price_percent (mech_discount, set while can_upgrade_item
++// evaluates the mechanic's discount condlist; get_price_percent reads it)
++static u32 upgrade_install_price(const inventory::upgrade::Upgrade* up)
++{
++	float percent = 1.f;
++	luabind::functor<float> get_percent;
++	if (ai().script_engine().functor("inventory_upgrades.get_price_percent", get_percent))
++		percent = float(get_percent());
++	const u32 cost = READ_IF_EXISTS(pSettings, r_u32, up->section(), "cost", 0);
++	return u32(_max(0.f, floorf(float(cost) * percent)));
++}
++
++static u32 upgrade_repair_price(const CInventoryItem* item)
++{
++	// inventory_upgrades.how_much_repair (local there): cost x (1 - condition) x the repair eco factor
++	float eco = 1.67f;
++	luabind::functor<float> factor;
++	if (ai().script_engine().functor("game_difficulties.get_eco_factor", factor))
++		eco = factor("repair");
++	const u32 cost = READ_IF_EXISTS(pSettings, r_u32, item->m_section_id, "cost", 0);
++	return u32(_max(0.f, floorf(float(cost) * (1.f - clampr(item->GetCondition(), 0.f, 1.f)) * eco)));
++}
++
++// the upgrade table to the player (in his context, the mechanic as the speaker)
++static void upgrade_send_table(PlayerLink& link, LPCSTR why)
++{
++	CGameObject* npc = nullptr;
++	CInventoryOwner* mech = upgrade_partner(link, &npc);
++	CActor* actor = participant_actor(link.ref);
++	CInventoryOwner* me = actor ? smart_cast<CInventoryOwner*>(actor) : nullptr;
++	if (!mech || !me)
++		return;
++	struct Up
++	{
++		xr_string id;
++		u8 result;
++		u32 cost;
++	};
++	struct Entry
++	{
++		coop::proto::EntityRef ref;
++		u8 can_upgrade;
++		xr_vector<Up> ups;
++	};
++	xr_vector<Entry> entries;
++	u32 installable = 0;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "upgrade-table");
++		UpgradeSpeaker speaker(npc);
++		luabind::functor<bool> can_up;
++		const bool have_can = ai().script_engine().functor("inventory_upgrades.can_upgrade_item", can_up);
++		inventory::upgrade::Manager& manager = ai().alife().inventory_upgrade_manager();
++		LPCSTR profile = mech->CharacterInfo().Profile().c_str();
++		for (PIItem item : me->inventory().m_all)
++		{
++			if (!item)
++				continue;
++			Entry e;
++			if (!entity_ref_of(item->object().ID(), e.ref))
++				continue;
++			inventory::upgrade::Root* root = manager.get_root(item->m_section_id);
++			if (!root)
++				continue; // no upgrade scheme: not listed
++			e.can_upgrade = have_can && can_up(item->m_section_id.c_str(), profile) ? 1 : 0;
++			for (inventory::upgrade::Upgrade* up : root->contained_upgrades())
++			{
++				Up u;
++				u.id = up->id_str();
++				u.result = u8(up->can_install(*item, false));
++				u.cost = upgrade_install_price(up);
++				if (u.result == u8(inventory::upgrade::result_ok))
++					++installable;
++				e.ups.push_back(u);
++			}
++			entries.push_back(e);
++		}
++	}
++	// per item: ref (12), u8 can_upgrade, u8 count, count x (u8 len, id, u8 result, u32 cost); parts of <= 900 bytes
++	xr_vector<std::vector<u8>> blobs;
++	for (const Entry& e : entries)
++	{
++		std::vector<u8> b;
++		put_entity_ref(b, e.ref);
++		put_u8(b, e.can_upgrade);
++		const u32 n = _min<u32>(u32(e.ups.size()), 64u);
++		put_u8(b, u8(n));
++		for (u32 i = 0; i < n; ++i)
++		{
++			const Up& u = e.ups[i];
++			const u32 len = _min<u32>(u32(u.id.size()), 128u);
++			put_u8(b, u8(len));
++			b.insert(b.end(), u.id.begin(), u.id.begin() + len);
++			put_u8(b, u.result);
++			put_u32(b, u.cost);
++		}
++		blobs.push_back(b);
++	}
++	xr_vector<std::pair<u32, u32>> parts; // [first, last) blobs per part
++	for (u32 i = 0; i < blobs.size();)
++	{
++		u32 bytes = 0, j = i;
++		while (j < blobs.size() && (j == i || bytes + blobs[j].size() <= 900))
++			bytes += u32(blobs[j++].size());
++		parts.push_back(std::make_pair(i, j));
++		i = j;
++	}
++	if (parts.empty())
++		parts.push_back(std::make_pair(0u, 0u));
++	const u32 count = _min<u32>(u32(parts.size()), 255u);
++	for (u32 part = 0; part < count; ++part)
++	{
++		std::vector<u8> p;
++		put_ref(p, link.upgrade_npc);
++		put_u8(p, u8(part));
++		put_u8(p, u8(count));
++		put_u32(p, actor->get_money());
++		put_u8(p, u8(parts[part].second - parts[part].first));
++		for (u32 i = parts[part].first; i < parts[part].second; ++i)
++			p.insert(p.end(), blobs[i].begin(), blobs[i].end());
++		queue_event(link, 16, p);
++	}
++	++g_host->upgrade_tables_sent;
++	g_host->log.line("upgrade-table slot=%u npc=%u items=%u installable=%u parts=%u money=%u why=%s", u32(link.ref.slot),
++		u32(link.upgrade_npc), u32(entries.size()), installable, count, actor->get_money(), why);
++}
++
++// CampaignEvent 17: an upgrade installed on an item (op 1) or its repair (op 2), to every client
++static void upgrade_event(u16 item_id, u8 op, LPCSTR upgrade_id)
++{
++	std::vector<u8> p;
++	put_ref(p, item_id);
++	put_u8(p, op);
++	const u32 len = _min<u32>(u32(xr_strlen(upgrade_id)), 128u);
++	put_u8(p, u8(len));
++	p.insert(p.end(), upgrade_id, upgrade_id + len);
++	broadcast_event(17, p);
++}
++
++// Anomaly's mechanics: the engine's character flag (mechanic_mode, which the
++// installed character descriptions comment out) or a section of the installed
++// misc\stalkers_upgrade_info.ltx (the script's param_ini: tiers, discounts)
++static bool is_mechanic_section(LPCSTR section)
++{
++	static CInifile* mechanics = nullptr;
++	if (!mechanics)
++	{
++		string_path path;
++		FS.update_path(path, "$game_config$", "misc\\stalkers_upgrade_info.ltx");
++		mechanics = xr_new<CInifile>(path, TRUE, TRUE, FALSE);
++	}
++	return section && mechanics->section_exist(section);
++}
++
++static bool is_mechanic(CInventoryOwner* owner, CGameObject* npc)
++{
++	return owner && npc && (owner->SpecificCharacter().upgrade_mechanic() || is_mechanic_section(*npc->cNameSect()));
++}
++
++// the upgrade session for a player and the mechanic he talks to (kind 21, or
++// the dialogue phrase dialogs.npc_is_tech, whose npc:start_upgrade would open
++// a window in the server process)
++u16 upgrade_open_for(PlayerLink& link, u16 npc_id, CActor* actor)
++{
++	if (npc_id == kNoEngineId || link.talk_npc != npc_id)
++	{
++		++g_host->upgrades_refused;
++		g_host->log.line("upgrade-refused slot=%u npc=%u why=not-talking talk=%u", u32(link.ref.slot), u32(npc_id),
++			u32(link.talk_npc));
++		return coop::proto::kReasonNotTalking;
++	}
++	CGameObject* npc = smart_cast<CGameObject*>(Level().Objects.net_Find(npc_id));
++	CInventoryOwner* mech = npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++	CEntityAlive* alive = npc ? smart_cast<CEntityAlive*>(npc) : nullptr;
++	if (!mech || !alive || !alive->g_Alive() || !is_mechanic(mech, npc))
++	{
++		++g_host->upgrades_refused;
++		g_host->log.line("upgrade-refused slot=%u npc=%u why=not-a-mechanic", u32(link.ref.slot), u32(npc_id));
++		return coop::proto::kReasonNoMechanic;
++	}
++	if (link.upgrade_npc != npc_id)
++	{
++		upgrade_close(link, "reopened");
++		link.upgrade_npc = npc_id;
++		++g_host->upgrades_opened;
++		g_host->log.line("upgrade-open slot=%u actor=%u npc=%u name=%s", u32(link.ref.slot), u32(actor->ID()), u32(npc_id),
++			mech->Name());
++	}
++	upgrade_send_table(link, "open");
++	return 0;
++}
++
++u16 take_upgrade_open(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	CActor* actor = nullptr;
++	if (!trade_context_actor(link, actor))
++		return coop::proto::kReasonNoActor;
++	const u16 reason = upgrade_open_for(link, engine_id_of(intent.target), actor);
++	result.revision = g_host->commit;
++	return reason;
++}
++
++u16 take_upgrade_close(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	upgrade_close(link, "client");
++	result.revision = g_host->commit;
++	return 0;
++}
++
++// the server entity keeps the item's upgrades for the checkpoint and for a
++// joining client's spawn (GE_INSTALL_UPGRADE does it on the live path; a
++// replay installs in loading mode, which sends no event)
++static void upgrade_sync_entity(u16 item_id, LPCSTR upgrade_id)
++{
++	CSE_ALifeInventoryItem* se = smart_cast<CSE_ALifeInventoryItem*>(ai().alife().objects().object(item_id, true));
++	if (se && !se->has_upgrade(upgrade_id))
++		se->add_upgrade(upgrade_id);
++}
++
++u16 take_upgrade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		g_host->log.line("upgrade-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (intent.params.size() < 2)
++		return coop::proto::kReasonMalformed;
++	const u8 op = intent.params[0], len = intent.params[1];
++	if ((op != 1 && op != 2) || intent.params.size() != 2u + len || (op == 1 && len == 0) || (op == 2 && len != 0))
++		return coop::proto::kReasonMalformed;
++	xr_string upgrade_id(reinterpret_cast<const char*>(intent.params.data() + 2), len);
++	CActor* actor = nullptr;
++	coop::proto::EntityRef actor_ref;
++	u16 id = kNoEngineId;
++	CInventoryItem* item = nullptr;
++	if (const u16 reason = own_inventory_item(link, intent, actor, actor_ref, id, item))
++		return reason;
++	CGameObject* npc = nullptr;
++	CInventoryOwner* mech = upgrade_partner(link, &npc);
++	if (!mech || link.talk_npc != link.upgrade_npc)
++	{
++		++g_host->upgrades_refused;
++		g_host->log.line("upgrade-refused slot=%u item=%u why=no-open-session upgrade_npc=%u talk=%u", u32(link.ref.slot),
++			u32(id), u32(link.upgrade_npc), u32(link.talk_npc));
++		return coop::proto::kReasonNoMechanic;
++	}
++	const u32 money = actor->get_money();
++	u32 price = 0;
++	LPCSTR refused = nullptr;
++	u16 refusal = coop::proto::kReasonUpgradeRefused;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "upgrade-check");
++		UpgradeSpeaker speaker(npc);
++		LPCSTR profile = mech->CharacterInfo().Profile().c_str();
++		if (op == 1)
++		{
++			inventory::upgrade::Manager& manager = ai().alife().inventory_upgrade_manager();
++			inventory::upgrade::Root* root = manager.get_root(item->m_section_id);
++			inventory::upgrade::Upgrade* up = manager.get_upgrade(shared_str(upgrade_id.c_str()));
++			if (root && (!up || !root->contain_upgrade(shared_str(upgrade_id.c_str()))))
++			{
++				// the id may be the upgrade's effect section (the installed Lua window
++				// passes the element id; a script may pass the section)
++				up = nullptr;
++				for (inventory::upgrade::Upgrade* candidate : root->contained_upgrades())
++					if (!xr_strcmp(candidate->section(), upgrade_id.c_str()) || !xr_strcmp(candidate->id_str(), upgrade_id.c_str()))
++					{
++						up = candidate;
++						upgrade_id = candidate->id_str();
++						break;
++					}
++			}
++			luabind::functor<bool> can_up;
++			if (!up || !root)
++				refused = "unknown-upgrade";
++			else if (!ai().script_engine().functor("inventory_upgrades.can_upgrade_item", can_up) ||
++				!can_up(item->m_section_id.c_str(), profile))
++				refused = "mechanic-declines";
++			else
++			{
++				const inventory::upgrade::UpgradeStateResult res = up->can_install(*item, false);
++				if (res == inventory::upgrade::result_e_precondition_money)
++				{
++					refused = "no-money";
++					refusal = coop::proto::kReasonNoMoney;
++				}
++				else if (res != inventory::upgrade::result_ok)
++					refused = res == inventory::upgrade::result_e_installed ? "installed" :
++						res == inventory::upgrade::result_e_unknown ? "unknown" :
++						res == inventory::upgrade::result_e_parents ? "parents" :
++						res == inventory::upgrade::result_e_group ? "group" : "precondition";
++				else
++					price = upgrade_install_price(up);
++			}
++		}
++		else
++		{
++			luabind::functor<bool> can_rep;
++			if (item->GetCondition() > 0.99f)
++				refused = "not-worn";
++			else if (!ai().script_engine().functor("inventory_upgrades.can_repair_item", can_rep) ||
++				!can_rep(item->m_section_id.c_str(), item->GetCondition(), profile))
++				refused = "not-repairable";
++			else
++			{
++				price = upgrade_repair_price(item);
++				if (money < price)
++				{
++					refused = "no-money";
++					refusal = coop::proto::kReasonNoMoney;
++				}
++			}
++		}
++	}
++	if (refused)
++	{
++		++g_host->upgrades_refused;
++		g_host->log.line("upgrade-refused slot=%u op=%u item=%u section=%s upgrade=%s why=%s price=%u money=%u",
++			u32(link.ref.slot), u32(op), u32(id), *item->object().cNameSect(), upgrade_id.c_str(), refused, price, money);
++		return refusal;
++	}
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	// 3. Resolve: the absolute post-state.
++	UpgradeRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.npc_entity = entity_of(link.upgrade_npc);
++	record.actor_entity = actor_ref.id;
++	record.item_entity = intent.target.id;
++	record.op = op;
++	record.upgrade_id = upgrade_id;
++	record.price = price;
++	record.actor_money_after = money >= price ? money - price : 0;
++	const u64 revision = ++g_host->commit;
++	// 4. Durable commit, before anything is applied or acknowledged.
++	if (!coop::store::failpoint("upgrade:before-append"))
++		persistence->fail_closed("failpoint upgrade:before-append");
++	if (!persistence->commit(coop::store::kRecordUpgrade, g_host->tick, revision, encode_upgrade(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("upgrade-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("upgrade:after-flush");
++	++g_host->upgrades_committed;
++	g_host->log.line("upgrade-committed revision=%I64u slot=%u operation=%I64u op=%u item=%u item_entity=%I64u section=%s "
++		"upgrade=%s price=%u money=%u->%u", revision, u32(link.ref.slot), intent.operation_id, u32(op), u32(id),
++		record.item_entity, *item->object().cNameSect(), upgrade_id.c_str(), price, money, record.actor_money_after);
++	// 5. Apply: the engine's own path in the buyer's context.
++	bool applied = false;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "upgrade-apply");
++		UpgradeSpeaker speaker(npc);
++		if (op == 1)
++		{
++			applied = ai().alife().inventory_upgrade_manager().upgrade_install(*item, shared_str(upgrade_id.c_str()), false);
++			if (applied)
++			{
++				upgrade_sync_entity(id, upgrade_id.c_str());
++				luabind::functor<void> after; // as CUIInventoryUpgradeWnd::OnMesBoxYes: the mechanic feature (lending)
++				if (ai().script_engine().functor("inventory_upgrades.effect_upgrade_item", after))
++					after(item->object().lua_game_object(), upgrade_id.c_str());
++			}
++		}
++		else
++		{
++			luabind::functor<void> effect; // as CUIActorMenu::RepairEffect_CurItem: the charge and the mechanic feature
++			if (ai().script_engine().functor("inventory_upgrades.effect_repair_item", effect))
++				effect(item->m_section_id.c_str(), item->GetCondition());
++			item->SetCondition(1.f);
++			applied = true;
++		}
++		actor->set_money(record.actor_money_after, false);
++	}
++	coop::store::failpoint("upgrade:after-apply");
++	g_host->log.line("upgrade-applied revision=%I64u op=%u item=%u applied=%d has_upgrade=%d condition=%.2f money=%u "
++		"owner=%u", revision, u32(op), u32(id), applied ? 1 : 0,
++		op == 1 ? (item->has_upgrade(shared_str(upgrade_id.c_str())) ? 1 : 0) : -1, item->GetCondition(),
++		actor->get_money(), item->object().H_Parent() ? u32(item->object().H_Parent()->ID()) : 0xffffu);
++	StoredOutcome outcome = {u8(coop::proto::ActionOutcome::Accepted), 0, revision};
++	persistence->remember(link.player, intent.operation_id, outcome);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.reason = 0;
++	result.commit_id = revision;
++	result.revision = revision;
++	upgrade_event(id, op, upgrade_id.c_str());
++	upgrade_send_table(link, "applied");
++	return 0;
++}
++
+ u16 take_talk_start(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+ {
+ 	if (!link.session)
+@@ -9388,12 +9892,28 @@ static bool talk_quest_action(PlayerLink& link, LPCSTR action, const CGameObject
+ {
+ 	const bool accept = !xr_strcmp(action, "dialogs.npc_give_task");
+ 	const bool finish = !xr_strcmp(action, "dialogs.npc_set_finished_task_complete");
+-	if (!accept && !finish)
++	const bool tech = !xr_strcmp(action, "dialogs.npc_is_tech"); // S10-T04f
++	const bool trader = !xr_strcmp(action, "dialogs.npc_is_trader"); // S10-T04f
++	if (!accept && !finish && !tech && !trader)
+ 		return false;
+ 	const CGameObject* npc_const = smart_cast<const CActor*>(speaker) ? listener : speaker;
+ 	CGameObject* npc = const_cast<CGameObject*>(npc_const);
+ 	if (!npc || smart_cast<CActor*>(npc))
+ 		return false;
++	if (tech || trader)
++	{
++		// S10-T04f: the phrase's npc:start_upgrade / npc:start_trade would open a
++		// window in the server process (and its hide_hud_inventory() guard is false
++		// here): the player's session opens instead and his client's window
++		// follows the table (Anomaly's mechanics have no talk-window button:
++		// mechanic_mode is commented out of the character descriptions)
++		CActor* actor = participant_actor(link.ref);
++		const u16 reason = !actor ? u16(coop::proto::kReasonNoActor) :
++			tech ? upgrade_open_for(link, u16(npc->ID()), actor) : trade_open_for(link, u16(npc->ID()), actor);
++		g_host->log.line("talk-%s slot=%u npc=%u dialog=%s phrase=%s reason=%u", tech ? "upgrade" : "trade", u32(link.ref.slot),
++			u32(npc->ID()), dialog_id, phrase_id, u32(reason));
++		return true;
++	}
+ 	++g_host->talk_quest_routed;
+ 	const u16 reason = accept ? talk_quest_accept(link, npc) : talk_quest_turn_in(link, npc);
+ 	g_host->log.line("talk-quest slot=%u op=%s npc=%u dialog=%s phrase=%s reason=%u", u32(link.ref.slot),
+@@ -10334,6 +10854,286 @@ void trade_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T04f
++// The upgrade and repair fixture (profile upgrade_party, server-driven). Once
++// both players are in the world: both placed beside the nearest online
++// mechanic (an inventory owner whose character profile has mechanic_mode);
++// p1 gets 50000 RU and the mechanic's tier infos (party-shared, T04b).
++//   talk       p1 talks to the mechanic and opens the upgrade session (the table);
++//              p2's talk start must be refused busy (33)
++//   install    p1 installs the first upgrade the table marks installable on the
++//              first item that has one (take_upgrade op 1); the item has it after
++//   repair     p1's first weapon is worn to 0.5, then repaired (op 2): condition 1
++//   recovered  (the restarted server) the upgrade and repair records replayed
++//              (upgrade-replayed); the item still has the upgrade; p1's money
++// the nearest online mechanic who talks, one of the player's own community
++// first (upgrade-3: the nearest was the army checkpoint's, who refuses a loner)
++static u16 find_mechanic(const Fvector& origin, CHARACTER_COMMUNITY_INDEX community)
++{
++	u16 best = 0xffff;
++	float best_score = flt_max;
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CObject* o = Level().Objects.o_get_by_iterator(i);
++		CInventoryOwner* owner = o ? smart_cast<CInventoryOwner*>(o) : nullptr;
++		CEntityAlive* alive = o ? smart_cast<CEntityAlive*>(o) : nullptr;
++		if (!owner || !alive || !alive->g_Alive() || smart_cast<CActor*>(o) || !is_mechanic(owner, smart_cast<CGameObject*>(o)) ||
++			!owner->IsTalkEnabled())
++			continue;
++		const float d = o->Position().distance_to(origin) +
++			(owner->CharacterInfo().Community().index() == community ? 0.f : 10000.f);
++		if (d < best_score)
++		{
++			best_score = d;
++			best = u16(o->ID());
++		}
++	}
++	return best;
++}
++
++void upgrade_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.upgrade_party || !ai().get_alife())
++		return;
++	Host::UpgradeFixture& f = g_host->upgrade_fixture;
++	PlayerLink* links[2] = {nullptr, nullptr};
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				links[attached] = &link;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		f.recovered = g_host->persistence && g_host->persistence->recovered();
++		g_host->log.line("fixture-upgrade both-attached tick=%I64u recovered=%d", g_host->tick, f.recovered ? 1 : 0);
++	}
++	if (attached < 2 || f.phase >= 9 || g_host->tick < f.both_since + u64(config.upgrade_party) * 50)
++		return;
++	if (links[0]->ref.slot != 0)
++	{
++		std::swap(links[0], links[1]);
++		std::swap(actors[0], actors[1]);
++	}
++	PlayerLink& p1 = *links[0];
++	PlayerLink& p2 = *links[1];
++	if (f.recovered)
++	{
++		// what the restart kept: the first item of p1 with any upgrade, its condition
++		LPCSTR section = "-";
++		string2048 upgrades = "";
++		float condition = -1.f;
++		for (PIItem item : actors[0]->inventory().m_all)
++			if (item && item->has_any_upgrades())
++			{
++				section = *item->object().cNameSect();
++				item->get_upgrades_str(upgrades);
++				condition = item->GetCondition();
++				break;
++			}
++		g_host->log.line("fixture-upgrade recovered money_p1=%u upgrades_replayed=%I64u item=%s upgrades=[%s] condition=%.2f",
++			actors[0]->get_money(), g_host->upgrades_replayed, section, upgrades, condition);
++		g_host->log.line("fixture-upgrade done phase=recovered failures=%u", f.failures);
++		f.phase = 9;
++		return;
++	}
++	coop::proto::ActionIntent intent;
++	coop::proto::ActionResult result;
++	if (f.phase == 0)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		const CHARACTER_COMMUNITY_INDEX community = smart_cast<CInventoryOwner*>(actors[0])->CharacterInfo().Community().index();
++		f.mechanic = find_mechanic(actors[0]->Position(), community);
++		CGameObject* mech = f.mechanic != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(f.mechanic)) : nullptr;
++		if (!mech && f.moves < 3)
++		{
++			// no mechanic online: the nearest offline one of this level (its character
++			// profile's mechanic_mode); both players moved beside it, which brings it
++			// online within the switch distance; tried again a few seconds later
++			const CSE_ALifeHumanStalker* best = nullptr;
++			float best_distance = flt_max;
++			for (const auto& o : ai().alife().objects().objects())
++			{
++				const CSE_ALifeHumanStalker* st = smart_cast<const CSE_ALifeHumanStalker*>(o.second);
++				if (!st || !st->g_Alive() || ai().game_graph().vertex(st->m_tGraphID)->level_id() != ai().level_graph().level_id())
++					continue;
++				CSpecificCharacter spec;
++				spec.Load(const_cast<CSE_ALifeHumanStalker*>(st)->specific_character());
++				if (!spec.upgrade_mechanic() && !is_mechanic_section(st->name_replace()))
++					continue;
++				const float d = st->o_Position.distance_to(actors[0]->Position()) + (st->m_community_index == community ? 0.f : 10000.f);
++				if (d < best_distance)
++				{
++					best_distance = d;
++					best = st;
++				}
++			}
++			++f.moves;
++			if (best)
++			{
++				place_beside(actors[0], Fvector().set(best->o_Position.x + 0.6f, best->o_Position.y, best->o_Position.z + 1.5f));
++				g_host->log.line("fixture-upgrade mechanic-offline id=%u name=%s distance=%.1f moved=%u", u32(best->ID),
++					const_cast<CSE_ALifeHumanStalker*>(best)->name_replace(), best_distance, f.moves);
++				f.phase_tick = g_host->tick + 6 * 50;
++				return;
++			}
++		}
++		if (!mech)
++		{
++			g_host->log.line("fixture-upgrade mechanic-missing");
++			++f.failures;
++			g_host->log.line("fixture-upgrade done phase=no-mechanic failures=%u", f.failures);
++			f.phase = 9;
++			return;
++		}
++		CInventoryOwner* owner = smart_cast<CInventoryOwner*>(mech);
++		Fvector forward;
++		forward.set(mech->XFORM().k);
++		forward.y = 0.f;
++		if (forward.square_magnitude() < 0.01f)
++			forward.set(0.f, 0.f, 1.f);
++		forward.normalize();
++		Fvector side;
++		side.crossproduct(Fvector().set(0.f, 1.f, 0.f), forward);
++		{
++			// only p1 moves (upgrade-5: a 534 m relocation of p2's own actor crashed
++			// its client; p2 stays and is refused out of reach, then not-talking)
++			Fvector at = mech->Position();
++			at.mad(forward, 1.6f);
++			at.mad(side, 0.5f);
++			place_beside(actors[0], at);
++		}
++		actors[0]->set_money(50000, false);
++		// the mechanic's tiers (inventory_upgrades.get_global_precondition_functor reads
++		// <mechanic>_upgrade_tier_N when the mechanic's def_upgr_tier_N is 0)
++		for (u32 tier = 1; tier <= 3; ++tier)
++		{
++			string256 info;
++			xr_sprintf(info, "%s_upgrade_tier_%u", *mech->cNameSect(), tier);
++			actors[0]->TransferInfo(shared_str(info), true);
++		}
++		g_host->log.line("fixture-upgrade mechanic id=%u section=%s name=%s profile=%s money_p1=%u", u32(f.mechanic),
++			*mech->cNameSect(), owner->Name(), owner->CharacterInfo().Profile().c_str(), actors[0]->get_money());
++		f.phase = 1;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		fixture_intent(intent, coop::proto::kActionTalkStart, f.mechanic, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++		const u16 talk1 = take_talk_start(p1, intent, result);
++		fixture_intent(intent, coop::proto::kActionUpgradeOpen, f.mechanic, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++		const u16 open1 = take_upgrade_open(p1, intent, result);
++		fixture_intent(intent, coop::proto::kActionTalkStart, f.mechanic, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++		const u16 talk2 = take_talk_start(p2, intent, result); // p1 talks: busy (33), checked before the reach
++		fixture_intent(intent, coop::proto::kActionUpgradeOpen, f.mechanic, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++		const u16 open2 = take_upgrade_open(p2, intent, result); // no talk: not-talking
++		g_host->log.line("fixture-upgrade opened talk_p1=%u open_p1=%u talk_p2=%u open_p2=%u", u32(talk1), u32(open1), u32(talk2),
++			u32(open2));
++		if (talk1 || open1 || talk2 != coop::proto::kReasonTalkBusy || open2 != coop::proto::kReasonNotTalking)
++			++f.failures;
++		f.phase = 2;
++		f.phase_tick = g_host->tick + 1 * 50;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		// the first installable upgrade of the first item that has one (in p1's context, the mechanic speaking)
++		CGameObject* mech = smart_cast<CGameObject*>(Level().Objects.net_Find(f.mechanic));
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actors[0]), "fixture-upgrade");
++			UpgradeSpeaker speaker(mech);
++			inventory::upgrade::Manager& manager = ai().alife().inventory_upgrade_manager();
++			for (PIItem item : actors[0]->inventory().m_all)
++			{
++				if (!item || f.item != 0xffff)
++					continue;
++				inventory::upgrade::Root* root = manager.get_root(item->m_section_id);
++				if (!root || !g_host->published.count(u16(item->object().ID())))
++					continue;
++				for (inventory::upgrade::Upgrade* up : root->contained_upgrades())
++					if (up->can_install(*item, false) == inventory::upgrade::result_ok)
++					{
++						f.item = u16(item->object().ID());
++						f.upgrade = up->id_str();
++						break;
++					}
++			}
++		}
++		if (f.item == 0xffff)
++		{
++			g_host->log.line("fixture-upgrade none-installable");
++			++f.failures;
++		}
++		else
++		{
++			CInventoryItem* item = smart_cast<CInventoryItem*>(Level().Objects.net_Find(f.item));
++			const u32 money = actors[0]->get_money();
++			fixture_intent(intent, coop::proto::kActionUpgrade, f.item, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++			intent.params.push_back(1);
++			intent.params.push_back(u8(f.upgrade.size()));
++			intent.params.insert(intent.params.end(), f.upgrade.begin(), f.upgrade.end());
++			const u16 reason = take_upgrade(p1, intent, result);
++			g_host->log.line("fixture-upgrade installed item=%u section=%s upgrade=%s reason=%u has_upgrade=%d money=%u->%u",
++				u32(f.item), *item->object().cNameSect(), f.upgrade.c_str(), u32(reason),
++				item->has_upgrade(shared_str(f.upgrade.c_str())) ? 1 : 0, money, actors[0]->get_money());
++			if (reason || !item->has_upgrade(shared_str(f.upgrade.c_str())))
++				++f.failures;
++		}
++		f.phase = 3;
++		f.phase_tick = g_host->tick + 1 * 50;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		for (PIItem item : actors[0]->inventory().m_all)
++			if (item && smart_cast<CWeapon*>(item) && g_host->published.count(u16(item->object().ID())))
++			{
++				f.worn = u16(item->object().ID());
++				break;
++			}
++		CInventoryItem* item = f.worn != 0xffff ? smart_cast<CInventoryItem*>(Level().Objects.net_Find(f.worn)) : nullptr;
++		if (!item)
++		{
++			g_host->log.line("fixture-upgrade worn-missing");
++			++f.failures;
++		}
++		else
++		{
++			item->SetCondition(0.5f);
++			const u32 money = actors[0]->get_money();
++			fixture_intent(intent, coop::proto::kActionUpgrade, f.worn, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++			intent.params.push_back(2);
++			intent.params.push_back(0);
++			const u16 reason = take_upgrade(p1, intent, result);
++			g_host->log.line("fixture-upgrade repaired item=%u section=%s reason=%u condition=%.2f money=%u->%u", u32(f.worn),
++				*item->object().cNameSect(), u32(reason), item->GetCondition(), money, actors[0]->get_money());
++			if (reason || item->GetCondition() < 0.99f)
++				++f.failures;
++		}
++		fixture_intent(intent, coop::proto::kActionUpgradeClose, f.mechanic, kTradeFixtureOpBase + 0x1000 + ++f.ops);
++		take_upgrade_close(p1, intent, result);
++		talk_close(p1, "fixture");
++		g_host->log.line("fixture-upgrade done phase=upgraded failures=%u money_p1=%u (no publication: the restart replays the "
++			"journal)", f.failures, actors[0]->get_money());
++		f.phase = 9;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -12509,6 +13309,12 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_trade(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionTradeClose)
+ 			reason = take_trade_close(*link, *intent, result);
++		else if (intent->kind == coop::proto::kActionUpgradeOpen)
++			reason = take_upgrade_open(*link, *intent, result); // S10-T04f
++		else if (intent->kind == coop::proto::kActionUpgrade)
++			reason = take_upgrade(*link, *intent, result);
++		else if (intent->kind == coop::proto::kActionUpgradeClose)
++			reason = take_upgrade_close(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionTalkSay)
+ 			reason = take_talk_say(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionTalkEnd)
+@@ -13322,6 +14128,47 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 			++g_host->trades_replayed;
+ 			continue;
+ 		}
++		if (record.kind == coop::store::kRecordUpgrade)
++		{
++			// S10-T04f: the upgrade installed again on the restored item (loading
++			// mode: no charge, no event), or the condition set; the purse after
++			UpgradeRecord up;
++			if (!decode_upgrade(record.payload, up))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			const u16 actor_id = engine_id_of_entity(up.actor_entity), item_id = engine_id_of_entity(up.item_entity);
++			CActor* actor = actor_id != kNoEngineId ? smart_cast<CActor*>(Level().Objects.net_Find(actor_id)) : nullptr;
++			CInventoryItem* item = item_id != kNoEngineId ? smart_cast<CInventoryItem*>(Level().Objects.net_Find(item_id)) : nullptr;
++			bool done = false;
++			if (item && up.op == 1)
++			{
++				const shared_str uid(up.upgrade_id.c_str());
++				done = item->has_upgrade(uid) ||
++					ai().alife().inventory_upgrade_manager().upgrade_install(*item, uid, true);
++				if (done)
++					upgrade_sync_entity(item_id, up.upgrade_id.c_str());
++			}
++			else if (item && up.op == 2)
++			{
++				item->SetCondition(1.f);
++				done = true;
++			}
++			if (actor)
++				actor->set_money(up.actor_money_after, false);
++			g_host->log.line("upgrade-replayed revision=%I64u op=%u item=%u item_entity=%I64u upgrade=%s done=%d actor=%u money=%u",
++				record.revision, u32(up.op), u32(item_id), up.item_entity, up.upgrade_id.c_str(), done ? 1 : 0, u32(actor_id),
++				up.actor_money_after);
++			if (CoopPersistence* p = g_host->persistence)
++			{
++				StoredOutcome s = {1, 0, record.revision};
++				p->remember(up.player, up.operation, s);
++			}
++			++g_host->upgrades_replayed;
++			continue;
++		}
+ 		if (record.kind == coop::store::kRecordDeath)
+ 		{
+ 			DeathRecord death;
+@@ -13476,6 +14323,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	info_fixtures();
+ 	task_fixtures(); // S10-T05b
+ 	trade_fixtures(); // S10-T04c
++	upgrade_fixtures(); // S10-T04f
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+diff --git a/src/xrGame/inventory_upgrade.cpp b/src/xrGame/inventory_upgrade.cpp
+index e79694c..694ea30 100644
+--- a/src/xrGame/inventory_upgrade.cpp
++++ b/src/xrGame/inventory_upgrade.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopClientLink.h" // S10-T04f
+ #include "ai_space.h"
+ #include "../xrServerEntities/script_engine.h"
+ #include "string_table.h"
+@@ -151,6 +152,14 @@ void Upgrade::log_hierarchy( LPCSTR nest )
+ 
+ 		UpgradeStateResult Upgrade::can_install(CInventoryItem& item, bool loading)
+ 		{
++			if (!loading)
++			{
++				// S10-T04f: on a co-op client the upgrade window shows the server's
++				// install states (the preconditions ran there, in the player's context)
++				u8 remote = 0;
++				if (campaign::coop_client_upgrade_state(&item, id_str(), remote) && remote < u8(result_count))
++					return UpgradeStateResult(remote);
++			}
+ 			UpgradeStateResult res = inherited::can_install(item, loading);
+ 			if (res != result_ok)
+ 			{
+diff --git a/src/xrGame/inventory_upgrade_manager.cpp b/src/xrGame/inventory_upgrade_manager.cpp
+index 97e448b..b950936 100644
+--- a/src/xrGame/inventory_upgrade_manager.cpp
++++ b/src/xrGame/inventory_upgrade_manager.cpp
+@@ -6,6 +6,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopClientLink.h" // S10-T04f
+ 
+ #include "inventory_upgrade_manager.h"
+ #include "inventory_upgrade_base.h"
+@@ -365,6 +366,10 @@ void Manager::test_all_upgrades( CInventoryItem& item )
+ 
+ 		bool Manager::upgrade_install(CInventoryItem& item, shared_str const& upgrade_id, bool loading)
+ 		{
++			// S10-T04f: a co-op client's click sends the install to the server; the
++			// server's CampaignEvent 17 installs it here in loading mode
++			if (!loading && campaign::coop_client_upgrade_install(&item, upgrade_id.c_str()))
++				return false;
+ 			Upgrade* upgrade = upgrade_verify(item.m_section_id, upgrade_id);
+ 			UpgradeStateResult res = upgrade->can_install(item, loading);
+ 
+diff --git a/src/xrGame/inventory_upgrade_root.h b/src/xrGame/inventory_upgrade_root.h
+index d2ff978..17a384e 100644
+--- a/src/xrGame/inventory_upgrade_root.h
++++ b/src/xrGame/inventory_upgrade_root.h
+@@ -41,6 +41,7 @@ namespace inventory
+ 
+ 			void highlight_hierarchy(shared_str const& upgrade_id);
+ 			void reset_highlight();
++			Upgrades_vec const& contained_upgrades() const { return m_contained_upgrades; } // S10-T04f: the server's table
+ 
+ 		protected:
+ 			shared_str m_upgrade_scheme;
+diff --git a/src/xrGame/script_game_object.cpp b/src/xrGame/script_game_object.cpp
+index 61846d8..ea269fa 100644
+--- a/src/xrGame/script_game_object.cpp
++++ b/src/xrGame/script_game_object.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopClientLink.h" // S10-T04f
+ #include "script_game_object.h"
+ #include "script_game_object_impl.h"
+ #include "script_entity_action.h"
+@@ -1002,6 +1003,8 @@ void CScriptGameObject::SetCondition(float val)
+ 		                                "CSciptEntity : cannot access class member SetCondition!");
+ 		return;
+ 	}
++	if (campaign::coop_client_script_set_condition(inventory_item, val))
++		return; // S10-T04f: a repair in the installed Lua window: the server's
+ 	val -= inventory_item->GetCondition();
+ 	inventory_item->ChangeCondition(val);
+ }
+diff --git a/src/xrGame/script_game_object_inventory_owner.cpp b/src/xrGame/script_game_object_inventory_owner.cpp
+index 84d4f3c..473c15d 100644
+--- a/src/xrGame/script_game_object_inventory_owner.cpp
++++ b/src/xrGame/script_game_object_inventory_owner.cpp
+@@ -3,6 +3,7 @@
+ //////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CoopClientLink.h" // S10-T04f
+ #include "script_game_object.h"
+ #include "CampaignActorAccess.h"
+ #include "CampaignScriptContext.h"
+@@ -651,6 +652,8 @@ void CScriptGameObject::TransferItem(CScriptGameObject* pItem, CScriptGameObject
+ 		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError, "Cannot transfer not CInventoryItem item");
+ 		return;
+ 	}
++	if (campaign::coop_client_script_transfer_item(pIItem, &object(), &pForWho->object()))
++		return; // S10-T04f: the installed Lua trade window's exchange, or a lending to the mechanic: the server's
+ 
+ 	// выбросить у себя
+ 	NET_Packet P;
+@@ -772,6 +775,8 @@ void CScriptGameObject::GiveMoney(int money)
+ {
+ 	CInventoryOwner* pOurOwner = smart_cast<CInventoryOwner*>(&object());
+ 	VERIFY(pOurOwner);
++	if (campaign::coop_client_script_give_money(pOurOwner, money))
++		return; // S10-T04f: the installed Lua trade or repair window: the purse is the server's
+ 
+     GiveMoneySafe(pOurOwner, money, true);
+ }
+diff --git a/src/xrGame/ui/UIActorMenu.h b/src/xrGame/ui/UIActorMenu.h
+index ab9fcd3..cebf648 100644
+--- a/src/xrGame/ui/UIActorMenu.h
++++ b/src/xrGame/ui/UIActorMenu.h
+@@ -186,6 +186,7 @@ public:
+ public:
+ 	void SetMenuMode(EMenuMode mode);
+ 	EMenuMode GetMenuMode() { return m_currMenuMode; };
++	void CoopUpgradeRefresh(); // S10-T04f: the server's upgrade table or an installed upgrade arrived
+ 	void CoopTradeRefresh(); // S10-T04c: the lists from the (server-moved) inventories
+ 	void CoopTradeRefused(bool money); // S10-T04c: the server's refusal as the window's message box
+ 	void SetActor(CInventoryOwner* io);
+diff --git a/src/xrGame/ui/UIActorMenuUpgrade.cpp b/src/xrGame/ui/UIActorMenuUpgrade.cpp
+index ccbda1c..a6d1f0b 100644
+--- a/src/xrGame/ui/UIActorMenuUpgrade.cpp
++++ b/src/xrGame/ui/UIActorMenuUpgrade.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "inventory_upgrade.h"
+ #include "UITalkWnd.h"
++#include "../CoopClientLink.h" // S10-T04f
+ 
+ void CUIActorMenu::InitUpgradeMode()
+ {
+@@ -49,6 +50,7 @@ void CUIActorMenu::DeInitUpgradeMode()
+ 	{
+ 		m_pPartnerInvOwner->StopTrading();
+ 	}
++	campaign::coop_client_upgrade_closed(); // S10-T04f
+ 
+ 	if (!CurrentGameUI())
+ 		return;
+@@ -62,6 +64,21 @@ void CUIActorMenu::DeInitUpgradeMode()
+ 	}
+ }
+ 
++// S10-T04f: the server's table or an installed upgrade arrived: the window
++// shows the states and the item's new grid and condition
++void CUIActorMenu::CoopUpgradeRefresh()
++{
++	if (m_currMenuMode != mmUpgrade)
++		return;
++	UpdateActor();
++	if (m_upgrade_selected && m_upgrade_selected->m_pData)
++		SeparateUpgradeItem();
++	if (m_pUpgradeWnd)
++		m_pUpgradeWnd->UpdateAllUpgrades();
++	UpdateConditionProgressBars();
++	UpdateItemsPlace();
++}
++
+ void CUIActorMenu::SetupUpgradeItem()
+ {
+ 	if (m_upgrade_selected)
+diff --git a/src/xrGame/ui/UIActorMenu_script.cpp b/src/xrGame/ui/UIActorMenu_script.cpp
+index 30352cf..d62483b 100644
+--- a/src/xrGame/ui/UIActorMenu_script.cpp
++++ b/src/xrGame/ui/UIActorMenu_script.cpp
+@@ -6,6 +6,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "../CoopClientLink.h" // S10-T04f
+ #include "UIActorMenu.h"
+ #include "../UIGameCustom.h"
+ 
+@@ -154,6 +155,8 @@ void CUIActorMenu::RepairEffect_CurItem()
+ 	{
+ 		return;
+ 	}
++	if (campaign::coop_client_upgrade_repair(item))
++		return; // S10-T04f: the server repairs (the charge, the condition with the layout)
+ 	LPCSTR item_name = item->m_section_id.c_str();
+ 
+ 	::luabind::functor<void> funct;
+@@ -171,6 +174,9 @@ void CUIActorMenu::RepairEffect_CurItem()
+ bool CUIActorMenu::CanUpgradeItem(PIItem item)
+ {
+ 	VERIFY(item && m_pPartnerInvOwner);
++	bool can = false;
++	if (campaign::coop_client_upgrade_can(item, can))
++		return can; // S10-T04f: the server's table (the installed script asks the mechanic there)
+ 	LPCSTR item_name = item->m_section_id.c_str();
+ 	LPCSTR partner = m_pPartnerInvOwner->CharacterInfo().Profile().c_str();
+ 
+diff --git a/src/xrGame/ui/UITalkWnd.cpp b/src/xrGame/ui/UITalkWnd.cpp
+index 02d5766..25aaa40 100644
+--- a/src/xrGame/ui/UITalkWnd.cpp
++++ b/src/xrGame/ui/UITalkWnd.cpp
+@@ -209,8 +209,7 @@ void CUITalkWnd::SendMessage(CUIWindow* pWnd, s16 msg, void* pData)
+ 	}
+ 	else if (pWnd == UITalkDialogWnd && msg == TALK_DIALOG_UPGRADE_BUTTON_CLICKED)
+ 	{
+-		if (!m_remote)
+-			SwitchToUpgrade();
++		SwitchToUpgrade(); // S10-T04f: remote too
+ 	}
+ 	else if (pWnd == UITalkDialogWnd && msg == TALK_DIALOG_QUESTION_CLICKED)
+ 	{
+@@ -468,7 +467,10 @@ void CUITalkWnd::SwitchToTrade()
+ void CUITalkWnd::SwitchToUpgrade()
+ {
+ 	if (m_remote)
+-		return; // S10-T04a
++	{
++		campaign::coop_client_upgrade_open(m_pOthersInvOwner); // S10-T04f: the window opens when the table arrives
++		return;
++	}
+ 	//if ( m_pOurInvOwner->IsInvUpgradeEnabled() && m_pOthersInvOwner->IsInvUpgradeEnabled() )
+ 	{
+ 		CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());

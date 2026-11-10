@@ -1,0 +1,316 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 8118d21..bc88288 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1031,6 +1031,31 @@ float lua_nearest_participant_distance(float x, float y, float z)
+ 	return best;
+ }
+ 
++// S10-T03b: the engine id of the nearest alive participant actor to a point
++// (the same anchors), -1 when none
++int lua_nearest_participant_id(float x, float y, float z)
++{
++	if (!server_role())
++		return -1;
++	xr_vector<CSE_ALifeCreatureActor*> actors;
++	participant_actor_entities(actors);
++	const Fvector at = {x, y, z};
++	float best = -1.f;
++	int id = -1;
++	for (CSE_ALifeCreatureActor* actor : actors)
++	{
++		if (!actor->g_Alive())
++			continue;
++		const float d = actor->o_Position.distance_to(at);
++		if (best < 0.f || d < best)
++		{
++			best = d;
++			id = int(actor->ID);
++		}
++	}
++	return id;
++}
++
+ int lua_slot_actor_id(int slot)
+ {
+ 	CActor* actor = slot >= 0 && slot <= 0xff ? slot_actor(u8(slot)) : nullptr;
+@@ -1186,6 +1211,7 @@ LPCSTR const compat_source =
+ 	"S.companion_wrap = 'none'\n"
+ 	"S.companion_recruits = 0\n"
+ 	"S.companion_targets = 0\n"
++	"S.squad_actor_targets = 0\n" // S10-T03b: squad targets of actor 0 answered with player 2
+ 	"S.companion_refused = 0\n"
+ 	"local function recruiter_of(id, name)\n"
+ 	"  local slot = campaign.companion_slot(id)\n"
+@@ -1237,6 +1263,13 @@ LPCSTR const compat_source =
+ 	"        return self.id\n" // the recruiter is away: the squad holds where it is
+ 	"      end\n"
+ 	"    end\n"
++	// S10-T03b: any other squad sent at "the actor" (target 0: bounty
++	// hunters, task squads) goes for the nearest player (matrix rule F8)
++	"    if t == 0 and self.position then\n"
++	"      local id = campaign.nearest_participant_id(self.position.x, self.position.y, self.position.z)\n"
++	"      if id and id > 0 then S.squad_actor_targets = S.squad_actor_targets + 1 end\n"
++	"      if id and id >= 0 then return id end\n"
++	"    end\n"
+ 	"    return t\n"
+ 	"  end\n"
+ 	"  S.companion_wrap = S.companion_wrap .. '+target'\n"
+@@ -1408,6 +1441,7 @@ void script_register_context(lua_State* L)
+ 		def("companion_slot", &lua_companion_slot),
+ 		def("slot_actor_id", &lua_slot_actor_id),
+ 		def("nearest_participant_distance", &lua_nearest_participant_distance), // S10-T03a
++		def("nearest_participant_id", &lua_nearest_participant_id), // S10-T03b
+ 		def("present", &lua_present)
+ 	];
+ }
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 0a5d1f1..ee5bb8d 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -162,6 +162,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.fauna_party = ini.line_exist("coop", "fauna_party") ? ini.r_u32("coop", "fauna_party") : 0; // S10-T02e
+ 		out.companion_party = ini.line_exist("coop", "companion_party") ? ini.r_u32("coop", "companion_party") : 0; // S10-T02f
+ 		out.alife_party = ini.line_exist("coop", "alife_party") ? ini.r_u32("coop", "alife_party") : 0; // S10-T03a
++		out.squad_party = ini.line_exist("coop", "squad_party") ? ini.r_u32("coop", "squad_party") : 0; // S10-T03b
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index d49de87..dbc5d53 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -122,6 +122,7 @@ struct CoopConfig
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
+ 	u32 companion_party; // S10-T02f fixture: seconds after both attach until p2 recruits a companion (or a restored one is checked)
+ 	u32 alife_party; // S10-T03a fixture: seconds after both attach until the ALife identity fixture starts (or a restored one is checked)
++	u32 squad_party; // S10-T03b fixture: seconds after both attach until a squad is sent at the actor near p2
+ 	u32 fauna_party; // S10-T02e fixture:seconds after both attach until each generic mutant class is spawned near p2
+ 	u32 mutant_party; // S10-T02d fixture:seconds after both attach until the bloodsucker, burer and poltergeist stages
+ 	u32 psy_party; // S10-T02c fixture:seconds after both attach until a controller is spawned near p2
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index dcaa239..b707e63 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -798,6 +798,17 @@ struct Host
+ 		u64 travel_since = 0; // both back in the world on another level (a travel)
+ 		xr_map<u16, shared_str> dead; // dead creatures at the baseline: id -> name
+ 	} alife_fixture;
++	// S10-T03b: the squad-target fixture (profile squad_party)
++	struct SquadFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		int dest = -1, src = -1, squad = -1;
++		Fvector dest_pos = {0.f, 0.f, 0.f};
++		float d0 = 0.f;
++		u32 failures = 0;
++	} squad_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -13266,6 +13277,195 @@ void alife_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T03b
++// The squad-target fixture (profile squad_party, server-driven). p1 moves to a
++// smart terrain 300+ m from p2 (p1 only, L58); a loner squad (friendly, it does
++// not fight) is created at a smart terrain 120-250 m from p2 and farther from
++// p1, and sent at "the actor" as bounty hunters are (scripted_target "actor",
++// rush_to_target): its script target must be p2's actor (the nearest player),
++// not 0, and its commander must come within 30 m of p2 in 240 s. Then p1 is put
++// 10 m from the commander, nearer than p2: the target must become p1's (0).
++// compare-coop-squad.py checks the lines.
++static bool squad_commander_position(int squad, Fvector& out)
++{
++	string512 chunk;
++	double v[4] = {0, 0, 0, -1};
++	xr_sprintf(chunk, "local sq = alife_object(%d) local c = sq and sq:commander_id()\n"
++		"local o = c and level.object_by_id(c)\n"
++		"if o then local p = o:position() return p.x, p.y, p.z, 1 end\n"
++		"local se = c and alife_object(c)\n"
++		"if se then return se.position.x, se.position.y, se.position.z, 0 end\n"
++		"return 0, 0, 0, -1\n", squad);
++	if (alife_lua(chunk, v, 4, "squad-commander") != 4 || v[3] < 0)
++		return false;
++	out.set(float(v[0]), float(v[1]), float(v[2]));
++	return true;
++}
++
++static int squad_target(int squad)
++{
++	string256 chunk;
++	double v[1] = {-9};
++	xr_sprintf(chunk, "local sq = alife_object(%d) local t = sq and sq:get_script_target() return t or -2\n", squad);
++	return alife_lua(chunk, v, 1, "squad-target") == 1 ? int(v[0]) : -9;
++}
++
++void squad_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.squad_party || !ai().get_alife())
++		return;
++	Host::SquadFixture& f = g_host->squad_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-squad both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 999 || g_host->tick < f.both_since + u64(config.squad_party) * 50)
++		return;
++	CActor* p1 = actors[0];
++	CActor* p2 = actors[1];
++	double v[6] = {-9, -9, -9, -9, -9, -9};
++	string2048 chunk;
++	if (f.phase == 0)
++	{
++		const Fvector& a = p2->Position();
++		xr_sprintf(chunk,
++			"local p2 = vector():set(%f, %f, %f)\n"
++			"local gg = game_graph() local lvl = gg:vertex(alife():actor().m_game_vertex_id):level_id()\n"
++			"local all = {}\n"
++			"for id, e in pairs(SIMBOARD.smarts) do local s = e.smrt\n"
++			"  if s and gg:valid_vertex_id(s.m_game_vertex_id) and gg:vertex(s.m_game_vertex_id):level_id() == lvl then all[#all + 1] = s end\n"
++			"end\n"
++			"local dest, dd = nil, 1e9\n"
++			"for _, s in ipairs(all) do local d = s.position:distance_to(p2) if d >= 300 and d < dd then dest, dd = s, d end end\n"
++			"if not dest then return -1, -1, 0, 0, 0, -1 end\n"
++			"local src, ds = nil, 1e9\n"
++			"for _, s in ipairs(all) do local d = s.position:distance_to(p2)\n"
++			"  if d >= 120 and d <= 250 and s.position:distance_to(dest.position) > d + 100 and d < ds then src, ds = s, d end end\n"
++			"local at = level.vertex_position(dest.m_level_vertex_id)\n"
++			"return dest.id, src and src.id or -1, at.x, at.y, at.z, src and ds or -1\n",
++			a.x, a.y, a.z);
++		if (alife_lua(chunk, v, 6, "squad-select") != 6 || v[0] < 0 || v[1] < 0)
++		{
++			++f.failures;
++			g_host->log.line("fixture-squad done phase=no-subject dest=%d src=%d failures=%u", int(v[0]), int(v[1]), f.failures);
++			f.phase = 999;
++			return;
++		}
++		f.dest = int(v[0]);
++		f.src = int(v[1]);
++		f.dest_pos.set(float(v[2]), float(v[3]), float(v[4]));
++		place_beside(p1, Fvector().add(f.dest_pos, Fvector().set(0.f, 0.3f, 0.f)));
++		g_host->log.line("fixture-squad select dest=%d dest_d=%.1f src=%d src_d=%.1f", f.dest, f.dest_pos.distance_to(a), f.src,
++			v[5]);
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick - f.phase_tick < 10 * 50)
++			return;
++		xr_sprintf(chunk,
++			"local e = SIMBOARD.smarts[%d] local s = e and e.smrt\n"
++			"local sq = s and SIMBOARD:create_squad(s, 'stalker_sim_squad_novice')\n"
++			"if not sq then return -1, 0 end\n"
++			"sq.scripted_target = 'actor'\n"
++			"sq.rush_to_target = true\n"
++			"local n = 0 for m in sq:squad_members() do n = n + 1 end\n"
++			"return sq.id, n\n", f.src);
++		if (alife_lua(chunk, v, 2, "squad-create") != 2 || v[0] < 0)
++		{
++			++f.failures;
++			g_host->log.line("fixture-squad done phase=no-squad failures=%u", f.failures);
++			f.phase = 999;
++			return;
++		}
++		f.squad = int(v[0]);
++		g_host->log.line("fixture-squad created squad=%d members=%d d_p1_p2=%.1f", f.squad, int(v[1]),
++			p1->Position().distance_to(p2->Position()));
++		f.phase = 2;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	Fvector at;
++	const bool have = squad_commander_position(f.squad, at);
++	if (f.phase == 2)
++	{
++		if (g_host->tick - f.phase_tick < 3 * 50)
++			return;
++		const int target = squad_target(f.squad);
++		f.d0 = have ? at.distance_to(p2->Position()) : -1.f;
++		const bool pass = target == int(p2->ID()) && have;
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-squad target phase=p2 squad=%d target=%d p1=%u p2=%u d_p2=%.1f d_p1=%.1f pass=%d", f.squad, target,
++			u32(p1->ID()), u32(p2->ID()), f.d0, have ? at.distance_to(p1->Position()) : -1.f, pass ? 1 : 0);
++		f.phase = 3;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		const float d = have ? at.distance_to(p2->Position()) : -1.f;
++		const float seconds = float(g_host->tick - f.phase_tick) / 50.f;
++		const bool reached = have && d <= 30.f;
++		if ((g_host->tick - f.phase_tick) % (10 * 50) == 0 && !reached)
++			g_host->log.line("fixture-squad approach seconds=%.0f d_p2=%.1f d_p1=%.1f target=%d", seconds, d,
++				have ? at.distance_to(p1->Position()) : -1.f, squad_target(f.squad));
++		if (!reached && seconds < 240.f)
++			return;
++		if (!reached)
++			++f.failures;
++		g_host->log.line("fixture-squad reach d0=%.1f d_p2=%.1f seconds=%.1f reached=%d", f.d0, d, seconds, reached ? 1 : 0);
++		if (!have)
++		{
++			g_host->log.line("fixture-squad done phase=lost failures=%u", f.failures);
++			f.phase = 999;
++			return;
++		}
++		// p1 beside the squad, nearer than p2: the target follows
++		Fvector side;
++		side.sub(at, p2->Position());
++		side.y = 0.f;
++		if (side.square_magnitude() < 0.01f)
++			side.set(1.f, 0.f, 0.f);
++		side.normalize();
++		place_beside(p1, Fvector().mad(at, side, 10.f));
++		f.phase = 4;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	if (f.phase == 4)
++	{
++		if (g_host->tick - f.phase_tick < 3 * 50)
++			return;
++		const int target = squad_target(f.squad);
++		const float d1 = have ? at.distance_to(p1->Position()) : -1.f;
++		const float d2 = have ? at.distance_to(p2->Position()) : -1.f;
++		const bool pass = have && d1 < d2 && target == int(p1->ID());
++		if (!pass)
++			++f.failures;
++		g_host->log.line("fixture-squad target phase=p1 squad=%d target=%d d_p1=%.1f d_p2=%.1f pass=%d", f.squad, target, d1, d2,
++			pass ? 1 : 0);
++		alife_lua("return __campaign_ctx.squad_actor_targets or -1", v, 1, "squad-counter");
++		g_host->log.line("fixture-squad done phase=switched failures=%u squad_actor_targets=%d", f.failures, int(v[0]));
++		f.phase = 999;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -16536,6 +16736,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	fauna_fixtures(); // S10-T02e
+ 	companion_fixtures(); // S10-T02f
+ 	alife_fixtures(); // S10-T03a
++	squad_fixtures(); // S10-T03b
+ 
+ 
+ 

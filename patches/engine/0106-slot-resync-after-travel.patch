@@ -1,0 +1,155 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index adc0672..32e7096 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -228,6 +228,7 @@ struct Link
+ 	xr_map<u16, Outcome> outcomes;
+ 	// S06-T07: the player's own weapon actions forwarded to the server
+ 	u8 own_slot_sent = 0xff; // the slot the server was last asked for or reported
++	u64 own_slot_operation = 0; // B45: the last slot intent sent (its refusal re-syncs own_slot_sent)
+ 	bool own_reloading = false;
+ 	u64 player_slot_actions = 0, player_reload_actions = 0;
+ 	u64 shots_presented = 0, slots_applied = 0, ammo_applied = 0, health_applied = 0;
+@@ -2298,6 +2299,9 @@ void forward_player_actions()
+ 		xr_vector<u8> slot;
+ 		slot.push_back(u8(target));
+ 		send_action(coop::proto::kActionActivateSlot, slot, "player-slot");
++		g_link->own_slot_operation = g_link->combat_operation; // B45
++		g_link->log.line("player-slot-sent slot=%u server_slot=%u", u32(target), g_actor ?
++			u32(g_link->outcomes[u16(g_actor->ID())].slot) : 0xffu);
+ 		++g_link->player_slot_actions;
+ 	}
+ 	const CWeapon* weapon = smart_cast<const CWeapon*>(g_actor->inventory().ActiveItem());
+@@ -4134,6 +4138,21 @@ void on_message(const coop::session::ClientEvent& e)
+ 			u32(result->outcome), u32(result->reason), result->commit_id);
+ 		if (g_link->config.script == 6)
+ 			ledger_result(*result);
++		// B45: a refused slot intent (demo-16: sent at world-live during the
++		// travel's hold, refused 30) left own_slot_sent on the slot the server
++		// never took: the client showed its weapon drawn, the server held it
++		// put away; own_slot_sent goes back to the server's slot, so the local
++		// slot is asked for again
++		if (g_link->own_slot_operation && result->operation_id == g_link->own_slot_operation &&
++			result->outcome == coop::proto::ActionOutcome::Rejected && g_actor)
++		{
++			const u8 server_slot = g_link->outcomes[u16(g_actor->ID())].slot;
++			g_link->log.line("player-slot-refused operation=%I64u reason=%u resync=%u->%u", result->operation_id,
++				u32(result->reason), u32(g_link->own_slot_sent), u32(server_slot));
++			if (server_slot != 0xff)
++				g_link->own_slot_sent = server_slot;
++			g_link->own_slot_operation = 0;
++		}
+ 		if (result->operation_id == g_link->respawn_operation || (result->operation_id >> 48) == 0x7e5f)
+ 			respawn_result(*result);
+ 		if (pickup_operation(result->operation_id))
+@@ -6252,6 +6271,9 @@ void on_travel(const coop::proto::CampaignEvent& event)
+ 		t.holding = false;
+ 		t.ready_id = 0;
+ 		++t.resumes;
++		// B45: the local slot is asked for again against the server's after the hold
++		if (g_actor && g_link->outcomes[u16(g_actor->ID())].slot != 0xff)
++			g_link->own_slot_sent = g_link->outcomes[u16(g_actor->ID())].slot;
+ 		travel_hud(abort == 9 ? "Your partner did not arrive in time: you may go on." : "Both players are here.", 5);
+ 		g_link->log.line("travel-resumed id=%I64x level=%s timeout=%d", id, level, abort == 9 ? 1 : 0);
+ 		return;
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 4848cba..77368b3 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -643,6 +643,7 @@ struct Host
+ 		// S09-T03: the hold on the destination level until both clients are ready
+ 		u64 hold_id = 0; // 0: no hold
+ 		u64 hold_since_ms = 0, hold_deadline_ms = 0;
++		u64 weapon_probe_tick = 0, weapon_probe_check = 0; // B45: the travel fixture's weapon probe
+ 		xr_string hold_level;
+ 		bool ready[2] = {false, false};
+ 		u64 readies = 0, readies_refused = 0, inputs_ignored = 0, holds = 0, resumes_timeout = 0;
+@@ -14792,6 +14793,28 @@ void announce_pickup_round(u32 round, u8 kind, const coop::proto::EntityRef& tar
+ 		attached > 1 ? at.distance_to(actors[1]->Position()) : -1.f);
+ }
+ 
++// B45: a player's weapon state as the server's inventory holds it (the
++// active, next and previous slots, which slots are blocked, what each weapon
++// slot holds, whether it can be activated)
++void log_actor_weapons(LPCSTR tag, u8 slot_of_player, CActor* actor)
++{
++	if (!actor)
++		return;
++	CInventory& inv = actor->inventory();
++	string256 slots = "";
++	for (u16 s = KNIFE_SLOT; s <= INV_SLOT_3; ++s)
++	{
++		PIItem item = inv.ItemFromSlot(s);
++		string64 one;
++		xr_sprintf(one, " %u:%s:%s%s", u32(s), item ? *item->object().cNameSect() : "-", item && inv.IsSlotBlocked(item) ? "b" : "",
++			"");
++		xr_strcat(slots, one);
++	}
++	g_host->log.line("actor-weapons tag=%s slot=%u actor=%u alive=%d active=%u next=%u prev=%u enabled=%d ready=%d%s", tag,
++		u32(slot_of_player), u32(actor->ID()), actor->g_Alive() ? 1 : 0, u32(inv.GetActiveSlot()),
++		u32(inv.GetNextActiveSlot()), u32(inv.GetPrevActiveSlot()), actor->getEnabled() ? 1 : 0, actor->Ready() ? 1 : 0, slots);
++}
++
+ u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
+ {
+ 	if (intent.kind != coop::proto::kActionActivateSlot && intent.kind != coop::proto::kActionReload)
+@@ -14825,6 +14848,7 @@ u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
+ 		if (!actor->inventory().ItemFromSlot(slot))
+ 			return 4;
+ 		actor->inventory().Activate(slot);
++		log_actor_weapons("activate", u8(link.ref.slot), actor); // B45
+ 		return 0;
+ 	}
+ 	// reload: the native reload key on the active weapon (its own ammo rules)
+@@ -17161,6 +17185,29 @@ void travel_fixtures()
+ 	const CoopConfig& config = g_host->config;
+ 	if (!config.travel_party || !ai().get_alife())
+ 		return;
++	// B45: 5 s after the travel resumed (profile arm): each player's pistol is
++	// activated as a client's slot intent would, then its state logged 1 s on
++	Host::Travel& tvp = g_host->travel;
++	if (tvp.weapon_probe_tick && g_host->tick >= tvp.weapon_probe_tick)
++	{
++		tvp.weapon_probe_tick = 0;
++		tvp.weapon_probe_check = g_host->tick + 50;
++		for (PlayerLink& l : g_host->links)
++			if (l.bound)
++				if (CActor* a = participant_actor(l.ref))
++				{
++					const u16 s = a->inventory().ItemFromSlot(INV_SLOT_2) ? INV_SLOT_2 : INV_SLOT_3;
++					a->inventory().Activate(s);
++					log_actor_weapons("probe-activate", u8(l.ref.slot), a);
++				}
++	}
++	if (tvp.weapon_probe_check && g_host->tick >= tvp.weapon_probe_check)
++	{
++		tvp.weapon_probe_check = 0;
++		for (PlayerLink& l : g_host->links)
++			if (l.bound)
++				log_actor_weapons("probe-check", u8(l.ref.slot), participant_actor(l.ref));
++	}
+ 	Host::Travel::Fixture& f = g_host->travel.fixture;
+ 	CActor* actors[2] = {nullptr, nullptr};
+ 	u32 attached = 0;
+@@ -17753,6 +17800,9 @@ void travel_on_published(u32 generation, bool ok)
+ 	travel_record(2, ++g_host->commit);
+ 	++tv.committed;
+ 	g_host->log.line("travel-committed id=%I64x generation=%u level=%s", tv.exec_id, generation, tv.exec_level.c_str());
++	for (PlayerLink& l : g_host->links) // B45: each player's weapons before the reload
++		if (l.bound)
++			log_actor_weapons("committed", u8(l.ref.slot), participant_actor(l.ref));
+ 	// both clients leave their world and rejoin once the server is on the new level
+ 	coop::proto::Transition t = tv.coordinator->last_ended();
+ 	t.state = coop::proto::TravelState(8); // committed: reload
+@@ -17955,6 +18005,11 @@ void travel_resume(LPCSTR why)
+ 	travel_event(t, 0);
+ 	tv.hold_id = 0;
+ 	tv.hold_level.clear();
++	// B45: each player's weapons as the destination world holds them
++	for (PlayerLink& l : g_host->links)
++		if (l.bound)
++			log_actor_weapons("resumed", u8(l.ref.slot), participant_actor(l.ref));
++	tv.weapon_probe_tick = g_host->config.arm && g_host->config.travel_party ? g_host->tick + 250 : 0;
+ }
+ 
+ u16 take_travel_ready(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)

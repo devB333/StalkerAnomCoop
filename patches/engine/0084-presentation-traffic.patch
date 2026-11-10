@@ -1,0 +1,560 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index f9807a6..f49eed3 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -758,6 +758,20 @@ Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const Prese
+ 	return Refusal::None;
+ }
+ 
++ScriptAudience script_audience(ParticipantRef* player)
++{
++	if (!server_role())
++		return ScriptAudience::Nobody;
++	ScriptContext context;
++	if (current_script_context(context) == Refusal::None)
++	{
++		if (player)
++			*player = context.action.actor;
++		return ScriptAudience::Player;
++	}
++	return s_mute > 0 ? ScriptAudience::Nobody : ScriptAudience::Everyone;
++}
++
+ static xr_vector<MapSpotState> s_map_spots; // S08-T09
+ static xr_vector<xr_string> s_map_spot_types;
+ 
+@@ -1605,7 +1619,8 @@ LPCSTR const compat_source =
+ 	"      local p = { stages = {}, blowout_waves = {}, body_tears = {}, hitFactor = mgr.hitFactor or 0,\n"
+ 	"                  effector_set = false, blowout_sound = false, wave_sound = false, second_message_given = false,\n"
+ 	"                  ui_disabled = false, first_update = true, task_given = true, serial = S.surge_serial,\n"
+-	"                  u_prev_sec = -1, u_prev_game_sec = -1, u_currentPPEfactor = 0.001, indik = nil, slot = slot }\n"
++	"                  u_prev_sec = -1, u_prev_game_sec = -1, u_currentPPEfactor = 0.001, indik = nil, slot = slot,\n"
++	"                  loops = {} }\n"
+ 	"      local d = diff_sec_of(mgr)\n"
+ 	"      for k, t in pairs(ONCE) do if d > t + 3 then p.stages[k] = true end end\n"
+ 	// a wave is where it would be had it started on time
+@@ -1642,6 +1657,50 @@ LPCSTR const compat_source =
+ 	"      rawset(SMM, 'currentIndik', saved.indik)\n"
+ 	"      lvl.set_weather_fx = orig_swfx\n"
+ 	"    end\n"
++	// S10-T05d1: a pass's looped sounds (the rumble, the wave, the earthquake)
++	// are its own sound objects at its player. A sound theme holds one sound
++	// object for everyone: the world's muted run played it first, so a pass
++	// found it playing and only set the volume of a sound its client never had.
++	"    local cur_pass = nil\n"
++	"    local xs_ok, XS = pcall(function() return xr_sound end)\n"
++	"    local th_ok, THM = pcall(function() return sound_theme end)\n"
++	"    if xs_ok and type(XS) == 'table' and th_ok and type(THM) == 'table' and XS.play_sound_looped\n"
++	"       and XS.stop_sound_looped and XS.set_volume_sound_looped then\n"
++	"      local o_play, o_stop, o_vol = XS.play_sound_looped, XS.stop_sound_looped, XS.set_volume_sound_looped\n"
++	"      XS.play_sound_looped = function(id, snd, ...)\n"
++	"        if not (cur_pass and id == AC_ID and snd) then return o_play(id, snd, ...) end\n"
++	"        local th = THM.theme and THM.theme[snd]\n"
++	"        local a = db.actor\n"
++	"        if not (th and th.class_id == 'looped_sound' and th.sound and a) then return end\n"
++	"        local s = cur_pass.loops[snd]\n"
++	"        if s and s:playing() then return end\n"
++	"        s = s or sound_object(th.sound)\n"
++	"        cur_pass.loops[snd] = s\n"
++	"        s:play_at_pos(a, a:position(), 0, sound_object.s3d + sound_object.looped)\n"
++	"        note('surge-pass-loop slot=%d sound=%s', cur_pass.slot, tostring(snd))\n"
++	"      end\n"
++	"      XS.set_volume_sound_looped = function(id, snd, v, ...)\n"
++	"        if not (cur_pass and id == AC_ID and snd) then return o_vol(id, snd, v, ...) end\n"
++	"        local s = cur_pass.loops[snd]\n"
++	"        if s and s:playing() then s.volume = v end\n"
++	"      end\n"
++	"      XS.stop_sound_looped = function(id, snd, ...)\n"
++	"        if not (cur_pass and id == AC_ID) then return o_stop(id, snd, ...) end\n"
++	"        for k, s in pairs(cur_pass.loops) do\n"
++	"          if (snd == nil or k == snd) and s:playing() then s:stop() end\n"
++	"        end\n"
++	"      end\n"
++	"      S.emission_wrap_loops = true\n"
++	"    end\n"
++	// a pass replaced while its loops play (a rejoin: the client that came
++	// back never had them): they stop on the server only, muted
++	"    local function stop_loops(p)\n"
++	"      if not (p and p.loops and next(p.loops)) then return end\n"
++	"      campaign.mute(true)\n"
++	"      for _, s in pairs(p.loops) do if s:playing() then pcall(s.stop, s) end end\n"
++	"      campaign.mute(false)\n"
++	"      p.loops = {}\n"
++	"    end\n"
+ 	// the end of the surge for one player: what end_surge stops (its sounds,
+ 	// waves, effectors, indicators), and the kill at the end when it is the fate
+ 	"    local function pass_end(p, mgr)\n"
+@@ -1664,7 +1723,9 @@ LPCSTR const compat_source =
+ 	"      local saved = swap_in(p)\n"
+ 	"      local hp0 = db.actor and db.actor.health or -1\n"
+ 	"      local ok, err\n"
++	"      cur_pass = p\n"
+ 	"      if ended then ok, err = pcall(pass_end, p, mgr) else ok, err = pcall(orig_update, p) end\n"
++	"      cur_pass = nil\n"
+ 	"      local hp1 = db.actor and db.actor.health or -1\n"
+ 	"      local alive = db.actor and db.actor:alive()\n"
+ 	"      swap_out(p, saved)\n"
+@@ -1701,6 +1762,7 @@ LPCSTR const compat_source =
+ 	// a player who (re)joins during the surge gets its effects from now on
+ 	"          if p and in_world and not p.in_world and not fresh then fresh = true S.emission_rejoins = S.emission_rejoins + 1 end\n"
+ 	"          if fresh then\n"
++	"            stop_loops(p)\n"
+ 	"            p = new_pass(self, slot)\n"
+ 	"            p.active = true\n"
+ 	"            passes[slot] = p\n"
+@@ -1716,7 +1778,7 @@ LPCSTR const compat_source =
+ 	"      if not r[1] then error(r[2], 0) end\n"
+ 	"      return unpack(r, 2, r.n)\n"
+ 	"    end\n"
+-	"    S.emission_wrap = 'surge'\n"
++	"    S.emission_wrap = S.emission_wrap_loops and 'surge+loops' or 'surge'\n"
+ 	"    S.wrapped = S.wrapped + 1\n"
+ 	"  else\n"
+ 	"    S.emission_wrap = 'surge-no-upvalues'\n"
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index be19ad6..78e86e7 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -316,6 +316,11 @@ Refusal present_to_actor(const CObject* actor, Presentation kind, u16 object, LP
+ // live client. Counted as broadcast, not dropped.
+ Refusal present_script(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args);
+ const u8 kBroadcastSlot = 7;
++// S10-T05d1: who present_script would reach now: nobody (a client, or the
++// muted world run of the surge), the context's player (into *player when
++// given), or every player.
++enum class ScriptAudience { Nobody, Player, Everyone };
++ScriptAudience script_audience(ParticipantRef* player = nullptr);
+ // S08-T09: to every player (the broadcast outbox), whatever the context.
+ Refusal present_broadcast(Presentation kind, u16 object, LPCSTR detail, const PresentationArgs& args);
+ // S08-T09: the scripts' map spots as they stand on the server (added, hint
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 9daa9a8..284dc31 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -40,6 +40,7 @@
+ #include "xrServer.h"
+ #include "../xrEngine/Environment.h"
+ #include "CampaignScriptContext.h" // S06-T08: presentation outboxes
++#include "script_sound.h" // S10-T05d1: the live loops
+ #include "CampaignActorControl.h"
+ #include "Inventory.h"
+ #include "Weapon.h"
+@@ -171,6 +172,7 @@ struct PlayerLink
+ 	u32 waiting_generation = 0; // S07-T08: the generation this join waits for
+ 	bool layouts_sent = false; // S08-T07: every participant actor's inventory layout sent since it entered the world
+ 	bool party_sent = false; // S08-T09: the party's tasks sent since it entered the world
++	bool loops_sent = false; // S10-T05d1: the live looped sounds played to it since it entered the world
+ 	// S08-T09 (user, 2026-10-27): no firing while a use's animation keeps the weapon down
+ 	u64 fire_block_until = 0;
+ 	u64 fire_blocked_ticks = 0;
+@@ -18638,6 +18640,21 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	sweep_fixtures(); // S10-T03e
+ 	emission_fixtures(); // S10-T05a
+ 	story_fixtures(); // S10-T05c
++	// S10-T05d1: the looped sounds already playing, to a player entering the world; only once its
++	// presentation has started (the start skips every record queued before it)
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!client_in_world(link) || !link.presentation_started)
++		{
++			link.loops_sent = false;
++			continue;
++		}
++		if (link.loops_sent || !link.bound)
++			continue;
++		link.loops_sent = true;
++		const u32 n = coop_script_sound_replay(link.ref);
++		g_host->log.line("loops-joined to=%u loops=%u", u32(link.ref.slot), n);
++	}
+ 	story_tick();
+ 
+ 
+@@ -18784,6 +18801,9 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 			fclose(g_host->pickups_csv);
+ 		g_host->pickups_csv = nullptr;
+ 		timeEndPeriod(1);
++		string512 pres; // S10-T05d1
++		coop_presentation_report(pres);
++		g_host->log.line("presentation-stop %s", pres);
+ 		g_host->log.line("server-stopped");
+ 	}
+ 	xr_delete(g_host->persistence);
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 12b29f2..285df28 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -11,6 +11,7 @@
+ #include "actor.h"
+ #include "CampaignActorAccess.h" // S03-T03
+ #include "CampaignScriptContext.h" // S03-T05
++#include "script_sound.h" // S10-T05d1: the presentation counters
+ #include "script_game_object.h"
+ #include "patrol_path_storage.h"
+ #include "xrServer.h"
+@@ -874,6 +875,11 @@ static CEffectorCam* viewer_cam_effector(int id)
+ // S06-T08: on the server a script camera effector is the context participant's
+ // presentation, or every player's outside a context (the surge's earthquakes
+ // run from level.add_call); the flags and numbers a client needs to play it.
++// S10-T05d1: the effector ids the server has presented as added (any player or all); a remove or a
++// factor for another is not sent (the installed actor_effects removes its effects every update, B14)
++static xr_set<int> s_coop_pp_on, s_coop_cam_on;
++static xr_map<int, float> s_coop_pp_factor;
++
+ static campaign::Refusal present_cam_effector(int id, LPCSTR fn, bool cyclic, bool hud, float fov, float power,
+                                               float speed)
+ {
+@@ -881,6 +887,7 @@ static campaign::Refusal present_cam_effector(int id, LPCSTR fn, bool cyclic, bo
+ 	args.flags = (cyclic ? 1u : 0u) | (hud ? 2u : 0u);
+ 	args.value = power;
+ 	args.position.set(fov, speed, 0.f);
++	s_coop_cam_on.insert(id); // S10-T05d1
+ 	return campaign::present_script(campaign::Presentation::CameraEffector, u16(id), fn, args);
+ }
+ 
+@@ -1122,6 +1129,8 @@ void remove_cam_effector(int id)
+ {
+ 	if (CActor* viewer = campaign::local_view_actor())
+ 		viewer->Cameras().RemoveCamEffector((ECamEffectorType)id);
++	else if (!s_coop_cam_on.erase(id))
++		++g_coop_cam_orphans; // S10-T05d1
+ 	else
+ 		campaign::present_script(campaign::Presentation::CameraEffectorRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
+ }
+@@ -1242,6 +1251,8 @@ void add_pp_effector(LPCSTR fn, int id, bool cyclic)
+ 		// S03-T05; S06-T08: to every player outside a context, with the cyclic flag
+ 		campaign::PresentationArgs args;
+ 		args.flags = cyclic ? 1u : 0u;
++		s_coop_pp_on.insert(id); // S10-T05d1
++		s_coop_pp_factor.erase(id);
+ 		campaign::present_script(campaign::Presentation::PostProcess, u16(id), fn, args);
+ 		return;
+ 	}
+@@ -1256,13 +1267,31 @@ void remove_pp_effector(int id)
+ 
+ 	if (pp) pp->Stop(1.0f);
+ 	else if (campaign::process_role() == campaign::Role::Server)
+-		campaign::present_script(campaign::Presentation::PostProcessRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
++	{
++		if (!s_coop_pp_on.erase(id))
++			++g_coop_pp_orphans; // S10-T05d1 (B14)
++		else
++			campaign::present_script(campaign::Presentation::PostProcessRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
++	}
+ }
+ 
+ // S06-T08: the surge sets its psychic effector's factor every second from the
+ // actor's cover; on the server that is presentation too.
+ static void present_pp_factor(int id, float f, float f_sp)
+ {
++	// S10-T05d1: only for an effector that is on, and only a change
++	if (!s_coop_pp_on.count(id))
++	{
++		++g_coop_pp_orphans;
++		return;
++	}
++	auto last = s_coop_pp_factor.find(id);
++	if (last != s_coop_pp_factor.end() && _abs(last->second - f) < 0.001f)
++	{
++		++g_coop_volume_deduped;
++		return;
++	}
++	s_coop_pp_factor[id] = f;
+ 	campaign::PresentationArgs args;
+ 	args.value = f;
+ 	args.position.set(f_sp, 0.f, 0.f);
+diff --git a/src/xrGame/script_sound.cpp b/src/xrGame/script_sound.cpp
+index e3d0a7f..ac30380 100644
+--- a/src/xrGame/script_sound.cpp
++++ b/src/xrGame/script_sound.cpp
+@@ -23,6 +23,76 @@ static const campaign::Presentation s_sound_kinds[] = {campaign::Presentation::S
+ 	campaign::Presentation::SoundPosition};
+ static u32 s_coop_sound_handles = 0;
+ 
++// S10-T05d1
++u32 g_coop_volume_deduped = 0, g_coop_pp_orphans = 0, g_coop_cam_orphans = 0, g_coop_sounds_replayed = 0,
++	g_coop_follow_dropped = 0;
++struct CoopLiveSound
++{
++	shared_str name;
++	u32 flags;
++	bool at_pos;
++	Fvector position;
++	float volume;
++};
++static xr_map<u32, CoopLiveSound> s_coop_live_sounds;
++
++void coop_script_sound_live(u32 handle, LPCSTR name, u32 flags, const Fvector* position)
++{
++	if (!(flags & sm_Looped))
++		return; // a one-shot is over by the time someone joins
++	CoopLiveSound& s = s_coop_live_sounds[handle];
++	s.name = name;
++	s.flags = flags;
++	s.at_pos = position != nullptr;
++	s.position = position ? *position : Fvector().set(0.f, 0.f, 0.f);
++	s.volume = 1.f;
++}
++
++void coop_script_sound_gone(u32 handle)
++{
++	s_coop_live_sounds.erase(handle);
++}
++
++void coop_script_sound_live_update(u32 handle, const Fvector* position, const float* volume)
++{
++	auto it = s_coop_live_sounds.find(handle);
++	if (it == s_coop_live_sounds.end())
++		return;
++	if (position)
++		it->second.position = *position;
++	if (volume)
++		it->second.volume = *volume;
++}
++
++u32 coop_script_sound_replay(const campaign::ParticipantRef& to)
++{
++	u32 n = 0;
++	for (const auto& e : s_coop_live_sounds)
++	{
++		campaign::PresentationArgs play;
++		play.handle = e.first;
++		play.flags = e.second.flags;
++		if (e.second.at_pos)
++			play.position = e.second.position;
++		campaign::present(to, e.second.at_pos ? campaign::Presentation::SoundAtPos : campaign::Presentation::Sound, 0,
++			*e.second.name, play);
++		campaign::PresentationArgs vol;
++		vol.handle = e.first;
++		vol.value = e.second.volume;
++		campaign::present(to, campaign::Presentation::SoundVolume, 0, "", vol);
++		++n;
++	}
++	g_coop_sounds_replayed += n;
++	return n;
++}
++
++void coop_presentation_report(string512& out)
++{
++	xr_sprintf(out, "live_loops=%u volume_deduped=%u pp_orphans=%u cam_orphans=%u sounds_replayed=%u follow_dropped=%u",
++		u32(s_coop_live_sounds.size()), g_coop_volume_deduped, g_coop_pp_orphans, g_coop_cam_orphans,
++		g_coop_sounds_replayed, g_coop_follow_dropped);
++}
++
+ void coop_script_sound_present(u8 kind, u32 handle, LPCSTR name, const Fvector* position, float value, u32 flags)
+ {
+ 	if (campaign::process_role() != campaign::Role::Server || kind >= sizeof(s_sound_kinds) / sizeof(s_sound_kinds[0]))
+@@ -36,6 +106,67 @@ void coop_script_sound_present(u8 kind, u32 handle, LPCSTR name, const Fvector*
+ 	campaign::present_script(s_sound_kinds[kind], 0, name, args);
+ }
+ 
++// S10-T05d1: a routed play (at a position, or 2D when at is null). The muted world run of the surge
++// plays nothing for the players, and the sound is then not routed (its volumes and stops are not
++// sent). Only a play every player hears is a live loop, played again to a player entering the world.
++// slot/generation: who got it (kBroadcastSlot for every player).
++static bool coop_route_play(u32 handle, LPCSTR name, const Fvector* at, float delay, u32 flags, u8& slot,
++                            u32& generation)
++{
++	campaign::ParticipantRef player = {campaign::kBroadcastSlot, 0};
++	const campaign::ScriptAudience audience = campaign::script_audience(&player);
++	slot = campaign::kBroadcastSlot;
++	generation = 0;
++	if (audience == campaign::ScriptAudience::Nobody)
++	{
++		coop_script_sound_gone(handle);
++		return false;
++	}
++	coop_script_sound_present(at ? 1 : 0, handle, name, at, delay, flags);
++	if (audience == campaign::ScriptAudience::Everyone)
++		coop_script_sound_live(handle, name, flags, at);
++	else
++	{
++		slot = player.slot;
++		generation = player.generation;
++		coop_script_sound_gone(handle);
++	}
++	return true;
++}
++
++bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, const Fvector* position, float value)
++{
++	if (campaign::process_role() != campaign::Role::Server)
++		return false;
++	if (slot == campaign::kBroadcastSlot)
++	{
++		coop_script_sound_present(kind, handle, "", position, value, 0);
++		return true;
++	}
++	campaign::ParticipantRef now = {campaign::kBroadcastSlot, 0};
++	const campaign::ScriptAudience audience = campaign::script_audience(&now);
++	// another player's context (two players' passes share a sound theme's object), or muted
++	if (audience == campaign::ScriptAudience::Nobody ||
++		(audience == campaign::ScriptAudience::Player && (now.slot != slot || now.generation != generation)))
++	{
++		++g_coop_follow_dropped;
++		return false;
++	}
++	if (audience == campaign::ScriptAudience::Player)
++	{
++		coop_script_sound_present(kind, handle, "", position, value, 0);
++		return true;
++	}
++	// outside any context: to the player who got the play
++	campaign::PresentationArgs args;
++	args.handle = handle;
++	if (position)
++		args.position = *position;
++	args.value = value;
++	campaign::ParticipantRef to = {slot, generation};
++	return campaign::present(to, s_sound_kinds[kind], 0, "", args) == campaign::Refusal::None;
++}
++
+ // A sound on no object or on an actor is the players' to hear; so is one on
+ // a living NPC or monster, at its position (demo-5: Sidorovich's greeting
+ // and goodbye lines are his logic's xr_sound, not dialogue phrases; the
+@@ -90,6 +221,9 @@ CScriptSound::CScriptSound(LPCSTR caSoundName, ESoundTypes sound_type)
+ 	m_caSoundToPlay = caSoundName;
+ 	m_coop_handle = ++s_coop_sound_handles;
+ 	m_coop_routed = false;
++	m_coop_volume = -1.f;
++	m_coop_slot = 7; // campaign::kBroadcastSlot
++	m_coop_generation = 0;
+ 	string_path l_caFileName;
+ 	VERIFY(::Sound) ;
+ 	if (FS.exist(l_caFileName, "$game_sounds$", caSoundName, ".ogg"))
+@@ -107,6 +241,7 @@ CScriptSound::~CScriptSound()
+ 	THROW3(!m_sound._feedback(), "playing sound is not completed, but is destroying",
+ 	       m_sound._handle() ? m_sound._handle()->file_name() : "unknown");
+ #endif
++	coop_script_sound_gone(m_coop_handle); // S10-T05d1
+ 	m_sound.destroy();
+ }
+ 
+@@ -134,15 +269,17 @@ void CScriptSound::Play(CScriptGameObject* object, float delay, int flags)
+ 	m_sound.play((object) ? &object->object() : NULL, flags, delay);
+ 	if (campaign::process_role() == campaign::Role::Server && coop_sound_for_players(object))
+ 	{
+-		m_coop_routed = true;
++		Fvector at;
++		const Fvector* pos = nullptr; // S06-T08: 2D on no object or an actor
+ 		if (coop_sound_on_npc(object))
+ 		{
+-			Fvector at = object->object().Position();
++			at = object->object().Position();
+ 			at.y += 1.6f; // about head height
+-			coop_script_sound_present(1, m_coop_handle, *m_caSoundToPlay, &at, delay, u32(flags));
++			pos = &at;
+ 		}
+-		else
+-			coop_script_sound_present(0, m_coop_handle, *m_caSoundToPlay, nullptr, delay, u32(flags)); // S06-T08
++		m_coop_routed = coop_route_play(m_coop_handle, *m_caSoundToPlay, pos, delay, u32(flags), m_coop_slot,
++			m_coop_generation); // S10-T05d1
++		m_coop_volume = 1.f;
+ 	}
+ 	if (volume_mult < 1.0f)
+ 		m_sound.set_volume(volume_mult);
+@@ -158,8 +295,9 @@ void CScriptSound::PlayAtPos(CScriptGameObject* object, const Fvector& position,
+ 	m_sound.play_at_pos((object) ? &object->object() : NULL, position, flags, delay);
+ 	if (campaign::process_role() == campaign::Role::Server && coop_sound_for_players(object))
+ 	{
+-		m_coop_routed = true;
+-		coop_script_sound_present(1, m_coop_handle, *m_caSoundToPlay, &position, delay, u32(flags)); // S06-T08
++		m_coop_routed = coop_route_play(m_coop_handle, *m_caSoundToPlay, &position, delay, u32(flags), m_coop_slot,
++			m_coop_generation); // S06-T08, S10-T05d1
++		m_coop_volume = 1.f;
+ 	}
+ 	if (volume_mult < 1.0f)
+ 		m_sound.set_volume(volume_mult);
+diff --git a/src/xrGame/script_sound.h b/src/xrGame/script_sound.h
+index cc96428..2070df3 100644
+--- a/src/xrGame/script_sound.h
++++ b/src/xrGame/script_sound.h
+@@ -17,6 +17,19 @@ class CScriptGameObject;
+ // position is presentation; the co-op clients play it (kinds in
+ // CampaignScriptContext.h). Nothing on a client.
+ void coop_script_sound_present(u8 kind, u32 handle, LPCSTR name, const Fvector* position, float value, u32 flags);
++// S10-T05d1: the routed looped sounds still playing (the level's ambient loops start before anyone
++// joins): played again to a player entering the world; the presentation counters
++namespace campaign { struct ParticipantRef; }
++u32 coop_script_sound_replay(const campaign::ParticipantRef& to);
++void coop_script_sound_live(u32 handle, LPCSTR name, u32 flags, const Fvector* position);
++void coop_script_sound_gone(u32 handle);
++void coop_script_sound_live_update(u32 handle, const Fvector* position, const float* volume);
++void coop_presentation_report(string512& out);
++// S10-T05d1: a stop, volume or position for a routed sound (kinds as coop_script_sound_present), to whom
++// got its play: everyone, or the one player (slot, generation) it was played to. From another player's
++// context, or muted, it is not sent (false).
++bool coop_script_sound_follow(u8 kind, u32 handle, u8 slot, u32 generation, const Fvector* position, float value);
++extern u32 g_coop_volume_deduped, g_coop_pp_orphans, g_coop_cam_orphans, g_coop_sounds_replayed, g_coop_follow_dropped;
+ 
+ class CScriptSound
+ {
+@@ -24,6 +37,9 @@ class CScriptSound
+ 	shared_str m_caSoundToPlay;
+ 	u32 m_coop_handle; // S06-T08: identifies this sound_object to the clients
+ 	bool m_coop_routed; // ...once Play/PlayAtPos presented it
++	float m_coop_volume; // S10-T05d1: the volume last presented (unchanged ones are not sent)
++	u8 m_coop_slot; // S10-T05d1: who got the play: one player's slot, or campaign::kBroadcastSlot (7) for all
++	u32 m_coop_generation; // ...and that player's generation
+ 
+ 	friend class CScriptSoundAction;
+ public:
+diff --git a/src/xrGame/script_sound_inline.h b/src/xrGame/script_sound_inline.h
+index e134c59..6a05cc9 100644
+--- a/src/xrGame/script_sound_inline.h
++++ b/src/xrGame/script_sound_inline.h
+@@ -87,7 +87,10 @@ IC void CScriptSound::Stop()
+ 	VERIFY(m_sound._handle());
+ 	m_sound.stop();
+ 	if (m_coop_routed)
+-		coop_script_sound_present(2, m_coop_handle, "", nullptr, 0.f, 0); // S06-T08 SoundStop
++	{
++		coop_script_sound_follow(2, m_coop_handle, m_coop_slot, m_coop_generation, nullptr, 0.f); // S06-T08 SoundStop
++		coop_script_sound_gone(m_coop_handle); // S10-T05d1
++	}
+ }
+ 
+ IC void CScriptSound::StopDeffered()
+@@ -95,15 +98,21 @@ IC void CScriptSound::StopDeffered()
+ 	VERIFY(m_sound._handle());
+ 	m_sound.stop_deffered();
+ 	if (m_coop_routed)
+-		coop_script_sound_present(3, m_coop_handle, "", nullptr, 0.f, 0); // S06-T08 SoundStopDeferred
++	{
++		coop_script_sound_follow(3, m_coop_handle, m_coop_slot, m_coop_generation, nullptr, 0.f); // S06-T08 SoundStopDeferred
++		coop_script_sound_gone(m_coop_handle); // S10-T05d1
++	}
+ }
+ 
+ IC void CScriptSound::SetPosition(const Fvector& position)
+ {
+ 	VERIFY(m_sound._handle());
+ 	m_sound.set_position(position);
+-	if (m_coop_routed)
+-		coop_script_sound_present(5, m_coop_handle, "", &position, 0.f, 0); // S06-T08 SoundPosition
++	if (m_coop_routed && m_sound._feedback()) // S10-T05d1: not for a sound that has stopped
++	{
++		if (coop_script_sound_follow(5, m_coop_handle, m_coop_slot, m_coop_generation, &position, 0.f)) // S06-T08 SoundPosition
++			coop_script_sound_live_update(m_coop_handle, &position, nullptr); // S10-T05d1
++	}
+ }
+ 
+ IC void CScriptSound::SetFrequency(float frequency)
+@@ -116,8 +125,16 @@ IC void CScriptSound::SetVolume(float volume)
+ {
+ 	VERIFY(m_sound._handle());
+ 	m_sound.set_volume(volume);
+-	if (m_coop_routed)
+-		coop_script_sound_present(4, m_coop_handle, "", nullptr, volume, 0); // S06-T08 SoundVolume
++	// S10-T05d1: the scripts set a loop's volume every update; only a change is sent, and nothing for
++	// a sound that has stopped playing (the server's sound core still gives it feedback while it plays)
++	if (m_coop_routed && (_abs(volume - m_coop_volume) < 0.002f || !m_sound._feedback()))
++		++g_coop_volume_deduped;
++	else if (m_coop_routed && coop_script_sound_follow(4, m_coop_handle, m_coop_slot, m_coop_generation, nullptr,
++		volume)) // S06-T08 SoundVolume
++	{
++		m_coop_volume = volume;
++		coop_script_sound_live_update(m_coop_handle, nullptr, &volume);
++	}
+ }
+ 
+ IC const CSound_params* CScriptSound::GetParams()

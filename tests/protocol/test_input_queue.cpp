@@ -44,11 +44,15 @@ TEST("input-queue/order-once-hold")
         CHECK(out.tick == t);
         CHECK(q.last_consumed_tick() == t);
     }
-    // Empty: the last input is held for hold_ticks ticks, then nothing.
+    // Empty: the last input is held for hold_ticks ticks, then nothing. A
+    // held tick keeps the consumed tick's number (S10-T07, B21: a late input
+    // for a later tick is still applied; the snapshot during a hold names the
+    // same last input and the client skips it).
     for (int i = 0; i < 3; ++i)
     {
         CHECK(q.consume(out) == InputSource::Held);
         CHECK(out.tick == 4);
+        CHECK(q.processed_tick() == 4);
     }
     CHECK(q.consume(out) == InputSource::None);
     CHECK(q.consume(out) == InputSource::None);

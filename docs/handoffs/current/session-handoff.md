@@ -1,65 +1,95 @@
-# Session handoff — S09-T01…T03 completed; next S09-T04 (then G09)
+# Session handoff — S10-T07 bug pass: B48 (torch) and the quest demo in code, the user's hands-on next
 
-## State (2026-10-28)
+## State (2026-11-03)
 
-- **S09-T01 Completed** (2026-10-27, patch 0054, proto-build-45):
-  [S09-T01](../../validation/S09-T01.md) — the [travel contract](../../travel-contract.md)
-  §1–§8: request at a level changer, two-player consent, 30-s expiry,
-  aborts on disconnect/death/combat, no one-player consent.
-- **S09-T02 Completed** (2026-10-28, patch 0055, proto-build-46):
-  [S09-T02](../../validation/S09-T02.md) — contract §9: barrier, the
-  `transition` journal record, both actors moved, the destination
-  generation as the commit point, the in-process reload, the clients'
-  rejoin. **The party travelled Cordon → Darkscape** (tv-11); a crash
-  before the commit recovers the source level (tv-12), after it the
-  destination (tv-13).
-- **S09-T03 Completed** (2026-10-28, patch 0056 `travel-resume`, protocol
-  `proto-build-47`, final builds **campaign-302 / client-199**):
-  [S09-T03](../../validation/S09-T03.md) — contract §10: the world held
-  after the reload until both clients' validated readies (kind 13; wrong
-  id/level refused 31, not-yet-live 32), 60-s deadline; tv-14 both ready
-  (resume at 12.9 s), tv-15 delayed partner + wrong readies, tv-16 a silent
-  partner → timeout; no input applied during any hold.
-- Stage 9 In Progress; L14 touched (a coordinated level change works;
-  close at G09 if the user accepts). Gameplay decisions for G09 are
-  collected in [Stage 9 decisions](../../stage9-decisions.md): T01-1…9,
-  T02-1…7, T03-1…2. The ones most likely to need the user's word: T01-3
-  (no travel while the partner is away), T03-2 (60-s wait, then the
-  present player goes on), T02-6 (vehicles not carried over).
-- Still to do by hand: the user's own two-window travel trial (walk into
-  a changer, USE, partner USE/DROP, arrive together); the K1/K5 retest.
-  In tv-4 a few hands-on USE/DROP presses reached the clients and worked.
+- **S10-T07** (bug pass before Stage 11) continues through the user's
+  hands-on demos. engine-work equals the series of **111** patches (patch
+  check 124). Builds **campaign-472 / client-355**, protocol
+  **proto-build-64** (st-39 122/122). Report: [S10-T07](../../validation/S10-T07.md) parts
+  9–22; bug table: [known issues](../../known-issues.md).
+- **B46 (patch 0108):** travel matches vanilla (decision T07-11 in
+  [Stage 10 decisions](../../stage10-decisions.md)): only fast travel and the
+  backpack check combat. The user's demo-19: travel back and forth worked.
+- **B47 (patch 0109), found in demo-19:** after player 1 walked into the
+  Cordon ↔ Marsh passage the server updated no object for the rest of the
+  session (shots from 0,0,0, NPCs standing). The passage's space restrictor
+  ran the installed travel box (`ui_sr_teleport`) on the server, which
+  paused the device (`set_device_paused_script`); a paused device runs no
+  `UpdateCL`. Same in demo-16/17: **the root cause of B45**. Now the campaign
+  server refuses every pause (`device-pause-refused`) and shows no window;
+  `update-stall` logs any object near a player that stops updating; the
+  travel checker's new `updates` check fails on it. Reproduced by
+  **bugfix-38/39** (the fixture through the passage's approach:
+  `--travel-changer to_marsh_1 --travel-approach=-278.6,-21.0,-268.7`),
+  passing in **bugfix-40/41** (8/8) and **bugfix-42** (B46's round, 9/9).
+- **demo-20** (the user): "almost everything is working"; no stall. Then
+  **B48 (patch 0110):** the L key's torch goes through the server
+  (ActionIntent 30, Presentation TorchState); the demo kit adds a headlamp;
+  `demo_quest` starts the party with Sidorovich's "Mobbing the Mob" and its
+  bandit patches, ready to turn in. **bugfix-44** pass (quest `stage=1`
+  11/11 on both PDAs; both torches on and off, seen by both clients).
+- **Not verified:** the quest's turn-in by hand, shooting an NPC after a travel and the refusal wording
+  (hands-on; the fixture does not shoot); a fast travel in combat.
+- **Still open from before:** the quest fixture's variant 2 is
+  order-dependent; patch 0107's kick stays as a guard though B45's cause is
+  now B47.
+- **Decisions waiting on the user's word at G10:** G10-5 revised (B34), B35,
+  T07-11 (the user's own choice).
+- **Test kits (2026-11-03):** the user's first try (host-7) found **B49**:
+  New game showed no co-op choice (the installed button bound before the
+  hook; the tests had bypassed the button). Patch **0111** fixes it; build
+  **campaign-472 / client-355**. Kits for the two-PC test: **host-9**
+  (`builds/kits/client1HostKit/host-9`), **server-6**
+  (`builds/kits/ServerHostKit/server-6`), **client-7**
+  (`builds/kits/clientKit/client-7.zip`); checked by **kit-12** (host kit,
+  through the New game button) and **kit-13** (server kit), both pass
+  ([S11-T00](../../validation/S11-T00.md)). host-6…8 and server-3…5 hold
+  test players; not for use. A choice in the box runs on a double-click.
+- demo-19's launcher stopped before copying its logs into
+  `builds/logs/S10-T07/run-demo-19/` (empty); they are under
+  `builds/stage2/test-install/S10-T07/demo-19-*/appdata/logs/`.
 
 ## Next
 
-S09-T04 (plan.md): cancellation, failed load and interrupted travel — the
-failure matrix and the G09 report. Most of the machinery exists; the task
-is to define and test the remaining windows explicitly:
-- kill the server at each transition state (done: after-propose tv-4,
-  before-take tv-12, after-commit tv-13; **missing**: during the reload
-  itself — between `travel-reload` and `travel-reloaded` — and during the
-  hold; both should recover the destination generation);
-- fail one client's load / a client that never rejoins (tv-16 covers a
-  silent one; **missing**: a client that disconnects between the commit and
-  its rejoin, and a client whose load fails outright);
-- disconnect before/after consent (tv-3 round 4, tv-4) and **during the
-  barrier** (`travel_execute_tick` rolls back on a party member leaving:
-  untested by a run);
-- the rolled-back-by-server path (phase 3: a failed take/publication) —
-  needs a failpoint in `travel_take` or a store failure (`:fail` mode);
-- retry and recover: the players request again after each failure.
-Then write `docs/validation/G09.md` (gate conditions: both confirm, the
-barrier and migration preserve state, both load before resuming;
-refusal, cancellation, timeout, failed load, client disconnect and server
-crash recoverable) with the decisions list for the user, and **stop at
-the gate** for the user's item-by-item review.
+1. The first two-PC test over Tailscale (S11-T00, the user's): this PC runs
+   **host-9** (`Start-Coop.cmd`, New game, double-click Host co-op) or **server-6**
+   (`Start-Server.cmd`, both players join); the friend unzips **client-7.zip**,
+   runs `Setup-Coop.ps1` once, then `Start-Coop.cmd`, New game > Join co-op
+   with the host's Tailscale address and the join code. Afterwards read the
+   logs (host kit: its runtime's `appdata\logs`; friend: theirs) and record
+   the result in [S11-T00](../../validation/S11-T00.md).
+2. Remake the kits after any rebuild (a server refuses an older client
+   build); `demo_quest` / `torch_test` remain for hands-on checks.
+3. Close G10 only on the user's word.
+
+## Picking this up
+
+- Read `CLAUDE.md` / `AGENTS.md`, `plan.md` §I, this file, then the S10-T07
+  report parts 9–21 and the known issues B27–B47.
+- **One cycle:** edit engine-work → `Build-Stage2.ps1` Campaign and Client
+  with `-ProtocolBuild proto-build-64` → a fixture run → `python3
+  tools/export-engine-patch.py <NNNN-name>.patch <check>` → manifest, README,
+  report, known issues, handoff, commit.
+- **Travel fixtures:** `--travel c1,c2 --travel-variant 2|5`, optionally
+  `--travel-changer <name part> --travel-approach=x,y,z`; check with
+  `compare-coop-travel.py --variant 2|5` (`updates` is the B47 check). Others:
+  `--sleep`, `--pickup`, `--loot`, `--quest c1,c2 --quest-variant 2
+  --auto-respawn 5`; arm with `arm = 1` in the server's `coop.ltx`. Don't
+  type in the terminal while a fixture runs.
+- Installed scripts: `python3 tools/xray-db-extract.py -q grep 'pattern'
+  /mnt/c/Users/djb20/StalkerAnom/db/configs/scripts.db0`, or `extract -m
+  <name> -o <scratch dir>`.
 
 ## Run names
 
-- Next: `campaign-303`, `client-200`, `proto-build-48`, `st-22`, patch
-  check 63; session names `tv-17…` (tv-1…tv-16 used; tv-2, tv-9, tv-10
-  prepared, not run).
+- Used: `campaign-334…472`, `client-226…355`, `proto-build-53…64`,
+  `st-28…39`, `bugfix-1…44`, `demo-1…20` (S10-T07), `menu-1…10`,
+  (S11-T00), `kit-1…13`, patch checks 77–124, kits host-1…9, friend-1…3,
+  client-4…7, server-1…6.
+- Next: `campaign-473`, `client-356`, `proto-build-65`, `st-40`,
+  `bugfix-45`, `demo-21`, `menu-11`, `kit-14`, patch check 125, kits host-10,
+  client-8, server-7.
 
 Preserve the original installation, the reference checkout, the accepted
 source-client runtime and both saved-game fixtures.
-Previous snapshot: [before S09-T04](../done/snapshot-before-S09-T04.md).
+Previous snapshot: [before the B48 hands-on](../done/snapshot-before-B48-hands-on.md).

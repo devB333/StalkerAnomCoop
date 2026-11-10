@@ -1,0 +1,30 @@
+diff --git a/src/Layers/xrRender/SkeletonAnimated.cpp b/src/Layers/xrRender/SkeletonAnimated.cpp
+index 7066940..2a16fa0 100644
+--- a/src/Layers/xrRender/SkeletonAnimated.cpp
++++ b/src/Layers/xrRender/SkeletonAnimated.cpp
+@@ -398,6 +398,25 @@ CBlend* CKinematicsAnimated::LL_PlayCycle(u16 part, MotionID motion_ID, BOOL bMi
+ 	CBlend* B = IBlend_Create();
+ 	if (!B) return 0;
+ 
++	// S10-T07 (B24): a part (and each of its bones) holds at most MAX_BLENDED
++	// blends in a fixed array whose push_back checks the bound in debug builds
++	// only; one more wrote over the list's count, and the next fade walked off
++	// the end (demo-5: a co-op client's remote player, a read of address 0x12
++	// in LL_FadeCycle). A body whose motion changes faster than its blends fade
++	// retires the oldest blend of the part instead.
++	if (blend_cycles[part].size() >= MAX_BLENDED)
++	{
++		CBlend* oldest = blend_cycles[part][0];
++		for (u32 i = 0; i < P->bones.size(); i++)
++			Bone_Motion_Stop_IM((*bones)[P->bones[i]], oldest);
++		oldest->set_free_state();
++		blend_cycles[part].erase(0u);
++		static u32 s_retired = 0;
++		if (++s_retired <= 8 || s_retired % 1000 == 0)
++			Msg("! [B24] blend list full: %s part %u, oldest blend retired (%u so far)", *getDebugName(), u32(part),
++			    s_retired);
++	}
++
+ 	_DBG_SINGLE_USE_MARKER;
+ 	IBlendSetup(*B, part, channel, motion_ID, bMixing, blendAccrue, blendFalloff, Speed, noloop, Callback,
+ 	            CallbackParam);

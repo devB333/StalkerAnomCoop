@@ -233,6 +233,226 @@
     {
       "path": "patches/engine/0056-travel-resume.patch",
       "sha256": "91d629ba3d453df48598515a7ccc120c47f1f053e0e0bc2675e95d6557a02dc7"
+    },
+    {
+      "path": "patches/engine/0057-travel-failures.patch",
+      "sha256": "a8844a8f02a8ab776132a00f97125b380f2b423b1cdf1946390b0fb9d3e85ec6"
+    },
+    {
+      "path": "patches/engine/0058-talk-window.patch",
+      "sha256": "a753e5dac863f69b137bdd2d987d6492185e6559f33372abc993ff5ec2858694"
+    },
+    {
+      "path": "patches/engine/0059-party-info-portions.patch",
+      "sha256": "29ff42457faaa4ab7d9fc1780431ede47b6c2396927f93f4bee7a4180fefcde8"
+    },
+    {
+      "path": "patches/engine/0060-party-tasks-general.patch",
+      "sha256": "8f5b953db75334c7989c5143ed80eaa698418aef8c017b3dc88a5e6ac973b3a0"
+    },
+    {
+      "path": "patches/engine/0061-demo-place-giver.patch",
+      "sha256": "a49b201afb3552fed53fd3bfba1a7ed12cc6f7cf98ecd8daad1a095ca120f2c2"
+    },
+    {
+      "path": "patches/engine/0062-party-task-map-npc-sounds.patch",
+      "sha256": "80a0a61c25ac534a939c9603209bd445a252f108353d1ee880611972c40fedc3"
+    },
+    {
+      "path": "patches/engine/0063-use-object-money.patch",
+      "sha256": "faec0fa1136dc03c24f7856b8f2ee014582597d2fabd4179c728480f908d1b99"
+    },
+    {
+      "path": "patches/engine/0064-trade.patch",
+      "sha256": "bf820e424fb3178b0667211d30256a696038ed3668760fe428fc7b0bf2ef2e47"
+    },
+    {
+      "path": "patches/engine/0065-remote-weapon-switch.patch",
+      "sha256": "d0226394265006007b9c968e79c395e24c491e302fa562586a0df052fe145192"
+    },
+    {
+      "path": "patches/engine/0066-remote-weapon-anim-repair-belt.patch",
+      "sha256": "7bf55174e3d7af37ef7e58148a96fe7ba1699ca0ab2aa3bacd65fa5176bdeb96"
+    },
+    {
+      "path": "patches/engine/0067-upgrades.patch",
+      "sha256": "e2cc34aea75af9746f3337fb73fed4a1df1b87a8ac1cbede77e75def9826d5b5"
+    },
+    {
+      "path": "patches/engine/0068-relations.patch",
+      "sha256": "72f5cd902c4689e8bc98fc3e36964c238aff4640a96825894cf222ebbc1ea02f"
+    },
+    {
+      "path": "patches/engine/0069-stashes.patch",
+      "sha256": "84b891a3e4adc2272121fa21dc14c5edc6fb0a339ed0c9406048396b4471faf2"
+    },
+    {
+      "path": "patches/engine/0070-npc-logic.patch",
+      "sha256": "292aa919df0204a0a83954ba287d3189b75d4b19aa3b5c99d8591d730bcbb527"
+    },
+    {
+      "path": "patches/engine/0071-npc-loot.patch",
+      "sha256": "70124230317c3bd67c75eb9e083a03e060db4c31c0f4146c2906be332e61a0ba"
+    },
+    {
+      "path": "patches/engine/0072-controller-psy.patch",
+      "sha256": "7ca8bc53b2bfe703272b47e3770626a686c51d25c4e8114290ef4be37a04c19c"
+    },
+    {
+      "path": "patches/engine/0073-mutant-abilities.patch",
+      "sha256": "ca85d50f1b368f879768074c65756c2e3d6eed3c254eebfe91060855b477c7ff"
+    },
+    {
+      "path": "patches/engine/0074-fauna.patch",
+      "sha256": "cc3a405f859ef456ff3b9e7025597d215a19f9ec12ee45d423e6e6c5fa922a2a"
+    },
+    {
+      "path": "patches/engine/0075-companions.patch",
+      "sha256": "0c5e1c55e69126a02d9f92ed6ede527c11d6fe4dcd07cf8001702fbe8c7d742b"
+    },
+    {
+      "path": "patches/engine/0076-alife-respawn.patch",
+      "sha256": "9a7bd0db72b9baa6d87c1ab94a9a3ba71b550eabd1aef8715ef40c5ae9ca4c9c"
+    },
+    {
+      "path": "patches/engine/0077-squad-targets.patch",
+      "sha256": "a544c9f1204983744e7f4c54fc54c2ac115e979b8eaa22fd102d1b91430ba27d"
+    },
+    {
+      "path": "patches/engine/0078-sleep.patch",
+      "sha256": "6a58ed7b7314527db11a1c27b23fb1465decc5f0756e4ec3d2759a01b48d45b1"
+    },
+    {
+      "path": "patches/engine/0079-relocate.patch",
+      "sha256": "71e8c0c3943ac03cab5e75d8c07bf6f06cffbd58fa5dae065a53893edaec9b21"
+    },
+    {
+      "path": "patches/engine/0080-passage-sweep.patch",
+      "sha256": "a569f7cb1f1f6c23a2730bcd678c13cf077c97ca669b5a25660a9b185e03bc95"
+    },
+    {
+      "path": "patches/engine/0081-new-game.patch",
+      "sha256": "ee433d8b6df57a49b319e5b43814b594f80160bca28d61507991390cd539d8aa"
+    },
+    {
+      "path": "patches/engine/0082-emission-per-player.patch",
+      "sha256": "6f00dab7190636f461be5d349ebb16f5d78f92d93da8ea43034272231b80d288"
+    },
+    {
+      "path": "patches/engine/0083-story-chains.patch",
+      "sha256": "3f9e82fd571820e9aa58fdb09c1c73e471a7dcc981d1a5e8d8d446395f4b7fda"
+    },
+    {
+      "path": "patches/engine/0084-presentation-traffic.patch",
+      "sha256": "55a1413a799c9b80f95fa855e856487d49d4286e568f640f3c7ebaaa125b53c4"
+    },
+    {
+      "path": "patches/engine/0085-hud-statics.patch",
+      "sha256": "70aaf5c646a5d73429386534577d973c8084949f85dc36b6864bb716692336f9"
+    },
+    {
+      "path": "patches/engine/0086-session-control.patch",
+      "sha256": "00d14a9aadf05a0fcebb81c5320934da355910d608d12581113a05dd31798fdb"
+    },
+    {
+      "path": "patches/engine/0087-bug-pass-1.patch",
+      "sha256": "1c8f10c75448f33385583ab448b75a7669b7ab9abe2a0c2ed2fc5e4ce190f02c"
+    },
+    {
+      "path": "patches/engine/0088-bug-pass-2.patch",
+      "sha256": "a2b55d0f4d5d1e43aea05e6f7a46e236e7d19234e381ab630d58eef611877e03"
+    },
+    {
+      "path": "patches/engine/0089-bug-pass-3.patch",
+      "sha256": "6f52701d0ee0670be13e609910714bda208e05c98e6b1595d1bf98f07c4626be"
+    },
+    {
+      "path": "patches/engine/0090-bug-pass-4.patch",
+      "sha256": "e0b0cff8aa0b4182a09d6b62f4256db0a956022f5b4001e1396b971ff2ef2595"
+    },
+    {
+      "path": "patches/engine/0091-bug-pass-5.patch",
+      "sha256": "2f582834f9d445c159eb7dbd40409a024ceb876c852a7a2e61787b78d66dc803"
+    },
+    {
+      "path": "patches/engine/0092-blend-list-guard.patch",
+      "sha256": "0f82810384404e7c0c86060839854b7c545a5182bec66626e4cf1dc34fc79860"
+    },
+    {
+      "path": "patches/engine/0093-g10-revisions.patch",
+      "sha256": "a95647b893cd1f274945b16cfef31faad3ab62b4e6cc873e0f9445c51c167cce"
+    },
+    {
+      "path": "patches/engine/0094-world-item-pickup.patch",
+      "sha256": "07aeb9fe35862c462fa3a5b0ed131eca9a131eb79902a73959c61aa19698acd6"
+    },
+    {
+      "path": "patches/engine/0095-local-hosting.patch",
+      "sha256": "bb63065966768af7b199fb4b29042dba168a1e0fab098853a057eb85401d8e9c"
+    },
+    {
+      "path": "patches/engine/0096-dedicated-server.patch",
+      "sha256": "93f5c22f820c443db70da7156870e4a6b371c00146be05e453a5508c817a35f9"
+    },
+    {
+      "path": "patches/engine/0097-demo7-fixes.patch",
+      "sha256": "a5e2a15afe842e3d80060dfb35c942bd104fc72cad03808968d63ff676f2af99"
+    },
+    {
+      "path": "patches/engine/0098-physics-present-fire-gate.patch",
+      "sha256": "9e7ecccea3e0a2182a0642601b4887d5e9e23fec93f642b4beb5134d753b80d8"
+    },
+    {
+      "path": "patches/engine/0099-sleepbag-corpse-grab.patch",
+      "sha256": "4ba20c6587f0e9366fe17bd78a58dbaae7c228eb45e0a186e64054b0a1e6938e"
+    },
+    {
+      "path": "patches/engine/0100-tent-shelter-rifle-kit.patch",
+      "sha256": "e154599bf6386fc3540d803b16a6bf6bbf3b1f66f736fa4e6f52e4a75e675ba9"
+    },
+    {
+      "path": "patches/engine/0101-effects-per-player-body-loot.patch",
+      "sha256": "0dc3fbdef2c3165285aa2df2819d7e5ef99f8558b23872ca7c73b2b592e9f344"
+    },
+    {
+      "path": "patches/engine/0102-npc-weapons-status-hud.patch",
+      "sha256": "9f15af3125ae9a614656018a0b41c7236bd8225185e9609e890b1cce50b4ad31"
+    },
+    {
+      "path": "patches/engine/0103-npc-body-loot.patch",
+      "sha256": "c367935bf0a829db85b488e71a3daabffaf397bd44ff743b7cda3ef6a4f4a146"
+    },
+    {
+      "path": "patches/engine/0104-host-actor-fallback-spot-text.patch",
+      "sha256": "11a369d8545920a822e0e791858fcbfe15719bf01bb6dcf723bedd3a1d20b788"
+    },
+    {
+      "path": "patches/engine/0105-travel-resume-fallback-itemswap.patch",
+      "sha256": "52708a255ffe25d786f79f8707d75da32b58c9a988776c500103e89f506f4520"
+    },
+    {
+      "path": "patches/engine/0106-slot-resync-after-travel.patch",
+      "sha256": "6578349ca977335580010968410ed67880b399ef8ab1163ceb502bfbee702397"
+    },
+    {
+      "path": "patches/engine/0107-stalled-inventory-kick.patch",
+      "sha256": "0b834d79340ad571ea1bf73de83769ccdcae544003718c64ecabdb326b175133"
+    },
+    {
+      "path": "patches/engine/0108-travel-combat-vanilla.patch",
+      "sha256": "299f39323099b15abb41e880ba299bf6fb5e2c350047c92e1a6701323e76fbad"
+    },
+    {
+      "path": "patches/engine/0109-server-never-paused.patch",
+      "sha256": "c396c518921cb256134e19c1dffc4be5d1a099dbdaf8f2fbd4b4d6eec5047896"
+    },
+    {
+      "path": "patches/engine/0110-torch-demo-quest.patch",
+      "sha256": "606521db8c057bdfaaee99049ecfcff4b1ef609d17a8287ad8fc1b67e29b8ab4"
+    },
+    {
+      "path": "patches/engine/0111-menu-new-game-click.patch",
+      "sha256": "5f7a3e6b5b7e05caa50668cbde3dc8c2d73793e6b60cf61b3396778da2c3168e"
     }
   ],
   "submodules": [

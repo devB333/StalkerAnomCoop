@@ -23,6 +23,9 @@ struct ClientConfig
     std::string display_name;
     // If set, refuse to authenticate to any other campaign.
     proto::Uuid128 expected_campaign;
+    // S11-T00: the host's join code: the proof also carries this player's
+    // public key, so a server that does not list it yet can let it in.
+    std::string join_code;
     LivenessConfig liveness;
     // Continue an earlier session (same process on the server): its session
     // id, its latest token (tokens are single-use) and the client's cursors.

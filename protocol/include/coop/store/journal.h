@@ -48,6 +48,10 @@ enum JournalKind : std::uint8_t
     kRecordStack = 12,   // S08-T08: ammunition stacks in a container after a merge (counts, released stacks)
     kRecordTransition = 13, // S09-T02: a party travel's durable phases (prepared before the destination take;
                             // committed once the destination generation is published; rolled back)
+    kRecordTrade = 14,   // S10-T04c: a trade with an NPC: the items that changed hands (transfer records) and both
+                         // purses after it
+    kRecordUpgrade = 15, // S10-T04f: an upgrade installed on an item, or its repair, at a mechanic: the item, the
+                         // upgrade id (empty: a repair), the price, the purse after it
 };
 
 struct JournalHeader

@@ -105,6 +105,27 @@ TEST("codec/round-trip")
     CHECK(sn.entities[1].aim_yaw == -3.f && sn.entities[1].aim_pitch == 1.2f); // v1.3
 }
 
+// S11-T00: the proof's optional join fields round-trip; a plain proof is unchanged.
+TEST("codec/auth-proof-join")
+{
+    AuthProof pr;
+    for (std::size_t i = 0; i < pr.signature.size(); ++i)
+        pr.signature[i] = std::uint8_t(i);
+    pr.join = true;
+    for (std::size_t i = 0; i < pr.public_key.size(); ++i)
+        pr.public_key[i] = std::uint8_t(0x80 + i);
+    pr.join_mac = MakeDigest(9);
+    const auto bytes = Encode(Fixture{"auth-proof-join", pr, 0, 2});
+    Decoded d;
+    REQUIRE(DecodeAs(MessageType::AuthProof, bytes, &d).ok());
+    const AuthProof& back = std::get<AuthProof>(d.body);
+    CHECK(back.join && back.public_key == pr.public_key && back.join_mac == pr.join_mac && back.signature == pr.signature);
+    const auto plain = Encode(Find("auth-proof"));
+    CHECK(bytes.size() == plain.size() + 1 + 64 + 32);
+    REQUIRE(DecodeAs(MessageType::AuthProof, plain, &d).ok());
+    CHECK(!std::get<AuthProof>(d.body).join);
+}
+
 TEST("codec/truncation")
 {
     // Every proper prefix of every fixture is refused, whether the header's

@@ -1,0 +1,1490 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 8ae2d18..b18e778 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -59,6 +59,7 @@
+ #include "xr_level_controller.h"
+ #include "script_engine.h" // S07-T07: the respawn prompt through actor_menu.set_msg
+ #include "UIGameSP.h" // S10-T04a: the talk window
++#include "ui/UIActorMenu.h" // S10-T04c: the trade window
+ #include "ui/UITalkWnd.h"
+ 
+ ENGINE_API extern float psHUD_FOV; // the camera watch log
+@@ -191,6 +192,7 @@ struct Link
+ 		u8 slot = 0xff;
+ 		u16 ammo = 0xffff;
+ 		u16 shots = 0xffff;
++		u32 watch_until_ms = 0, watch_last_ms = 0; // S10-T04c diagnostics
+ 	};
+ 	xr_map<u16, Outcome> outcomes;
+ 	// S06-T07: the player's own weapon actions forwarded to the server
+@@ -400,6 +402,18 @@ struct Link
+ 		xr_string last_npc_text; // the NPC's last reply (the driver reads the offer it is made)
+ 	} talk;
+ 	u16 sell_from = 0xffff, sell_item = 0xffff; // the pending half of a move (GE_TRADE_SELL)
++	struct Trade // S10-T04c: the trade window on the server's trade
++	{
++		bool open = false; // the window is up (the first table arrived)
++		bool pending_open = false, pending_perform = false;
++		u16 npc = 0xffff;
++		coop::proto::EntityRef npc_ref;
++		xr_map<u16, u32> buy, sell; // item id -> what this player pays for the trader's item / gets for its own
++		u32 actor_money = 0, trader_money = 0;
++		u8 parts_seen = 0;
++		u32 refresh_at_ms = 0;
++		u64 opens = 0, performs = 0, accepted = 0, refused = 0, price_events = 0, refreshes = 0;
++	} trade;
+ 	u64 drops_requested = 0, transfers_requested = 0, ownership_events_ignored = 0, transfer_rounds = 0;
+ 	u64 transfer_steps_unlinked = 0;
+ 	u64 item_graph_matches = 0, item_graph_mismatches = 0, own_inventory_mismatches = 0; // S08-T03
+@@ -906,6 +920,9 @@ void apply_despawn(const coop::proto::Despawn& d)
+ }
+ 
+ void apply_reparent(const coop::proto::Reparent& r, bool retry = false); // S08-T01
++void on_trade_prices(const coop::proto::CampaignEvent& event); // S10-T04c
++static void trade_refresh_menu();
++static void trade_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
+ 
+ void apply_lifecycle(const coop::proto::Message& m)
+ {
+@@ -1417,6 +1434,30 @@ void apply_actor_outcomes(CActor* actor, const coop::proto::EntityState& s)
+ 			actor->inventory().Activate(s.weapon_slot);
+ 			++g_link->slots_applied;
+ 		}
++		if (actor != g_actor)
++		{
++			// S10-T04c diagnostics (the user's demo-1: the partner's weapon stays
++			// the old one): what the replica holds right after the activation
++			PIItem in_slot = s.weapon_slot != NO_ACTIVE_SLOT ? actor->inventory().ItemFromSlot(s.weapon_slot) : nullptr;
++			PIItem active = actor->inventory().ActiveItem();
++			CHudItem* hud = active ? active->cast_hud_item() : nullptr;
++			g_link->log.line("remote-slot-applied id=%u slot=%u active=%u next=%u in_slot=%s active_item=%s hidden=%d state=%d "
++				"on_server=%d ruck=%u", u32(actor->ID()), u32(s.weapon_slot), u32(actor->inventory().GetActiveSlot()),
++				u32(actor->inventory().GetNextActiveSlot()), in_slot ? *in_slot->object().cNameSect() : "-",
++				active ? *active->object().cNameSect() : "-", hud ? (hud->IsHidden() ? 1 : 0) : -1,
++				hud ? int(hud->GetState()) : -1, OnServer() ? 1 : 0, u32(actor->inventory().m_ruck.size()));
++			o.watch_until_ms = g_link->wall.GetElapsed_ms() + 3000;
++		}
++	}
++	if (actor != g_actor && o.watch_until_ms && g_link->wall.GetElapsed_ms() < o.watch_until_ms &&
++		g_link->wall.GetElapsed_ms() - o.watch_last_ms >= 500)
++	{
++		o.watch_last_ms = g_link->wall.GetElapsed_ms();
++		PIItem active = actor->inventory().ActiveItem();
++		CHudItem* hud = active ? active->cast_hud_item() : nullptr;
++		g_link->log.line("remote-slot-watch id=%u active=%u next=%u active_item=%s hidden=%d state=%d",
++			u32(actor->ID()), u32(actor->inventory().GetActiveSlot()), u32(actor->inventory().GetNextActiveSlot()),
++			active ? *active->object().cNameSect() : "-", hud ? (hud->IsHidden() ? 1 : 0) : -1, hud ? int(hud->GetState()) : -1);
+ 	}
+ 	CWeapon* weapon = smart_cast<CWeapon*>(actor->inventory().ActiveItem());
+ 	if (s.ammo != o.ammo)
+@@ -3305,6 +3346,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 12: on_needs(*event); break; // S08-T09
+ 			case 13: on_travel(*event); break; // S09-T01
+ 			case 14: on_talk(*event); break; // S10-T04a
++			case 15: on_trade_prices(*event); break; // S10-T04c
+ 			default: break;
+ 			}
+ 		}
+@@ -3666,6 +3708,8 @@ u64 request_ownership(u16 action, const coop::proto::EntityRef& target, const xr
+ 		action == coop::proto::kActionQuest ? "quest" : action == coop::proto::kActionTravelRequest ? "travel-request" :
+ 		action == coop::proto::kActionTravelAnswer ? "travel-answer" : action == coop::proto::kActionTravelReady ? "travel-ready" :
+ 		action == coop::proto::kActionUseObject ? "use-object" : // S10-T04c
++		action == coop::proto::kActionTradeOpen ? "trade-open" : action == coop::proto::kActionTrade ? "trade" :
++		action == coop::proto::kActionTradeClose ? "trade-close" :
+ 		action == coop::proto::kActionTalkStart ? "talk-start" : action == coop::proto::kActionTalkSay ? "talk-say" :
+ 		action == coop::proto::kActionTalkEnd ? "talk-end" : "transfer",
+ 		why, p.operation, target.id, target.generation, int(round), int(kind), expected);
+@@ -3722,6 +3766,10 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 				p.action == coop::proto::kActionTalkEnd;
+ 			if (talk_action)
+ 				talk_result(p, result); // S10-T04a
++			const bool trade_action = p.action == coop::proto::kActionTradeOpen || p.action == coop::proto::kActionTrade ||
++				p.action == coop::proto::kActionTradeClose;
++			if (trade_action)
++				trade_result(p, result); // S10-T04c
+ 			if (accepted && p.action == coop::proto::kActionUse && !p.fx.empty())
+ 			{
+ 				// S08-T07: the use's first-person presentation, as single player plays it
+@@ -3737,7 +3785,7 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 					result.reason == coop::proto::kReasonPlaceRefused ? "It doesn't fit there." :
+ 					result.reason == coop::proto::kReasonNotUsable ? "You can't use that." :
+ 					result.reason == coop::proto::kReasonItemGone ? "It's gone." : "You can't do that now.");
+-			else if (p.player && !accepted && !talk_action)
++			else if (p.player && !accepted && !talk_action && !trade_action)
+ 				pickup_message(result.reason == coop::proto::kReasonItemTaken ? "Someone else took it." :
+ 					result.reason == coop::proto::kReasonOutOfReach ? "Too far away." :
+ 					result.reason == coop::proto::kReasonStale ? "It was moved in the meantime." :
+@@ -3902,6 +3950,8 @@ void run_script7(u32 t)
+ // inventory, or on the ground where snapshots place it).
+ void apply_reparent(const coop::proto::Reparent& r, bool retry)
+ {
++	if (g_link->trade.open) // S10-T04c: the window's lists follow the server's moves
++		g_link->trade.refresh_at_ms = g_link->wall.GetElapsed_ms() + 50;
+ 	if (!retry)
+ 	{
+ 		if (r.commit_id <= g_link->applied)
+@@ -4455,8 +4505,12 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 			t->m_Title = shown;
+ 			t->m_Description = description;
+ 			t->SetIconName_script(icon);
+-			t->SetMapLocation_script(location);
+-			t->SetMapObjectID_script(object);
++			// a spot only on an object this client holds (the server's quest corpse
++			// elsewhere in the Zone is not in a client's ALife: demo-1 crash in
++			// CMapLocation::UpdateSpot)
++			const bool known = object != 0xffff && ai().alife().objects().object(object, true) != nullptr;
++			t->SetMapLocation_script(known ? location : "");
++			t->SetMapObjectID_script(known ? object : u16(0xffff));
+ 			t->m_priority = priority;
+ 			if (!tasks.GiveGameTaskToActor(t, 0, false, 0))
+ 			{
+@@ -4472,15 +4526,16 @@ void on_party_tasks(const coop::proto::CampaignEvent& event)
+ 				t->m_Description = description;
+ 			// demo-5: the server's map location follows the installed check_task;
+ 			// the PDA's task spot and its map centring need the current one
++			const bool known = object != 0xffff && ai().alife().objects().object(object, true) != nullptr;
+ 			const bool location_changed = xr_strcmp(t->GetMapLocation_script() ? t->GetMapLocation_script() : "", location) != 0 ||
+ 				t->GetMapObjectID_script() != object;
+ 			if (location_changed && state == 1)
+ 			{
+-				if (location[0] && object != 0xffff)
++				if (location[0] && known)
+ 					t->ChangeMapLocation(location, object);
+-				else
++				else if (t->GetMapObjectID_script() != u16(0xffff))
+ 					t->RemoveMapLocations(false);
+-				what = "relocated";
++				what = known ? "relocated" : "relocated-unknown-object";
+ 			}
+ 			const ETaskState want = state == 2 ? eTaskStateCompleted : state == 0 ? eTaskStateFail : eTaskStateInProgress;
+ 			if (t->GetTaskState() != want && want != eTaskStateInProgress)
+@@ -5829,6 +5884,131 @@ void on_talk(const coop::proto::CampaignEvent& event)
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T04c: trade
++// The trade window on the server's trade. The remote talk window's trade
++// button sends the open intent; the server answers with the price table
++// (CampaignEvent 15, in parts); on the last part the native window opens
++// (CUIGameSP::StartTrade against the replica trader) and CTrade::GetItemPrice
++// reads the table. A buy or sell button sends the items as one trade intent;
++// nothing moves locally: the server's Reparent events move the items and the
++// needs event brings the purse, and the window's lists are rebuilt from them.
++static void trade_refresh_menu()
++{
++	CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++	if (!ui || ui->GetActorMenu().GetMenuMode() != mmTrade)
++		return;
++	ui->GetActorMenu().CoopTradeRefresh();
++	++g_link->trade.refreshes;
++}
++
++void on_trade_prices(const coop::proto::CampaignEvent& event)
++{
++	const std::vector<u8>& b = event.payload;
++	if (b.size() < 12 + 2 + 8 + 1)
++		return;
++	coop::proto::EntityRef ref;
++	for (int i = 0; i < 8; ++i)
++		ref.id |= u64(b[i]) << (8 * i);
++	for (int i = 0; i < 4; ++i)
++		ref.generation |= u32(b[8 + i]) << (8 * i);
++	PayloadReader r(b);
++	r.at = 12;
++	const u8 part = r.get<u8>();
++	const u8 parts = r.get<u8>();
++	const u32 actor_money = r.get<u32>();
++	const u32 trader_money = r.get<u32>();
++	const u8 count = r.get<u8>();
++	Link::Trade& t = g_link->trade;
++	const u16 npc_id = id_of(ref);
++	if (!r.ok || npc_id == 0xffff || !parts || part >= parts)
++		return;
++	++t.price_events;
++	if (part == 0 || t.npc != npc_id)
++	{
++		t.buy.clear();
++		t.sell.clear();
++		t.parts_seen = 0;
++	}
++	u32 unknown = 0;
++	for (u8 i = 0; i < count && r.ok; ++i)
++	{
++		const u8 side = r.get<u8>();
++		coop::proto::EntityRef item_ref;
++		item_ref.id = r.get<u64>();
++		item_ref.generation = r.get<u32>();
++		const u32 price = r.get<u32>();
++		if (!r.ok)
++			break;
++		const u16 item = id_of(item_ref);
++		if (item == 0xffff)
++		{
++			++unknown;
++			continue;
++		}
++		(side ? t.sell : t.buy)[item] = price;
++	}
++	t.npc = npc_id;
++	t.npc_ref = ref;
++	t.actor_money = actor_money;
++	t.trader_money = trader_money;
++	++t.parts_seen;
++	if (part + 1 < parts)
++		return;
++	t.pending_open = false;
++	if (g_actor && g_actor->get_money() != actor_money)
++		g_actor->set_money(actor_money, false);
++	CInventoryOwner* partner = smart_cast<CInventoryOwner*>(Level().Objects.net_Find(npc_id));
++	if (partner && g_actor && partner->get_money() != trader_money)
++		partner->set_money(trader_money, false);
++	g_link->log.line("trade-prices npc=%u parts=%u buy=%u sell=%u unknown=%u money=%u trader_money=%u open=%d", u32(npc_id),
++		u32(parts), u32(t.buy.size()), u32(t.sell.size()), unknown, actor_money, trader_money, t.open ? 1 : 0);
++	if (t.open)
++	{
++		t.refresh_at_ms = g_link->wall.GetElapsed_ms() + 1;
++		return;
++	}
++	CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++	if (!partner || !ui || !g_actor)
++	{
++		g_link->log.line("trade-open-failed npc=%u partner=%d ui=%d", u32(npc_id), partner ? 1 : 0, ui ? 1 : 0);
++		request_ownership(coop::proto::kActionTradeClose, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, false, "unshowable");
++		return;
++	}
++	t.open = true;
++	++t.opens;
++	ui->StartTrade(smart_cast<CInventoryOwner*>(g_actor), partner);
++	g_link->log.line("trade-open npc=%u name=%s mode=%d", u32(npc_id), partner->Name(), int(ui->GetActorMenu().GetMenuMode()));
++}
++
++static void trade_result(const Link::PickupPending& p, const coop::proto::ActionResult& result)
++{
++	Link::Trade& t = g_link->trade;
++	const bool accepted = result.outcome == coop::proto::ActionOutcome::Accepted;
++	if (p.action == coop::proto::kActionTradeOpen)
++	{
++		if (!accepted)
++		{
++			t.pending_open = false;
++			_give_news(result.reason == coop::proto::kReasonNotTrading ? "Co-op: this character does not trade" :
++				"Co-op: the trade could not be opened", "", "ui_inGame2_Mesta_evakuatsii", 0, 6000, 0);
++		}
++		g_link->log.line("trade-open-result outcome=%u reason=%u", u32(result.outcome), u32(result.reason));
++		return;
++	}
++	if (p.action == coop::proto::kActionTrade)
++	{
++		t.pending_perform = false;
++		++(accepted ? t.accepted : t.refused);
++		CUIGameSP* ui = smart_cast<CUIGameSP*>(CurrentGameUI());
++		if (!accepted && ui && ui->GetActorMenu().GetMenuMode() == mmTrade)
++			ui->GetActorMenu().CoopTradeRefused(result.reason == coop::proto::kReasonNoMoney);
++		if (accepted)
++			t.refresh_at_ms = g_link->wall.GetElapsed_ms() + 50;
++		g_link->log.line("trade-result outcome=%u reason=%u commit=%I64u", u32(result.outcome), u32(result.reason),
++			result.commit_id);
++	}
++}
++
+ } // namespace
+ 
+ namespace campaign
+@@ -5901,6 +6081,105 @@ bool coop_client_use_object(CGameObject* object, CGameObject* who)
+ 	return true;
+ }
+ 
++bool coop_client_trade_open(CInventoryOwner* partner)
++{
++	if (!g_link || !g_link->active)
++		return false;
++	Link::Trade& t = g_link->trade;
++	if (g_link->world != WorldLive || !g_actor)
++		return true; // nothing trades locally on a replica
++	CGameObject* go = smart_cast<CGameObject*>(partner);
++	coop::proto::EntityRef ref;
++	if (!go || !ref_of(u16(go->ID()), ref))
++	{
++		g_link->log.line("trade-open-unknown npc=%u", go ? u32(go->ID()) : 0xffffu);
++		return true;
++	}
++	if (t.open || t.pending_open)
++	{
++		g_link->log.line("trade-open-ignored npc=%u open=%d pending=%d", u32(go->ID()), t.open ? 1 : 0, t.pending_open ? 1 : 0);
++		return true;
++	}
++	t.pending_open = true;
++	t.npc = u16(go->ID());
++	t.npc_ref = ref;
++	request_ownership(coop::proto::kActionTradeOpen, ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("trade-open-sent npc=%u", u32(go->ID()));
++	return true;
++}
++
++bool coop_client_trade_active()
++{
++	return g_link && g_link->active && g_link->trade.open;
++}
++
++bool coop_client_trade_price(const CInventoryItem* item, bool trader_buying, u32& price)
++{
++	if (!g_link || !g_link->active || !g_link->trade.open || !item)
++		return false;
++	const Link::Trade& t = g_link->trade;
++	const xr_map<u16, u32>& table = trader_buying ? t.sell : t.buy;
++	const auto it = table.find(u16(item->object().ID()));
++	price = it != table.end() ? it->second : 0;
++	return true;
++}
++
++void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold)
++{
++	if (!coop_client_trade_active() || !g_actor)
++		return;
++	Link::Trade& t = g_link->trade;
++	if (t.pending_perform)
++	{
++		g_link->log.line("trade-perform-ignored why=pending");
++		return;
++	}
++	if (bought.empty() && sold.empty())
++		return;
++	xr_vector<u8> params;
++	params.push_back(u8(bought.size()));
++	params.push_back(u8(sold.size()));
++	u32 expected = 0;
++	for (int side = 0; side < 2; ++side)
++		for (u16 id : side ? sold : bought)
++		{
++			coop::proto::EntityRef ref;
++			if (!ref_of(id, ref))
++			{
++				g_link->log.line("trade-perform-unknown item=%u", u32(id));
++				return;
++			}
++			push_ref(params, ref);
++			const xr_map<u16, u32>& table = side ? t.sell : t.buy;
++			const auto it = table.find(id);
++			expected += it != table.end() ? it->second : 0;
++		}
++	for (int b = 0; b < 4; ++b)
++		params.push_back(u8(expected >> (8 * b)));
++	t.pending_perform = true;
++	++t.performs;
++	request_ownership(coop::proto::kActionTrade, t.npc_ref, params, 0, 0xffffffff, 0xffffffff, true, "player");
++	g_link->log.line("trade-sent npc=%u bought=%u sold=%u", u32(t.npc), u32(bought.size()), u32(sold.size()));
++}
++
++void coop_client_trade_closed()
++{
++	if (!g_link || !g_link->active)
++		return;
++	Link::Trade& t = g_link->trade;
++	if (!t.open && !t.pending_open)
++		return;
++	const bool was_open = t.open;
++	t.open = false;
++	t.pending_open = false;
++	t.pending_perform = false;
++	t.buy.clear();
++	t.sell.clear();
++	if (was_open)
++		request_ownership(coop::proto::kActionTradeClose, t.npc_ref, xr_vector<u8>(), 0, 0xffffffff, 0xffffffff, false, "player");
++	g_link->log.line("trade-closed npc=%u", u32(t.npc));
++}
++
+ void coop_client_talk_closed()
+ {
+ 	if (!g_link || !g_link->active)
+@@ -6121,6 +6400,11 @@ void coop_client_frame()
+ 	}
+ 	log_weather_client(); // S06-T08
+ 	const u32 now = g_link->wall.GetElapsed_ms();
++	if (g_link->trade.open && g_link->trade.refresh_at_ms && now >= g_link->trade.refresh_at_ms)
++	{
++		g_link->trade.refresh_at_ms = 0;
++		trade_refresh_menu(); // S10-T04c
++	}
+ 	if (now - g_link->last_status_ms >= 5000)
+ 	{
+ 		g_link->last_status_ms = now;
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 4c89d0e..b521c4a 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -61,6 +61,16 @@ void coop_client_talk_closed();
+ // server in this player's context). Items, living things and level
+ // changers keep their own paths (false).
+ bool coop_client_use_object(CGameObject* object, CGameObject* who);
++// S10-T04c: the trade window on the server's trade. The remote talk window's
++// trade button asks the server to open the trade (the native window opens
++// when the price table arrives); CTrade::GetItemPrice on a co-op client
++// reads that table (true: priced here); the window's buy and sell buttons
++// send the trade; closing the window tells the server.
++bool coop_client_trade_open(CInventoryOwner* partner);
++bool coop_client_trade_active();
++bool coop_client_trade_price(const CInventoryItem* item, bool trader_buying, u32& price);
++void coop_client_trade_perform(const xr_vector<u16>& bought, const xr_vector<u16>& sold);
++void coop_client_trade_closed();
+ } // namespace campaign
+ 
+ // From CApplication::OnEvent(eStart) in xrEngine: false refuses the start.
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index fe79fb9..45737da 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -151,6 +151,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.info_party = ini.line_exist("coop", "info_party") ? ini.r_u32("coop", "info_party") : 0; // S10-T04b
+ 		out.task_party = ini.line_exist("coop", "task_party") ? ini.r_u32("coop", "task_party") : 0; // S10-T05b
+ 		out.place_giver = ini.line_exist("coop", "place_giver") ? ini.r_u32("coop", "place_giver") : 0; // demo aid
++		out.trade_party = ini.line_exist("coop", "trade_party") ? ini.r_u32("coop", "trade_party") : 0; // S10-T04c
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 899fb60..951c31c 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,6 +120,7 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
++	u32 trade_party; // S10-T04c fixture: seconds after both attach until the door and trade rounds at Sidorovich (0 off)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopPersistence.cpp b/src/xrGame/CoopPersistence.cpp
+index 8331dc9..e399bae 100644
+--- a/src/xrGame/CoopPersistence.cpp
++++ b/src/xrGame/CoopPersistence.cpp
+@@ -169,6 +169,55 @@ bool decode_transfer(const std::vector<u8>& payload, PickupRecord& out)
+ 		(out.from_entity || out.owner_entity) && out.from_entity != out.owner_entity;
+ }
+ 
++// S10-T04c
++std::vector<u8> encode_trade(const TradeRecord& r)
++{
++	std::vector<u8> out;
++	put<u8>(out, r.slot);
++	put<u64>(out, r.player.hi);
++	put<u64>(out, r.player.lo);
++	put<u64>(out, r.operation);
++	put<u64>(out, r.npc_entity);
++	put<u64>(out, r.actor_entity);
++	put<u32>(out, r.actor_money_after);
++	put<u32>(out, r.npc_money_after);
++	put<u32>(out, r.paid);
++	put<u32>(out, r.received);
++	put<u16>(out, u16(r.items.size()));
++	for (const PickupRecord& item : r.items)
++	{
++		const std::vector<u8> one = encode_transfer(item);
++		put<u16>(out, u16(one.size()));
++		out.insert(out.end(), one.begin(), one.end());
++	}
++	return out;
++}
++
++bool decode_trade(const std::vector<u8>& payload, TradeRecord& out)
++{
++	size_t at = 0;
++	u16 count = 0;
++	if (!(get(payload, at, out.slot) && get(payload, at, out.player.hi) && get(payload, at, out.player.lo) &&
++			get(payload, at, out.operation) && get(payload, at, out.npc_entity) && get(payload, at, out.actor_entity) &&
++			get(payload, at, out.actor_money_after) && get(payload, at, out.npc_money_after) &&
++			get(payload, at, out.paid) && get(payload, at, out.received) && get(payload, at, count)) ||
++		!out.npc_entity || !out.actor_entity || count > 64)
++		return false;
++	out.items.clear();
++	for (u16 i = 0; i < count; ++i)
++	{
++		u16 length = 0;
++		if (!get(payload, at, length) || length == 0 || at + length > payload.size())
++			return false;
++		PickupRecord item;
++		if (!decode_transfer(std::vector<u8>(payload.begin() + at, payload.begin() + at + length), item))
++			return false;
++		out.items.push_back(item);
++		at += length;
++	}
++	return at == payload.size();
++}
++
+ // S08-T07
+ std::vector<u8> encode_equip(const EquipRecord& r)
+ {
+diff --git a/src/xrGame/CoopPersistence.h b/src/xrGame/CoopPersistence.h
+index 9072aed..363907d 100644
+--- a/src/xrGame/CoopPersistence.h
++++ b/src/xrGame/CoopPersistence.h
+@@ -128,6 +128,24 @@ bool decode_pickup(const std::vector<u8>& payload, PickupRecord& out);
+ std::vector<u8> encode_transfer(const PickupRecord& r); // S08-T02: action, from, then the pickup layout
+ bool decode_transfer(const std::vector<u8>& payload, PickupRecord& out);
+ 
++// S10-T04c: a trade with an NPC (contract §6 `trade`): the items that change
++// hands as transfer records (absolute post-state each: bought ones from the
++// NPC to the actor, sold ones the other way) and both purses after it.
++struct TradeRecord
++{
++	u8 slot;
++	coop::proto::Uuid128 player;
++	u64 operation;
++	u64 npc_entity;
++	u64 actor_entity;
++	u32 actor_money_after;
++	u32 npc_money_after;
++	u32 paid, received; // the sums (diagnostics)
++	std::vector<PickupRecord> items;
++};
++std::vector<u8> encode_trade(const TradeRecord& r);
++bool decode_trade(const std::vector<u8>& payload, TradeRecord& out);
++
+ // S08-T07: the equip record (contract §6 `equip`): an item's place in its
+ // participant actor's inventory, as absolute post-state (the engine's
+ // CInventory::Slot/Belt/Ruck at replay).
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 95018cf..677feb8 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -65,6 +65,8 @@
+ #include "alife_registry_wrappers.h" // S08-T09: info portions
+ #include "level_changer.h" // S09-T01: party travel
+ #include "UsableScriptObject.h" // S10-T04c: a use on a world object
++#include "trade.h" // S10-T04c: the trade on the server
++#include "PhysicObject.h" // S10-T04c: the fixture finds the bunker door
+ #include "coop/proto/transition.h"
+ #include "memory_manager.h"
+ #include "enemy_manager.h"
+@@ -163,6 +165,7 @@ struct PlayerLink
+ 	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
+ 	// S10-T04a: the open talk (one per player)
+ 	u16 talk_npc = 0xffff; // the partner (0xffff: no talk)
++	u16 trade_npc = 0xffff; // S10-T04c: the open trade, inside the talk (0xffff: none)
+ 	DIALOG_SHARED_PTR talk_dialog; // the current dialog (empty: topic mode)
+ 	u64 talk_since = 0;
+ 	u64 talk_says_now = 0; // says in the open talk
+@@ -593,6 +596,7 @@ struct Host
+ 	u64 talks_started = 0, talks_busy = 0, talks_refused = 0, talk_says = 0, talk_say_refused = 0, talks_closed = 0;
+ 	u64 talk_quest_routed = 0, talk_actions_blocked = 0, talk_answers = 0;
+ 	u64 uses_object = 0, uses_object_refused = 0; // S10-T04c
++	u64 trades_opened = 0, trades_committed = 0, trades_refused = 0, trades_replayed = 0, trade_prices_sent = 0;
+ 	struct TalkFixture
+ 	{
+ 		u64 both_since = 0;
+@@ -634,6 +638,17 @@ struct Host
+ 	// the hands-on aid place_giver (start-coop-demo.sh)
+ 	u64 demo_place_since = 0;
+ 	bool demo_placed = false;
++	// S10-T04c: the door and trade fixture
++	struct TradeFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		bool recovered = false;
++		u16 giver = 0xffff, door = 0xffff;
++		u64 ops = 0;
++		u32 failures = 0;
++	} trade_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -8495,10 +8510,13 @@ static void talk_send_list(PlayerLink& link, CPhraseDialogManager* ours, CPhrase
+ 		dialog.c_str(), u32(entries.size()), ids);
+ }
+ 
++void trade_close(PlayerLink& link, LPCSTR why); // S10-T04c
++
+ void talk_close(PlayerLink& link, LPCSTR why, bool notify = true)
+ {
+ 	if (link.talk_npc == 0xffff)
+ 		return;
++	trade_close(link, "talk-closed"); // S10-T04c: the trade lives inside the talk
+ 	CActor* actor = participant_actor(link.ref);
+ 	CGameObject* npc = nullptr;
+ 	CInventoryOwner* owner = talk_partner(link, &npc);
+@@ -8571,12 +8589,405 @@ u16 take_use_object(PlayerLink& link, const coop::proto::ActionIntent& intent, c
+ 	}
+ 	const bool ok = usable->use(actor);
+ 	++g_host->uses_object;
+-	g_host->log.line("use-object slot=%u actor=%u object=%u section=%s distance=%.2f ok=%d", u32(link.ref.slot),
+-		u32(actor->ID()), u32(id), *object->cNameSect(), distance, ok ? 1 : 0);
++	g_host->log.line("use-object slot=%u actor=%u object=%u section=%s name=%s distance=%.2f ok=%d", u32(link.ref.slot),
++		u32(actor->ID()), u32(id), *object->cNameSect(), *object->cName(), distance, ok ? 1 : 0);
+ 	result.revision = g_host->commit;
+ 	return ok ? 0 : coop::proto::kReasonNotUsable;
+ }
+ 
++// ------------------------------------------------------------ S10-T04c: trade
++// The trade window on the server's trade (decision T01-7: each player's
++// money is theirs, one stock, one buyer at a time inside the one-speaker
++// talk). Opened by ActionIntent 18 inside the player's open talk with the
++// trader: the server starts the engine's trade session for this buyer in
++// his context (CTrade::StartTradeEx on the trader: the installed
++// trade_manager sets the trader's buy and sell conditions for him), prices
++// every item of the trader's stock and of the buyer's inventory with
++// CTrade::GetItemPrice as the window would, and sends the table as
++// CampaignEvent 15 (the trader's ref, u8 part, u8 parts, u32 the buyer's
++// money, u32 the trader's, u8 count, count x (u8 side: 0 the trader's item,
++// 1 the buyer's; ref; u32 price)); the client opens the native window and
++// its prices read that table. A trade (19: the bought and the sold item
++// refs) is re-priced here, checked (the owners, the purse), journaled as one
++// `trade` record (the item moves as transfer records plus both purses)
++// before CTrade::TransferItem applies it (the engine's own path: the
++// trader's callbacks, GE_TRADE_SELL/BUY on the server's level; the parent
++// changes reach the clients as Reparent), then answered; the table is sent
++// again (the stock changed). 20 closes the trade; the talk's end closes it.
++const u32 kTradePerEvent = 56; // 12 + 2 + 8 + 1 + 56 x 17 = 975 bytes
++
++static void put_entity_ref(std::vector<u8>& p, const coop::proto::EntityRef& ref)
++{
++	for (int b = 0; b < 8; ++b)
++		p.push_back(u8(ref.id >> (8 * b)));
++	put_u32(p, ref.generation);
++}
++
++static CInventoryOwner* trade_partner(const PlayerLink& link, CGameObject** object = nullptr)
++{
++	CGameObject* npc = link.trade_npc != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(link.trade_npc)) :
++		nullptr;
++	if (object)
++		*object = npc;
++	return npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++}
++
++// the price table to the player (in his context: the trader's conditions for him)
++static void trade_send_prices(PlayerLink& link, LPCSTR why)
++{
++	CGameObject* npc = nullptr;
++	CInventoryOwner* trader = trade_partner(link, &npc);
++	CActor* actor = participant_actor(link.ref);
++	CInventoryOwner* me = actor ? smart_cast<CInventoryOwner*>(actor) : nullptr;
++	if (!trader || !me)
++		return;
++	struct Entry
++	{
++		u8 side;
++		coop::proto::EntityRef ref;
++		u32 price;
++	};
++	xr_vector<Entry> entries;
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "trade-prices");
++		CTrade* trade = trader->GetTrade();
++		if (!trade)
++			return;
++		trade->StartTradeEx(me);
++		TIItemContainer stock, mine;
++		trader->inventory().AddAvailableItems(stock, true);
++		me->inventory().AddAvailableItems(mine, true);
++		for (CInventoryItem* item : stock)
++		{
++			Entry e;
++			e.side = 0;
++			if (!entity_ref_of(item->object().ID(), e.ref))
++				continue;
++			e.price = trade->GetItemPrice(item, false, false); // the trader sells it
++			entries.push_back(e);
++		}
++		for (CInventoryItem* item : mine)
++		{
++			Entry e;
++			e.side = 1;
++			if (!entity_ref_of(item->object().ID(), e.ref))
++				continue;
++			e.price = trade->GetItemPrice(item, true, false); // the trader buys it
++			entries.push_back(e);
++		}
++	}
++	const u32 parts = _max(1u, u32((entries.size() + kTradePerEvent - 1) / kTradePerEvent));
++	for (u32 part = 0; part < parts; ++part)
++	{
++		std::vector<u8> p;
++		put_ref(p, link.trade_npc);
++		put_u8(p, u8(part));
++		put_u8(p, u8(parts));
++		put_u32(p, actor->get_money());
++		put_u32(p, trader->get_money());
++		const u32 first = part * kTradePerEvent, last = _min(u32(entries.size()), first + kTradePerEvent);
++		put_u8(p, u8(last - first));
++		for (u32 i = first; i < last; ++i)
++		{
++			put_u8(p, entries[i].side);
++			put_entity_ref(p, entries[i].ref);
++			put_u32(p, entries[i].price);
++		}
++		queue_event(link, 15, p);
++	}
++	++g_host->trade_prices_sent;
++	g_host->log.line("trade-prices slot=%u npc=%u entries=%u parts=%u money=%u trader_money=%u why=%s", u32(link.ref.slot),
++		u32(link.trade_npc), u32(entries.size()), parts, actor->get_money(), trader->get_money(), why);
++}
++
++// The installed scripts' trade-window hooks (actor_menu.script fires them from
++// the client-side UI in single player): ActorMenu_on_trade_started sets the
++// trader's mob_trade state (all_money, trading) that its trade_perform
++// callback adds to (trade-1: nil arithmetic without it), and
++// trade_manager.update refreshes the trader's buy and sell conditions. On
++// the server they run in the buyer's context while his talk with the trader
++// is open (GetTalkingNpc finds it).
++static void trade_script_hooks(CActor* actor, CGameObject* npc, bool started)
++{
++	campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), started ? "trade-started" : "trade-closed");
++	if (!scope.entered())
++		return;
++	luabind::functor<void> update;
++	if (started && npc && ai().script_engine().functor("trade_manager.update", update))
++		update(npc->lua_game_object());
++	luabind::functor<void> send;
++	if (ai().script_engine().functor("_G.SendScriptCallback", send))
++		send(started ? "ActorMenu_on_trade_started" : "ActorMenu_on_trade_closed");
++}
++
++void trade_close(PlayerLink& link, LPCSTR why)
++{
++	if (link.trade_npc == 0xffff)
++		return;
++	CGameObject* npc = nullptr;
++	CInventoryOwner* trader = trade_partner(link, &npc);
++	CActor* actor = participant_actor(link.ref);
++	if (actor)
++		trade_script_hooks(actor, npc, false);
++	if (trader && trader->GetTrade())
++	{
++		campaign::ScriptContextScope scope(actor ? static_cast<const CObject*>(actor) : nullptr, "trade-close");
++		trader->GetTrade()->StopTrade();
++		trader->StopTrading();
++	}
++	g_host->log.line("trade-close slot=%u npc=%u why=%s", u32(link.ref.slot), u32(link.trade_npc), why);
++	link.trade_npc = 0xffff;
++}
++
++static bool trade_context_actor(PlayerLink& link, CActor*& actor)
++{
++	PartyId party;
++	party.hi = g_host->config.party_id.hi;
++	party.lo = g_host->config.party_id.lo;
++	ActionContext context;
++	context.origin = Origin::ClientIntent;
++	context.session = link.session;
++	context.actor = link.ref;
++	context.party = party;
++	Refusal why = Refusal::None;
++	actor = context_actor(context, Scope::Self, &why);
++	return actor && actor->g_Alive();
++}
++
++u16 take_trade_open(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	if (!intent.params.empty())
++		return coop::proto::kReasonMalformed;
++	CActor* actor = nullptr;
++	if (!trade_context_actor(link, actor))
++		return coop::proto::kReasonNoActor;
++	const u16 npc_id = engine_id_of(intent.target);
++	if (npc_id == kNoEngineId || link.talk_npc != npc_id)
++	{
++		++g_host->trades_refused;
++		g_host->log.line("trade-refused slot=%u npc=%u why=not-talking talk=%u", u32(link.ref.slot), u32(npc_id),
++			u32(link.talk_npc));
++		return coop::proto::kReasonNotTalking;
++	}
++	CGameObject* npc = smart_cast<CGameObject*>(Level().Objects.net_Find(npc_id));
++	CInventoryOwner* trader = npc ? smart_cast<CInventoryOwner*>(npc) : nullptr;
++	CEntityAlive* alive = npc ? smart_cast<CEntityAlive*>(npc) : nullptr;
++	if (!trader || !alive || !alive->g_Alive() || !trader->IsTradeEnabled() || !trader->GetTrade())
++	{
++		++g_host->trades_refused;
++		g_host->log.line("trade-refused slot=%u npc=%u why=not-trading", u32(link.ref.slot), u32(npc_id));
++		return coop::proto::kReasonNotTrading;
++	}
++	if (link.trade_npc != npc_id)
++	{
++		trade_close(link, "reopened");
++		link.trade_npc = npc_id;
++		++g_host->trades_opened;
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "trade-start");
++			trader->StartTrading(); // as CUIActorMenu::InitTradeMode: the trader's own start (its AI, its callbacks)
++		}
++		trade_script_hooks(actor, npc, true);
++		g_host->log.line("trade-open slot=%u actor=%u npc=%u name=%s", u32(link.ref.slot), u32(actor->ID()), u32(npc_id),
++			trader->Name());
++	}
++	trade_send_prices(link, "open");
++	result.revision = g_host->commit;
++	return 0;
++}
++
++u16 take_trade_close(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	trade_close(link, "client");
++	result.revision = g_host->commit;
++	return 0;
++}
++
++u16 take_trade(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	CoopPersistence* persistence = g_host->persistence;
++	// 1. Receive: a known operation returns its stored outcome.
++	StoredOutcome stored;
++	if (persistence && persistence->lookup(link.player, intent.operation_id, stored))
++	{
++		result.outcome = coop::proto::ActionOutcome(stored.outcome);
++		result.reason = stored.reason;
++		result.commit_id = stored.revision;
++		result.revision = stored.revision;
++		g_host->log.line("trade-duplicate player=%s operation=%I64u outcome=%u revision=%I64u",
++			coop_uuid_hex(link.player).c_str(), intent.operation_id, u32(stored.outcome), stored.revision);
++		return stored.reason;
++	}
++	// 2. Prepare / validate.
++	if (!link.session)
++		return coop::proto::kReasonNoActor;
++	CActor* actor = nullptr;
++	if (!trade_context_actor(link, actor))
++		return coop::proto::kReasonNoActor;
++	const u16 npc_id = engine_id_of(intent.target);
++	CGameObject* npc = nullptr;
++	CInventoryOwner* trader = trade_partner(link, &npc);
++	CInventoryOwner* me = smart_cast<CInventoryOwner*>(actor);
++	if (npc_id == kNoEngineId || link.trade_npc != npc_id || !trader || !me || !trader->GetTrade())
++	{
++		++g_host->trades_refused;
++		g_host->log.line("trade-refused slot=%u npc=%u why=no-open-trade trade=%u", u32(link.ref.slot), u32(npc_id),
++			u32(link.trade_npc));
++		return coop::proto::kReasonNotTrading;
++	}
++	if (intent.params.size() < 2)
++		return coop::proto::kReasonMalformed;
++	const u32 nbuy = intent.params[0], nsell = intent.params[1];
++	if (nbuy + nsell == 0 || nbuy + nsell > 32 || intent.params.size() != 2 + 12 * (nbuy + nsell) + 4)
++		return coop::proto::kReasonMalformed;
++	struct Line
++	{
++		bool bought;
++		coop::proto::EntityRef ref;
++		u16 id;
++		CInventoryItem* item;
++		CSE_Abstract* se;
++		u32 price;
++	};
++	xr_vector<Line> lines;
++	for (u32 i = 0; i < nbuy + nsell; ++i)
++	{
++		Line l;
++		l.bought = i < nbuy;
++		if (!read_ref(intent.params, 2 + 12 * i, l.ref))
++			return coop::proto::kReasonMalformed;
++		l.id = engine_id_of(l.ref);
++		CObject* object = l.id != kNoEngineId ? Level().Objects.net_Find(l.id) : nullptr;
++		l.se = l.id != kNoEngineId ? Level().Server->ID_to_entity(l.id) : nullptr;
++		l.item = object ? smart_cast<CInventoryItem*>(object) : nullptr;
++		if (!l.item || !l.se || object->getDestroy())
++			return coop::proto::kReasonItemGone;
++		const u16 expected_parent = l.bought ? npc_id : actor->ID();
++		if (l.se->ID_Parent != expected_parent || object->H_Parent() != (l.bought ? npc : static_cast<CGameObject*>(actor)))
++		{
++			++g_host->trades_refused;
++			g_host->log.line("trade-refused slot=%u npc=%u why=item-moved item=%u parent=%u expected=%u", u32(link.ref.slot),
++				u32(npc_id), u32(l.id), u32(l.se->ID_Parent), u32(expected_parent));
++			return coop::proto::kReasonTradeRefused;
++		}
++		if (!l.bought && (l.item->IsQuestItem() || !l.item->CanTrade()))
++		{
++			++g_host->trades_refused;
++			g_host->log.line("trade-refused slot=%u npc=%u why=not-tradeable item=%u section=%s", u32(link.ref.slot),
++				u32(npc_id), u32(l.id), *object->cNameSect());
++			return coop::proto::kReasonTradeRefused;
++		}
++		l.price = 0;
++		lines.push_back(l);
++	}
++	u32 pay = 0, get = 0;
++	CTrade* trade = trader->GetTrade();
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "trade-price");
++		trade->StartTradeEx(me);
++		for (Line& l : lines)
++		{
++			l.price = trade->GetItemPrice(l.item, !l.bought, false);
++			if (!l.price)
++			{
++				++g_host->trades_refused;
++				g_host->log.line("trade-refused slot=%u npc=%u why=unpriced item=%u section=%s bought=%d", u32(link.ref.slot),
++					u32(npc_id), u32(l.id), *l.item->object().cNameSect(), l.bought ? 1 : 0);
++				return coop::proto::kReasonTradeRefused;
++			}
++			(l.bought ? pay : get) += l.price;
++		}
++	}
++	const u32 money = actor->get_money();
++	if (money + get < pay)
++	{
++		++g_host->trades_refused;
++		g_host->log.line("trade-refused slot=%u npc=%u why=no-money money=%u pay=%u get=%u", u32(link.ref.slot),
++			u32(npc_id), money, pay, get);
++		return coop::proto::kReasonNoMoney;
++	}
++	if (!persistence || persistence->failed())
++	{
++		++g_host->ledger_store_failed;
++		return kActionReasonStoreFailed;
++	}
++	// 3. Resolve: the absolute post-state.
++	TradeRecord record;
++	record.slot = link.ref.slot;
++	record.player = link.player;
++	record.operation = intent.operation_id;
++	record.npc_entity = entity_of(npc_id);
++	record.actor_entity = entity_of(actor->ID());
++	record.actor_money_after = money + get - pay;
++	record.npc_money_after = trader->get_money() + pay - get;
++	record.paid = pay;
++	record.received = get;
++	for (const Line& l : lines)
++	{
++		PickupRecord item;
++		item.action = u8(coop::proto::kActionTransfer);
++		item.slot = link.ref.slot;
++		item.player = link.player;
++		item.operation = intent.operation_id;
++		item.from_entity = l.bought ? record.npc_entity : record.actor_entity;
++		item.owner_entity = l.bought ? record.actor_entity : record.npc_entity;
++		item.item_entity = l.ref.id;
++		item.item_id = l.id;
++		item.section = *l.se->s_name;
++		const Fvector at = l.item->object().Position();
++		item.position[0] = at.x;
++		item.position[1] = at.y;
++		item.position[2] = at.z;
++		sync_ammo_state(l.se);
++		NET_Packet packet;
++		l.se->Spawn_Write(packet, FALSE);
++		item.state.assign(packet.B.data, packet.B.data + packet.B.count);
++		record.items.push_back(item);
++	}
++	const u64 revision = ++g_host->commit;
++	// 4. Durable commit, before anything is applied or acknowledged.
++	if (!coop::store::failpoint("trade:before-append"))
++		persistence->fail_closed("failpoint trade:before-append");
++	if (!persistence->commit(coop::store::kRecordTrade, g_host->tick, revision, encode_trade(record)))
++	{
++		++g_host->ledger_store_failed;
++		g_host->log.line("trade-store-failed revision=%I64u operation=%I64u reason=%s", revision, intent.operation_id,
++			persistence->failure());
++		g_host->stop_requested = true;
++		return kActionReasonStoreFailed;
++	}
++	coop::store::failpoint("trade:after-flush");
++	++g_host->trades_committed;
++	g_host->log.line("trade-committed revision=%I64u slot=%u operation=%I64u npc=%u bought=%u sold=%u pay=%u get=%u "
++		"money=%u->%u", revision, u32(link.ref.slot), intent.operation_id, u32(npc_id), nbuy, nsell, pay, get, money,
++		record.actor_money_after);
++	// 5. Apply: the engine's own trade in the buyer's context.
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "trade-apply");
++		trade->OnPerformTrade(pay, get);
++		for (const Line& l : lines)
++		{
++			trade->TransferItem(l.item, !l.bought); // from the trader's side: it buys the sold items
++			g_host->log.line("trade-item revision=%I64u item=%u item_entity=%I64u section=%s %s price=%u", revision, u32(l.id),
++				l.ref.id, *l.item->object().cNameSect(), l.bought ? "bought" : "sold", l.price);
++		}
++		actor->set_money(record.actor_money_after, false);
++	}
++	coop::store::failpoint("trade:after-apply");
++	StoredOutcome outcome = {u8(coop::proto::ActionOutcome::Accepted), 0, revision};
++	persistence->remember(link.player, intent.operation_id, outcome);
++	result.outcome = coop::proto::ActionOutcome::Accepted;
++	result.reason = 0;
++	result.commit_id = revision;
++	result.revision = revision;
++	trade_send_prices(link, "traded");
++	return 0;
++}
++
+ u16 take_talk_start(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
+ {
+ 	if (!link.session)
+@@ -9553,6 +9964,257 @@ void demo_place_tick()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T04c
++// The door and trade fixture (profile trade_party; a server kill and restart
++// between its two halves, -ServerKill / -ServerRestartAfter, no publication
++// requested after the trades so the restart replays the `trade` records):
++//   door       (the first run) p2 is placed at Sidorovich's bunker door and
++//              uses it (take_use_object): the installed ph_door logic opens
++//              it on the server and the joint drive goes to every client
++//   trade      both placed at Sidorovich; p1 opens a talk and the trade
++//              (take_talk_start, take_trade_open: the price table); p2's talk
++//              is refused busy (33) and p2's trade open not-talking (34); p1
++//              buys the cheapest affordable item of the stock and sells one
++//              of its own tradeable items (two trade records); p1 closes
++//   recovered  (the restarted server) the two trades were replayed from the
++//              journal (trade-replayed); p1's money is the recorded after
++const u32 kTradeFixtureOpBase = 0xF1D0000;
++
++static void fixture_intent(coop::proto::ActionIntent& intent, u16 kind, u16 target_id, u64 op)
++{
++	intent.operation_id = op;
++	intent.kind = kind;
++	intent.params.clear();
++	intent.expected_revision = 0;
++	if (target_id == 0xffff || !entity_ref_of(target_id, intent.target))
++		intent.target = coop::proto::EntityRef();
++}
++
++static u16 find_trader_door(CObject* giver)
++{
++	u16 best = 0xffff;
++	float best_distance = 25.f;
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CObject* o = Level().Objects.o_get_by_iterator(i);
++		CGameObject* go = o ? smart_cast<CGameObject*>(o) : nullptr;
++		// a door of the installed ph_door scheme (the engine registers doors::door for it)
++		if (!go || !smart_cast<CPhysicObject*>(o) || !go->lua_game_object() || !go->lua_game_object()->m_door)
++			continue;
++		const float d = o->Position().distance_to(giver->Position());
++		if (d < best_distance)
++		{
++			best_distance = d;
++			best = u16(o->ID());
++		}
++	}
++	return best;
++}
++
++void trade_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.trade_party || !ai().get_alife())
++		return;
++	Host::TradeFixture& f = g_host->trade_fixture;
++	PlayerLink* links[2] = {nullptr, nullptr};
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				links[link.ref.slot] = &link;
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		f.recovered = g_host->persistence && g_host->persistence->recovered();
++		g_host->log.line("fixture-trade both-attached tick=%I64u recovered=%d", g_host->tick, f.recovered ? 1 : 0);
++	}
++	if (attached < 2 || f.phase >= 9 || g_host->tick < f.both_since + u64(config.trade_party) * 50)
++		return;
++	PlayerLink& p1 = *links[0];
++	PlayerLink& p2 = *links[1];
++	if (f.giver == 0xffff)
++	{
++		f.giver = find_giver();
++		if (f.giver == 0xffff)
++		{
++			if (g_host->tick - f.both_since > u64(config.trade_party) * 50 + 30 * 50)
++			{
++				g_host->log.line("fixture-trade giver-missing");
++				++f.failures;
++				f.phase = 9;
++			}
++			return;
++		}
++	}
++	CGameObject* giver = smart_cast<CGameObject*>(Level().Objects.net_Find(f.giver));
++	if (!giver)
++		return;
++	coop::proto::ActionIntent intent;
++	coop::proto::ActionResult result;
++	if (f.recovered)
++	{
++		g_host->log.line("fixture-trade recovered money_p1=%u money_p2=%u trades_replayed=%I64u", actors[0]->get_money(),
++			actors[1]->get_money(), g_host->trades_replayed);
++		g_host->log.line("fixture-trade done phase=recovered failures=%u", f.failures);
++		f.phase = 9;
++		return;
++	}
++	if (f.phase == 0)
++	{
++		// the door: p2 beside it, then USE
++		f.door = find_trader_door(giver);
++		CObject* door = f.door != 0xffff ? Level().Objects.net_Find(f.door) : nullptr;
++		if (door)
++		{
++			Fvector at = door->Position();
++			Fvector toward;
++			toward.sub(giver->Position(), door->Position());
++			toward.y = 0.f;
++			if (toward.square_magnitude() > 0.01f)
++				toward.normalize();
++			else
++				toward.set(0.f, 0.f, 1.f);
++			at.mad(toward, -1.5f); // outside, 1.5 m from the door
++			at.y = door->Position().y;
++			place_beside(actors[1], at);
++			g_host->log.line("fixture-trade door id=%u name=%s p2_at=%.2f,%.2f,%.2f distance=%.2f", u32(f.door), *door->cName(),
++				VPUSH(at), pickup_distance(actors[1], door));
++		}
++		else
++		{
++			g_host->log.line("fixture-trade door-missing");
++			++f.failures;
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		if (f.door != 0xffff)
++		{
++			fixture_intent(intent, coop::proto::kActionUseObject, f.door, kTradeFixtureOpBase + ++f.ops);
++			const u16 reason = take_use_object(p2, intent, result);
++			g_host->log.line("fixture-trade door-used slot=1 door=%u reason=%u", u32(f.door), u32(reason));
++			if (reason)
++				++f.failures;
++		}
++		// both at Sidorovich (the talk fixture's spots)
++		const Fvector g = giver->Position();
++		for (u32 k = 0; k < 2; ++k)
++		{
++			Fvector at = g;
++			at.x += k ? -1.2f : 1.2f;
++			place_beside(actors[k], at);
++		}
++		f.phase = 2;
++		f.phase_tick = g_host->tick + 3 * 50;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		fixture_intent(intent, coop::proto::kActionTalkStart, f.giver, kTradeFixtureOpBase + ++f.ops);
++		const u16 talk1 = take_talk_start(p1, intent, result);
++		fixture_intent(intent, coop::proto::kActionTradeOpen, f.giver, kTradeFixtureOpBase + ++f.ops);
++		const u16 open1 = take_trade_open(p1, intent, result);
++		fixture_intent(intent, coop::proto::kActionTalkStart, f.giver, kTradeFixtureOpBase + ++f.ops);
++		const u16 talk2 = take_talk_start(p2, intent, result);
++		fixture_intent(intent, coop::proto::kActionTradeOpen, f.giver, kTradeFixtureOpBase + ++f.ops);
++		const u16 open2 = take_trade_open(p2, intent, result);
++		g_host->log.line("fixture-trade opened talk_p1=%u open_p1=%u talk_p2=%u open_p2=%u", u32(talk1), u32(open1), u32(talk2),
++			u32(open2));
++		if (talk1 || open1 || talk2 != coop::proto::kReasonTalkBusy || open2 != coop::proto::kReasonNotTalking)
++			++f.failures;
++		f.phase = 3;
++		f.phase_tick = g_host->tick + 1 * 50;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		// the cheapest affordable item of the stock, and one tradeable item of p1's
++		CInventoryOwner* trader = smart_cast<CInventoryOwner*>(giver);
++		CInventoryOwner* me = smart_cast<CInventoryOwner*>(actors[0]);
++		u16 buy = 0xffff, sell = 0xffff;
++		u32 buy_price = 0, sell_price = 0;
++		if (trader && me && trader->GetTrade())
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actors[0]), "fixture-trade");
++			CTrade* trade = trader->GetTrade();
++			trade->StartTradeEx(me);
++			TIItemContainer stock, mine;
++			trader->inventory().AddAvailableItems(stock, true);
++			me->inventory().AddAvailableItems(mine, true);
++			for (CInventoryItem* item : stock)
++			{
++				const u32 price = trade->GetItemPrice(item, false, false);
++				if (price && price <= actors[0]->get_money() && (buy == 0xffff || price < buy_price))
++				{
++					buy = u16(item->object().ID());
++					buy_price = price;
++				}
++			}
++			for (CInventoryItem* item : mine)
++			{
++				const u32 price = trade->GetItemPrice(item, true, false);
++				if (price && !item->IsQuestItem() && item->CanTrade() && sell == 0xffff)
++				{
++					sell = u16(item->object().ID());
++					sell_price = price;
++				}
++			}
++		}
++		g_host->log.line("fixture-trade picked buy=%u buy_price=%u sell=%u sell_price=%u money=%u", u32(buy), buy_price, u32(sell),
++			sell_price, actors[0]->get_money());
++		u16 reasons[2] = {0xffff, 0xffff};
++		for (int round = 0; round < 2; ++round)
++		{
++			const u16 item = round ? sell : buy;
++			if (item == 0xffff)
++			{
++				++f.failures;
++				continue;
++			}
++			fixture_intent(intent, coop::proto::kActionTrade, f.giver, kTradeFixtureOpBase + ++f.ops);
++			intent.params.push_back(round ? 0 : 1);
++			intent.params.push_back(round ? 1 : 0);
++			coop::proto::EntityRef ref;
++			entity_ref_of(item, ref);
++			for (int b = 0; b < 8; ++b)
++				intent.params.push_back(u8(ref.id >> (8 * b)));
++			for (int b = 0; b < 4; ++b)
++				intent.params.push_back(u8(ref.generation >> (8 * b)));
++			const u32 expected = round ? sell_price : buy_price;
++			for (int b = 0; b < 4; ++b)
++				intent.params.push_back(u8(expected >> (8 * b)));
++			reasons[round] = take_trade(p1, intent, result);
++			g_host->log.line("fixture-trade %s item=%u reason=%u money=%u", round ? "sold" : "bought", u32(item),
++				u32(reasons[round]), actors[0]->get_money());
++			if (reasons[round])
++				++f.failures;
++		}
++		fixture_intent(intent, coop::proto::kActionTradeClose, f.giver, kTradeFixtureOpBase + ++f.ops);
++		take_trade_close(p1, intent, result);
++		talk_close(p1, "fixture");
++		g_host->log.line("fixture-trade done phase=traded failures=%u money_p1=%u (no publication: the restart replays the "
++			"journal)", f.failures, actors[0]->get_money());
++		f.phase = 9;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -11722,6 +12384,12 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
+ 		else if (intent->kind == coop::proto::kActionUseObject)
+ 			reason = take_use_object(*link, *intent, result); // S10-T04c
++		else if (intent->kind == coop::proto::kActionTradeOpen)
++			reason = take_trade_open(*link, *intent, result); // S10-T04c
++		else if (intent->kind == coop::proto::kActionTrade)
++			reason = take_trade(*link, *intent, result);
++		else if (intent->kind == coop::proto::kActionTradeClose)
++			reason = take_trade_close(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionTalkSay)
+ 			reason = take_talk_say(*link, *intent, result);
+ 		else if (intent->kind == coop::proto::kActionTalkEnd)
+@@ -12500,6 +13168,41 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 			++g_host->transfers_replayed;
+ 			continue;
+ 		}
++		if (record.kind == coop::store::kRecordTrade)
++		{
++			// S10-T04c: the item moves by the transfer adapter, then both purses
++			TradeRecord trade;
++			if (!decode_trade(record.payload, trade))
++			{
++				g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u", u32(record.kind),
++					record.revision, record.sequence);
++				return false;
++			}
++			for (const PickupRecord& item : trade.items)
++				if (!apply_or_defer(item, "replay", record.revision))
++				{
++					g_host->log.line("recovery-replay-failed kind=%u revision=%I64u sequence=%I64u item_entity=%I64u",
++						u32(record.kind), record.revision, record.sequence, item.item_entity);
++					return false;
++				}
++			const u16 actor_id = engine_id_of_entity(trade.actor_entity), npc_id = engine_id_of_entity(trade.npc_entity);
++			CInventoryOwner* buyer = actor_id != kNoEngineId ? smart_cast<CInventoryOwner*>(Level().Objects.net_Find(actor_id)) : nullptr;
++			CInventoryOwner* seller = npc_id != kNoEngineId ? smart_cast<CInventoryOwner*>(Level().Objects.net_Find(npc_id)) : nullptr;
++			if (buyer)
++				buyer->set_money(trade.actor_money_after, false);
++			if (seller)
++				seller->set_money(trade.npc_money_after, false);
++			g_host->log.line("trade-replayed revision=%I64u items=%u actor=%u money=%u npc=%u buyer=%d seller=%d",
++				record.revision, u32(trade.items.size()), u32(actor_id), trade.actor_money_after, u32(npc_id),
++				buyer ? 1 : 0, seller ? 1 : 0);
++			if (CoopPersistence* p = g_host->persistence)
++			{
++				StoredOutcome s = {1, 0, record.revision};
++				p->remember(trade.player, trade.operation, s);
++			}
++			++g_host->trades_replayed;
++			continue;
++		}
+ 		if (record.kind == coop::store::kRecordDeath)
+ 		{
+ 			DeathRecord death;
+@@ -12653,6 +13356,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	actor_state_tick(); // S10-T04b: the script state of an actor without the installed binder
+ 	info_fixtures();
+ 	task_fixtures(); // S10-T05b
++	trade_fixtures(); // S10-T04c
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+diff --git a/src/xrGame/map_location.cpp b/src/xrGame/map_location.cpp
+index 161ae19..09fc66e 100644
+--- a/src/xrGame/map_location.cpp
++++ b/src/xrGame/map_location.cpp
+@@ -476,7 +476,7 @@ void CMapLocation::UpdateSpot(CUICustomMap* map, CMapSpot* sp, CMapSpotPointer*
+ 	{
+ 		// S03-T02: the exit pointer path is the viewer's; none on the server.
+ 		CActor* viewer = campaign::local_view_actor();
+-		if (!viewer)
++		if (!viewer || !m_owner_se_object) // S10-T04c: a co-op client may not hold the spot's object (demo-1 crash)
+ 			return;
+ 		GameGraph::_GRAPH_ID dest_graph_id = m_owner_se_object->m_tGraphID;
+ 		GameGraph::_GRAPH_ID actor_graph_id = viewer->ai_location().game_vertex_id();
+diff --git a/src/xrGame/trade2.cpp b/src/xrGame/trade2.cpp
+index 634d67d..3a3cc1b 100644
+--- a/src/xrGame/trade2.cpp
++++ b/src/xrGame/trade2.cpp
+@@ -12,6 +12,7 @@
+ #include "script_callback_ex.h"
+ #include "script_game_object.h"
+ #include "game_object_space.h"
++#include "CoopClientLink.h" // S10-T04c: a co-op client's prices are the server's
+ #include "trade_parameters.h"
+ #include "eatable_item.h"
+ 
+@@ -155,6 +156,11 @@ u32 CTrade::GetItemPrice(PIItem pItem, bool b_buying, bool b_free)
+ {
+ 	if (b_free)
+ 		return 0;
++	{
++		u32 server_price = 0;
++		if (campaign::coop_client_trade_price(pItem, b_buying, server_price)) // S10-T04c
++			return server_price;
++	}
+ 
+ 	CArtefact* pArtefact = smart_cast<CArtefact*>(pItem);
+ 
+diff --git a/src/xrGame/ui/UIActorMenu.h b/src/xrGame/ui/UIActorMenu.h
+index 5f4dc37..ab9fcd3 100644
+--- a/src/xrGame/ui/UIActorMenu.h
++++ b/src/xrGame/ui/UIActorMenu.h
+@@ -186,6 +186,8 @@ public:
+ public:
+ 	void SetMenuMode(EMenuMode mode);
+ 	EMenuMode GetMenuMode() { return m_currMenuMode; };
++	void CoopTradeRefresh(); // S10-T04c: the lists from the (server-moved) inventories
++	void CoopTradeRefused(bool money); // S10-T04c: the server's refusal as the window's message box
+ 	void SetActor(CInventoryOwner* io);
+ 	void SetPartner(CInventoryOwner* io);
+ 	CInventoryOwner* GetPartner() { return m_pPartnerInvOwner; };
+diff --git a/src/xrGame/ui/UIActorMenuTrade.cpp b/src/xrGame/ui/UIActorMenuTrade.cpp
+index f7652b2..bdcf480 100644
+--- a/src/xrGame/ui/UIActorMenuTrade.cpp
++++ b/src/xrGame/ui/UIActorMenuTrade.cpp
+@@ -83,6 +83,43 @@ bool is_item_in_list(CUIDragDropListEx* pList, PIItem item)
+ }
+ 
+ #include "../MPPlayersBag.h"
++#include "../CoopClientLink.h" // S10-T04c: the trade on the server
++
++// S10-T04c: a co-op client's buy or sell: the items in the list go to the
++// server as one trade intent; nothing moves here (the server's Reparent
++// events and the purse bring the result, CoopTradeRefresh rebuilds the lists)
++static void coop_send_trade(CUIDragDropListEx* list, bool selling)
++{
++	xr_vector<u16> ids;
++	for (u16 i = 0; i < list->ItemsCount(); ++i)
++	{
++		CUICellItem* cell = list->GetItemIdx(i);
++		if (PIItem item = (PIItem)cell->m_pData)
++			ids.push_back(u16(item->object().ID()));
++		for (u16 k = 0; k < cell->ChildsCount(); ++k)
++			if (PIItem child = (PIItem)cell->Child(k)->m_pData)
++				ids.push_back(u16(child->object().ID()));
++	}
++	campaign::coop_client_trade_perform(selling ? xr_vector<u16>() : ids, selling ? ids : xr_vector<u16>());
++}
++
++void CUIActorMenu::CoopTradeRefresh()
++{
++	if (!m_pActorInvOwner || !m_pPartnerInvOwner)
++		return;
++	m_pTradeActorList->ClearAll(true);
++	m_pTradePartnerList->ClearAll(true);
++	InitInventoryContents(m_pTradeActorBagList);
++	InitPartnerInventoryContents();
++	SetCurrentItem(NULL);
++	UpdatePrices();
++	UpdateItemsPlace();
++}
++
++void CUIActorMenu::CoopTradeRefused(bool money)
++{
++	CallMessageBoxOK(money ? "not_enough_money_actor" : "trade_dont_make");
++}
+ 
+ void CUIActorMenu::FilterActorTradeBagList(int mode)
+ {
+@@ -209,6 +246,7 @@ void CUIActorMenu::ColorizeItem(CUICellItem* itm, bool colorize)
+ 
+ void CUIActorMenu::DeInitTradeMode()
+ {
++	campaign::coop_client_trade_closed(); // S10-T04c
+ 	if (m_actor_trade)
+ 	{
+ 		m_actor_trade->StopTrade();
+@@ -549,6 +587,11 @@ void CUIActorMenu::OnBtnPerformTradeBuy(CUIWindow* w, void* d)
+ 	{
+ 		return;
+ 	}
++	if (campaign::coop_client_trade_active()) // S10-T04c
++	{
++		coop_send_trade(m_pTradePartnerList, false);
++		return;
++	}
+ 
+ 	int actor_money = (int)m_pActorInvOwner->get_money();
+ 	int partner_money = (int)m_pPartnerInvOwner->get_money();
+@@ -607,6 +650,11 @@ void CUIActorMenu::OnBtnPerformTradeBuy(CUIWindow* w, void* d)
+ 
+ void CUIActorMenu::OnBtnPerformTradeSell(CUIWindow* w, void* d)
+ {
++	if (campaign::coop_client_trade_active() && m_pTradeActorList->ItemsCount()) // S10-T04c
++	{
++		coop_send_trade(m_pTradeActorList, true);
++		return;
++	}
+ 	if (m_pTradeActorList->ItemsCount() == 0)
+ 	{
+ 		return;
+diff --git a/src/xrGame/ui/UITalkWnd.cpp b/src/xrGame/ui/UITalkWnd.cpp
+index 98e1e2f..02d5766 100644
+--- a/src/xrGame/ui/UITalkWnd.cpp
++++ b/src/xrGame/ui/UITalkWnd.cpp
+@@ -270,7 +270,7 @@ void CUITalkWnd::Update()
+ 		return; // S10-T04a: hidden this frame
+ 	UpdateCameraDirection(smart_cast<CGameObject*>(m_pOthersInvOwner));
+ 
+-	UITalkDialogWnd->UpdateButtonsLayout(b_disable_break, !m_remote && m_pOthersInvOwner->IsTradeEnabled());
++	UITalkDialogWnd->UpdateButtonsLayout(b_disable_break, m_pOthersInvOwner->IsTradeEnabled()); // S10-T04c: remote too
+ 
+ 	if (playing_sound())
+ 	{
+@@ -447,7 +447,10 @@ void CUITalkWnd::AddAnswer(const shared_str& text, LPCSTR SpeakerName)
+ void CUITalkWnd::SwitchToTrade()
+ {
+ 	if (m_remote)
+-		return; // S10-T04a: trade is S10-T04c
++	{
++		campaign::coop_client_trade_open(m_pOthersInvOwner); // S10-T04c: the window opens when the prices arrive
++		return;
++	}
+ 	if (m_pOurInvOwner->IsTradeEnabled() && m_pOthersInvOwner->IsTradeEnabled())
+ 	{
+ 		CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());

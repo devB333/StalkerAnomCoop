@@ -1,0 +1,1323 @@
+diff --git a/src/xrEngine/x_ray.cpp b/src/xrEngine/x_ray.cpp
+index deb606c..79091f8 100644
+--- a/src/xrEngine/x_ray.cpp
++++ b/src/xrEngine/x_ray.cpp
+@@ -1043,6 +1043,8 @@ extern "C" bool __cdecl xrCoopServer_AfterReload();
+ extern "C" void __cdecl xrCoopServer_Tick(u64 tick);
+ extern "C" bool __cdecl xrCoopServer_ShouldStop();
+ extern "C" void __cdecl xrCoopServer_Stop();
++extern "C" bool __cdecl xrCoopServer_Relaunch(); // S10-T06: a campaign switch: the launcher starts the server again
++static bool g_coop_relaunch = false;
+ extern "C" bool __cdecl xrCampaignLevel_LightingBegin(LPCSTR out_path);
+ extern "C" void __cdecl xrCampaignLevel_LightingTick();
+ extern "C" bool __cdecl xrCampaignLevel_LightingDone();
+@@ -2001,8 +2003,9 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+                 }
+                 if (!reload)
+                 {
++                    g_coop_relaunch = xrCoopServer_Relaunch(); // S10-T06
+                     xrCoopServer_Stop();
+-                    stage("coop-server-stopped");
++                    stage(g_coop_relaunch ? "coop-server-stopped-for-relaunch" : "coop-server-stopped");
+                 }
+             }
+             } while (reload && result == 0);
+@@ -2498,7 +2501,8 @@ static int RunCampaignServerSmoke(LPCSTR command_line)
+     g_campaign_server = false;
+     fprintf(stages, "S02-T02 stage=shutdown-complete\n");
+     fclose(stages);
+-    return result;
++    // S10-T06: a clean stop for a campaign switch ends with 75; its launcher starts the next campaign
++    return (result == 0 && g_coop_relaunch) ? 75 : result;
+ }
+ #endif
+ 
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index d59b9ec..1bc2912 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1988,6 +1988,11 @@ void script_register_context(lua_State* L)
+ 		def("client_sleep", &lua_client_sleep),
+ 		def("relocate", &lua_relocate), // S10-T03d
+ 		def("client_relocate", &lua_client_relocate),
++		def("client_session_list", &coop_client_session_list), // S10-T06: the co-op menu
++		def("client_session_create", &coop_client_session_create),
++		def("client_session_load", &coop_client_session_load),
++		def("client_session_entries", &coop_client_session_entries),
++		def("client_session_version", &coop_client_session_version),
+ 		def("note_fee", &lua_note_fee),
+ 		def("enter_slot", &lua_enter_slot), // S10-T05a
+ 		def("slot_in_world", &lua_slot_in_world),
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index a3434d9..09b2ec4 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -378,6 +378,18 @@ struct Link
+ 		u64 requests = 0, skips_noted = 0, refused = 0;
+ 		bool test_done = false;
+ 	} relocate;
++	// S10-T06: session control from the co-op menu (CampaignEvent 20)
++	struct Session
++	{
++		xr_string entries; // "id|current|label|level|updated" lines, newest first
++		u32 version = 0; // a list arrived
++		bool owner = false;
++		u32 switches = 0, results = 0, refused = 0;
++		// the test driver (config session_script)
++		u32 phase = 0, phase_ms = 0, live_count = 0;
++		coop::proto::Uuid128 first; // the campaign the session started in
++		xr_string first_hex;
++	} session;
+ 	// S10-T03c: party sleep (CampaignEvent 19)
+ 	struct Sleep
+ 	{
+@@ -1060,6 +1072,8 @@ void talk_session_reset(LPCSTR why);
+ void talk_driver_choose();
+ u64 talk_send_say(LPCSTR id, u32 round, u32 step, bool player);
+ void travel_hud(LPCSTR text, int seconds);
++void on_session(const coop::proto::CampaignEvent& event); // S10-T06
++void session_menu_install(); // S10-T06
+ void travel_session_reset();
+ void travel_frame();
+ void travel_result(const Link::PickupPending& p, const coop::proto::ActionResult& result);
+@@ -1134,6 +1148,8 @@ void world_frame()
+ 		if (Device.Paused())
+ 			Device.Pause(FALSE, TRUE, TRUE, "coop-world-live");
+ 		campaign::report_replica("live");
++		session_menu_install(); // S10-T06
++		++g_link->session.live_count;
+ 		{
+ 			// S08-T08: the installed scripts merge ammunition stacks after a move
+ 			// into a box (item_weapon.ammo_aggregation via the inventory UI's
+@@ -3602,6 +3618,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 16: on_upgrade_table(*event); break; // S10-T04f
+ 			case 17: on_upgrade_installed(*event); break; // S10-T04f
+ 			case 18: on_relations(*event); break; // S10-T04d
++			case 20: on_session(*event); break; // S10-T06
+ 			default: break;
+ 			}
+ 		}
+@@ -4029,6 +4046,27 @@ void pickup_result(const coop::proto::ActionResult& result)
+ 					"The travel request was refused.", 5);
+ 				g_link->log.line("relocate-refused reason=%u", u32(r));
+ 			}
++			if (p.action == coop::proto::kActionSession)
++			{
++				// S10-T06: a create, a load or a loadout, in plain words
++				++g_link->session.results;
++				const u16 r = result.reason;
++				const bool ok = result.outcome == coop::proto::ActionOutcome::Accepted;
++				const u8 op = p.params.empty() ? 0 : p.params[0];
++				const bool last_part = op != 2 && op != 4 ? true : (p.params.size() > 2 && p.params[1] + 1 == p.params[2]);
++				if (!ok)
++					++g_link->session.refused;
++				if (!ok || (last_part && op != 1))
++					travel_hud(!ok ? (r == coop::proto::kReasonNotOwner ? "Only the session's owner can load a campaign." :
++						r == coop::proto::kReasonBadChoices ? "The server refused the new game: a choice breaks the creation rules." :
++						r == coop::proto::kReasonSessionBusy ? "Not now: a travel, a sleep or another switch is under way." :
++						r == coop::proto::kReasonUnknownCampaign ? "That campaign is not on the server." :
++						"The server refused the request.") :
++						result.revision == 2 ? "Your loadout is kept for the owner's next new game." :
++						"The server is switching campaigns...", 6);
++				g_link->log.line("session-result op=%u outcome=%u reason=%u revision=%I64u", u32(op), u32(result.outcome),
++					u32(r), result.revision);
++			}
+ 			if ((p.action == coop::proto::kActionSleepRequest || p.action == coop::proto::kActionSleepAnswer) &&
+ 				result.outcome == coop::proto::ActionOutcome::Rejected)
+ 			{
+@@ -6796,6 +6834,315 @@ static void upgrade_result(const Link::PickupPending& p, const coop::proto::Acti
+ 	}
+ }
+ 
++// --- S10-T06: session control from the co-op menu ----------------------------------------------------------------
++// The server's answer to a list (its campaigns) or a switch (the campaign it is relaunched on: this client then
++// proves itself to that campaign when it reconnects).
++void on_session(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	const u8 type = r.get<u8>();
++	if (type == 1)
++	{
++		const u8 owner = r.get<u8>();
++		const u8 n = r.get<u8>();
++		xr_string out;
++		for (u32 i = 0; i < n && r.ok; ++i)
++		{
++			coop::proto::Uuid128 id;
++			id.hi = r.get<u64>();
++			id.lo = r.get<u64>();
++			const u8 current = r.get<u8>();
++			string256 label, level;
++			r.str(label, sizeof(label));
++			r.str(level, sizeof(level));
++			const u32 updated = r.get<u32>();
++			for (char* c = label; *c; ++c)
++				if (*c == '|' || *c == '\n')
++					*c = '/';
++			string512 line;
++			xr_sprintf(line, "%s|%u|%s|%s|%u\n", coop_uuid_hex(id).c_str(), u32(current), label, level, updated);
++			out += line;
++		}
++		if (!r.ok)
++		{
++			g_link->log.line("session-list-malformed bytes=%u", u32(event.payload.size()));
++			return;
++		}
++		g_link->session.entries = out;
++		g_link->session.owner = owner != 0;
++		++g_link->session.version;
++		g_link->log.line("session-list owner=%u campaigns=%u version=%u", u32(owner), u32(n), g_link->session.version);
++		return;
++	}
++	if (type == 2)
++	{
++		coop::proto::Uuid128 id;
++		id.hi = r.get<u64>();
++		id.lo = r.get<u64>();
++		const u8 why = r.get<u8>();
++		string256 label;
++		r.str(label, sizeof(label));
++		if (!r.ok || id.zero())
++		{
++			g_link->log.line("session-switch-malformed");
++			return;
++		}
++		g_link->log.line("session-switch why=%s from=%s to=%s label=\"%s\"", why == 1 ? "create" : "load",
++			coop_uuid_hex(g_link->config.campaign_id).c_str(), coop_uuid_hex(id).c_str(), label);
++		g_link->config.campaign_id = id; // the next connect proves itself to that campaign
++		++g_link->session.switches;
++		string512 text;
++		xr_sprintf(text, why == 1 ? "The owner started a new campaign (%s). Joining it..." :
++			"The owner loaded another campaign (%s). Joining it...", label);
++		travel_hud(text, 15);
++	}
++}
++
++bool session_send(const xr_vector<u8>& params)
++{
++	if (!g_link || !g_link->active || !g_link->client)
++		return false;
++	request_ownership(coop::proto::kActionSession, coop::proto::EntityRef(), params, 0, 0xffffffff, 0, true, "session");
++	return true;
++}
++
++// a create (op 2) or a loadout (op 4) in parts of at most 240 bytes, at most 8
++bool session_send_parts(u8 op, LPCSTR text)
++{
++	const size_t size = text ? xr_strlen(text) : 0;
++	const size_t chunk = 240;
++	const size_t parts = _max(size_t(1), (size + chunk - 1) / chunk);
++	if (parts > 8)
++	{
++		g_link->log.line("session-create-too-long bytes=%u", u32(size));
++		return false;
++	}
++	for (size_t i = 0; i < parts; ++i)
++	{
++		const size_t from = i * chunk, n = _min(chunk, size - _min(size, from));
++		xr_vector<u8> params;
++		params.push_back(op);
++		params.push_back(u8(i));
++		params.push_back(u8(parts));
++		params.push_back(u8(n));
++		params.insert(params.end(), text + from, text + from + n);
++		if (!session_send(params))
++			return false;
++	}
++	g_link->log.line("session-create-sent op=%u bytes=%u parts=%u", u32(op), u32(size), u32(parts));
++	return true;
++}
++
++void session_lua(LPCSTR chunk, LPCSTR name)
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	if (luaL_loadbuffer(L, chunk, xr_strlen(chunk), name) == 0)
++	{
++		if (lua_pcall(L, 0, 0, 0) != 0)
++		{
++			g_link->log.line("session-lua-error chunk=%s error=%s", name, lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++			lua_pop(L, 1);
++		}
++	}
++	else
++	{
++		g_link->log.line("session-lua-load-error chunk=%s error=%s", name, lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++		lua_pop(L, 1);
++	}
++}
++
++// The installed menus, on a co-op client (decision T01-17): New game opens the standard creation screen and its
++// Start sends the choices to the server (the owner's create; the partner's loadout, T01-19); Load lists the
++// server's campaigns in the standard load window and its Load button asks the server for that campaign. Joining
++// is the client's start: it connects to its configured server.
++void session_menu_install()
++{
++	LPCSTR chunk =
++		"if not __coop_session_menu and campaign and campaign.client_session_create then "
++		"local keys = {'new_game_difficulty','new_game_economy','new_game_economy_treasure','new_game_hardcore_mode',"
++		"'new_game_hardcore_mode_lives','new_game_hardcore_mode_regenerate','new_game_story_mode','new_game_azazel_mode',"
++		"'new_game_survival_mode','new_game_campfire_mode','new_game_conditions_mode','new_game_opened_routes',"
++		"'new_game_warfare','new_game_timer_mode','new_game_character_name','new_game_faction','new_game_icon',"
++		"'new_game_loadout','new_game_map','new_game_money'} "
++		"coop_session_choices = function() "
++		"  local t = {} "
++		"  for _, k in ipairs(keys) do "
++		"    local v = axr_main.config:r_value('character_creation', k) "
++		"    if v ~= nil and v ~= '' then t[#t + 1] = k .. '=' .. tostring(v) end "
++		"  end "
++		"  return table.concat(t, '\\n') "
++		"end "
++		"local mm_ok, MM = pcall(function() return ui_main_menu end) "
++		"if mm_ok and type(MM) == 'table' and MM.main_menu then "
++		"  MM.main_menu.StartGame = function(self) "
++		"    campaign.client_session_create(coop_session_choices()) "
++		"    exec_console_cmd('main_menu off') "
++		"  end "
++		"  MM.main_menu.OnButton_load_clicked = function(self) "
++		"    if self.load_dlg == nil then self.load_dlg = ui_load_dialog.UILoadDialog() self.load_dlg.owner = self end "
++		"    campaign.client_session_list() "
++		"    self.load_dlg:FillList() "
++		"    self.load_dlg:ShowDialog(true) "
++		"    self:HideDialog() "
++		"    self:Show(false) "
++		"  end "
++		"end "
++		"local ld_ok, LD = pcall(function() return ui_load_dialog end) "
++		"if ld_ok and type(LD) == 'table' and LD.UILoadDialog then "
++		"  local D = LD.UILoadDialog "
++		"  local function entries() "
++		"    local t = {} "
++		"    for line in string.gmatch(campaign.client_session_entries() or '', '[^\\n]+') do "
++		"      local id, cur, label, lvl = string.match(line, '^([^|]*)|([^|]*)|([^|]*)|([^|]*)|') "
++		"      if id then t[#t + 1] = {id = id, current = cur == '1', label = label, level = lvl} end "
++		"    end "
++		"    return t "
++		"  end "
++		"  D.FillList = function(self) "
++		"    self.list_box:RemoveAll() "
++		"    self.coop_entries = {} "
++		"    self.coop_version = campaign.client_session_version() "
++		"    for _, e in ipairs(entries()) do "
++		"      local text = e.label .. (e.current and ' (playing)' or '') "
++		"      self.coop_entries[text] = e "
++		"      self:AddItemToList(text, '[' .. e.level .. ']') "
++		"    end "
++		"  end "
++		"  D.Update = function(self) "
++		"    CUIScriptWnd.Update(self) "
++		"    if self.coop_version ~= campaign.client_session_version() then self:FillList() end "
++		"  end "
++		"  D.OnListItemClicked = function(self) "
++		"    local item = self.list_box:GetSelectedItem() "
++		"    local e = item and self.coop_entries and self.coop_entries[item.fn:GetText()] "
++		"    self.file_caption:SetText(e and e.label or '') "
++		"    self.file_data:SetText(e and (e.level .. (e.current and ' - the campaign you are playing' or '')) or '') "
++		"  end "
++		"  D.OnButton_load_clicked = function(self) "
++		"    local item = self.list_box:GetSelectedItem() "
++		"    local e = item and self.coop_entries and self.coop_entries[item.fn:GetText()] "
++		"    if not e or e.current then return end "
++		"    campaign.client_session_load(e.id) "
++		"    self:OnButton_back_clicked() "
++		"    exec_console_cmd('main_menu off') "
++		"  end "
++		"  D.OnButton_del_clicked = function(self) end "
++		"end "
++		"__coop_session_menu = true "
++		"end";
++	session_lua(chunk, "coop_session_menu");
++	g_link->log.line("session-menu-installed");
++}
++
++// The creation screen's Start as the test driver does it: the choices written where the screen writes them
++// (axr_main.config [character_creation]), then the installed menu's StartGame (the co-op override above).
++void session_driver_create(LPCSTR faction, LPCSTR map, LPCSTR name, LPCSTR loadout)
++{
++	string2048 chunk;
++	xr_sprintf(chunk,
++		"local c = axr_main.config "
++		"c:w_value('character_creation','new_game_difficulty',1) "
++		"c:w_value('character_creation','new_game_economy',1) "
++		"c:w_value('character_creation','new_game_economy_treasure',1) "
++		"c:w_value('character_creation','new_game_story_mode',true) "
++		"c:w_value('character_creation','new_game_character_name','%s') "
++		"c:w_value('character_creation','new_game_faction','%s') "
++		"c:w_value('character_creation','new_game_map','%s') "
++		"c:w_value('character_creation','new_game_loadout','%s') "
++		"c:w_value('character_creation','new_game_money',99999) "
++		"ui_main_menu.main_menu.StartGame(nil)",
++		name, faction, map, loadout);
++	session_lua(chunk, "coop_session_driver");
++}
++
++const char* const kSessionOwnerLoadout =
++	"helm_resp,novice_outfit,wpn_pm,wpn_knife,stalker_patch,bolt,bread,device_pda_1,device_flashlight,itm_backpack,"
++	"box_matches,flask,wpn_bm16,kolbasa,ration_ru";
++const char* const kSessionPartnerLoadout =
++	"helm_resp,novice_outfit,wpn_pm,wpn_knife,stalker_patch,bolt,bread,device_pda_1,device_flashlight,itm_backpack,"
++	"box_matches,flask,detector_geiger,vodka,kolbasa"; // the faction's own bread line overrides the shared one
++
++// S10-T06 driver (config session_script): 1 the owner, 2 the partner
++void session_driver()
++{
++	Link::Session& s = g_link->session;
++	const u32 script = g_link->config.session_script;
++	if (!script || s.phase >= 99 || g_link->world != WorldLive || !g_actor)
++		return;
++	const u32 now = g_link->wall.GetElapsed_ms();
++	auto next = [&s, now](u32 phase, u32 wait_ms) {
++		s.phase = phase;
++		s.phase_ms = now + wait_ms;
++		g_link->log.line("session-driver phase=%u", phase);
++	};
++	if (s.phase == 0)
++	{
++		s.first = g_link->config.campaign_id;
++		s.first_hex = coop_uuid_hex(s.first).c_str();
++		next(1, script == 1 ? 60000 : 10000);
++		return;
++	}
++	if (now < s.phase_ms)
++		return;
++	if (script == 2)
++	{
++		if (s.phase == 1)
++		{
++			session_driver_create("bandit", "rookie_village", "Partner_Two", kSessionPartnerLoadout); // kept as its loadout
++			next(2, 6000);
++		}
++		else if (s.phase == 2)
++		{
++			campaign::coop_client_session_load(s.first_hex.c_str()); // refused: not the owner
++			next(99, 0);
++		}
++		return;
++	}
++	switch (s.phase)
++	{
++	case 1:
++		campaign::coop_client_session_list();
++		next(2, 5000);
++		break;
++	case 2:
++		// over the points and an item the faction is not offered: refused
++		session_driver_create("stalker", "skadovsk_shipwreck", "Owner_One",
++			"helm_resp,novice_outfit,wpn_svt40,wpn_svt40,wpn_ump45,wpn_gauss");
++		next(3, 8000);
++		break;
++	case 3:
++		session_driver_create("stalker", "skadovsk_shipwreck", "Owner_One", kSessionOwnerLoadout);
++		next(4, 0);
++		break;
++	case 4:
++		// on the new campaign once its world is live
++		if (g_link->config.campaign_id != s.first && s.live_count >= 2)
++			next(5, 45000);
++		break;
++	case 5:
++		campaign::coop_client_session_list();
++		next(6, 5000);
++		break;
++	case 6:
++		campaign::coop_client_session_load(s.first_hex.c_str());
++		next(7, 0);
++		break;
++	case 7:
++		if (g_link->config.campaign_id == s.first && s.live_count >= 3)
++			next(8, 20000);
++		break;
++	case 8:
++		campaign::coop_client_session_list();
++		g_link->log.line("session-driver done campaign=%s lives=%u switches=%u", s.first_hex.c_str(), s.live_count,
++			s.switches);
++		next(99, 0);
++		break;
++	default: break;
++	}
++}
++
+ } // namespace
+ 
+ namespace campaign
+@@ -6824,6 +7171,34 @@ bool coop_client_sleep_request(int hours)
+ 	return sleep_request(hours);
+ }
+ 
++// S10-T06: the co-op menu's session commands
++bool coop_client_session_list()
++{
++	return session_send(xr_vector<u8>(1, 1));
++}
++
++bool coop_client_session_create(LPCSTR choices)
++{
++	return g_link && g_link->active && session_send_parts(2, choices);
++}
++
++bool coop_client_session_load(LPCSTR id_hex)
++{
++	coop::proto::Uuid128 id;
++	if (!id_hex || !coop::session::uuid_from_hex(id_hex, id) || id.zero())
++		return false;
++	xr_vector<u8> params(1, 3);
++	for (int b = 0; b < 8; ++b)
++		params.push_back(u8(id.hi >> (8 * b)));
++	for (int b = 0; b < 8; ++b)
++		params.push_back(u8(id.lo >> (8 * b)));
++	g_link->log.line("session-load-sent id=%s", id_hex);
++	return session_send(params);
++}
++
++LPCSTR coop_client_session_entries() { return g_link ? g_link->session.entries.c_str() : ""; }
++u32 coop_client_session_version() { return g_link ? g_link->session.version : 0; }
++
+ bool coop_client_upgrade_open(CInventoryOwner* partner)
+ {
+ 	if (!g_link || !g_link->active)
+@@ -7415,6 +7790,7 @@ void coop_client_frame()
+ 	}
+ 	inject_step();
+ 	world_frame();
++	session_driver(); // S10-T06
+ 	// S07-T05: the reconnect, once the stale world is gone
+ 	if (g_link->reconnect_at_ms && !g_link->quitting && g_link->world == WorldMenu &&
+ 		g_link->wall.GetElapsed_ms() >= g_link->reconnect_at_ms)
+diff --git a/src/xrGame/CoopClientLink.h b/src/xrGame/CoopClientLink.h
+index 78abfdc..25db7ca 100644
+--- a/src/xrGame/CoopClientLink.h
++++ b/src/xrGame/CoopClientLink.h
+@@ -81,6 +81,12 @@ void coop_client_trade_closed();
+ bool coop_client_upgrade_open(CInventoryOwner* partner);
+ // S10-T03c: the sleep window's request (the partner is asked); false off a co-op client
+ bool coop_client_sleep_request(int hours);
++// S10-T06: the co-op menu's session commands (kind 27) and the server's campaign list
++bool coop_client_session_list();
++bool coop_client_session_create(LPCSTR choices);
++bool coop_client_session_load(LPCSTR id_hex);
++LPCSTR coop_client_session_entries();
++u32 coop_client_session_version();
+ // S10-T03d: a script's level change or jump of the own actor on a co-op client
+ // (fast travel, the backpack): a party travel request to that point instead
+ bool coop_client_relocate(const Fvector& position, u32 level_vertex, u16 game_vertex, u8 source);
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 4e172f4..d67e11e 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -202,6 +202,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.travel_rejoin_delay = ini.line_exist("coop", "travel_rejoin_delay") ? ini.r_u32("coop", "travel_rejoin_delay") : 0; // S09-T04
+ 		out.travel_load_fail = ini.line_exist("coop", "travel_load_fail") ? ini.r_u32("coop", "travel_load_fail") : 0;
+ 		out.relocate_test = ini.line_exist("coop", "relocate_test") ? ini.r_u32("coop", "relocate_test") : 0; // S10-T03d
++		out.session_script = ini.line_exist("coop", "session_script") ? ini.r_u32("coop", "session_script") : 0; // S10-T06
+ 		if (ok && !absolute(out.key_path))
+ 		{
+ 			Msg("! S05-T01 coop config: key must be an absolute path");
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index ff6bdad..dca007d 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -170,6 +170,8 @@ struct CoopConfig
+ 	                        // level, then the right one
+ 	u32 travel_rejoin_delay; // S09-T04 test driver: seconds after a committed travel until the client reconnects (0: 2 s)
+ 	u32 travel_load_fail; // S09-T04 test driver: 1 terminates the process when the destination world is received
++	u32 session_script; // S10-T06 test driver: 1 the owner (a refused create, a new game, then the first campaign
++	                    // loaded back), 2 the partner (its loadout, then a refused load); 0 off
+ 	                  // by itself (0: the player confirms with the use key); also sends one early (refused) request
+ };
+ 
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 10b953b..d6d47a3 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -917,9 +917,28 @@ struct Host
+ 		u32 dest_lvid = 0;
+ 		u16 dest_gvid = 0, npc = 0xffff;
+ 	} relocate_fixture;
++	// S10-T06: session control from the co-op menu (decisions T01-17…T01-19)
++	struct Session
++	{
++		bool owner_known = false;
++		coop::proto::Uuid128 owner; // the first key this server accepted (app data coop-owner.txt)
++		string_path profile = "", fsgame = ""; // the served campaign's launch files (the command line)
++		struct Parts
++		{
++			u8 op = 0, count = 0;
++			u32 got = 0; // bit per part received
++			xr_string text[8];
++		} parts[2]; // per roster slot: a create or loadout arriving in parts
++		u32 relaunch_at_ms = 0; // a switch announced: the stop follows
++		coop::proto::Uuid128 next; // the campaign the relaunch serves
++		u32 lists = 0, creates = 0, loads = 0, loadouts = 0, refused = 0;
++	} session;
+ };
+ 
+ Host* g_host = nullptr;
++static bool s_coop_relaunch = false; // S10-T06: the process ends with kRelaunchExitCode for its launcher
++struct PlayerLink;
++void session_owner_join(const PlayerLink& link); // S10-T06
+ 
+ PlayerId player_of(const coop::proto::Uuid128& id)
+ {
+@@ -17294,9 +17313,722 @@ void on_joined(const coop::session::SessionEvent& e)
+ 		"attach=%s",
+ 		coop_uuid_hex(e.player).c_str(), link->name.c_str(), u32(e.slot), u32(link->ref.slot), link->ref.generation,
+ 		session, e.resumed ? 1 : 0, refusal_name(attached));
++	session_owner_join(*link); // S10-T06
+ 	give_actor(*link);
+ }
+ 
++// --- S10-T06: session control from the co-op menu (decisions T01-17…T01-19) ------------------------------------
++// The owner is the first key this server accepted (app data coop-owner.txt; T01-18). The campaign library is the
++// app data folder campaigns\<id>\campaign.ltx, one per campaign this server served or created. A create or a load
++// is carried out as a clean stop and a relaunch: the server writes the chosen campaign's launch files into
++// coop-relaunch.ltx, tells every client the new campaign id (CampaignEvent 20), stops (the clean stop publishes
++// a checkpoint) and ends with kRelaunchExitCode; its launcher (tools/Run-CoopSession.ps1,
++// tools/Start-CoopServer.ps1) starts it again on them. A process serves one campaign from start to end, so no
++// state of one campaign can leak into the next.
++const int kRelaunchExitCode = 75;
++const u16 kEventSession = 20;
++
++struct CampaignEntry
++{
++	coop::proto::Uuid128 id;
++	xr_string label, level, profile, fsgame;
++	u32 created = 0, updated = 0;
++};
++
++static u32 session_now() { return u32(_time64(nullptr)); }
++
++static xr_string session_num(int v)
++{
++	string32 n;
++	xr_sprintf(n, "%d", v);
++	return n;
++}
++
++static xr_string session_path(LPCSTR name)
++{
++	string_path root;
++	FS.update_path(root, "$app_data_root$", "");
++	xr_string p = root;
++	if (!p.empty() && p.back() != '\\')
++		p += '\\';
++	return p + name;
++}
++
++static bool session_read(const xr_string& path, xr_string& out)
++{
++	FILE* f = fopen(path.c_str(), "rb");
++	if (!f)
++		return false;
++	out.clear();
++	char buffer[4096];
++	size_t n;
++	while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0)
++		out.append(buffer, n);
++	fclose(f);
++	return true;
++}
++
++// written whole or not at all (a temporary file renamed over the old one)
++static bool session_write(const xr_string& path, const xr_string& text)
++{
++	const xr_string temp = path + ".tmp";
++	FILE* f = fopen(temp.c_str(), "wb");
++	if (!f)
++		return false;
++	const bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
++	fclose(f);
++	return ok && MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
++}
++
++static xr_string session_trim(const xr_string& s)
++{
++	size_t a = 0, b = s.size();
++	while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n'))
++		++a;
++	while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n'))
++		--b;
++	return s.substr(a, b - a);
++}
++
++// "key = value" lines (one section or none) into a map
++static void session_parse(const xr_string& text, xr_map<xr_string, xr_string>& out)
++{
++	size_t at = 0;
++	while (at < text.size())
++	{
++		size_t end = text.find('\n', at);
++		if (end == xr_string::npos)
++			end = text.size();
++		const xr_string line = text.substr(at, end - at);
++		at = end + 1;
++		const size_t eq = line.find('=');
++		if (eq == xr_string::npos)
++			continue;
++		const xr_string key = session_trim(line.substr(0, eq));
++		if (!key.empty() && key[0] != ';' && key[0] != '[')
++			out[key] = session_trim(line.substr(eq + 1));
++	}
++}
++
++static xr_string campaign_dir(const coop::proto::Uuid128& id)
++{
++	return session_path("campaigns\\") + coop_uuid_hex(id).c_str();
++}
++
++static bool campaign_write(const CampaignEntry& e)
++{
++	CreateDirectoryA(session_path("campaigns").c_str(), nullptr);
++	const xr_string dir = campaign_dir(e.id);
++	CreateDirectoryA(dir.c_str(), nullptr);
++	string4096 text;
++	xr_sprintf(text, "[campaign]\nid = %s\nlabel = %s\nlevel = %s\nprofile = %s\nfsgame = %s\ncreated = %u\nupdated = %u\n",
++		coop_uuid_hex(e.id).c_str(), e.label.c_str(), e.level.c_str(), e.profile.c_str(), e.fsgame.c_str(), e.created,
++		e.updated);
++	return session_write(dir + "\\campaign.ltx", text);
++}
++
++static bool campaign_read(const xr_string& file, CampaignEntry& e)
++{
++	xr_string text;
++	if (!session_read(file, text))
++		return false;
++	xr_map<xr_string, xr_string> kv;
++	session_parse(text, kv);
++	if (!coop::session::uuid_from_hex(kv["id"].c_str(), e.id) || e.id.zero())
++		return false;
++	e.label = kv["label"];
++	e.level = kv["level"];
++	e.profile = kv["profile"];
++	e.fsgame = kv["fsgame"];
++	e.created = u32(atoi(kv["created"].c_str()));
++	e.updated = u32(atoi(kv["updated"].c_str()));
++	return true;
++}
++
++// newest first
++static void campaign_list(xr_vector<CampaignEntry>& out)
++{
++	out.clear();
++	WIN32_FIND_DATAA found;
++	const xr_string pattern = session_path("campaigns\\*");
++	HANDLE h = FindFirstFileA(pattern.c_str(), &found);
++	if (h == INVALID_HANDLE_VALUE)
++		return;
++	do
++	{
++		if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || found.cFileName[0] == '.')
++			continue;
++		CampaignEntry e;
++		if (campaign_read(session_path("campaigns\\") + found.cFileName + "\\campaign.ltx", e))
++			out.push_back(e);
++	} while (FindNextFileA(h, &found));
++	FindClose(h);
++	std::sort(out.begin(), out.end(), [](const CampaignEntry& a, const CampaignEntry& b) { return a.updated > b.updated; });
++}
++
++// a path after -<key> on the command line (quoted or not)
++static void session_arg(LPCSTR key, LPSTR out, size_t size)
++{
++	LPCSTR at = strstr(GetCommandLineA(), key);
++	if (!at)
++		return;
++	at += xr_strlen(key);
++	while (*at == ' ')
++		++at;
++	const bool quoted = *at == '"';
++	if (quoted)
++		++at;
++	size_t n = 0;
++	while (at[n] && (quoted ? at[n] != '"' : at[n] != ' ') && n + 1 < size)
++		++n;
++	strncpy_s(out, size, at, n);
++}
++
++static bool session_is_owner(const PlayerLink& link)
++{
++	return g_host->session.owner_known && g_host->session.owner == link.player;
++}
++
++// The served campaign joins the library (or is updated there); the owner is read.
++void session_start()
++{
++	Host::Session& s = g_host->session;
++	session_arg("-coop-config ", s.profile, sizeof(s.profile));
++	session_arg("-fsltx ", s.fsgame, sizeof(s.fsgame));
++	xr_string text;
++	if (session_read(session_path("coop-owner.txt"), text) &&
++		coop::session::uuid_from_hex(session_trim(text).c_str(), s.owner) && !s.owner.zero())
++		s.owner_known = true;
++	CampaignEntry e;
++	if (!campaign_read(campaign_dir(g_host->config.campaign_id) + "\\campaign.ltx", e))
++	{
++		e.id = g_host->config.campaign_id;
++		string256 label;
++		if (g_host->config.new_game)
++			xr_sprintf(label, "New game (%s)", g_host->config.new_game_faction);
++		else
++			xr_sprintf(label, "Saved game %s", g_host->config.save_name);
++		e.label = label;
++		e.created = session_now();
++	}
++	e.profile = s.profile;
++	e.fsgame = s.fsgame;
++	e.level = g_pGameLevel ? Level().name().c_str() : "";
++	e.updated = session_now();
++	const bool written = campaign_write(e);
++	g_host->log.line("session-campaign id=%s label=\"%s\" level=%s written=%d owner=%s", coop_uuid_hex(e.id).c_str(),
++		e.label.c_str(), e.level.c_str(), written ? 1 : 0,
++		s.owner_known ? coop_uuid_hex(s.owner).c_str() : "none");
++}
++
++// the level and time of the served campaign, at its stop
++void session_stop()
++{
++	CampaignEntry e;
++	if (!campaign_read(campaign_dir(g_host->config.campaign_id) + "\\campaign.ltx", e))
++		return;
++	if (g_pGameLevel)
++		e.level = Level().name().c_str();
++	e.updated = session_now();
++	campaign_write(e);
++}
++
++// T01-18: the first key a fresh server accepts owns the session, for every campaign it serves
++void session_owner_join(const PlayerLink& link)
++{
++	Host::Session& s = g_host->session;
++	if (s.owner_known)
++		return;
++	s.owner = link.player;
++	s.owner_known = true;
++	const bool written = session_write(session_path("coop-owner.txt"), coop_uuid_hex(link.player).c_str());
++	g_host->log.line("session-owner player=%s slot=%u first=1 written=%d", coop_uuid_hex(link.player).c_str(),
++		u32(link.ref.slot), written ? 1 : 0);
++}
++
++static bool session_ident(const xr_string& v, size_t max, bool upper)
++{
++	if (v.empty() || v.size() > max)
++		return false;
++	for (char c : v)
++		if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || (upper && c >= 'A' && c <= 'Z')))
++			return false;
++	return true;
++}
++
++// A loadout as the creation screen allows it (ui_mm_faction_select.script LoadLoadout, 1206-1290): every item from
++// the faction's [<faction>_loadout] list in items\settings\new_game_loadouts.ltx, at most its count, the always-given
++// ones ("false") free and the picked ones ("true") within [points] total_points_eco_<economy>.
++static bool session_check_loadout(LPCSTR faction, int economy, const xr_string& list, xr_string& why)
++{
++	string_path path;
++	FS.update_path(path, "$game_config$", "items\\settings\\new_game_loadouts.ltx");
++	CInifile itm(path, TRUE, TRUE, FALSE);
++	string128 section;
++	xr_sprintf(section, "%s_loadout", faction);
++	if (!itm.section_exist(section))
++	{
++		why = "no loadout list for the faction";
++		return false;
++	}
++	xr_map<xr_string, int> kit, pick;
++	xr_map<xr_string, float> points;
++	const u32 lines = itm.line_count(section);
++	for (u32 i = 0; i < lines; ++i)
++	{
++		LPCSTR name = nullptr, value = nullptr;
++		if (!itm.r_line(section, int(i), &name, &value) || !name || !value || !pSettings->section_exist(name))
++			continue;
++		string256 v;
++		xr_strcpy(v, value);
++		string64 flag = "", count = "", pts = "", eco = "";
++		_GetItem(v, 0, flag);
++		_GetItem(v, 1, count);
++		_GetItem(v, 2, pts);
++		_GetItem(v, 3, eco);
++		if (eco[0] && economy > atoi(eco))
++			continue;
++		if (!xr_strcmp(flag, "false"))
++			kit[name] += atoi(count);
++		else if (!xr_strcmp(flag, "true"))
++		{
++			pick[name] += atoi(count);
++			points[name] = float(atof(pts));
++		}
++	}
++	string64 budget_key;
++	xr_sprintf(budget_key, "total_points_eco_%d", economy);
++	const float budget = itm.line_exist("points", budget_key) ? itm.r_float("points", budget_key) : 1000.f;
++	float used = 0.f;
++	u32 items = 0;
++	string4096 copy;
++	xr_strcpy(copy, list.c_str());
++	for (LPSTR name = strtok(copy, ", \t"); name; name = strtok(nullptr, ", \t"))
++	{
++		if (++items > 64)
++		{
++			why = "more than 64 items";
++			return false;
++		}
++		if (kit[name] > 0)
++			--kit[name];
++		else if (pick[name] > 0)
++		{
++			--pick[name];
++			used += points[name];
++		}
++		else
++		{
++			why = xr_string("not offered to the faction: ") + name;
++			return false;
++		}
++	}
++	if (used > budget + 0.01f)
++	{
++		string128 b;
++		xr_sprintf(b, "over the points: %.0f of %.0f", used, budget);
++		why = b;
++		return false;
++	}
++	return true;
++}
++
++// The creation screen's choices (OnStartGame, 1683-1764), checked by its rules; the creator's money is the
++// faction's ([<faction>_money] money), whatever the client sent.
++static bool session_check_creation(const xr_map<xr_string, xr_string>& kv, xr_vector<std::pair<xr_string, xr_string>>& clean,
++	xr_string& faction, xr_string& map, int& money, xr_string& why)
++{
++	auto get = [&kv](LPCSTR k) {
++		auto it = kv.find(k);
++		return it == kv.end() ? xr_string() : it->second;
++	};
++	faction = get("new_game_faction");
++	map = get("new_game_map");
++	const xr_string name = get("new_game_character_name");
++	if (!session_ident(faction, 64, false) || !session_ident(map, 64, false))
++	{
++		why = "no faction or start";
++		return false;
++	}
++	if (!session_ident(name, 32, true))
++	{
++		why = "the name is not 1-32 letters, digits or _";
++		return false;
++	}
++	string_path path;
++	FS.update_path(path, "$game_config$", "plugins\\new_game_start_locations.ltx");
++	CInifile starts(path, TRUE, TRUE, FALSE);
++	string128 section;
++	xr_sprintf(section, "%s_start_locations", faction.c_str());
++	if (!starts.section_exist(section) || !starts.line_exist(section, map.c_str()))
++	{
++		why = "the start is not one of the faction's";
++		return false;
++	}
++	const int economy = _max(1, _min(9, atoi(get("new_game_economy").c_str())));
++	const int difficulty = _max(1, _min(9, atoi(get("new_game_difficulty").c_str())));
++	if (!session_check_loadout(faction.c_str(), economy, get("new_game_loadout"), why))
++		return false;
++	FS.update_path(path, "$game_config$", "items\\settings\\new_game_loadouts.ltx");
++	CInifile itm(path, TRUE, TRUE, FALSE);
++	xr_sprintf(section, "%s_money", faction.c_str());
++	money = itm.line_exist(section, "money") ? iFloor(itm.r_float(section, "money")) : 2000;
++	clean.clear();
++	clean.emplace_back("new_game_difficulty", session_num(difficulty));
++	clean.emplace_back("new_game_economy", session_num(economy));
++	clean.emplace_back("new_game_economy_treasure", session_num(economy));
++	for (LPCSTR flag : {"new_game_hardcore_mode", "new_game_story_mode", "new_game_azazel_mode", "new_game_survival_mode",
++			 "new_game_campfire_mode", "new_game_conditions_mode", "new_game_opened_routes", "new_game_warfare"})
++	{
++		const xr_string v = get(flag);
++		if (v == "true" || v == "1")
++			clean.emplace_back(flag, "true");
++	}
++	for (LPCSTR number : {"new_game_hardcore_mode_lives", "new_game_hardcore_mode_regenerate", "new_game_timer_mode"})
++	{
++		const xr_string v = get(number);
++		if (!v.empty())
++			clean.emplace_back(number, session_num(_max(0, _min(100000, atoi(v.c_str())))));
++	}
++	clean.emplace_back("new_game_character_name", name);
++	clean.emplace_back("new_game_faction", faction);
++	const xr_string icon = get("new_game_icon");
++	if (session_ident(icon, 64, true))
++		clean.emplace_back("new_game_icon", icon);
++	clean.emplace_back("new_game_loadout", get("new_game_loadout"));
++	clean.emplace_back("new_game_map", map);
++	clean.emplace_back("new_game_money", session_num(money));
++	return true;
++}
++
++// the server's own axr_options.ltx (axr_main.config: $game_config$, S10-T03f) gets the creator's choices
++static bool session_write_creation(const xr_vector<std::pair<xr_string, xr_string>>& clean)
++{
++	string_path path;
++	FS.update_path(path, "$game_config$", "axr_options.ltx");
++	xr_string text, out;
++	session_read(path, text);
++	bool skipping = false;
++	size_t at = 0;
++	while (at < text.size())
++	{
++		size_t end = text.find('\n', at);
++		if (end == xr_string::npos)
++			end = text.size();
++		const xr_string line = text.substr(at, end - at);
++		at = end + 1;
++		const xr_string t = session_trim(line);
++		if (!t.empty() && t[0] == '[')
++			skipping = t.compare(0, 20, "[character_creation]") == 0;
++		if (!skipping)
++			out += line + "\n";
++	}
++	out += "[character_creation]\n";
++	for (const auto& kv : clean)
++		out += kv.first + " = " + kv.second + "\n";
++	return session_write(path, out);
++}
++
++// a launch file of the served campaign with some keys replaced (a profile) or one line (fsgame's $game_saves$)
++static xr_string session_rewrite(const xr_string& text, const xr_vector<std::pair<xr_string, xr_string>>& keys,
++	LPCSTR after_section)
++{
++	xr_string out;
++	size_t at = 0;
++	bool inserted = !after_section;
++	while (at < text.size())
++	{
++		size_t end = text.find('\n', at);
++		if (end == xr_string::npos)
++			end = text.size();
++		const xr_string line = text.substr(at, end - at);
++		at = end + 1;
++		const size_t eq = line.find('=');
++		const xr_string key = eq == xr_string::npos ? xr_string() : session_trim(line.substr(0, eq));
++		bool replaced = false;
++		for (const auto& kv : keys)
++			if (key == kv.first)
++				replaced = true;
++		if (!replaced)
++			out += line + "\n";
++		if (!inserted && session_trim(line) == after_section)
++		{
++			for (const auto& kv : keys)
++				out += kv.first + " = " + kv.second + "\n";
++			inserted = true;
++		}
++	}
++	if (!inserted || !after_section)
++		for (const auto& kv : keys)
++			out += kv.first + " = " + kv.second + "\n";
++	return out;
++}
++
++static std::vector<u8> session_id_bytes(const coop::proto::Uuid128& id)
++{
++	std::vector<u8> p;
++	for (int b = 0; b < 8; ++b)
++		p.push_back(u8(id.hi >> (8 * b)));
++	for (int b = 0; b < 8; ++b)
++		p.push_back(u8(id.lo >> (8 * b)));
++	return p;
++}
++
++// Every client is told the next campaign, then the server stops and is relaunched on it.
++static void session_announce(const CampaignEntry& next, u8 why)
++{
++	Host::Session& s = g_host->session;
++	string4096 relaunch;
++	xr_sprintf(relaunch, "[relaunch]\ncampaign = %s\nprofile = %s\nfsgame = %s\nwhy = %s\n", coop_uuid_hex(next.id).c_str(),
++		next.profile.c_str(), next.fsgame.c_str(), why == 1 ? "create" : "load");
++	const bool written = session_write(session_path("coop-relaunch.ltx"), relaunch);
++	std::vector<u8> p;
++	put_u8(p, 2);
++	const std::vector<u8> id = session_id_bytes(next.id);
++	p.insert(p.end(), id.begin(), id.end());
++	put_u8(p, why);
++	put_str(p, next.label.c_str());
++	u32 told = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && link.session)
++		{
++			queue_event(link, kEventSession, p);
++			++told;
++		}
++	s.next = next.id;
++	s.relaunch_at_ms = g_host->wall.GetElapsed_ms() + 2000; // the notice goes out first
++	g_host->log.line("session-switch why=%s from=%s to=%s label=\"%s\" told=%u relaunch_file=%d",
++		why == 1 ? "create" : "load", coop_uuid_hex(g_host->config.campaign_id).c_str(), coop_uuid_hex(next.id).c_str(),
++		next.label.c_str(), told, written ? 1 : 0);
++}
++
++static bool session_busy()
++{
++	return g_host->session.relaunch_at_ms || g_host->travel.exec ||
++		(g_host->sleep.coordinator && g_host->sleep.coordinator->live());
++}
++
++static void session_send_list(PlayerLink& link)
++{
++	xr_vector<CampaignEntry> entries;
++	campaign_list(entries);
++	std::vector<u8> p;
++	put_u8(p, 1);
++	put_u8(p, session_is_owner(link) ? 1 : 0);
++	const u32 n = _min(u32(entries.size()), 8u);
++	put_u8(p, u8(n));
++	for (u32 i = 0; i < n; ++i)
++	{
++		const CampaignEntry& e = entries[i];
++		const std::vector<u8> id = session_id_bytes(e.id);
++		p.insert(p.end(), id.begin(), id.end());
++		put_u8(p, e.id == g_host->config.campaign_id ? 1 : 0);
++		put_str(p, e.label.substr(0, 60).c_str());
++		put_str(p, e.level.substr(0, 32).c_str());
++		put_u32(p, e.updated);
++	}
++	queue_event(link, kEventSession, p);
++	++g_host->session.lists;
++	g_host->log.line("session-list slot=%u owner=%d campaigns=%u", u32(link.ref.slot), session_is_owner(link) ? 1 : 0, n);
++}
++
++// the partner's loadout for the next new game (T01-19), checked against that game's faction when it is created
++static xr_string session_loadout_file(u8 slot)
++{
++	string32 name;
++	xr_sprintf(name, "coop-loadout-%u.txt", u32(slot));
++	return session_path(name);
++}
++
++static u16 session_create(PlayerLink& link, const xr_string& text, coop::proto::ActionResult& result)
++{
++	xr_map<xr_string, xr_string> kv;
++	session_parse(text, kv);
++	xr_vector<std::pair<xr_string, xr_string>> clean;
++	xr_string faction, map, why;
++	int money = 0;
++	if (!session_check_creation(kv, clean, faction, map, money, why))
++	{
++		g_host->log.line("session-create-refused slot=%u why=\"%s\"", u32(link.ref.slot), why.c_str());
++		return coop::proto::kReasonBadChoices;
++	}
++	Host::Session& s = g_host->session;
++	xr_string profile_text, fsgame_text;
++	if (!session_read(s.profile, profile_text) || !session_read(s.fsgame, fsgame_text))
++	{
++		g_host->log.line("session-create-refused slot=%u why=\"launch files unreadable\"", u32(link.ref.slot));
++		return coop::proto::kReasonStoreFailed;
++	}
++	CampaignEntry next;
++	next.id = coop::session::random_uuid();
++	const xr_string dir = campaign_dir(next.id);
++	CreateDirectoryA(session_path("campaigns").c_str(), nullptr);
++	CreateDirectoryA(dir.c_str(), nullptr);
++	CreateDirectoryA((dir + "\\savedgames").c_str(), nullptr);
++	// the partner's own loadout, if it chose one for the faction (else the faction's kit, S10-T03f)
++	xr_string loadout2;
++	for (const PlayerLink& other : g_host->links)
++		if (other.ref.slot != link.ref.slot && other.ref.slot < 2)
++		{
++			xr_string saved, why2;
++			xr_map<xr_string, xr_string> kv2;
++			if (session_read(session_loadout_file(other.ref.slot), saved))
++				session_parse(saved, kv2);
++			const xr_string list = kv2["new_game_loadout"];
++			const int economy = _max(1, _min(9, atoi(kv["new_game_economy"].c_str())));
++			if (!list.empty() && session_check_loadout(faction.c_str(), economy, list, why2))
++				loadout2 = list;
++			g_host->log.line("session-partner-loadout slot=%u chosen=%d kept=%d why=\"%s\"", u32(other.ref.slot),
++				list.empty() ? 0 : 1, loadout2.empty() ? 0 : 1, why2.c_str());
++		}
++	xr_vector<std::pair<xr_string, xr_string>> keys;
++	keys.emplace_back("campaign_id", coop_uuid_hex(next.id).c_str());
++	keys.emplace_back("save", "coop-campaign");
++	keys.emplace_back("new_game", "1");
++	keys.emplace_back("new_game_faction", faction);
++	keys.emplace_back("new_game_loadout_2", loadout2);
++	keys.emplace_back("new_game_money_2", session_num(money));
++	next.profile = dir + "\\coop.ltx";
++	next.fsgame = dir + "\\fsgame.ltx";
++	xr_vector<std::pair<xr_string, xr_string>> saves;
++	saves.emplace_back("$game_saves$",
++		xr_string("true | false | $app_data_root$| campaigns\\") + coop_uuid_hex(next.id).c_str() + "\\savedgames\\ | *.scop;*.scoc");
++	const xr_string name = kv["new_game_character_name"];
++	next.label = name + ": " + faction + ", " + map;
++	next.level = "";
++	next.created = next.updated = session_now();
++	if (!session_write(next.profile, session_rewrite(profile_text, keys, "[coop]")) ||
++		!session_write(next.fsgame, session_rewrite(fsgame_text, saves, nullptr)) || !campaign_write(next) ||
++		!session_write_creation(clean))
++	{
++		g_host->log.line("session-create-refused slot=%u why=\"launch files not written\"", u32(link.ref.slot));
++		return coop::proto::kReasonStoreFailed;
++	}
++	++s.creates;
++	result.revision = 1;
++	g_host->log.line("session-create slot=%u id=%s faction=%s map=%s name=%s money=%d loadout=[%s] loadout2=[%s]",
++		u32(link.ref.slot), coop_uuid_hex(next.id).c_str(), faction.c_str(), map.c_str(), name.c_str(), money,
++		kv["new_game_loadout"].c_str(), loadout2.c_str());
++	session_announce(next, 1);
++	return 0;
++}
++
++u16 take_session(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::proto::ActionResult& result)
++{
++	Host::Session& s = g_host->session;
++	const std::vector<u8>& p = intent.params;
++	if (!link.session || p.empty())
++		return coop::proto::kReasonMalformed;
++	const u8 op = p[0];
++	if (op == 1)
++	{
++		if (p.size() != 1)
++			return coop::proto::kReasonMalformed;
++		session_send_list(link);
++		return 0;
++	}
++	if (op == 3)
++	{
++		if (p.size() != 17)
++			return coop::proto::kReasonMalformed;
++		coop::proto::Uuid128 id;
++		for (int b = 0; b < 8; ++b)
++			id.hi |= u64(p[1 + b]) << (8 * b);
++		for (int b = 0; b < 8; ++b)
++			id.lo |= u64(p[9 + b]) << (8 * b);
++		u16 reason = 0;
++		CampaignEntry chosen;
++		bool found = false;
++		if (!session_is_owner(link))
++			reason = coop::proto::kReasonNotOwner;
++		else if (session_busy())
++			reason = coop::proto::kReasonSessionBusy;
++		else
++		{
++			xr_vector<CampaignEntry> entries;
++			campaign_list(entries);
++			for (const CampaignEntry& e : entries)
++				if (e.id == id && e.id != g_host->config.campaign_id && !e.profile.empty() && !e.fsgame.empty())
++				{
++					chosen = e;
++					found = true;
++				}
++			if (!found)
++				reason = coop::proto::kReasonUnknownCampaign;
++		}
++		if (reason)
++		{
++			++s.refused;
++			g_host->log.line("session-load-refused slot=%u id=%s reason=%u", u32(link.ref.slot), coop_uuid_hex(id).c_str(),
++				u32(reason));
++			return reason;
++		}
++		++s.loads;
++		result.revision = 1;
++		session_announce(chosen, 2);
++		return 0;
++	}
++	if (op != 2 && op != 4)
++		return coop::proto::kReasonMalformed;
++	// a create or a loadout in parts: u8 part, u8 parts, u8 length, the text
++	if (p.size() < 4 || p[2] < 1 || p[2] > 8 || p[1] >= p[2] || p.size() != size_t(4 + p[3]) || link.ref.slot >= 2)
++		return coop::proto::kReasonMalformed;
++	Host::Session::Parts& parts = s.parts[link.ref.slot];
++	if (parts.op != op || parts.count != p[2] || p[1] == 0)
++	{
++		if (p[1] == 0)
++		{
++			parts.op = op;
++			parts.count = p[2];
++			parts.got = 0;
++		}
++		else if (parts.op != op || parts.count != p[2])
++			return coop::proto::kReasonMalformed; // a part without its first
++	}
++	parts.text[p[1]].assign(reinterpret_cast<const char*>(p.data() + 4), p[3]);
++	parts.got |= 1u << p[1];
++	if (parts.got != (1u << parts.count) - 1)
++		return 0; // more parts to come
++	xr_string text;
++	for (u32 i = 0; i < parts.count; ++i)
++		text += parts.text[i];
++	parts = Host::Session::Parts();
++	if (op == 2 && session_is_owner(link))
++	{
++		if (session_busy())
++		{
++			++s.refused;
++			return coop::proto::kReasonSessionBusy;
++		}
++		const u16 reason = session_create(link, text, result);
++		if (reason)
++			++s.refused;
++		return reason;
++	}
++	// T01-19: the partner's creation screen keeps only its loadout, for the owner's next new game
++	xr_map<xr_string, xr_string> kv;
++	session_parse(text, kv);
++	string1024 saved;
++	xr_sprintf(saved, "new_game_loadout = %s\n", kv["new_game_loadout"].substr(0, 900).c_str());
++	const bool written = session_write(session_loadout_file(link.ref.slot), saved);
++	++s.loadouts;
++	result.revision = 2;
++	g_host->log.line("session-loadout slot=%u op=%u written=%d loadout=[%s]", u32(link.ref.slot), u32(op), written ? 1 : 0,
++		kv["new_game_loadout"].c_str());
++	return written ? 0 : coop::proto::kReasonStoreFailed;
++}
++
++// the announced switch: the stop follows once the notice is out
++void session_tick()
++{
++	Host::Session& s = g_host->session;
++	if (!s.relaunch_at_ms || g_host->wall.GetElapsed_ms() < s.relaunch_at_ms || s_coop_relaunch)
++		return;
++	s_coop_relaunch = true;
++	g_host->stop_requested = true;
++	g_host->log.line("session-relaunch to=%s exit_code=%d", coop_uuid_hex(s.next).c_str(), kRelaunchExitCode);
++}
++
+ void on_left(const coop::session::SessionEvent& e)
+ {
+ 	PlayerLink* link = link_of(e.player);
+@@ -17395,6 +18127,8 @@ void on_message(const coop::session::SessionEvent& e)
+ 			reason = take_sleep_answer(*link, *intent, result); // S10-T03c
+ 		else if (intent->kind == coop::proto::kActionRelocate)
+ 			reason = take_relocate(*link, *intent, result); // S10-T03d
++		else if (intent->kind == coop::proto::kActionSession)
++			reason = take_session(*link, *intent, result); // S10-T06
+ 		else if (intent->kind == coop::proto::kActionTalkStart)
+ 			reason = take_talk_start(*link, *intent, result); // S10-T04a
+ 		else if (intent->kind == coop::proto::kActionUseObject)
+@@ -18527,6 +19261,7 @@ extern "C" bool __cdecl xrCoopServer_Start()
+ 		g_host->config.listen, coop_hex(config.build.build_id).c_str(), coop_hex(config.build.content_digest).c_str(),
+ 		u32(config.build.major), u32(config.build.minor), u32(config.tick_rate_hz), u32(config.snapshot_rate_hz));
+ 	log_status("status");
++	session_start(); // S10-T06
+ 	return true;
+ }
+ 
+@@ -18721,8 +19456,11 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 		}
+ 	}
+ 	observer_resync(); // S08-T08: the host's own changes this tick are journaled already
++	session_tick(); // S10-T06
+ }
+ 
++// S10-T06: the process ends with the relaunch exit code (its launcher starts the next campaign)
++extern "C" bool __cdecl xrCoopServer_Relaunch() { return s_coop_relaunch; }
+ extern "C" bool __cdecl xrCoopServer_ShouldStop() { return !g_host || !g_host->started || g_host->stop_requested; }
+ // S09-T02: the serve loop reloads the level from the travel's destination generation.
+ extern "C" bool __cdecl xrCoopServer_ReloadRequested() { return g_host && g_host->started && g_host->travel.reload_requested; }
+@@ -18810,7 +19548,8 @@ extern "C" void __cdecl xrCoopServer_Stop()
+ 		string256 statics; // S10-T05d2
+ 		coop_hud_statics_report(statics);
+ 		g_host->log.line("presentation-stop %s %s", pres, statics);
+-		g_host->log.line("server-stopped");
++		session_stop(); // S10-T06
++		g_host->log.line("server-stopped%s", s_coop_relaunch ? " relaunch=1" : "");
+ 	}
+ 	xr_delete(g_host->persistence);
+ 	g_host->log.close();

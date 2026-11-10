@@ -1,0 +1,222 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index cc155f1..8a71f24 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1502,6 +1502,36 @@ LPCSTR const compat_source =
+ 	"  end\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// B28: level.add_call(condition, action) too (item_tent places a tent and
++	// gives its bag from one); a refused re-entry ends the call doing nothing.
++	"local lvl_ns = rawget(_G, 'level')\n"
++	"local orig_add_call = type(lvl_ns) == 'table' and lvl_ns.add_call\n"
++	"if type(orig_add_call) == 'function' then\n"
++	"  local ok = pcall(function()\n"
++	"    lvl_ns.add_call = function(a, b, c, ...)\n"
++	"      if S.depth > 0 and c == nil and type(a) == 'function' and type(b) == 'function' then\n"
++	"        local h = campaign.capture()\n"
++	"        if h ~= 0 then\n"
++	"          local cond, act = a, b\n"
++	"          a = function()\n"
++	"            local tok = campaign.enter_captured(h)\n"
++	"            if tok == 0 then return true end\n"
++	"            return finish(tok, pack(pcall(cond)))\n"
++	"          end\n"
++	"          b = function()\n"
++	"            local tok = campaign.enter_captured(h)\n"
++	"            if tok == 0 then S.deferred_refused = S.deferred_refused + 1 return end\n"
++	"            return finish(tok, pack(pcall(act)))\n"
++	"          end\n"
++	"          S.deferred_captured = S.deferred_captured + 1\n"
++	"        end\n"
++	"      end\n"
++	"      if c == nil then return orig_add_call(a, b) end\n"
++	"      return orig_add_call(a, b, c, ...)\n"
++	"    end\n"
++	"  end)\n"
++	"  if ok and lvl_ns.add_call ~= orig_add_call then S.wrapped = S.wrapped + 1 end\n"
++	"end\n"
+ 	// An owned task's periodic Lua check runs in its owner's context.
+ 	"S.check_wrap = 'no-class'\n"
+ 	"local tobj = task_objects\n"
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 8d76e8b..0d66734 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -182,6 +182,7 @@ struct Link
+ 		u64 server_tick = 0;
+ 		u8 kind = 0; // what presents it: 0 actor, 1 creature, 2 physics object, 3 other
+ 		bool presented = false; // shown at least once
++		u32 dead_seen_ms = 0, corpse_moved_ms = 0; // B29: a body's convergence to the server's
+ 	};
+ 	// S06-T02: server time from the least-delayed recent snapshot (a sliding
+ 	// window: the server's ticks are not exactly 20 ms)
+@@ -519,6 +520,7 @@ struct Link
+ 	// S08-T07: equip and use
+ 	u64 equips_requested = 0, uses_requested = 0, inventory_events_ignored = 0, local_eats_blocked = 0;
+ 	u64 use_objects_requested = 0, joint_drives = 0; // S10-T04c
++	u64 corpses_moved = 0; // B29
+ 	u64 uses_presented = 0;
+ 	struct LayoutItem
+ 	{
+@@ -1233,7 +1235,12 @@ void world_frame()
+ 				"local hours = self.time_track and self.time_track:GetIValue() or 1 "
+ 				"if self:IsShown() then self:HideDialog() Unregister_UI('UISleep') end "
+ 				"disable_info('sleep_active') "
+-				"campaign.client_sleep(hours) end end "
++				"campaign.client_sleep(hours) end "
++				// B28: the window's own shelter and bleeding checks are the server's
++				// (reasons 42 and 47: both players); the client sees no server tent
++				"local tas = usd.UISleep.TestAndShow "
++				"if tas and not __coop_tas_wrapped then __coop_tas_wrapped = true "
++				"usd.UISleep.TestAndShow = function(self, force) return tas(self, true) end end end "
+ 				// S10-T03d: a script's level change (fast travel, the backpack) asks the
+ 				// partner instead (the native change is refused on a client, L14)
+ 				"if campaign and campaign.client_relocate and type(ChangeLevel) == 'function' and not __coop_cl_wrapped then "
+@@ -1736,6 +1743,52 @@ void present_object(CPhysicsShellHolder* object, const coop::proto::EntityState&
+ 	object->spatial_move();
+ }
+ 
++// B29: a body falls by itself on each machine (its ragdoll, S06-T05), so it
++// came to rest up to 4 m from the server's body, whose position the server
++// measures a loot's reach against (every take refused, demo-7). Once the body
++// has lain kCorpseSettleMs here, a difference over kCorpseTolerance moves its
++// shell (pose kept) to where the server has it; a body the server moves later
++// follows the same way.
++const u32 kCorpseSettleMs = 8000;
++const u32 kCorpseRepeatMs = 2000;
++const float kCorpseTolerance = 0.5f;
++
++void converge_corpse(CEntityAlive* body, Link::Track& track)
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	if (!track.dead_seen_ms)
++	{
++		track.dead_seen_ms = now;
++		return;
++	}
++	if (now - track.dead_seen_ms < kCorpseSettleMs || (track.corpse_moved_ms && now - track.corpse_moved_ms < kCorpseRepeatMs))
++		return;
++	const coop::proto::EntityState* newest = track.buffer.newest();
++	if (!newest || !(newest->components & coop::proto::kTransform))
++		return;
++	Fvector delta;
++	delta.set(newest->transform.x, newest->transform.y, newest->transform.z);
++	delta.sub(body->Position());
++	if (!_valid(delta) || delta.magnitude() < kCorpseTolerance)
++		return;
++	CPhysicsShell* shell = body->PPhysicsShell();
++	if (!shell || !shell->isActive())
++		return;
++	const float offset = delta.magnitude();
++	Fmatrix trans;
++	trans.identity();
++	trans.c.set(delta);
++	shell->TransformPosition(trans, mh_clear);
++	shell->set_LinearVel(Fvector().set(0, 0, 0));
++	shell->set_AngularVel(Fvector().set(0, 0, 0));
++	shell->GetGlobalTransformDynamic(&body->XFORM());
++	body->spatial_move();
++	track.corpse_moved_ms = now;
++	++g_link->corpses_moved;
++	g_link->log.line("corpse-moved id=%u section=%s offset=%.2f to=%.2f,%.2f,%.2f", u32(body->ID()), *body->cNameSect(), offset,
++		newest->transform.x, newest->transform.y, newest->transform.z);
++}
++
+ // Every tracked entity where the server had it kRenderDelayMs ago, by server
+ // time: interpolated between the states around that moment, so uneven
+ // arrival does not jolt the motion; past the newest state it holds (no
+@@ -1774,6 +1827,7 @@ void present_actors()
+ 			if (!actor->g_Alive())
+ 			{
+ 				entry.second.presented = true; // S06-T05: its body falls here
++				converge_corpse(actor, entry.second); // B29
+ 				continue;
+ 			}
+ 			if (actor == g_actor && g_link->predicting)
+@@ -1812,6 +1866,8 @@ void present_actors()
+ 						++g_link->creature_health_applied;
+ 					}
+ 				}
++			if (!creature->g_Alive())
++				converge_corpse(creature, entry.second); // B29
+ 			if (creature->g_Alive())
+ 			{
+ 				creature->replica_present(position, s.transform.yaw, velocity);
+@@ -1849,6 +1905,10 @@ void present_actors()
+ 				}
+ 				else if (CBaseMonster* monster = smart_cast<CBaseMonster*>(creature))
+ 				{
++					// B27: the server sets a monster's motion a moment before it picks
++					// the variant, so a snapshot can pair the new motion with the old
++					// motion's variant; select_animation ignores an index past the
++					// motion's variants
+ 					const u32 motion = (s.state_bits >> 1) & 127;
+ 					if (motion == 0 || motion > u32(eAnimCount))
+ 						monster->anim().clear_override_animation();
+@@ -8134,6 +8194,14 @@ bool coop_client_use_object(CGameObject* object, CGameObject* who)
+ 		return false;
+ 	if (g_link->world != WorldLive || !g_actor || who != g_actor)
+ 		return true; // nothing uses locally on a replica
++	// B28: a placed sleeping bag (itms_manager.ltx [sleeping_bag_ph_sections])
++	// opens the installed sleep window here (item_tent's use callback); its
++	// Sleep asks the server, which checks both players' shelter
++	if (!xr_strcmp(object->cNameSect(), "ph_sleepbag"))
++	{
++		g_link->log.line("use-object-local object=%u section=%s", u32(object->ID()), *object->cNameSect());
++		return false;
++	}
+ 	coop::proto::EntityRef ref;
+ 	if (!ref_of(u16(object->ID()), ref))
+ 	{
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 7806569..111b54f 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -7273,7 +7273,15 @@ LPCSTR const g10_source =
+ 	"    if z and z:inside(pos) then return 2 end\n"
+ 	"  end\n"
+ 	"  if GetEvent and GetEvent('underground') then return 3 end\n"
+-	"  if item_tent and item_tent.get_nearby_tent and item_tent.get_nearby_tent(1.5) then return 4 end\n"
++	// B28: every placed tent (the installed get_nearby_tent gives up at the first
++	// tent out of range)
++	"  local tents = item_tent and item_tent.get_spawned_tents and item_tent.get_spawned_tents()\n"
++	"  if type(tents) == 'table' then\n"
++	"    for id, v in pairs(tents) do\n"
++	"      local t = v == true and level.object_by_id(id)\n"
++	"      if t and t:section() == 'ph_tent' and t:position():distance_to(pos) < 1.5 then return 4 end\n"
++	"    end\n"
++	"  end\n"
+ 	"  return 0\n"
+ 	"end\n"
+ 	"-- The fixture's shelter: the nearest installed sleep zone to the context's player ('' when none is online).\n"
+@@ -14842,7 +14850,9 @@ void combat_fixtures()
+ 				// S10-T07 (G10 hands-on): what the revisions' checks need
+ 				give_item(alife, "cleaning_kit_p", actor, se);
+ 				give_item(alife, "itm_tent", actor, se);
+-				g_host->log.line("demo-kit slot=%u actor=%u +cleaning_kit_p +itm_tent", u32(link.ref.slot), u32(actor->ID()));
++				give_item(alife, "itm_sleepbag", actor, se); // B28: the sleep window opens from a placed bag
++				g_host->log.line("demo-kit slot=%u actor=%u +cleaning_kit_p +itm_tent +itm_sleepbag", u32(link.ref.slot),
++					u32(actor->ID()));
+ 			}
+ 			g_host->log.line("arm slot=%u actor=%u %s +2x ammo_9x18_fmj", u32(link.ref.slot), u32(actor->ID()),
+ 				has ? actor->inventory().ItemFromSlot(INV_SLOT_2)->object().cNameSect().c_str() : "wpn_pm");
+diff --git a/src/xrGame/ai/monsters/control_animation_base.cpp b/src/xrGame/ai/monsters/control_animation_base.cpp
+index 6b3fe48..efd9eb2 100644
+--- a/src/xrGame/ai/monsters/control_animation_base.cpp
++++ b/src/xrGame/ai/monsters/control_animation_base.cpp
+@@ -221,9 +221,13 @@ void CControlAnimationBase::select_animation(bool anim_end)
+ 	// определить необходимый индекс
+ 	int index;
+ 
++	// co-op (B27): an override index past this visual's variants (a client
++	// replica given another motion's index) is ignored rather than fatal
+ 	if (m_override_animation == cur_anim_info().get_motion()
+ 		&&
+-		m_override_animation_index != (u32)-1)
++		m_override_animation_index != (u32)-1
++		&&
++		m_override_animation_index < anim_it->count)
+ 	{
+ 		VERIFY(anim_it->count != 0);
+ 		VERIFY(m_override_animation_index < anim_it->count);

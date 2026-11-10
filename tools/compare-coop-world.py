@@ -26,13 +26,18 @@ def server_set(path, commit):
     online = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
+            if row.get("section") is None:
+                continue  # a row cut short by a killed server
             if int(row["commit"]) > commit:
                 break
             key = int(row["id"])
+            if row["kind"] == "spawn" and key == 0 and online:
+                online = {}  # actor 0 spawned again: a travel's reload began a new world (S09-T02)
             if row["kind"] == "spawn":
                 online[key] = (int(row["entity"]), int(row["generation"]), row["section"])
-            elif online.get(key, (None, None))[:2] == (int(row["entity"]), int(row["generation"])):
-                del online[key]
+            elif row["kind"] == "despawn" and online.get(key, (None, None))[:2] == (int(row["entity"]),
+                                                                                  int(row["generation"])):
+                del online[key]  # a reparent (S08) keeps the object in the set
     return online
 
 

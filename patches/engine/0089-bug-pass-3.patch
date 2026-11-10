@@ -1,0 +1,461 @@
+diff --git a/src/xrGame/Actor.h b/src/xrGame/Actor.h
+index 416ecfc..4b6ce7f 100644
+--- a/src/xrGame/Actor.h
++++ b/src/xrGame/Actor.h
+@@ -374,6 +374,7 @@ public:
+ 	u32 replica_wishful() const { return mstate_wishful; }
+ 	float replica_torso_roll() const { return r_torso.roll; } // the lean as presented
+ 	void replica_set_wishful(u32 value) { mstate_wishful = value; }
++	void replica_follow_jump(const Fvector& velocity); // S10-T07 (B22): the jump the server took
+ 	// S10-T04c (K1 follow-up): the other player's weapon state as the server
+ 	// sampled it (EntityState::weapon_state), read by g_SetAnimation alone for
+ 	// the third-person attack, reload, draw and holster animations. The item's
+@@ -398,6 +399,10 @@ public:
+ 		u8 ph_exist, ph_body_enabled, ph_active, ph_freezed;
+ 		float slowmo, velocity;
+ 		u32 physics_steps;
++		// S10-T07 (B22): the jump key held and no jump taken: why (the last refusal)
++		u32 jump_refusals;
++		u8 jump_env, jump_phys, jump_key_pressed, jump_real;
++		float jump_time;
+ 	};
+ 	ControlTrace control_trace = {};
+ 	void g_SetSprintAnimation(u32 mstate_rl, MotionID& head, MotionID& torso, MotionID& legs);
+@@ -521,6 +526,7 @@ public:
+ 
+ 	bool CanAccelerate();
+ 	bool CanJump();
++	void jump_refused(u32 environment); // S10-T07 (B22)
+ 	bool CanMove();
+ 	float CameraHeight();
+ 
+diff --git a/src/xrGame/Actor_Movement.cpp b/src/xrGame/Actor_Movement.cpp
+index 7ec7915..45cebfa 100644
+--- a/src/xrGame/Actor_Movement.cpp
++++ b/src/xrGame/Actor_Movement.cpp
+@@ -202,6 +202,8 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
+ 	if (mstate_wf & mcRStrafe) mstate_wf & mcSprint ? vControlAccel.x += 0.5 : vControlAccel.x += 1;
+ 
+ 	CPHMovementControl::EEnvironment curr_env = character_physics_support()->movement()->Environment();
++	if ((mstate_wf & mcJump) && curr_env != CPHMovementControl::peOnGround && curr_env != CPHMovementControl::peAtWall)
++		jump_refused(curr_env); // S10-T07 (B22)
+ 	if (curr_env == CPHMovementControl::peOnGround || curr_env == CPHMovementControl::peAtWall)
+ 	{
+ 		// crouch
+@@ -247,6 +249,8 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
+ 			if (!GodMode())
+ 				conditions().ConditionJump(inventory().TotalWeight() / MaxCarryWeight());
+ 		}
++		else if (mstate_wf & mcJump)
++			jump_refused(curr_env); // S10-T07 (B22)
+ 
+ 		// mask input into "real" state
+ 		u32 move = mcAnyMove | mcAccel;
+@@ -781,6 +785,31 @@ bool CActor::CanJump()
+ 	return can_Jump;
+ }
+ 
++// S10-T07 (B22): the jump key is down and no jump was taken this step: what
++// refused it (a co-op client logs it, jump-refused)
++void CActor::jump_refused(u32 environment)
++{
++	++control_trace.jump_refusals;
++	control_trace.jump_env = u8(environment);
++	control_trace.jump_phys = character_physics_support()->movement()->PhysicsCanJump() ? 1 : 0;
++	control_trace.jump_key_pressed = m_bJumpKeyPressed ? 1 : 0;
++	control_trace.jump_real = (mstate_real & mcJump) ? 1 : 0;
++	control_trace.jump_time = m_fJumpTime;
++}
++
++// S10-T07 (B22): the server's actor jumped on this input and the own predicted
++// actor did not (its character had lost control on a slope after a position
++// correction's hop, so CanJump/PhysicsCanJump refused the held key): take the
++// same jump now, instead of being hoisted by every correction and slammed
++// back by the ground force until the server lands
++void CActor::replica_follow_jump(const Fvector& velocity)
++{
++	mstate_real |= mcJump;
++	m_bJumpKeyPressed = TRUE;
++	m_fJumpTime = s_fJumpTime;
++	character_physics_support()->movement()->JumpForced(velocity);
++}
++
+ bool CActor::CanMove()
+ {
+ 	if (conditions().IsCantWalk())
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 08c1984..799edb2 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -52,6 +52,9 @@
+ #include "ai/monsters/basemonster/base_monster.h" // S06-T05
+ #include "ai/monsters/control_animation_base.h" // S10-T07 (B4)
+ #include "stalker_movement_manager_smart_cover.h" // S10-T07 (B4)
++#include "stalker_animation_manager.h" // S10-T07 (B4): the replica-anim line
++#include "stalker_animation_pair.h"
++#include "../Include/xrRender/animation_blend.h"
+ #include "ai/monsters/controller/controller.h" // S10-T02c
+ #include "ai/monsters/ai_monster_effector.h"
+ #include "ai/monsters/bloodsucker/bloodsucker.h" // S10-T02d
+@@ -127,6 +130,8 @@ struct Link
+ 	CoopEventLog log;
+ 	CTimer wall;
+ 	u32 last_status_ms = 0;
++	u32 status_frame = 0; // S10-T07 (B23): Device.dwFrame and the wall time at the last status line (fps)
++	u32 status_frame_ms = 0;
+ 	u32 last_stop_check_ms = 0;
+ 	u32 connects = 0;
+ 	u32 welcomes = 0;
+@@ -328,6 +333,9 @@ struct Link
+ 	u32 reconnect_backoff_ms = 1000;
+ 	u32 lost_at_ms = 0; // S10-T07 (B16): the server's connection ended and no welcome since
+ 	u32 far_snaps = 0; // S10-T07 (B6)
++	u32 jumps_followed = 0; // S10-T07 (B22): the server's jumps taken after the own actor refused them
++	u32 jump_refusals_logged = 0; // the control trace's count at the last jump-refused line
++	u32 last_jump_log_ms = 0;
+ 	u16 grab_monster = 0xffff; // S10-T07 (B10): the bloodsucker holding the player's own actor
+ 	// S10-T07 (B13): the replica's ALife clock did not run between the server's clock events (each event found it
+ 	// a second of real time behind and stepped it); it runs from the last event on the link's own wall clock
+@@ -343,6 +351,7 @@ struct Link
+ 	u32 reconnects = 0, worlds_left = 0;
+ 	u64 last_epoch = 0;
+ 	u32 last_lean_log_ms = 0; // the other player's lean, logged every 250 ms while held
++	u32 last_anim_log_ms = 0; // S10-T07 (B4): a moving stalker's animation state, once a second
+ 	u32 camera_watch_until_ms = 0; // the own camera logged per frame after the other player's weapon change
+ 	FILE* camera_csv = nullptr;
+ 	// S07-T07: the respawn prompt and request
+@@ -1477,6 +1486,27 @@ void reconcile_own_actor(u64 snapshot_id, u64 last_input)
+ 		return;
+ 	const coop::proto::Vec3 server{it->second.transform.x, it->second.transform.y, it->second.transform.z};
+ 	const coop::proto::Correction c = g_link->reconciler.reconcile(last_input, server);
++	// S10-T07 (B22): the server's actor is rising from a jump this actor did not
++	// take (the held key refused here: its character lost control after a
++	// correction's hop on a slope): jump now with the server's rise; the position
++	// correction below then closes a small gap instead of hoisting a grounded
++	// body every snapshot
++	const auto& own = it->second;
++	if ((own.state_bits & (mcJump | mcFall)) && own.vy > 1.f && !(g_actor->MovingState() & mcJump) &&
++		g_actor->character_physics_support()->movement()->CharacterExist() &&
++		!g_actor->character_physics_support()->movement()->JumpState())
++	{
++		Fvector v;
++		g_actor->character_physics_support()->movement()->GetCharacterVelocity(v);
++		if (v.y < 1.f) // not rising itself
++		{
++			v.y = own.vy;
++			g_actor->replica_follow_jump(v);
++			++g_link->jumps_followed;
++			g_link->log.line("jump-followed snapshot=%I64u last_input=%I64u server_vy=%.2f server_state=%x error=%.3f "
++				"oy=%.3f", snapshot_id, last_input, own.vy, u32(own.state_bits), c.error, c.offset.y);
++		}
++	}
+ 	if (c.kind == coop::proto::CorrectionKind::Smooth || c.kind == coop::proto::CorrectionKind::Snap)
+ 	{
+ 		Fvector p = g_actor->Position();
+@@ -1764,8 +1794,22 @@ void present_actors()
+ 				// S10-T07 (B4): its animation state (the legs, torso and head of a
+ 				// stalker; a monster's motion), as the server packed it
+ 				if (CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(creature))
++				{
+ 					stalker->replica_present_animation(s.state_bits, (s.components & coop::proto::kAim) != 0, s.aim_yaw,
+ 						s.aim_pitch);
++					// a moving stalker's animation state, once a second (the hands-on check of B4)
++					const u32 now_ms = g_link->wall.GetElapsed_ms();
++					if (stalker->replica_speed() > 0.3f && now_ms - g_link->last_anim_log_ms >= 1000)
++					{
++						g_link->last_anim_log_ms = now_ms;
++						const CBlend* legs = stalker->animation().legs().blend();
++						const CBlend* torso = stalker->animation().torso().blend();
++						g_link->log.line("replica-anim id=%u bits=%x speed=%.2f standing=%d mt=%u legs=%u torso=%u",
++							u32(stalker->ID()), u32(s.state_bits), stalker->replica_speed(),
++							stalker->animation().standing() ? 1 : 0, u32(stalker->movement().movement_type()),
++							legs ? u32(legs->motionID.idx) : 0u, torso ? u32(torso->motionID.idx) : 0u);
++					}
++				}
+ 				else if (CBaseMonster* monster = smart_cast<CBaseMonster*>(creature))
+ 				{
+ 					const u32 motion = (s.state_bits >> 1) & 127;
+@@ -2085,6 +2129,20 @@ void sample_input()
+ 	leg_end_check(now);
+ 	if (!g_actor || !g_link->client || g_link->client->state() != coop::session::ClientState::Active)
+ 		return;
++	// S10-T07 (B22): a held jump key the control step refused, at most four a second
++	if (g_actor->control_trace.jump_refusals != g_link->jump_refusals_logged && now - g_link->last_jump_log_ms >= 250)
++	{
++		const CActor::ControlTrace& t = g_actor->control_trace;
++		Fvector n = Fvector().set(0.f, 0.f, 0.f), v = n;
++		g_actor->character_physics_support()->movement()->GroundNormal(n);
++		g_actor->character_physics_support()->movement()->GetCharacterVelocity(v);
++		g_link->log.line("jump-refused refusals=%u env=%u phys=%u key_pressed=%u real=%u jump_time=%.2f normal_y=%.2f "
++			"vel=%.2f,%.2f,%.2f pos=%.2f,%.2f,%.2f followed=%u", t.jump_refusals, u32(t.jump_env), u32(t.jump_phys),
++			u32(t.jump_key_pressed), u32(t.jump_real), t.jump_time, n.y, VPUSH(v), VPUSH(g_actor->Position()),
++			g_link->jumps_followed);
++		g_link->jump_refusals_logged = t.jump_refusals;
++		g_link->last_jump_log_ms = now;
++	}
+ 	forward_player_actions();
+ 	// Replay (script 2, leg D): recorded batches from an earlier leg, as they
+ 	// were, a few per frame. Every tick in them was consumed long ago.
+@@ -3428,7 +3486,9 @@ void on_presentation(const coop::proto::CampaignEvent& event)
+ 		const bool on = state != CCustomZone::eZoneStateDisabled;
+ 		if (CZoneCampfire* fire = smart_cast<CZoneCampfire*>(zone))
+ 		{
+-			if (fire->is_on() != on || (zone->IsEnabled() != on))
++			// S10-T07 (B23): one turn per change of the turn itself: a second
++			// turn-off during the fade (IsEnabled lags it) asserts in GoDisabledState
++			if (fire->is_on() != on)
+ 			{
+ 				if (on)
+ 					fire->turn_on_script();
+@@ -4728,6 +4788,24 @@ u32 local_creatures()
+ void log_status(LPCSTR tag)
+ {
+ 	const std::vector<double>& rtts = g_link->client ? g_link->client->rtts() : std::vector<double>();
++	// S10-T07 (B23): the frame rate since the last line, and the campfires lit on
++	// this client (within 100 m each is a shadowed point light and particles)
++	const u32 now_ms = g_link->wall.GetElapsed_ms();
++	const float fps = g_link->status_frame_ms && now_ms > g_link->status_frame_ms
++		? float(Device.dwFrame - g_link->status_frame) * 1000.f / float(now_ms - g_link->status_frame_ms) : 0.f;
++	g_link->status_frame = Device.dwFrame;
++	g_link->status_frame_ms = now_ms;
++	u32 fires_on = 0, fires_near = 0;
++	if (g_pGameLevel)
++		for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		{
++			CZoneCampfire* fire = smart_cast<CZoneCampfire*>(Level().Objects.o_get_by_iterator(i));
++			if (!fire || !fire->is_on())
++				continue;
++			++fires_on;
++			if (g_actor && fire->Position().distance_to(g_actor->Position()) <= 100.f)
++				++fires_near;
++		}
+ 	g_link->log.line("%s state=%u welcomes=%u connects=%u level=%d local_starts_refused=%u rtt_samples=%u "
+ 		"last_rtt_ms=%.2f inject_ok=%u inject_failed=%u snapshots=%I64u snapshot_unknown=%I64u inputs_sent=%I64u "
+ 		"input_acked=%I64u input_tick=%I64u input_period_ms=%u inputs_skipped=%I64u inputs_per_frame_peak=%u input_frames_multi=%I64u reconcile_held_skipped=%I64u replays=%u "
+@@ -4738,7 +4816,8 @@ void log_status(LPCSTR tag)
+ 		"pred_within=%I64u pred_smoothed=%I64u pred_snapped=%I64u pred_unknown=%I64u pred_max_error=%.3f "
+ 		"view_max_offset=%.3f correction_frames=%I64u hud_still_turn_max=%.3f hud_still_frames=%I64u "
+ 		"shots_presented=%I64u slots_applied=%I64u ammo_applied=%I64u health_applied=%I64u deaths_presented=%I64u "
+-		"creature_health_applied=%I64u player_slot_actions=%I64u player_reload_actions=%I64u weapon_states_presented=%I64u",
++		"creature_health_applied=%I64u player_slot_actions=%I64u player_reload_actions=%I64u weapon_states_presented=%I64u "
++		"fps=%.1f fires_on=%u fires_near=%u jumps_followed=%u jump_refusals=%u",
+ 		tag, g_link->client ? u32(g_link->client->state()) : 0u, g_link->welcomes, g_link->connects,
+ 		g_pGameLevel ? 1 : 0, g_link->local_starts_refused, u32(rtts.size()), rtts.empty() ? -1.0 : rtts.back(),
+ 		g_link->inject_ok, g_link->inject_failed, g_link->snapshots, g_link->snapshot_unknown, g_link->inputs_sent,
+@@ -4756,7 +4835,8 @@ void log_status(LPCSTR tag)
+ 		g_link->reconciler.counters().max_error, g_link->smoother.max_offset(), g_link->correction_frames,
+ 		g_link->hud_still_turn_max, g_link->hud_still_frames, g_link->shots_presented, g_link->slots_applied,
+ 		g_link->ammo_applied, g_link->health_applied, g_link->deaths_presented, g_link->creature_health_applied,
+-		g_link->player_slot_actions, g_link->player_reload_actions, g_link->weapon_states_presented);
++		g_link->player_slot_actions, g_link->player_reload_actions, g_link->weapon_states_presented, fps, fires_on,
++		fires_near, g_link->jumps_followed, g_actor ? g_actor->control_trace.jump_refusals : 0u);
+ }
+ // ------------------------------------------------------------ S08-T02
+ // Drops and moves. Every inventory path on the client (the engine's
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index e451d31..8a235d2 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -7887,7 +7887,7 @@ void send_party_tasks()
+ 			CCustomZone* zone = smart_cast<CCustomZone*>(o);
+ 			if (!zone || o->getDestroy())
+ 				continue;
+-			const bool fire = smart_cast<CZoneCampfire*>(zone) != nullptr;
++			CZoneCampfire* fire = smart_cast<CZoneCampfire*>(zone); // its turn is the truth (the fade lags it)
+ 			if (!fire && zone->IsEnabled())
+ 				continue;
+ 			std::vector<u8> p;
+@@ -7898,7 +7898,7 @@ void send_party_tasks()
+ 			put_f32(p, 0.f);
+ 			put_f32(p, 0.f);
+ 			put_f32(p, 0.f);
+-			put_u32(p, u32(zone->ZoneState()));
++			put_u32(p, u32(fire && !fire->is_on() ? CCustomZone::eZoneStateDisabled : zone->ZoneState()));
+ 			put_u32(p, 0);
+ 			put_str(p, "");
+ 			queue_event(link, kEventPresentation, p);
+diff --git a/src/xrGame/CustomMonster.cpp b/src/xrGame/CustomMonster.cpp
+index 9707d6b..0cda9ac 100644
+--- a/src/xrGame/CustomMonster.cpp
++++ b/src/xrGame/CustomMonster.cpp
+@@ -424,6 +424,7 @@ void CCustomMonster::replica_present(const Fvector& position, float yaw, const F
+ {
+ 	if (!_valid(position) || !_valid(yaw))
+ 		return;
++	m_replica_speed = _valid(velocity) ? _sqrt(velocity.x * velocity.x + velocity.z * velocity.z) : 0.f; // S10-T07 (B4)
+ 	net_update N;
+ 	N.dwTimeStamp = Level().timeServer();
+ 	N.o_model = yaw;
+diff --git a/src/xrGame/CustomMonster.h b/src/xrGame/CustomMonster.h
+index 4ae8859..49f16af 100644
+--- a/src/xrGame/CustomMonster.h
++++ b/src/xrGame/CustomMonster.h
+@@ -160,6 +160,14 @@ public:
+ 	// server's snapshots put it (position, body yaw, velocity), through the
+ 	// remote path UpdateCL already has (NET_Last), as a network import would.
+ 	void replica_present(const Fvector& position, float yaw, const Fvector& velocity);
++	// S10-T07 (B4): a co-op client's replica never runs the path step that sets
++	// CMovementManager::m_speed, so its speed for the animation pickers is the
++	// snapshot's (m/s in the ground plane); -1 until the first sample
++	bool replica_presented() const { return m_replica_speed >= 0.f; }
++	float replica_speed() const { return m_replica_speed; }
++private:
++	float m_replica_speed = -1.f;
++public:
+ 
+ 	// Network
+ 	virtual void net_Export(NET_Packet& P); // export to server
+diff --git a/src/xrGame/PHMovementControl.cpp b/src/xrGame/PHMovementControl.cpp
+index 9757483..9c7cfb1 100644
+--- a/src/xrGame/PHMovementControl.cpp
++++ b/src/xrGame/PHMovementControl.cpp
+@@ -1602,6 +1602,12 @@ bool CPHMovementControl::PhysicsCanJump()
+ 	return !m_character || !m_character->b_exist || m_character->CanJumpNow();
+ }
+ 
++void CPHMovementControl::JumpForced(const Fvector& velocity)
++{
++	if (m_character && m_character->b_exist)
++		m_character->JumpForced(velocity);
++}
++
+ bool CPHMovementControl::PhysicsOnlyMode()
+ {
+ 	return m_character && m_character->b_exist && m_character->IsEnabled() && (m_character->JumpState() || m_character->ForcedPhysicsControl());
+diff --git a/src/xrGame/PHMovementControl.h b/src/xrGame/PHMovementControl.h
+index 7538dea..72efe92 100644
+--- a/src/xrGame/PHMovementControl.h
++++ b/src/xrGame/PHMovementControl.h
+@@ -74,6 +74,7 @@ public:
+ 	float Jump(const Fvector& end_point);
+ 	bool JumpState();
+ 	bool PhysicsCanJump(); // S10-T07 (B22): the character could take a jump now
++	void JumpForced(const Fvector& velocity); // S10-T07 (B22): take a jump without the ground test
+ 	///
+ 	bool PhysicsOnlyMode();
+ 	void GetJumpMinVelParam(Fvector& min_vel, float& time, JumpType& type, const Fvector& end_point);
+diff --git a/src/xrGame/ZoneCampfire.cpp b/src/xrGame/ZoneCampfire.cpp
+index fa6d198..a14a27a 100644
+--- a/src/xrGame/ZoneCampfire.cpp
++++ b/src/xrGame/ZoneCampfire.cpp
+@@ -3,6 +3,17 @@
+ #include "ParticlesObject.h"
+ #include "GamePersistent.h"
+ #include "../xrEngine/LightAnimLibrary.h"
++#include "CampaignActorAccess.h" // S10-T07 (B23)
++
++// S10-T07 (B23): the campaign server sets no renderer flag (no user.ltx, no
++// `renderer` command, no device), so its campfires never turned: the scripts'
++// turn-off at spawn and the NPCs' turn-on were no-ops and every campfire stayed
++// at its constructor's lit state, which the join batch then lit on every
++// client (46 shadowed lights on Cordon). The turn is gameplay on the server.
++static bool campfire_turn_allowed()
++{
++	return psDeviceFlags.test(rsR2 | rsR3 | rsR4) || campaign::process_role() == campaign::Role::Server;
++}
+ 
+ /*
+ CZoneCampfire* g_zone = NULL;
+@@ -72,7 +83,7 @@ void CZoneCampfire::GoDisabledState()
+ 
+ void CZoneCampfire::turn_on_script()
+ {
+-	if (psDeviceFlags.test(rsR2 | rsR3 | rsR4))
++	if (campfire_turn_allowed())
+ 	{
+ 		m_turn_time = Device.dwTimeGlobal + OVL_TIME;
+ 		m_turned_on = true;
+@@ -82,7 +93,7 @@ void CZoneCampfire::turn_on_script()
+ 
+ void CZoneCampfire::turn_off_script()
+ {
+-	if (psDeviceFlags.test(rsR2 | rsR3 | rsR4))
++	if (campfire_turn_allowed())
+ 	{
+ 		m_turn_time = Device.dwTimeGlobal + OVL_TIME;
+ 		m_turned_on = false;
+diff --git a/src/xrGame/ai/monsters/control_animation_base_update.cpp b/src/xrGame/ai/monsters/control_animation_base_update.cpp
+index 37a4aba..89f73f7 100644
+--- a/src/xrGame/ai/monsters/control_animation_base_update.cpp
++++ b/src/xrGame/ai/monsters/control_animation_base_update.cpp
+@@ -331,7 +331,14 @@ void CControlAnimationBase::SelectVelocities()
+ 	// финальная корректировка скорости анимации по физической скорости
+ 
+ 
+-	if (!m_object->state_invisible && !fis_zero(anim_vel.linear))
++	if (m_object->replica_presented())
++	{
++		// S10-T07 (B4): a co-op replica plays the server's motion (the override)
++		// as it is: its physics velocity is meaningless here (the path direction
++		// is never set), and the chain would turn a run into a half-speed walk
++		cur_anim_info().speed._set_target(-1.f);
++	}
++	else if (!m_object->state_invisible && !fis_zero(anim_vel.linear))
+ 	{
+ 		EMotionAnim new_anim;
+ 		float a_speed;
+diff --git a/src/xrGame/stalker_animation_manager.cpp b/src/xrGame/stalker_animation_manager.cpp
+index 095f10b..e0bbac0 100644
+--- a/src/xrGame/stalker_animation_manager.cpp
++++ b/src/xrGame/stalker_animation_manager.cpp
+@@ -134,7 +134,13 @@ bool CStalkerAnimationManager::standing() const
+ 	CAI_Stalker& obj = object();
+ 	stalker_movement_manager_smart_cover& movement = obj.movement();
+ 
+-	if (movement.speed(obj.character_physics_support()->movement()) < EPS_L)
++	// S10-T07 (B4): a co-op replica never runs move_along_path (CustomMonster::
++	// UpdatePositionAnimation is Local only), so CMovementManager::m_speed stays 0
++	// and speed(physics) short-circuits to 0: every replica stood. Its speed is
++	// the snapshot's; the movement type is the server's (replica_set_current).
++	const float speed = obj.replica_presented() ? obj.replica_speed()
++		: movement.speed(obj.character_physics_support()->movement());
++	if (speed < EPS_L)
+ 		return (true);
+ 
+ 	if (eMovementTypeStand == movement.movement_type())
+diff --git a/src/xrPhysics/PHActorCharacter.cpp b/src/xrPhysics/PHActorCharacter.cpp
+index 0d4ea1b..0cf613f 100644
+--- a/src/xrPhysics/PHActorCharacter.cpp
++++ b/src/xrPhysics/PHActorCharacter.cpp
+@@ -242,6 +242,17 @@ void CPHActorCharacter::Jump(const Fvector& accel)
+ 	}
+ }
+ 
++// S10-T07 (B22): the jump the server's actor took, on a co-op client whose own
++// character refused it (control lost after a correction's hop on a slope):
++// PhTune applies m_jump_accel as the body's velocity, as it does for Jump
++void CPHActorCharacter::JumpForced(const Fvector& velocity)
++{
++	if (!b_exist) return;
++	b_jump = true;
++	m_jump_accel.set(velocity);
++	Enable();
++}
++
+ void CPHActorCharacter::SetObjectContactCallback(ObjectContactCallbackFun* callback)
+ {
+ 	inherited::SetObjectContactCallback(callback);
+diff --git a/src/xrPhysics/PHActorCharacter.h b/src/xrPhysics/PHActorCharacter.h
+index 0e015a0..cb48668 100644
+--- a/src/xrPhysics/PHActorCharacter.h
++++ b/src/xrPhysics/PHActorCharacter.h
+@@ -108,6 +108,7 @@ public:
+ public:
+ 	virtual CPHActorCharacter* CastActorCharacter() { return this; }
+ 	virtual bool CanJumpNow() { return CanJump(); } // S10-T07 (B22)
++	virtual void JumpForced(const Fvector& velocity); // S10-T07 (B22)
+ 	virtual void SetObjectContactCallback(ObjectContactCallbackFun* callback);
+ 	virtual void SetMaterial(u16 material);
+ 	virtual void Create(dVector3 sizes);
+diff --git a/src/xrPhysics/PHCharacter.h b/src/xrPhysics/PHCharacter.h
+index 704dc6b..7d87eb2 100644
+--- a/src/xrPhysics/PHCharacter.h
++++ b/src/xrPhysics/PHCharacter.h
+@@ -88,6 +88,7 @@ public:
+ 	virtual CPHActorCharacter* CastActorCharacter() { return NULL; }
+ 	// S10-T07 (B22): whether a jump asked for now would be taken (an actor's ground contact)
+ 	virtual bool CanJumpNow() { return true; }
++	virtual void JumpForced(const Fvector& /*velocity*/) {} // S10-T07 (B22): the jump another simulation took
+ 	virtual CPHAICharacter* CastAICharacter() { return NULL; }
+ 	ERestrictionType RestrictionType() { return m_restriction_type; }
+ 	void SetNewRestrictionType(ERestrictionType rt) { m_new_restriction_type = rt; }

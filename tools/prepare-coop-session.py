@@ -9,7 +9,10 @@ Usage: python3 tools/prepare-coop-session.py <run> [--task S05-T01] [--clients 2
            [--pickup c1,c2 [--pickup-rounds 8] [--pickup-start 20]]
            [--transfer c1,c2 [--transfer-start 20]] [--quest c1,c2 [--quest-start 20]]
            [--use c1,c2 [--use-start 20]] [--stack c1,c2 [--stack-start 20]]
-           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1]]
+           [--travel c1,c2 [--travel-start 20] [--travel-variant 0|1|2|3|4|5] [--travel-barrier-hold 5]
+            [--travel-ready-delay c2:15] [--travel-ready-wrong c2] [--travel-rejoin-delay c2:75]
+            [--travel-load-fail c2]] [--talk c1,c2 [--talk-start 20]] [--info c1,c2 [--info-start 20]]
+           [--party-task c1,c2 [--party-task-start 20]] [--trade c1,c2 [--trade-start 20]]
            [--protocol-build proto-build-42] [--keys-from <earlier run>]
 
 Each process gets its own runtime from prepare-stage2-smoke.py (fresh appdata,
@@ -49,6 +52,26 @@ def winpath(path):
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def merge_ini_section(path, section, values):
+    """Set keys of one [section] in an X-Ray ini file, keeping its other lines and line endings (S10-T03f)."""
+    text = path.read_text(encoding="latin-1") if path.exists() else ""
+    eol = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip().lower() == f"[{section}]"), None)
+    if start is None:
+        lines += [f"[{section}]"]
+        start = len(lines) - 1
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines))
+    left = dict(values)
+    for i in range(start + 1, end):
+        key = lines[i].split("=", 1)[0].strip()
+        if key in left:
+            lines[i] = f"\t{key} = {left.pop(key)}"
+    lines[end:end] = [f"\t{k} = {v}" for k, v in left.items()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(eol.join(lines) + eol, encoding="latin-1", newline="")
 
 
 def main():
@@ -136,18 +159,193 @@ def main():
                              "changer (fixture travel_party)")
     parser.add_argument("--travel-start", type=int, default=20,
                         help="with --travel: seconds after both players are in the world until the actors are placed")
+    parser.add_argument("--travel-changer", default="",
+                        help="with --travel (B47): use the level changer whose name contains this (e.g. to_marsh_1); "
+                             "default: the first enabled")
+    parser.add_argument("--travel-approach", default="",
+                        help="with --travel (B47): \"x,y,z\" where player 1 stands 5 s before the changer")
     parser.add_argument("--travel-variant", type=int, default=0,
                         help="with --travel: 0 every round; 1 the crash run (rounds 0 and 1; with --failpoint "
                              "travel:after-propose the server exits itself after round 0's proposal); 2 (S09-T02) "
                              "round 0 only and the agreed travel is carried out (the party arrives on the "
                              "destination level; --failpoint travel:before-take / travel:after-commit for the "
-                             "crash windows)")
+                             "crash windows); 3 (S09-T04) the partner accepts and drops its connection inside the "
+                             "barrier (with --travel-barrier-hold), then the party asks again and travels; 4 "
+                             "(S09-T04) two agreed travels, the first's publication failed from outside "
+                             "(--failpoint checkpoint:after-manifest:3:fail), the second carried out; 5 (B46) round 8 "
+                             "alone: the request and the accept while a boar hunts player 2, then carried out")
+    parser.add_argument("--talk", default="",
+                        help="comma-separated client names running the S10-T04a talk-window rounds at Sidorovich "
+                             "(profile script = 8; fixture talk_party)")
+    parser.add_argument("--talk-start", type=int, default=20,
+                        help="with --talk: seconds after both players are in the world until the actors are placed")
+    parser.add_argument("--talk-variant", type=int, default=0,
+                        help="with --talk: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 the other")
+    parser.add_argument("--info", default="",
+                        help="comma-separated client names present for the S10-T04b info-portion and actor-state "
+                             "fixture (server-driven; fixture info_party; use with --auto-respawn 5)")
+    parser.add_argument("--info-start", type=int, default=20,
+                        help="with --info: seconds after both players are in the world until the checks start")
+    parser.add_argument("--party-task", default="",
+                        help="comma-separated client names present for the S10-T05b general party-task fixture "
+                             "(server-driven: p2 accepts Sidorovich's bounty, a checkpoint; after an external restart "
+                             "the target is killed by p2 and the task turned in; fixture task_party)")
+    parser.add_argument("--party-task-start", type=int, default=20,
+                        help="with --party-task: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--trade", default="",
+                        help="comma-separated client names present for the S10-T04c door and trade fixture "
+                             "(server-driven: p2 uses the bunker door, p1 opens the trade, buys and sells; an external "
+                             "restart replays the trade records; fixture trade_party)")
+    parser.add_argument("--trade-start", type=int, default=20,
+                        help="with --trade: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--upgrade", default="",
+                        help="comma-separated client names present for the S10-T04f upgrade and repair fixture "
+                             "(server-driven: both placed at the nearest mechanic, p1 opens the upgrade session, "
+                             "installs an upgrade and repairs a weapon, p2 refused busy; an external restart replays "
+                             "the records; fixture upgrade_party)")
+    parser.add_argument("--upgrade-start", type=int, default=20,
+                        help="with --upgrade: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--relations", default="",
+                        help="comma-separated client names present for the S10-T04d relations fixture (server-driven: "
+                             "p2's stalker goodwill changed through the Lua export with character 0, a stalker/bandit "
+                             "relation set, p1's reputation raised, a checkpoint published; fixture relations_party)")
+    parser.add_argument("--relations-start", type=int, default=20,
+                        help="with --relations: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--stash", default="",
+                        help="comma-separated client names present for the S10-T04e stash fixture (server-driven: the "
+                             "nearest box made a stash in p1's context, p1 uses it and takes one item; a checkpoint "
+                             "follows the spawn; fixture stash_party)")
+    parser.add_argument("--stash-start", type=int, default=20,
+                        help="with --stash: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--npc", default="",
+                        help="comma-separated client names present for the S10-T02a NPC logic fixture (server-driven: "
+                             "the stalker nearest p2 evaluates db.actor, AC_ID and a distance condlist inside and "
+                             "outside its evaluation scope; fixture npc_party)")
+    parser.add_argument("--npc-start", type=int, default=20,
+                        help="with --npc: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--loot", default="",
+                        help="comma-separated client names present for the S10-T02b NPC loot fixture (server-driven: "
+                             "two stalkers spawned beside p2, p2 kills one, the other loots the body through the "
+                             "installed corpse scheme, the body's release is asked for; fixture loot_party)")
+    parser.add_argument("--loot-start", type=int, default=20,
+                        help="with --loot: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--psy", default="",
+                        help="comma-separated client names present for the S10-T02c psy fixture (server-driven: p1 "
+                             "moved away, a controller spawned near p2, its psy attack on p2 awaited; fixture "
+                             "psy_party)")
+    parser.add_argument("--psy-start", type=int, default=20,
+                        help="with --psy: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--mutant", default="",
+                        help="comma-separated client names present for the S10-T02d mutant fixture (server-driven: p1 "
+                             "moved away, a bloodsucker, a burer and a poltergeist in turn near p2; fixture "
+                             "mutant_party)")
+    parser.add_argument("--mutant-start", type=int, default=20,
+                        help="with --mutant: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--fauna", default="",
+                        help="comma-separated client names present for the S10-T02e fauna fixture (server-driven: p1 "
+                             "moved away, each generic mutant class in turn near p2; fixture fauna_party)")
+    parser.add_argument("--fauna-start", type=int, default=20,
+                        help="with --fauna: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--companion", default="",
+                        help="comma-separated client names present for the S10-T02f companion fixture (server-driven: "
+                             "p2 recruits the nearest friendly stalker, or a restored companion is checked; fixture "
+                             "companion_party)")
+    parser.add_argument("--companion-start", type=int, default=20,
+                        help="with --companion: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--alife", default="",
+                        help="comma-separated client names present for the S10-T03a ALife fixture (server-driven: "
+                             "p1 moves away, the respawn guard for p2, a forced respawn, a kill, a checkpoint; after a "
+                             "restart the dead stay dead and the respawned squad exists once; fixture alife_party)")
+    parser.add_argument("--alife-start", type=int, default=20,
+                        help="with --alife: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--squad", default="",
+                        help="comma-separated client names present for the S10-T03b squad-target fixture "
+                             "(server-driven: p1 moves away, a squad sent at the actor near p2 must reach p2, then p1 "
+                             "beside it takes the target; fixture squad_party)")
+    parser.add_argument("--squad-start", type=int, default=20,
+                        help="with --squad: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--sleep", default="",
+                        help="comma-separated client names present for the S10-T03c sleep fixture (server-driven: "
+                             "a refused and an agreed sleep, then a blackout for p2; fixture sleep_party)")
+    parser.add_argument("--sleep-start", type=int, default=20,
+                        help="with --sleep: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--relocate", default="",
+                        help="comma-separated client names present for the S10-T03d relocation fixture (server-driven; "
+                             "fixture relocate_party)")
+    parser.add_argument("--relocate-start", type=int, default=20,
+                        help="with --relocate: seconds after both players are in the world until the fixture starts")
+    parser.add_argument("--relocate-variant", type=int, default=0,
+                        help="with --relocate: 0 the guide rounds (refused, then agreed to another level); 1 client "
+                             "2's same-level fast travel (--relocate-test c2:N) agreed by p1")
+    parser.add_argument("--sweep", default="",
+                        help="comma-separated client names present for the S10-T03e passage sweep (server-driven: "
+                             "the party travels every passage it can reach; fixture sweep_party)")
+    parser.add_argument("--sweep-start", type=int, default=20,
+                        help="with --sweep: seconds after both players are in the world until the sweep starts")
+    parser.add_argument("--emission", default="",
+                        help="comma-separated client names present for the S10-T05a emission fixture (server-driven: "
+                             "variant 0 places player 1 in the nearest emission cover and starts a surge, variant 1 "
+                             "places player 1 350+ m from player 2 and starts a psi-storm; fixture emission_party)")
+    parser.add_argument("--emission-start", type=int, default=20,
+                        help="with --emission: seconds after both players are in the world until player 1 is placed")
+    parser.add_argument("--emission-variant", type=int, choices=(0, 1), default=0,
+                        help="with --emission: 0 a surge (one player in cover), 1 a psi-storm (the players apart)")
+    parser.add_argument("--story", default="",
+                        help="comma-separated client names present for the S10-T05c story fixture (server-driven: "
+                             "DoctorX and Living Legend steps in each player's context, a travel to Garbage; with "
+                             "Run-CoopSession -ServerKill the restart verifies; fixture story_party)")
+    parser.add_argument("--music", default="",
+                        help="comma-separated client names present for the S10-T07 combat-music fixture "
+                             "(server-driven: p1 moved away, a hostile stalker fights p2 for 60 s, then p2 jumps "
+                             "about 500 m (B6); fixture music_party)")
+    parser.add_argument("--music-start", type=int, default=20,
+                        help="with --music: seconds after both players are in the world until it acts")
+    parser.add_argument("--story-start", type=int, default=20,
+                        help="with --story: seconds after both players are in the world (on each level) until it acts")
+    parser.add_argument("--new-game", default="",
+                        help="S10-T03f: <faction>:<start location> (new_game_start_locations.ltx): the server starts a "
+                             "new game (all.spawn) with the creator's choices in its axr_options.ltx "
+                             "[character_creation] instead of loading the fixture save")
+    parser.add_argument("--new-game-loadout", default="",
+                        help="with --new-game: player 1's loadout (comma-separated sections, as the creation screen "
+                             "writes it); default: the faction's kit")
+    parser.add_argument("--new-game-loadout2", default="",
+                        help="with --new-game: player 2's loadout (T01-3: each player picks their own); default: the "
+                             "faction's kit")
+    parser.add_argument("--new-game-money", type=int, default=2000,
+                        help="with --new-game: each player's starting money")
+    parser.add_argument("--client-exit-after", type=int, default=1800,
+                        help="a client's own limit on its run in seconds (exit_after_seconds; raise it for a long "
+                             "sweep; the server's serve_seconds follows it)")
+    parser.add_argument("--torch-test", default="",
+                        help="S10-T07 (B48) driver: <client>:<seconds> after its world goes live the client presses "
+                             "the torch as the L key does, and again 12 s later")
+    parser.add_argument("--relocate-test", default="",
+                        help="S10-T03d driver: <client>:<seconds> after its world goes live the client does what a "
+                             "same-level fast travel does")
+    parser.add_argument("--companion-test", default="",
+                        help="S10-T07 driver: <client>:<seconds> after its world goes live the client presses the "
+                             "companion hotkeys (move, then combat), e.g. c2:60,c1:60")
+    parser.add_argument("--session", default="",
+                        help="S10-T06 driver: <client>:<script> (1 the owner: a refused create, a new game, the first "
+                             "campaign loaded back; 2 the partner: its loadout, a refused load), e.g. c1:1,c2:2")
+    parser.add_argument("--place-giver", type=int, default=0,
+                        help="hands-on aid: seconds after both players are in the world until both actors are placed "
+                             "in front of Sidorovich, once (profile place_giver; 0 off)")
+    parser.add_argument("--travel-barrier-hold", type=int, default=0,
+                        help="S09-T04 harness: seconds the server keeps the barrier up before the take (0 off)")
     parser.add_argument("--travel-ready-delay", default="",
                         help="S09-T03 driver: <client>:<seconds>[,...]: that client sends its ready N s after "
                              "arriving on the destination level (999: never)")
     parser.add_argument("--travel-ready-wrong", default="",
                         help="S09-T03 driver: comma-separated clients that first send a ready with a wrong "
                              "transition id, then a wrong level, then the right one")
+    parser.add_argument("--travel-rejoin-delay", default="",
+                        help="S09-T04 driver: <client>:<seconds> the client waits after a committed travel before "
+                             "it reconnects (default 2 s)")
+    parser.add_argument("--travel-load-fail", default="",
+                        help="S09-T04 driver: comma-separated clients that terminate themselves when the destination "
+                             "world is received (a crash during the load; restart them with Run-CoopSession -Restart)")
     parser.add_argument("--restart-no-fixture", action="store_true",
                         help="with --failpoint: the restarted server runs no fixture (the clients' pending "
                              "requests are retried against the recovered world) (S08-T06)")
@@ -205,9 +403,39 @@ def main():
     use = {n for n in args.use.split(",") if n}
     stack = {n for n in args.stack.split(",") if n}
     travel = {n for n in args.travel.split(",") if n}
+    talk = {n for n in args.talk.split(",") if n}
+    info = {n for n in args.info.split(",") if n}
+    party_task = {n for n in args.party_task.split(",") if n}
+    trade_fix = {n for n in args.trade.split(",") if n}
+    upgrade_fix = {n for n in args.upgrade.split(",") if n}
+    relations_fix = {n for n in args.relations.split(",") if n}
+    stash_fix = {n for n in args.stash.split(",") if n}
+    npc_fix = {n for n in args.npc.split(",") if n}
+    loot_fix = {n for n in args.loot.split(",") if n}
+    psy_fix = {n for n in args.psy.split(",") if n}
+    mutant_fix = {n for n in args.mutant.split(",") if n}
+    fauna_fix = {n for n in args.fauna.split(",") if n}
+    companion_fix = {n for n in args.companion.split(",") if n}
+    alife_fix = {n for n in args.alife.split(",") if n}
+    squad_fix = {n for n in args.squad.split(",") if n}
+    sleep_fix = {n for n in args.sleep.split(",") if n}
+    relocate_fix = {n for n in args.relocate.split(",") if n}
+    sweep_fix = {n for n in args.sweep.split(",") if n}
+    emission_fix = {n for n in args.emission.split(",") if n}
+    story_fix = {n for n in args.story.split(",") if n}
+    music_fix = {n for n in args.music.split(",") if n}
+    relocate_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.relocate_test.split(',') if e}
+    torch_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.torch_test.split(',') if e}
+    session_script = {e.split(':')[0]: int(e.split(':')[1]) for e in args.session.split(',') if e}
+    companion_test = {e.split(':')[0]: int(e.split(':')[1]) for e in args.companion_test.split(',') if e}
     ready_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_ready_delay.split(',') if e}
     ready_wrong = {n for n in args.travel_ready_wrong.split(',') if n}
-    drivers = inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel
+    rejoin_delay = {e.split(':')[0]: int(e.split(':')[1]) for e in args.travel_rejoin_delay.split(',') if e}
+    load_fail = {n for n in args.travel_load_fail.split(',') if n}
+    drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
+               | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
+               | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix | sweep_fix
+               | emission_fix | story_fix | music_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -237,6 +465,20 @@ def main():
         if not source.exists():
             raise SystemExit(f"No saved game {source}")
         shutil.copyfile(source, saves / ("coop-campaign" + extension))
+
+    if args.new_game:
+        # S10-T03f: what the creation screen (ui_mm_faction_select.script OnStartGame) writes to axr_main.config before
+        # it starts a new game; the server's on_game_load reads it as single player's does
+        faction, _, location = args.new_game.partition(":")
+        if not faction or not location:
+            raise SystemExit("--new-game <faction>:<start location>")
+        creation = {"new_game_difficulty": "1", "new_game_economy": "1", "new_game_economy_treasure": "1",
+                    "new_game_story_mode": "true", "new_game_character_name": "Player_1", "new_game_faction": faction,
+                    "new_game_map": location, "new_game_money": str(args.new_game_money)}
+        if args.new_game_loadout:
+            creation["new_game_loadout"] = args.new_game_loadout
+        # axr_main.config is ini_file_ex("axr_options.ltx"): $game_config$, the runtime's own gamedata copy
+        merge_ini_section(runtimes["server"] / "gamedata/configs/axr_options.ltx", "character_creation", creation)
 
     # Players: keys (DPAPI, this Windows user) and the public roster.
     roster_lines = []
@@ -279,7 +521,8 @@ def main():
             lines += [f"net_loss = {args.net_loss}", f"net_lag = {args.net_lag}"]
         if name == "server":
             lines += ["role = server", f"listen = 0.0.0.0:{args.port}", f"roster = {winpath(roster)}",
-                      f"party_id = {party_id}", "save = coop-campaign", "serve_seconds = 3600",
+                      f"party_id = {party_id}", "save = coop-campaign",
+                      f"serve_seconds = {max(3600, args.client_exit_after + 600)}",
                       f"churn = {args.churn}", f"drop = {args.drop}",
                       f"arm = {1 if combat or encounter else 0}", f"combat_heal = {1 if combat else 0}",
                       f"encounter = {20 if encounter else 0}", f"lethal = {8 if encounter else 0}",
@@ -294,7 +537,39 @@ def main():
                       f"quest_party = {args.quest_start if quest else 0}", f"quest_holder = {args.quest_holder}",
                       f"quest_variant = {args.quest_variant}",
                       f"travel_party = {args.travel_start if travel else 0}",
-                      f"travel_variant = {args.travel_variant}"]
+                      f"travel_variant = {args.travel_variant}",
+                      f"travel_changer = {args.travel_changer}",
+                      f"travel_approach = {args.travel_approach}",
+                      f"travel_barrier_hold = {args.travel_barrier_hold}",
+                      f"talk_party = {args.talk_start if talk else 0}", f"talk_variant = {args.talk_variant}",
+                      f"info_party = {args.info_start if info else 0}",
+                      f"task_party = {args.party_task_start if party_task else 0}",
+                      f"trade_party = {args.trade_start if trade_fix else 0}",
+                      f"upgrade_party = {args.upgrade_start if upgrade_fix else 0}",
+                      f"relations_party = {args.relations_start if relations_fix else 0}",
+                      f"stash_party = {args.stash_start if stash_fix else 0}",
+                      f"npc_party = {args.npc_start if npc_fix else 0}",
+                      f"loot_party = {args.loot_start if loot_fix else 0}",
+                      f"psy_party = {args.psy_start if psy_fix else 0}",
+                      f"mutant_party = {args.mutant_start if mutant_fix else 0}",
+                      f"fauna_party = {args.fauna_start if fauna_fix else 0}",
+                      f"companion_party = {args.companion_start if companion_fix else 0}",
+                      f"alife_party = {args.alife_start if alife_fix else 0}",
+                      f"squad_party = {args.squad_start if squad_fix else 0}",
+                      f"sleep_party = {args.sleep_start if sleep_fix else 0}",
+                      f"relocate_party = {args.relocate_start if relocate_fix else 0}",
+                      f"relocate_variant = {args.relocate_variant}",
+                      f"sweep_party = {args.sweep_start if sweep_fix else 0}",
+                      f"emission_party = {args.emission_start if emission_fix else 0}",
+                      f"emission_variant = {args.emission_variant}",
+                      f"story_party = {args.story_start if story_fix else 0}",
+                      f"music_party = {args.music_start if music_fix else 0}",
+                      f"place_giver = {args.place_giver}"]
+            if args.new_game:
+                # S10-T03f: the second player's own choices (T01-3: the creator's faction)
+                faction, _, _ = args.new_game.partition(":")
+                lines += ["new_game = 1", f"new_game_faction = {faction}",
+                          f"new_game_loadout_2 = {args.new_game_loadout2}", f"new_game_money_2 = {args.new_game_money}"]
             if args.failpoint:
                 # <operation>:<phase>[:<count>][:fail]; the point itself has one colon
                 parts = args.failpoint.split(":")
@@ -305,7 +580,12 @@ def main():
                 point = ":".join(parts[:2])
                 restart_lines = list(lines)
                 if args.restart_no_fixture:
-                    fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party")
+                    fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
+                                "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
+                                "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
+                                "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
+                                "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party",
+                            "music_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
                 lines += [f"failpoint = {point}", f"failpoint_count = {count}", f"failpoint_fail = {1 if fail else 0}"]
@@ -314,26 +594,37 @@ def main():
                 profiles["server-restart"] = restart
             elif args.restart_no_fixture:
                 # an external kill (Run-CoopSession -ServerKill <s>): the restart runs no fixture
-                fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party")
+                fixtures = ("pickup_race", "transfer_race", "quest_party", "use_race", "stack_race", "travel_party",
+                            "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
+                            "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
+                            "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
+                            "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party",
+                            "music_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                              for ln in lines) + "\n")
                 profiles["server-restart"] = restart
         else:
-            stepped = transfer | quest | use | stack | travel
+            stepped = transfer | quest | use | stack | travel | talk
             program = (8 if name in stepped else 7 if name in pickup else 6 if name in ledger
                        else 5 if name in weather
                        else 4 if name in encounter
                        else 3 if name in combat else 2 if name in movement else 1 if name in script else 0)
             lines += ["role = client", f"server = 127.0.0.1:{args.port}",
                       f"key = {winpath(session_dir / 'keys' / (name + '.key'))}",
-                      f"name = {players[name]['display_name']}", "exit_after_seconds = 1800",
+                      f"name = {players[name]['display_name']}", f"exit_after_seconds = {args.client_exit_after}",
                       f"inject = {1 if name in inject else 0}",
                       f"script = {program}",
                       f"predict = {0 if name in no_predict else 1}",
                       f"auto_respawn = {args.auto_respawn}",
                       f"travel_ready_delay = {ready_delay.get(name, 0)}",
-                      f"travel_ready_wrong = {1 if name in ready_wrong else 0}"]
+                      f"travel_ready_wrong = {1 if name in ready_wrong else 0}",
+                      f"travel_rejoin_delay = {rejoin_delay.get(name, 0)}",
+                      f"travel_load_fail = {1 if name in load_fail else 0}",
+                      f"relocate_test = {relocate_test.get(name, 0)}",
+                      f"torch_test = {torch_test.get(name, 0)}",
+                      f"session_script = {session_script.get(name, 0)}",
+                      f"companion_test = {companion_test.get(name, 0)}"]
         profile = runtime / "coop.ltx"
         profile.write_text("\n".join(lines) + "\n")
         profiles[name] = profile
@@ -392,6 +683,12 @@ def main():
         "travel_variant": args.travel_variant if travel else 0,
         "travel_ready_delay": ready_delay,
         "travel_ready_wrong": sorted(ready_wrong),
+        "travel_barrier_hold": args.travel_barrier_hold,
+        "travel_rejoin_delay": rejoin_delay,
+        "travel_load_fail": sorted(load_fail),
+        "talk": sorted(talk),
+        "talk_variant": args.talk_variant if talk else 0,
+        "info": sorted(info),
         "roster": str(roster.relative_to(workspace)),
         "roster_sha256": sha256(roster),
         "players": {name: {k: v for k, v in data.items()} for name, data in players.items()},

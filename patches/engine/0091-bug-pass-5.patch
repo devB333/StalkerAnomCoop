@@ -1,0 +1,338 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 7afa24c..61b6a29 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -352,6 +352,9 @@ struct Link
+ 	u64 last_epoch = 0;
+ 	u32 last_lean_log_ms = 0; // the other player's lean, logged every 250 ms while held
+ 	u32 last_anim_log_ms = 0; // S10-T07 (B4): a moving stalker's animation state, once a second
++	// S10-T07 (B23, part 5): this second's frames (wall clock) for the frame-trace line
++	u32 frame_prev_ms = 0, frame_window_ms = 0, frame_count = 0, frame_slow = 0, frame_traces = 0;
++	u32 frame_max_ms = 0;
+ 	u32 camera_watch_until_ms = 0; // the own camera logged per frame after the other player's weapon change
+ 	FILE* camera_csv = nullptr;
+ 	// S07-T07: the respawn prompt and request
+@@ -1827,12 +1830,15 @@ void present_actors()
+ 						LPCSTR torso_name = torso ? motion_name(ka, torso->motionID) : "-";
+ 						const float travel = atan2f(velocity.x, velocity.z);
+ 						g_link->log.line("replica-anim id=%u bits=%x speed=%.2f standing=%d mt=%u legs=%u:%s torso=%u:%s "
+-							"yaw=%.2f drawn=%.2f travel=%.2f visual=%s",
++							"yaw=%.2f drawn=%.2f travel=%.2f head=%.2f>%.2f body=%.2f danger=%d visual=%s",
+ 							u32(stalker->ID()), u32(s.state_bits), stalker->replica_speed(),
+ 							stalker->animation().standing() ? 1 : 0, u32(stalker->movement().movement_type()),
+ 							legs ? u32(legs->motionID.idx) : 0u, legs_name ? legs_name : "?",
+ 							torso ? u32(torso->motionID.idx) : 0u, torso_name ? torso_name : "?",
+ 							s.transform.yaw, stalker->replica_drawn_yaw(), travel,
++							stalker->movement().m_head.current.yaw, stalker->movement().m_head.target.yaw,
++							stalker->movement().m_body.current.yaw,
++							stalker->movement().mental_state() == MonsterSpace::eMentalStateDanger ? 1 : 0,
+ 							stalker->cNameVisual().c_str() ? stalker->cNameVisual().c_str() : "-");
+ 					}
+ 				}
+@@ -7700,6 +7706,10 @@ void session_driver()
+ 
+ } // namespace
+ 
++// S10-T07 (B23, part 5): a co-op client's campfire light settings (CustomZone.cpp)
++extern float g_coop_campfire_shadow;
++extern int g_coop_campfire_light;
++
+ namespace campaign
+ {
+ // S10-T04f: see the upgrade section above.
+@@ -8360,6 +8370,57 @@ void coop_client_app_start()
+ 	connect();
+ }
+ 
++// S10-T07 (B23, part 5): the frame rate near the campfires. Once a second, if
++// a frame took more than 40 ms or a lit fire is within 30 m of the camera:
++// the frames, the slowest one and the number over 50 ms (wall clock, not the
++// engine's clamped delta), the nearest lit fire and whether its light and
++// shadow are on, the lit and shadowed fire lights and the console settings.
++void frame_trace()
++{
++	const u32 now = g_link->wall.GetElapsed_ms();
++	const u32 ms = g_link->frame_prev_ms ? now - g_link->frame_prev_ms : 0;
++	g_link->frame_prev_ms = now;
++	if (g_link->world != WorldLive || !g_pGameLevel || !g_actor)
++	{
++		g_link->frame_window_ms = now;
++		return;
++	}
++	++g_link->frame_count;
++	g_link->frame_max_ms = _max(g_link->frame_max_ms, ms);
++	if (ms > 50)
++		++g_link->frame_slow;
++	if (now - g_link->frame_window_ms < 1000)
++		return;
++	float nearest = flt_max;
++	int nearest_light = 0, nearest_shadow = 0;
++	u32 lit = 0, shadowed = 0;
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CZoneCampfire* fire = smart_cast<CZoneCampfire*>(Level().Objects.o_get_by_iterator(i));
++		if (!fire || !fire->is_on())
++			continue;
++		lit += fire->idle_light_lit() ? 1 : 0;
++		shadowed += fire->idle_light_shadowed() ? 1 : 0;
++		const float d = fire->Position().distance_to(Device.vCameraPosition);
++		if (d < nearest)
++		{
++			nearest = d;
++			nearest_light = fire->idle_light_lit() ? 1 : 0;
++			nearest_shadow = fire->idle_light_shadowed() ? 1 : 0;
++		}
++	}
++	if ((g_link->frame_max_ms > 40 || nearest < 30.f) && g_link->frame_traces < 2400)
++	{
++		++g_link->frame_traces;
++		g_link->log.line("frame-trace frames=%u max_ms=%u slow=%u fire_m=%.1f fire_light=%d fire_shadow=%d lit=%u "
++			"shadowed=%u set_light=%d set_shadow=%.1f", g_link->frame_count, g_link->frame_max_ms, g_link->frame_slow,
++			nearest < flt_max ? nearest : -1.f, nearest_light, nearest_shadow, lit, shadowed, g_coop_campfire_light,
++			g_coop_campfire_shadow);
++	}
++	g_link->frame_window_ms = now;
++	g_link->frame_count = g_link->frame_slow = g_link->frame_max_ms = 0;
++}
++
+ void coop_client_frame()
+ {
+ 	if (!g_link || !g_link->active)
+@@ -8373,6 +8434,7 @@ void coop_client_frame()
+ 	}
+ 	inject_step();
+ 	world_frame();
++	frame_trace(); // S10-T07 (B23, part 5)
+ 	session_driver(); // S10-T06
+ 	companion_driver(); // S10-T07 (B12)
+ 	if (g_link->active && g_actor)
+diff --git a/src/xrGame/CustomZone.cpp b/src/xrGame/CustomZone.cpp
+index f75d392..6b8503a 100644
+--- a/src/xrGame/CustomZone.cpp
++++ b/src/xrGame/CustomZone.cpp
+@@ -398,8 +398,8 @@ BOOL CCustomZone::net_Spawn(CSE_Abstract* DC)
+ 	if (m_zone_flags.test(eIdleLight) && render_ver_allowed)
+ 	{
+ 		m_pIdleLight = ::Render->light_create();
+-		// S10-T07 (B23, part 4): a near-only shadow starts off (UpdateIdleLight)
+-		m_idle_light_shadow_cast = m_zone_flags.test(eIdleLightShadow) && m_idle_light_shadow_near <= 0.f;
++		// S10-T07 (B23): a co-op client's campfire shadow starts off (UpdateIdleLight)
++		m_idle_light_shadow_cast = m_zone_flags.test(eIdleLightShadow) && !m_coop_campfire;
+ 		m_pIdleLight->set_shadow(m_idle_light_shadow_cast);
+ 
+ 		if (m_zone_flags.test(eIdleLightVolumetric))
+@@ -855,9 +855,32 @@ void CCustomZone::StopIdleLight()
+ 		m_pIdleLight->set_active(false);
+ }
+ 
++// S10-T07 (B23, part 5): a co-op client's campfire light, set in the game
++// console: coop_campfire_light 0/1 (the light at all) and
++// coop_campfire_shadow <m> (its shadow within that distance of the camera;
++// 0, the default, casts none). All 46 Cordon fires burn in co-op (T07-10).
++float g_coop_campfire_shadow = 0.f;
++int g_coop_campfire_light = 1;
++
+ void CCustomZone::UpdateIdleLight()
+ {
+ 	if (!m_zone_flags.test(eFastMode)) return;
++	// this runs only while the zone is enabled (shedule_Update), so a light
++	// switched back on belongs to a burning fire
++	if (m_coop_campfire && m_pIdleLight)
++	{
++		if (!g_coop_campfire_light)
++		{
++			if (m_pIdleLight->get_active())
++				m_pIdleLight->set_active(false);
++			m_coop_light_hidden = true;
++		}
++		else if (m_coop_light_hidden)
++		{
++			m_coop_light_hidden = false;
++			StartIdleLight();
++		}
++	}
+ 	if (!m_pIdleLight || !m_pIdleLight->get_active())
+ 		return;
+ 
+@@ -877,16 +900,18 @@ void CCustomZone::UpdateIdleLight()
+ 	pos.y += m_fIdleLightHeight;
+ 	m_pIdleLight->set_position(pos);
+ 
+-	// S10-T07 (B23, part 4): a far campfire still burns and lights its
+-	// surroundings, but only a near one renders a shadow map (a point light's
+-	// shadow is six renders of the scene: 46 of them on Cordon cost the frame
+-	// rate). The off distance is a little farther than the on distance so a
+-	// player standing at the edge does not make the shadow flicker.
+-	if (m_idle_light_shadow_near > 0.f && m_zone_flags.test(eIdleLightShadow))
++	// S10-T07 (B23): a co-op campfire renders a shadow map (six renders of the
++	// scene for a point light) only within coop_campfire_shadow of the camera;
++	// it still burns and lights its surroundings. The off distance is a little
++	// farther than the on distance so the shadow does not flicker at the edge.
++	if (m_coop_campfire && m_zone_flags.test(eIdleLightShadow))
+ 	{
+-		const float dist = Device.vCameraPosition.distance_to(pos);
+-		const float limit = m_idle_light_shadow_cast ? m_idle_light_shadow_near * 1.25f : m_idle_light_shadow_near;
+-		const bool cast = dist < limit;
++		bool cast = false;
++		if (g_coop_campfire_shadow > 0.f)
++		{
++			const float dist = Device.vCameraPosition.distance_to(pos);
++			cast = dist < (m_idle_light_shadow_cast ? g_coop_campfire_shadow * 1.25f : g_coop_campfire_shadow);
++		}
+ 		if (cast != m_idle_light_shadow_cast)
+ 		{
+ 			m_idle_light_shadow_cast = cast;
+diff --git a/src/xrGame/CustomZone.h b/src/xrGame/CustomZone.h
+index acd5a39..3345bc3 100644
+--- a/src/xrGame/CustomZone.h
++++ b/src/xrGame/CustomZone.h
+@@ -301,10 +301,15 @@ protected:
+ 	void StartIdleLight();
+ 	void StopIdleLight();
+ 	void UpdateIdleLight();
+-	// S10-T07 (B23, part 4): above 0, a shadowed idle light casts its shadow
+-	// only while the camera is this close (metres; a co-op client's campfires)
+-	float m_idle_light_shadow_near = 0.f;
++	// S10-T07 (B23): a co-op client's campfire, whose idle light follows the
++	// console settings coop_campfire_light and coop_campfire_shadow
++	bool m_coop_campfire = false;
+ 	bool m_idle_light_shadow_cast = true; // what the light was last told
++	bool m_coop_light_hidden = false; // switched off by coop_campfire_light 0
++public:
++	bool idle_light_lit() const { return m_pIdleLight && m_pIdleLight->get_active(); }
++	bool idle_light_shadowed() const { return idle_light_lit() && m_idle_light_shadow_cast; }
++protected:
+ 
+ 
+ 	//подсветка выброса
+diff --git a/src/xrGame/ZoneCampfire.cpp b/src/xrGame/ZoneCampfire.cpp
+index 1784ac5..9d0ad91 100644
+--- a/src/xrGame/ZoneCampfire.cpp
++++ b/src/xrGame/ZoneCampfire.cpp
+@@ -14,8 +14,9 @@
+ // Part 4 (decision T07-10): that is what the players want. Letting the server
+ // turn them as single-player does left only the NPC-lit fires burning (10-11
+ // of 46 in demo-3), so the server never turns a campfire and every one burns.
+-// A co-op client keeps the frame rate by casting a campfire's shadow only
+-// near the camera (CCustomZone::UpdateIdleLight, m_idle_light_shadow_near).
++// A co-op client keeps the frame rate by casting no campfire shadow unless
++// the player asks for one near the camera (CCustomZone::UpdateIdleLight,
++// console coop_campfire_shadow / coop_campfire_light).
+ static bool campfire_turn_allowed()
+ {
+ 	if (campaign::process_role() == campaign::Role::Server)
+@@ -23,9 +24,6 @@ static bool campfire_turn_allowed()
+ 	return !!psDeviceFlags.test(rsR2 | rsR3 | rsR4);
+ }
+ 
+-// S10-T07 (B23, part 4): the shadow distance of a co-op client's campfire (m)
+-static const float kCoopCampfireShadowNear = 20.f;
+-
+ /*
+ CZoneCampfire* g_zone = NULL;
+ void turn_zone()
+@@ -54,7 +52,7 @@ void CZoneCampfire::Load(LPCSTR section)
+ {
+ 	inherited::Load(section);
+ 	if (campaign::coop_client_active())
+-		m_idle_light_shadow_near = kCoopCampfireShadowNear;
++		m_coop_campfire = true;
+ }
+ 
+ void CZoneCampfire::GoEnabledState()
+diff --git a/src/xrGame/ai/stalker/ai_stalker.cpp b/src/xrGame/ai/stalker/ai_stalker.cpp
+index 1c29ad0..265ca67 100644
+--- a/src/xrGame/ai/stalker/ai_stalker.cpp
++++ b/src/xrGame/ai/stalker/ai_stalker.cpp
+@@ -1089,14 +1089,21 @@ void CAI_Stalker::UpdateCL()
+ 			{
+ 				START_PROFILE("stalker/client_update/sight_manager")
+ 					VERIFY(!m_pPhysicsShell);
+-					try
++					// S10-T07 (B4, part 5): a co-op client's replica looks where the
++					// server's head aim says (replica_present_animation); its own
++					// sight action would overwrite that target every frame and twist
++					// the upper body toward a stale look
++					if (!replica_presented())
+ 					{
+-						sight().update();
+-					}
+-					catch (...)
+-					{
+-						sight().setup(CSightAction(SightManager::eSightTypeCurrentDirection));
+-						sight().update();
++						try
++						{
++							sight().update();
++						}
++						catch (...)
++						{
++							sight().setup(CSightAction(SightManager::eSightTypeCurrentDirection));
++							sight().update();
++						}
+ 					}
+ 
+ 					Exec_Look(client_update_fdelta());
+diff --git a/src/xrGame/console_commands.cpp b/src/xrGame/console_commands.cpp
+index c8bd92d..a4c940c 100644
+--- a/src/xrGame/console_commands.cpp
++++ b/src/xrGame/console_commands.cpp
+@@ -2509,6 +2509,10 @@ public:
+     }
+ };
+ 
++// S10-T07 (B23, part 5): a co-op client's campfire light (CustomZone.cpp)
++extern float g_coop_campfire_shadow;
++extern int g_coop_campfire_light;
++
+ void CCC_RegisterCommands()
+ {
+ 	//Not needed for a singleplayer-only mod
+@@ -3322,6 +3326,10 @@ void CCC_RegisterCommands()
+ 	CMD4(CCC_Float, "g_wallmark_range_static", &wallmark_range_static, 0.f, 1000.f);
+ 	CMD4(CCC_Float, "g_wallmark_range_skeleton", &wallmark_range_skeleton, 0.f, 1000.f);
+ 
++	// S10-T07 (B23, part 5): a co-op client's campfire light and its shadow distance (m, 0 = none)
++	CMD4(CCC_Integer, "coop_campfire_light", &g_coop_campfire_light, 0, 1);
++	CMD4(CCC_Float, "coop_campfire_shadow", &g_coop_campfire_shadow, 0.f, 100.f);
++
+ 	CMD1(CCC_MovePathQueryPosThreshold, "movement_manager_move_along_path_query_pos_threshold");
+     CMD4(CCC_Integer, "show_actor_body", &showActorBody, 0, 2);
+     CMD4(CCC_Integer, "disable_actor_body_rotation_delay", &disableActorBodyRotationDelay, 0, 1);
+diff --git a/src/xrGame/sight_manager.cpp b/src/xrGame/sight_manager.cpp
+index 8ed5066..06029b2 100644
+--- a/src/xrGame/sight_manager.cpp
++++ b/src/xrGame/sight_manager.cpp
+@@ -204,8 +204,16 @@ void CSightManager::Exec_Look(float time_delta)
+ 
+ 		if (enabled())
+ 		{
+-			compute_aiming(time_delta, head_speed);
+-			current_action().on_frame();
++			// S10-T07 (B4, part 5): a replica's upper body turns by the head's
++			// angle from the body only (the free look); its own weapon or
++			// animation aiming and its action's frame step are the server's
++			if (m_object->replica_presented())
++				process_action(time_delta);
++			else
++			{
++				compute_aiming(time_delta, head_speed);
++				current_action().on_frame();
++			}
+ 		}
+ 
+ #ifdef DEBUG
+@@ -654,7 +662,12 @@ void CSightManager::process_action(float const time_delta)
+ 	SBoneRotation const& head = object().movement().m_head;
+ 	SBoneRotation const& body = object().movement().m_body;
+ 
+-	Fvector const& factors = current_action().use_torso_look() ? s_danger_factors : s_free_factors;
++	// S10-T07 (B4, part 5): a replica's torso look follows the server's mental
++	// state (danger: the torso leads the look), not its own idle action
++	bool const torso_look = m_object->replica_presented()
++		? object().movement().mental_state() == MonsterSpace::eMentalStateDanger
++		: current_action().use_torso_look();
++	Fvector const& factors = torso_look ? s_danger_factors : s_free_factors;
+ 	VERIFY(_valid(factors));
+ 	//	if ( object().cName() == "level_prefix_stalker" ) {
+ 	//		Msg							("[%6d][%6d] [%f] + [%f] = [%f] ([%f])",  Device.dwFrame, Device.dwTimeGlobal, m_current.m_head.m_factor,		s_factor_lerp_speed*time_delta,		lerp ( m_current.m_head.m_factor,		factors.x, s_factor_lerp_speed*time_delta ), factors.x );

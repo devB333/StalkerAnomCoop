@@ -1,0 +1,224 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 8a71f24..ba0c1f2 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1882,6 +1882,63 @@ LPCSTR const compat_source =
+ 	"  S.ambient_wrap = 'per-player'\n"
+ 	"  S.wrapped = S.wrapped + 1\n"
+ 	"end\n"
++	// B35: the installed actor_effects' hit flash, bleeding, blood and radiation
++	// effects (from actor 0's update, outside a context: sent to both screens)
++	// run for each player in the world in its context, each with its own state
++	// (the module locals the function keeps, swapped per player)
++	"S.effects_wrap = 'none'\n"
++	"local aex_ok, AEX = pcall(function() return actor_effects end)\n"
++	"local ae_gu, ae_su = debug and debug.getupvalue, debug and debug.setupvalue\n"
++	"if aex_ok and type(AEX) == 'table' and ae_gu and ae_su then\n"
++	"  local AE_STATE = { Update_Impact = { 'prev_health', 'impact_snd', 'impact_cam', 'impact_removed' },\n"
++	"    Update_Bleeding = { 'bleed_set', 'bleed_rad_eff', 'bleed_1_tg', 'bleed_2', 'bleed_removed' },\n"
++	"    Update_Blood = { 'actor_last_health', 'blood_tg', 'blood_tg_b', 'blood_state', 'blood_count' },\n"
++	"    Update_Rad = { 'rad_removed' } }\n"
++	"  local n_fx = 0\n"
++	"  for fname, vars in pairs(AE_STATE) do\n"
++	"    local orig = rawget(AEX, fname)\n"
++	"    if type(orig) == 'function' then\n"
++	"      local idx = {}\n"
++	"      for i = 1, 255 do\n"
++	"        local n = ae_gu(orig, i)\n"
++	"        if n == nil then break end\n"
++	"        idx[n] = i\n"
++	"      end\n"
++	"      local complete = true\n"
++	"      for _, v in ipairs(vars) do if not idx[v] then complete = false end end\n"
++	"      if complete then\n"
++	"        local saved = { [0] = {}, [1] = {} }\n"
++	"        for _, v in ipairs(vars) do\n"
++	"          local _, val = ae_gu(orig, idx[v])\n"
++	"          saved[0][v] = val\n"
++	"          saved[1][v] = val\n"
++	"        end\n"
++	"        rawset(AEX, fname, function(actor, ...)\n"
++	"          if campaign.slot_actor_id(0) < 0 then return orig(actor, ...) end\n"
++	"          for sl = 0, 1 do\n"
++	"            if campaign.slot_actor_id(sl) >= 0 and campaign.slot_in_world(sl) then\n"
++	"              local tok = campaign.enter_slot(sl)\n"
++	"              if tok ~= 0 then\n"
++	"                local st = saved[sl]\n"
++	"                for _, v in ipairs(vars) do ae_su(orig, idx[v], st[v]) end\n"
++	"                local a = db.actor\n"
++	"                if a then pcall(orig, a, ...) end\n"
++	"                for _, v in ipairs(vars) do\n"
++	"                  local _, val = ae_gu(orig, idx[v])\n"
++	"                  st[v] = val\n"
++	"                end\n"
++	"                campaign.leave(tok)\n"
++	"              end\n"
++	"            end\n"
++	"          end\n"
++	"        end)\n"
++	"        n_fx = n_fx + 1\n"
++	"      end\n"
++	"    end\n"
++	"  end\n"
++	"  S.effects_wrap = 'per-player:' .. n_fx\n"
++	"  if n_fx > 0 then S.wrapped = S.wrapped + 1 end\n"
++	"end\n"
+ 	"local lvl = level\n"
+ 	"local orig_swfx = lvl and lvl.set_weather_fx\n"
+ 	"local function noop() end\n"
+@@ -2352,6 +2409,10 @@ bool install_compat(lua_State* L)
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T07 compatibility layer ambient wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+ 	lua_pop(L, 1);
++	lua_pushstring(L, "effects_wrap"); // B35
++	lua_rawget(L, -2);
++	Msg("S10-T07 compatibility layer effects wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
++	lua_pop(L, 1);
+ 	lua_pushstring(L, "combat_wrap");
+ 	lua_rawget(L, -2);
+ 	Msg("S10-T07 compatibility layer combat wrap: %s", lua_isstring(L, -1) ? lua_tostring(L, -1) : "?");
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index e121938..b7bd486 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -1220,6 +1220,16 @@ void world_frame()
+ 			// callback); on a replica that would change counts locally and try to
+ 			// release items: the server merges and sends the counts
+ 			LPCSTR chunk = "if item_weapon then item_weapon.ammo_aggregation = function() return true end "
++				// B36: the installed get_object_by_id answers db.actor for id 0
++				// (AC_ID, single player's actor); on a client id 0 is player 1's
++				// actor or body, so the loot window moved a body's items "from the
++				// player to the player" (refused malformed): id 0 is the real object
++				// unless it is this client's own actor
++				"if type(get_object_by_id) == 'function' and get_object_by_id ~= __coop_gobi_wrap then "
++				"local base = get_object_by_id "
++				"__coop_gobi_wrap = function(id) if id == AC_ID and db.actor and db.actor:id() ~= id then "
++				"return level.object_by_id(id) end return base(id) end "
++				"get_object_by_id = __coop_gobi_wrap end "
+ 				"item_weapon.ammo_aggregation_full = function() return true end end "
+ 				// S08-T09: thirst, sleep and psy health are the server's (CampaignEvent 12)
+ 				"for _, m in ipairs({'actor_status_thirst', 'actor_status_sleep', 'arszi_psy'}) do "
+@@ -8468,12 +8478,21 @@ void coop_client_ownership_event(u16 type, u16 destination, NET_Packet& P)
+ 		}
+ 		const u16 from = g_link->sell_from;
+ 		g_link->sell_item = 0xffff;
++		if (from == destination)
++		{
++			// B36: a move to the inventory it is already in (the server would
++			// refuse it malformed): nothing to send
++			++g_link->ownership_events_ignored;
++			g_link->log.line("transfer-same-owner item=%u owner=%u", u32(item), u32(destination));
++			return;
++		}
+ 		if (!ref_of(item, item_ref) || !ref_of(from, from_ref) || !ref_of(destination, to_ref))
+ 		{
+ 			++g_link->ownership_events_ignored;
+ 			g_link->log.line("transfer-unknown item=%u from=%u to=%u", u32(item), u32(from), u32(destination));
+ 			return;
+ 		}
++		g_link->log.line("transfer-sent item=%u from=%u to=%u", u32(item), u32(from), u32(destination));
+ 		xr_vector<u8> params;
+ 		push_ref(params, from_ref);
+ 		push_ref(params, to_ref);
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index b586008..9a94644 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -4254,7 +4254,12 @@ u16 take_transfer(PlayerLink& link, const coop::proto::ActionIntent& intent, coo
+ 	{
+ 		if (!read_ref(intent.params, 0, from_ref) || !read_ref(intent.params, 12, to_ref) || from_ref.none() ||
+ 			to_ref.none() || from_ref == to_ref)
++		{
++			// B36: which check (the client's from and to were not logged)
++			g_host->log.line("transfer-malformed slot=%u item=%u why=%s from=%I64u to=%I64u", u32(link.ref.slot), u32(id),
++				intent.params.size() != 24 ? "size" : (from_ref.none() || to_ref.none()) ? "none" : "same", from_ref.id, to_ref.id);
+ 			return coop::proto::kReasonMalformed;
++		}
+ 		from = engine_id_of(from_ref);
+ 		to = engine_id_of(to_ref);
+ 		if (from == kNoEngineId || to == kNoEngineId)
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 8782c95..802658f 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -888,8 +888,19 @@ static CEffectorCam* viewer_cam_effector(int id)
+ // run from level.add_call); the flags and numbers a client needs to play it.
+ // S10-T05d1: the effector ids the server has presented as added (any player or all); a remove or a
+ // factor for another is not sent (the installed actor_effects removes its effects every update, B14)
++// B35: keyed by audience and id (coop_effect_key): the installed actor_effects
++// runs for each player in its context, so one player's remove must not end the
++// other's effect of the same id
+ static xr_set<int> s_coop_pp_on, s_coop_cam_on;
+ static xr_map<int, float> s_coop_pp_factor;
++static int coop_effect_key(int id)
++{
++	campaign::ParticipantRef ref;
++	ref.slot = campaign::kBroadcastSlot;
++	const campaign::ScriptAudience audience = campaign::script_audience(&ref);
++	const int slot = audience == campaign::ScriptAudience::Player ? int(ref.slot) : int(campaign::kBroadcastSlot);
++	return (slot << 16) | (id & 0xffff);
++}
+ 
+ static campaign::Refusal present_cam_effector(int id, LPCSTR fn, bool cyclic, bool hud, float fov, float power,
+                                               float speed)
+@@ -898,7 +909,7 @@ static campaign::Refusal present_cam_effector(int id, LPCSTR fn, bool cyclic, bo
+ 	args.flags = (cyclic ? 1u : 0u) | (hud ? 2u : 0u);
+ 	args.value = power;
+ 	args.position.set(fov, speed, 0.f);
+-	s_coop_cam_on.insert(id); // S10-T05d1
++	s_coop_cam_on.insert(coop_effect_key(id)); // S10-T05d1
+ 	return campaign::present_script(campaign::Presentation::CameraEffector, u16(id), fn, args);
+ }
+ 
+@@ -1140,7 +1151,7 @@ void remove_cam_effector(int id)
+ {
+ 	if (CActor* viewer = campaign::local_view_actor())
+ 		viewer->Cameras().RemoveCamEffector((ECamEffectorType)id);
+-	else if (!s_coop_cam_on.erase(id))
++	else if (!s_coop_cam_on.erase(coop_effect_key(id)))
+ 		++g_coop_cam_orphans; // S10-T05d1
+ 	else
+ 		campaign::present_script(campaign::Presentation::CameraEffectorRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
+@@ -1262,8 +1273,8 @@ void add_pp_effector(LPCSTR fn, int id, bool cyclic)
+ 		// S03-T05; S06-T08: to every player outside a context, with the cyclic flag
+ 		campaign::PresentationArgs args;
+ 		args.flags = cyclic ? 1u : 0u;
+-		s_coop_pp_on.insert(id); // S10-T05d1
+-		s_coop_pp_factor.erase(id);
++		s_coop_pp_on.insert(coop_effect_key(id)); // S10-T05d1
++		s_coop_pp_factor.erase(coop_effect_key(id));
+ 		campaign::present_script(campaign::Presentation::PostProcess, u16(id), fn, args);
+ 		return;
+ 	}
+@@ -1279,7 +1290,7 @@ void remove_pp_effector(int id)
+ 	if (pp) pp->Stop(1.0f);
+ 	else if (campaign::process_role() == campaign::Role::Server)
+ 	{
+-		if (!s_coop_pp_on.erase(id))
++		if (!s_coop_pp_on.erase(coop_effect_key(id)))
+ 			++g_coop_pp_orphans; // S10-T05d1 (B14)
+ 		else
+ 			campaign::present_script(campaign::Presentation::PostProcessRemove, u16(id), "", campaign::PresentationArgs()); // S03-T05, S06-T08
+@@ -1291,18 +1302,19 @@ void remove_pp_effector(int id)
+ static void present_pp_factor(int id, float f, float f_sp)
+ {
+ 	// S10-T05d1: only for an effector that is on, and only a change
+-	if (!s_coop_pp_on.count(id))
++	const int key = coop_effect_key(id); // B35
++	if (!s_coop_pp_on.count(key))
+ 	{
+ 		++g_coop_pp_orphans;
+ 		return;
+ 	}
+-	auto last = s_coop_pp_factor.find(id);
++	auto last = s_coop_pp_factor.find(key);
+ 	if (last != s_coop_pp_factor.end() && _abs(last->second - f) < 0.001f)
+ 	{
+ 		++g_coop_volume_deduped;
+ 		return;
+ 	}
+-	s_coop_pp_factor[id] = f;
++	s_coop_pp_factor[key] = f;
+ 	campaign::PresentationArgs args;
+ 	args.value = f;
+ 	args.position.set(f_sp, 0.f, 0.f);

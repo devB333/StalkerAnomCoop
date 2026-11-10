@@ -1,5 +1,6 @@
 #include "coop/session/auth.h"
 
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -34,6 +35,79 @@ bool make_proof(const proto::Hello& h, const proto::AuthChallenge& c, const Priv
 bool check_proof(const proto::Hello& h, const proto::AuthChallenge& c, const PublicKey& pub, const proto::AuthProof& proof)
 {
     return verify(pub, transcript(h, c), proof.signature);
+}
+
+static const char kJoinAlphabet[] = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // 31 symbols, none ambiguous
+
+std::string make_join_code()
+{
+    std::string code;
+    while (code.size() < 10)
+    {
+        std::uint8_t b = 0;
+        if (!random_bytes(&b, 1))
+            return std::string();
+        if (b < 248) // 8 * 31: no modulo bias
+            code.push_back(kJoinAlphabet[b % 31]);
+    }
+    return code.substr(0, 5) + "-" + code.substr(5);
+}
+
+bool normalize_join_code(const std::string& in, std::string& out)
+{
+    out.clear();
+    for (char ch : in)
+    {
+        if (ch == '-' || ch == ' ' || ch == '\t')
+            continue;
+        if (ch >= 'a' && ch <= 'z')
+            ch = char(ch - 'a' + 'A');
+        if (!std::strchr(kJoinAlphabet, ch) || ch == 0)
+            return false;
+        out.push_back(ch);
+    }
+    return out.size() == 10;
+}
+
+proto::Digest join_mac(const std::string& code, const proto::Digest& t, const PublicKey& pub)
+{
+    std::string norm;
+    if (!normalize_join_code(code, norm))
+        norm.clear();
+    std::vector<std::uint8_t> b;
+    proto::Writer w(b);
+    static const char kLabel[] = "COOP-JOIN-v1";
+    w.raw(kLabel, sizeof(kLabel));
+    w.raw(norm.data(), norm.size());
+    w.digest(t);
+    w.raw(pub.data(), pub.size());
+    return sha256(b.data(), b.size());
+}
+
+bool make_join_proof(const proto::Hello& h, const proto::AuthChallenge& c, const PrivateKey& key,
+    const std::string& code, proto::AuthProof& proof)
+{
+    std::string norm;
+    PublicKey pub;
+    if (!normalize_join_code(code, norm) || !public_of(key, pub) || !make_proof(h, c, key, proof))
+        return false;
+    proof.join = true;
+    proof.public_key = pub;
+    proof.join_mac = join_mac(norm, transcript(h, c), pub);
+    return true;
+}
+
+bool check_join_proof(const proto::Hello& h, const proto::AuthChallenge& c, const std::string& code,
+    const proto::AuthProof& proof)
+{
+    std::string norm;
+    if (!proof.join || !normalize_join_code(code, norm) || !check_proof(h, c, proof.public_key, proof))
+        return false;
+    const proto::Digest want = join_mac(norm, transcript(h, c), proof.public_key);
+    std::uint8_t diff = 0; // constant time
+    for (std::size_t i = 0; i < want.size(); ++i)
+        diff |= std::uint8_t(want[i] ^ proof.join_mac[i]);
+    return diff == 0;
 }
 
 bool Roster::add(const RosterEntry& e, std::string* error)

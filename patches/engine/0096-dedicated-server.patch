@@ -1,0 +1,78 @@
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 93b57d2..7806569 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -434,6 +434,8 @@ struct Host
+ 	xr_vector<QuestAnswer> quest_answers;
+ 	bool party_adapter = false;
+ 	xr_string join_code; // S11-T00: the host's join code (normalized), empty: off
++	xr_string join_code_text; // ...as the file holds it
++	u32 roster_at_start = 0; // S11-T00: 0: a dedicated server (the first player to join owns it)
+ 	u64 field_repairs = 0; // S10-T07 (G10)
+ 	// S08-T09: the party's tasks as presented to the players
+ 	struct PartyFinished
+@@ -18625,8 +18627,9 @@ void session_owner_join(const PlayerLink& link)
+ 	Host::Session& s = g_host->session;
+ 	if (s.owner_known)
+ 		return;
+-	if (link.by_code)
+-		return; // S11-T00: the host (a roster key) owns a hosted session, even if a friend's join arrives first
++	if (link.by_code && g_host->roster_at_start > 0)
++		return; // S11-T00: the host (a roster key) owns a hosted session, even if a friend's join arrives first;
++	            // a dedicated server (no one listed at its start) is owned by the first player to join
+ 	s.owner = link.player;
+ 	s.owner_known = true;
+ 	const bool written = session_write(session_path("coop-owner.txt"), coop_uuid_hex(link.player).c_str());
+@@ -19566,11 +19569,15 @@ bool coop_server_prepare(LPCSTR command_line)
+ 		return false;
+ 	}
+ 	std::string error;
+-	if (!g_host->roster.load(g_host->config.roster_path, &error) || g_host->roster.size() == 0)
++	// S11-T00: a dedicated server may start with an empty roster when it has a join code (every player joins
++	// with it); otherwise an empty roster lets nobody in
++	const bool have_code = session_read(session_path("coop-join-code.txt"), g_host->join_code_text);
++	if (!g_host->roster.load(g_host->config.roster_path, &error) || (g_host->roster.size() == 0 && !have_code))
+ 	{
+ 		Msg("! S05-T01 roster %s: %s", g_host->config.roster_path, error.empty() ? "empty" : error.c_str());
+ 		return false;
+ 	}
++	g_host->roster_at_start = u32(g_host->roster.size());
+ 	if (!g_host->log.open(g_host->config.log_path))
+ 	{
+ 		Msg("! S05-T01 cannot open the co-op log %s", g_host->config.log_path);
+@@ -20491,10 +20498,35 @@ void roster_add_by_code(const coop::session::RosterEntry& e)
+ 	party.hi = g_host->config.party_id.hi;
+ 	party.lo = g_host->config.party_id.lo;
+ 	CampaignIdentityRegistry& registry = *g_campaign_identity;
++	// A dedicated server (no roster player at its start): the start's identity check bound a stand-in (the
++	// fixture's player 1) to hold the saved actor. The first player to join takes over its slot and that actor
++	// (the anchor of the party's tasks, as the host's actor is in a hosted session).
++	EngineEntityKey taken_actor;
++	bool take_actor = false;
++	{
++		PlayerId stand_in;
++		stand_in.hi = 0x5303000000000001ull; // CampaignIdentityFixture.cpp player_id(1)
++		stand_in.lo = 1;
++		ParticipantRef held;
++		if (g_host->roster_at_start == 0 && registry.find_player(stand_in, held) == Refusal::None)
++		{
++			CActor* body = participant_actor(held);
++			take_actor = body && registry.current_key(u16(body->ID()), taken_actor);
++			const Refusal released = registry.release_participant(registry.authority(), held, Device.dwFrame);
++			g_host->log.line("stand-in-released participant=%u/%u actor=%u release=%s", u32(held.slot), held.generation,
++				body ? u32(body->ID()) : 0xffffu, refusal_name(released));
++		}
++	}
+ 	const Refusal bound = registry.bound_count() < registry.active_slots() ?
+ 		registry.bind_participant(registry.authority(), player_of(e.player_id), party, Device.dwFrame, link.ref) :
+ 		Refusal::SlotsFull;
+ 	link.bound = bound == Refusal::None;
++	if (link.bound && take_actor)
++	{
++		const Refusal held = registry.bind_actor(registry.authority(), link.ref, taken_actor);
++		g_host->log.line("stand-in-actor-taken participant=%u/%u actor=%u/%u bind=%s", u32(link.ref.slot),
++			link.ref.generation, u32(taken_actor.id), taken_actor.generation, refusal_name(held));
++	}
+ 	g_host->links.push_back(link);
+ 	g_host->log.line("joined-by-code player=%s name=%s participant=%u/%u bind=%s roster_written=%d",
+ 		coop_uuid_hex(e.player_id).c_str(), e.display_name.c_str(), u32(link.ref.slot), link.ref.generation,

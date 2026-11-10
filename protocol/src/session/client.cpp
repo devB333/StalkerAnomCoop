@@ -168,7 +168,9 @@ void Client::update(std::vector<ClientEvent>& out)
             if (!config_.expected_campaign.zero() && ch->campaign_id != config_.expected_campaign)
                 return violation("challenge for another campaign", out);
             proto::AuthProof proof;
-            if (!make_proof(hello_, *ch, key_, proof) || !sendRaw(proof))
+            const bool made = config_.join_code.empty() ? make_proof(hello_, *ch, key_, proof)
+                                                        : make_join_proof(hello_, *ch, key_, config_.join_code, proof);
+            if (!made || !sendRaw(proof))
                 return violation("proof could not be made", out);
             state_ = ClientState::AwaitWelcome;
             break;

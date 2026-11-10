@@ -1,0 +1,367 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index 177ff65..98c6b60 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1,4 +1,5 @@
+ #include "pch_script.h"
++#include "entity_alive.h" // S10-T02a
+ #include "CampaignScriptContext.h"
+ 
+ // S03-T05: see CampaignScriptContext.h.
+@@ -29,6 +30,7 @@ const u32 kOutboxCapacity = 256;
+ ScriptContextStack* s_stack = nullptr;
+ const CampaignIdentityRegistry* s_stack_registry = nullptr;
+ ScriptContextStats s_stats = {};
++static CGameObject* s_npc_eval = nullptr; // S10-T02a: the NPC whose binder update runs (see NpcEvaluationScope)
+ 
+ xr_vector<PresentationRecord> s_outbox[kOutboxSlots];
+ u32 s_present_serial = 0;
+@@ -434,6 +436,40 @@ CActor* script_context_actor(Refusal* why)
+ 	return actor;
+ }
+ 
++NpcEvaluationScope::NpcEvaluationScope(CGameObject* npc) : m_previous(s_npc_eval), m_entered(false)
++{
++	if (!npc || !server_role())
++		return;
++	CEntityAlive* alive = smart_cast<CEntityAlive*>(npc);
++	if (!alive || !alive->g_Alive() || smart_cast<CActor*>(npc))
++		return;
++	s_npc_eval = npc;
++	m_entered = true;
++	++s_stats.npc_scope_enters;
++}
++
++NpcEvaluationScope::~NpcEvaluationScope()
++{
++	if (m_entered)
++		s_npc_eval = m_previous;
++}
++
++CGameObject* npc_under_evaluation()
++{
++	return s_npc_eval;
++}
++
++CActor* npc_evaluation_actor()
++{
++	if (!s_npc_eval)
++		return nullptr;
++	ScriptContext context;
++	if (current_script_context(context) == Refusal::None)
++		return nullptr; // a participant context wins
++	CActor* actor = nearest_participant_actor(s_npc_eval->Position());
++	return actor && actor->g_Alive() ? actor : nullptr;
++}
++
+ u16 info_actor_id(u16 id)
+ {
+ 	if (!server_role() || !ai().get_alife())
+@@ -767,6 +803,24 @@ int lua_actor_id()
+ 	return lua_context(context) && context.actor_key.id != kNoEngineId ? int(context.actor_key.id) : -1;
+ }
+ 
++CScriptGameObject* lua_npc_actor()
++{
++	CActor* actor = npc_evaluation_actor();
++	if (!actor)
++		return nullptr;
++	++s_stats.npc_scope_reads;
++	return actor->lua_game_object();
++}
++
++int lua_npc_actor_id()
++{
++	CActor* actor = npc_evaluation_actor();
++	if (!actor)
++		return -1;
++	++s_stats.npc_scope_reads;
++	return int(actor->ID());
++}
++
+ int lua_slot()
+ {
+ 	ScriptContext context;
+@@ -936,6 +990,8 @@ LPCSTR const compat_source =
+ 	"mt.__index = function(t, k)\n"
+ 	"  if k == 'actor' then\n"
+ 	"    if S.depth > 0 then return campaign.actor() end\n"
++	"    local n = campaign.npc_actor()\n" // S10-T02a: an NPC's update: the nearest participant
++	"    if n ~= nil then return n end\n"
+ 	"    if S.audit then\n"
+ 	"      local site = '?'\n"
+ 	"      if getinfo then\n"
+@@ -970,6 +1026,8 @@ LPCSTR const compat_source =
+ 	"        local id = campaign.actor_id()\n"
+ 	"        if id >= 0 then return id end\n"
+ 	"      end\n"
++	"      local nid = campaign.npc_actor_id()\n" // S10-T02a
++	"      if nid >= 0 then return nid end\n"
+ 	"      return ac_id\n"
+ 	"    end\n"
+ 	"    if type(g_index) == 'function' then return g_index(t, k) end\n"
+@@ -1074,6 +1132,8 @@ void script_register_context(lua_State* L)
+ 	[
+ 		def("actor", &lua_actor),
+ 		def("actor_id", &lua_actor_id),
++		def("npc_actor", &lua_npc_actor), // S10-T02a
++		def("npc_actor_id", &lua_npc_actor_id),
+ 		def("slot", &lua_slot),
+ 		def("generation", &lua_generation),
+ 		def("party", &lua_party),
+@@ -1163,11 +1223,12 @@ void report_script_context(LPCSTR tag)
+ 		st.captured, st.captured_entered, st.captured_refused, st.captured_evicted);
+ 	Msg("S03-T05 script-context %s lua_calls=%I64u lua_no_context=%I64u task_scopes=%I64u task_unowned=%I64u "
+ 		"task_callbacks_hosted=%I64u presented=%I64u present_no_context=%I64u present_broadcast=%I64u dropped=%u "
+-		"gameplay_context=%I64u gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u info_redirected=%I64u",
++		"gameplay_context=%I64u gameplay_compat=%I64u compat_installs=%I64u compat_failures=%I64u info_redirected=%I64u "
++		"npc_scope_enters=%I64u npc_scope_reads=%I64u",
+ 		tag, s_stats.lua_actor_calls, s_stats.lua_no_context, s_stats.task_scopes, s_stats.task_unowned,
+ 		s_stats.task_callbacks_hosted, s_stats.presented, s_stats.present_no_context, s_stats.present_broadcast,
+ 		s_present_dropped, s_stats.gameplay_context, s_stats.gameplay_compat, s_stats.compat_installs,
+-		s_stats.compat_failures, s_stats.info_redirected);
++		s_stats.compat_failures, s_stats.info_redirected, s_stats.npc_scope_enters, s_stats.npc_scope_reads);
+ 	for (u32 slot = 0; slot < kOutboxSlots; ++slot)
+ 		if (!s_outbox[slot].empty())
+ 			Msg("S03-T05 script-context %s outbox slot=%u records=%u", tag, slot, u32(s_outbox[slot].size()));
+diff --git a/src/xrGame/CampaignScriptContext.h b/src/xrGame/CampaignScriptContext.h
+index ac29266..1ada89c 100644
+--- a/src/xrGame/CampaignScriptContext.h
++++ b/src/xrGame/CampaignScriptContext.h
+@@ -182,6 +182,23 @@ bool party_inventory_view();
+ // The native bindings' rule: the context's actor; outside a context the
+ // single-actor compatibility accessor (null and counted with two actors).
+ CActor* gameplay_script_actor(LPCSTR purpose);
++// S10-T02a (decision T01-5): while the campaign server runs an NPC's script
++// binder update (CScriptBinder::shedule_Update of a stalker or a monster),
++// the installed scripts' `db.actor` and `AC_ID` outside a participant context
++// mean the nearest alive participant to that NPC, not the host's actor: its
++// condlists, meet, danger and combat-ignore logic decide against the player
++// in front of it. Inside a participant context the context's actor wins.
++class NpcEvaluationScope
++{
++public:
++	explicit NpcEvaluationScope(CGameObject* npc);
++	~NpcEvaluationScope();
++private:
++	CGameObject* m_previous;
++	bool m_entered;
++};
++CGameObject* npc_under_evaluation();
++CActor* npc_evaluation_actor(); // the nearest alive participant to the NPC under evaluation, else null
+ 
+ // --- tasks ------------------------------------------------------------------
+ // The participant a task was given to (CGameTask::m_campaign_owner), set by
+@@ -343,6 +360,8 @@ struct ScriptContextStats
+ 	u64 compat_failures;
+ 	u64 gameplay_context; // gameplay_script_actor answered from a context
+ 	u64 info_redirected; // S10-T04b: has_info(0, ...) reads sent to the context's player
++	u64 npc_scope_enters; // S10-T02a: NPC binder updates run with the nearest-participant rule
++	u64 npc_scope_reads; // S10-T02a: db.actor / AC_ID reads answered by that rule
+ 	u64 gameplay_compat; // ...from the compatibility accessor
+ };
+ 
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 1c5b98b..7ad2000 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -155,6 +155,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.upgrade_party = ini.line_exist("coop", "upgrade_party") ? ini.r_u32("coop", "upgrade_party") : 0; // S10-T04f
+ 		out.relations_party = ini.line_exist("coop", "relations_party") ? ini.r_u32("coop", "relations_party") : 0; // S10-T04d
+ 		out.stash_party = ini.line_exist("coop", "stash_party") ? ini.r_u32("coop", "stash_party") : 0; // S10-T04e
++		out.npc_party = ini.line_exist("coop", "npc_party") ? ini.r_u32("coop", "npc_party") : 0; // S10-T02a
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 4d0c670..3231d5b 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,6 +120,7 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
++	u32 npc_party; // S10-T02a fixture: seconds after both attach until the NPC logic evaluation
+ 	u32 stash_party; // S10-T04e fixture: seconds after both attach until the stash rounds (a box made a stash, used, one item taken)
+ 	u32 relations_party; // S10-T04d fixture: seconds after both attach until the goodwill, relation and reputation rounds
+ 	u32 upgrade_party; // S10-T04f fixture: seconds after both attach until the upgrade and repair rounds at the mechanic
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index d6cd68f..7fc44e9 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -706,6 +706,14 @@ struct Host
+ 		u64 ops = 0;
+ 		u32 failures = 0, items_before = 0;
+ 	} stash_fixture;
++	// S10-T02a: the NPC logic fixture (profile npc_party)
++	struct NpcFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		u32 failures = 0;
++	} npc_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -11737,6 +11745,132 @@ void stash_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T02a
++// The NPC logic fixture (profile npc_party, server-driven): once both players
++// are in the world, the stalker nearest to p2 is the subject; p1 is moved away
++// along the line from the NPC when it is the nearer player (p1 only, L58). A
++// Lua chunk evaluates, inside the NPC's evaluation scope and outside it:
++// db.actor's id, AC_ID and a condlist "{=dist_to_actor_le(D)} near, far" with
++// D a little more than the NPC's distance to p2: inside the scope the player
++// in front of the NPC (p2) answers, outside it the host's actor (p1).
++void npc_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.npc_party || !ai().get_alife())
++		return;
++	Host::NpcFixture& f = g_host->npc_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-npc both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || f.phase >= 9 || g_host->tick < f.both_since + u64(config.npc_party) * 50)
++		return;
++	if (slots[0] != 0)
++		std::swap(actors[0], actors[1]);
++	if (f.phase == 0)
++	{
++		// the subject: the alive stalker nearest to p2
++		CGameObject* npc = nullptr;
++		float best = flt_max;
++		for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++		{
++			CObject* o = Level().Objects.o_get_by_iterator(i);
++			CEntityAlive* alive = o ? smart_cast<CEntityAlive*>(o) : nullptr;
++			if (!alive || !alive->g_Alive() || smart_cast<CActor*>(o) || !smart_cast<CInventoryOwner*>(o))
++				continue;
++			const float d = o->Position().distance_to(actors[1]->Position());
++			if (d < best)
++			{
++				best = d;
++				npc = smart_cast<CGameObject*>(o);
++			}
++		}
++		if (!npc)
++		{
++			g_host->log.line("fixture-npc subject-missing");
++			++f.failures;
++			g_host->log.line("fixture-npc done phase=no-subject failures=%u", f.failures);
++			f.phase = 9;
++			return;
++		}
++		float d1 = npc->Position().distance_to(actors[0]->Position());
++		if (d1 <= best + 5.f)
++		{
++			// p1 is the nearer (or about as near): move p1 away from the NPC (p1 only)
++			Fvector away;
++			away.sub(actors[0]->Position(), npc->Position());
++			away.y = 0.f;
++			if (away.square_magnitude() < 0.01f)
++				away.set(1.f, 0.f, 0.f);
++			away.normalize();
++			Fvector at = actors[0]->Position();
++			at.mad(away, best + 15.f - d1 > 0.f ? best + 15.f - d1 : 0.f);
++			place_beside(actors[0], at);
++			d1 = npc->Position().distance_to(actors[0]->Position());
++		}
++		const float threshold = best + 2.f;
++		string1024 chunk;
++		xr_sprintf(chunk,
++			"local npc = level.object_by_id(%u)\n"
++			"local cl = xr_logic.parse_condlist(nil, nil, nil, \"{=dist_to_actor_le(%.1f)} near, far\")\n"
++			"local a = db.actor\n"
++			"return a and a:id() or -1, AC_ID, npc and xr_logic.pick_section_from_condlist(a, npc, cl) or 'none'",
++			u32(npc->ID()), threshold);
++		int in_actor = -2, in_ac = -2, out_actor = -2, out_ac = -2;
++		string64 in_pick = "", out_pick = "";
++		lua_State* L = ai().script_engine().lua();
++		for (int pass = 0; pass < 2; ++pass)
++		{
++			const int top = lua_gettop(L);
++			if (luaL_loadstring(L, chunk) == 0)
++			{
++				int rc;
++				{
++					// pass 0: inside the NPC's evaluation scope; pass 1: outside it
++					campaign::NpcEvaluationScope scope(pass == 0 ? npc : nullptr);
++					rc = lua_pcall(L, 0, 3, 0);
++				}
++				if (rc == 0 && lua_gettop(L) >= top + 3)
++				{
++					(pass == 0 ? in_actor : out_actor) = int(lua_tonumber(L, top + 1));
++					(pass == 0 ? in_ac : out_ac) = int(lua_tonumber(L, top + 2));
++					xr_strcpy(pass == 0 ? in_pick : out_pick, lua_tostring(L, top + 3) ? lua_tostring(L, top + 3) : "");
++				}
++				else
++					g_host->log.line("fixture-npc lua-error pass=%d error=%s", pass, lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++			}
++			else
++				g_host->log.line("fixture-npc lua-load-error error=%s", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
++			lua_settop(L, top);
++		}
++		const int p1 = int(actors[0]->ID()), p2 = int(actors[1]->ID());
++		g_host->log.line("fixture-npc eval npc=%u section=%s d_p1=%.1f d_p2=%.1f threshold=%.1f p1=%d p2=%d in_actor=%d in_ac_id=%d "
++			"in_pick=%s out_actor=%d out_ac_id=%d out_pick=%s", u32(npc->ID()), *npc->cNameSect(), d1, best, threshold, p1, p2, in_actor,
++			in_ac, in_pick, out_actor, out_ac, out_pick);
++		if (in_actor != p2 || in_ac != p2 || xr_strcmp(in_pick, "near"))
++			++f.failures;
++		if (out_actor != p1 || out_ac != p1 || (d1 > threshold && xr_strcmp(out_pick, "far")))
++			++f.failures;
++		const campaign::ScriptContextStats& st = campaign::script_context_stats();
++		g_host->log.line("fixture-npc done phase=evaluated failures=%u npc_scope_enters=%I64u npc_scope_reads=%I64u", f.failures,
++			st.npc_scope_enters, st.npc_scope_reads);
++		f.phase = 9;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -14959,6 +15093,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	upgrade_fixtures(); // S10-T04f
+ 	relations_fixtures(); // S10-T04d
+ 	stash_fixtures(); // S10-T04e
++	npc_fixtures(); // S10-T02a
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+diff --git a/src/xrGame/script_binder.cpp b/src/xrGame/script_binder.cpp
+index d28b5ee..a75fca6 100644
+--- a/src/xrGame/script_binder.cpp
++++ b/src/xrGame/script_binder.cpp
+@@ -7,6 +7,7 @@
+ ////////////////////////////////////////////////////////////////////////////
+ 
+ #include "pch_script.h"
++#include "CampaignScriptContext.h" // S10-T02a: the NPC evaluation scope
+ #include "CoopReplica.h"
+ #include "ai_space.h"
+ #include "script_engine.h"
+@@ -282,6 +283,7 @@ void CScriptBinder::shedule_Update(u32 time_delta)
+ 		const u64 start = CPU::QPC();
+ 		__try
+ 		{
++			campaign::NpcEvaluationScope npc(smart_cast<CGameObject*>(this)); // S10-T02a
+ 			m_object->shedule_Update(time_delta);
+ 		}
+ 		__except (binder_exception_filter(this, "shedule_Update", GetExceptionInformation()))

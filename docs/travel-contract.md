@@ -54,7 +54,7 @@ tick it receives it:
 | the target is an enabled `CLevelChanger` online on the server | 24 NoChanger |
 | the actor is inside the changer's shape (the engine's own touch test, `CCF_Shape::Contact`) or within 1 m of its bounding sphere (the server's actor trails the client's) | 25 NotAtChanger |
 | the partner (the other roster slot) is in the world (its client sends input) with a living actor | 26 PartnerUnavailable |
-| no alive NPC or monster online has either party actor as its selected enemy (`CMemoryManager::enemy().selected()`) | 27 InCombat |
+| ~~no alive NPC or monster online has either party actor as its selected enemy~~ **removed for level changers (B46, 2026-11-03)**: the installed game has no combat check there (`level_changer.cpp` `CLevelChanger::feel_touch_new`); kept for a PDA fast travel and a backpack jump (§12) | (27 InCombat, §12 only) |
 
 Accepted: the proposal is created (its id in `ActionResult.revision`),
 remembered under the operation id, and sent to both players with the
@@ -77,7 +77,7 @@ Params: `u64 transition id, u8 answer` (1 accept, 2 refuse, 3 cancel).
 | **the id is the live proposal's** | 28 NoTransition — a stale, replayed, unknown or pre-restart id approves nothing, whoever sends it |
 | accept or refuse from the partner; cancel from the requester | 29 WrongParty (the requester's own accept is not the partner's consent) |
 | accept: the partner's actor alive | 3 |
-| accept: the party out of combat now | 27 (the proposal stands; the tick's check may abort it) |
+| accept: the party out of combat now (fast travel and backpack only, §12; B46) | 27 (the proposal stands; the tick's check may abort it) |
 
 Accepted: the transition ends (Agreed, Refused or Cancelled), both players
 are told, the answer is remembered under its operation id (a duplicate
@@ -95,7 +95,7 @@ Checked every half second (and at a disconnect at once):
 |---|---|
 | the requester's or the partner's session ends (`on_left`) | Aborted: requester-left / partner-left. A rejoin starts over: the consent does not outlive the session |
 | the requester's or the partner's actor dies | Aborted: requester-dead / partner-dead |
-| an NPC or monster takes a party actor as its enemy | Aborted: combat |
+| an NPC or monster takes a party actor as its enemy (fast travel and backpack only, §12; B46) | Aborted: combat |
 | the changer leaves the online world or is disabled | Aborted: changer-gone |
 | the 30 s pass | Expired |
 
@@ -200,13 +200,83 @@ per connection (the queue starts afresh at the join) and the hold discards
 them until the resume; its unanswered actions are re-sent on the new level
 and judged there.
 
+## 11. The failure matrix (S09-T04)
+
+Code: `CoopServerHost.cpp` "S09-T04" (the executor's rollback reasons,
+`travel_hold_tick`'s held notice, failpoints `travel:reloading` and
+`travel:after-ready`), `CoopClientLink.cpp` (`held`, the hold-over refusal,
+the void on a new epoch). Validation: [S09-T04](validation/S09-T04.md).
+
+Every window a travel can fail in, what the world does, and how the players
+recover. "Source" and "destination" name the generation a restarted server
+recovers (§9). No window lets one player travel alone (R10): a rollback
+leaves both on the source level, a roll-forward puts both on the destination.
+
+| When | What fails | Outcome | The players |
+|---|---|---|---|
+| Proposed | the partner refuses, the requester cancels, 30 s pass | Refused / Cancelled / Expired (§2) | ask again |
+| Proposed | a party member's session ends, a party actor dies, combat, the changer goes | Aborted with the reason (§5) | ask again once both are back and safe |
+| Proposed | the server crashes | the proposal is forgotten (not durable); its id is refused 28 by the restarted server | ask again |
+| Draining (the barrier) | a party member's session ends or its actor dies | **rolled back** before anything durable: Aborted, reason requester/partner-left or -dead; the present player is told who | the absent one rejoins (its actor stood still), the party asks again |
+| Draining | the server crashes | the source generation | ask again |
+| Taking | the prepared record fails (store failed) | Aborted execution-failed; the server stops (fail-closed) | a restart recovers the source |
+| Taking | the server crashes after `prepared` (`travel:before-take`) | the source generation, `prepared-only-rolled-back` | ask again (the restarted fixture does, tv-23) |
+| Taking | the take finds no entity for a party actor | Aborted execution-failed | ask again |
+| Publishing | the publication fails before the pointer swap (a full disk) | **rolled back**: phase 3 recorded, Aborted execution-failed to both, the entities already restored; the store goes on | ask again |
+| Publishing | a party member's session ends | the travel goes on (its actor is in the taken save); the absent player rejoins on the destination (T02-4) | — |
+| Publishing | the server crashes before the swap | the source generation | ask again |
+| Committed | the server crashes before the reload (`travel:after-commit`) | the destination generation, `committed-rolled-forward` | both rejoin on the destination |
+| Reloading | the server crashes while the level is replaced (`travel:reloading`) | the destination generation | both rejoin on the destination |
+| Reloading | the destination generation cannot be loaded, or the identity registry cannot restart | the server stops; a restart recovers the destination | both rejoin after the restart |
+| Hold | a client takes long, disconnects and comes back, or crashes and restarts before the deadline | the hold waits; a client whose world goes live without having been told the transition is told it (`held`, state 10) and reports ready; all ready → resumed | nobody moves until both are there |
+| Hold | a client has not reported ready in 60 s | resumed at the deadline (`timeout`): the present player goes on; the absent one's actor stands at the arrival point (T03-2) | the late one's ready is refused 31 and it is told the party went on; it plays on the destination |
+| Hold | the server crashes (`travel:after-ready`) | the destination generation; the restarted server holds nothing (a recovery is not a travel) | both rejoin and play as after any recovery; a client's pending hold is void on the new epoch |
+| Any | a duplicate or re-sent request, answer or ready | its stored outcome (§3, §4, §10) | — |
+
+What the failures never do: move one player and not the other, lose a
+committed travel, keep a rolled-back one, or continue a transition across a
+restart (§1).
+
 ## 8. Not in S09-T01
 
 - A live proposal is **not durable**: a crash forgets it (the players
   request again). From Agreed on, S09-T02 records it (§9).
 - (S09-T02 adds the execution: §9.)
+- B46 (2026-11-03, the user's choice: match the installed game): only a PDA
+  fast travel and a backpack jump check combat (`travel_combat_rule`); a
+  level changer, a guide's trip and another script's `ChangeLevel` do not.
 - The combat test is the NPCs' enemy memory; a player shot at by someone
   who has not selected him as an enemy, or hit by an anomaly, is not "in
   combat". Hits in the last seconds could be added if play shows the need.
 - One-player travel while the partner is away: refused, pending the
   user's decision (§3).
+
+## 12. Travel to a point: guides, fast travel, the backpack (S10-T03d)
+
+Code: `CoopServerHost.cpp` "S10-T03d" (`relocate_propose`, `take_relocate`,
+`relocation_end`), `CoopClientLink.cpp` "S10-T03d", `CampaignScriptContext.cpp`
+(the `ChangeLevel` and fee wraps, `defer_game_time_change`),
+`level_script.cpp` (`change_game_time`), `script_game_object2.cpp`
+(`SetActorPosition`). Validation: [S10-T03d](validation/S10-T03d.md).
+
+A proposal can name a point (a game vertex, a level vertex, a position)
+instead of a level changer: the request is ActionIntent kind 26 from a
+client (its PDA's fast travel or backpack: the scripts' `ChangeLevel` or the
+own actor's `set_actor_position`) or a guide's `ChangeLevel` in a player's
+context on the server. The rules are §3–5's without the changer checks (no
+"at the changer", no "changer gone"); the answer is kind 12 and the
+presentation event 13 as for a changer. The trip's time skip, asked by the
+script just before, is held and applied once when the proposal is agreed
+(before the barrier, so the destination generation holds it); a guide's fee,
+paid by the script, is refunded to the requester if the proposal ends any
+other way. The executor (§9–10) carries it out, a same-level point included
+(the level is reloaded with both actors at the point).
+
+**Combat (B46, 2026-11-03).** As the installed scripts do by default
+(`game_fast_travel.script` and `game_backpack_travel.script`, option
+"on_combat" off): a fast travel (source 1) or a backpack jump (2) is refused
+27 while an NPC or monster online has a party actor as its enemy, the
+partner's accept likewise, and a live one is aborted when combat starts. A
+guide's trip (4: `ka_travel.script`, no check) and another script's
+`ChangeLevel` (3) check nothing. The server does not read the players'
+"allow in combat" option.

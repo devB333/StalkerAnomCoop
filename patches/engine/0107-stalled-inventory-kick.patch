@@ -1,0 +1,80 @@
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 77368b3..fdee60d 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -93,6 +93,7 @@
+ #include "ai/monsters/basemonster/base_monster.h" // S09-T01: a monster's enemy
+ #include "game_graph.h"
+ #include "../xrEngine/xr_collide_form.h"
++#include "player_hud.h" // B45: the hand animation that blocks an activation
+ 
+ extern xr_vector<CLevelChanger*> g_lchangers; // S09-T01: level_changer.cpp
+ 
+@@ -187,6 +188,7 @@ struct PlayerLink
+ 	u16 respawn_old_actor = 0xffff; // S08-T09: the body a respawned actor continues
+ 	u32 needs_sent_ms = 0; // S08-T09: this player's survival values last sent
+ 	float needs_last[8] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f}; // S10-T04c: + money; B39: + bleeding
++	bool inventory_kicked = false; // B45: its stalled inventory was updated by the host
+ 	u64 travel_sent_id = 0; // S09-T01: the live proposal this player was told
+ 	// S10-T07 (G10, T03a-2): away since (wall ms, 0 while attached); parked after 5 minutes
+ 	u32 absent_since_ms = 0;
+@@ -313,6 +315,7 @@ struct Host
+ 	xr_map<u16, Gun> guns;
+ 	FILE* combat_csv = nullptr;
+ 	u32 heals = 0;
++	u64 inventory_kicks = 0; // B45
+ 	// S06-T05: the encounter fixture
+ 	struct Encounter
+ 	{
+@@ -14810,9 +14813,40 @@ void log_actor_weapons(LPCSTR tag, u8 slot_of_player, CActor* actor)
+ 			"");
+ 		xr_strcat(slots, one);
+ 	}
+-	g_host->log.line("actor-weapons tag=%s slot=%u actor=%u alive=%d active=%u next=%u prev=%u enabled=%d ready=%d%s", tag,
+-		u32(slot_of_player), u32(actor->ID()), actor->g_Alive() ? 1 : 0, u32(inv.GetActiveSlot()),
+-		u32(inv.GetNextActiveSlot()), u32(inv.GetPrevActiveSlot()), actor->getEnabled() ? 1 : 0, actor->Ready() ? 1 : 0, slots);
++	g_host->log.line("actor-weapons tag=%s slot=%u actor=%u alive=%d active=%u next=%u prev=%u enabled=%d ready=%d "
++		"updcl_age=%u proc=%d view=%d hud_anim=%d%s", tag, u32(slot_of_player), u32(actor->ID()), actor->g_Alive() ? 1 : 0,
++		u32(inv.GetActiveSlot()), u32(inv.GetNextActiveSlot()), u32(inv.GetPrevActiveSlot()), actor->getEnabled() ? 1 : 0,
++		actor->Ready() ? 1 : 0, Device.dwFrame - actor->dwFrame_UpdateCL, actor->processing_enabled() ? 1 : 0,
++		Level().CurrentViewEntity() == actor ? 1 : 0, g_player_hud ? int(g_player_hud->script_anim_part) : -2, slots);
++}
++
++// B45: a player's pending weapon change is completed by its inventory's
++// update (CInventory::Update, from CActor::UpdateCL). demo-17: after a
++// travel both actors kept the change pending (active 0, next 2/3) for good
++// while the server accepted every later slot intent. A participant actor
++// whose own update has not run for 10 frames with a change pending gets its
++// inventory updated here (counted, logged once per actor and frame gap)
++void kick_stalled_inventories()
++{
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!link.bound)
++			continue;
++		CActor* actor = participant_actor(link.ref);
++		if (!actor || !actor->g_Alive())
++			continue;
++		CInventory& inv = actor->inventory();
++		if (inv.GetActiveSlot() == inv.GetNextActiveSlot())
++			continue;
++		const u32 age = Device.dwFrame - actor->dwFrame_UpdateCL;
++		if (age < 10)
++			continue;
++		if (!link.inventory_kicked)
++			log_actor_weapons("kick", u8(link.ref.slot), actor);
++		link.inventory_kicked = true;
++		++g_host->inventory_kicks;
++		inv.Update();
++	}
+ }
+ 
+ u16 take_action(PlayerLink& link, const coop::proto::ActionIntent& intent)
+@@ -20733,6 +20767,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	quest_tick(); // S08-T04
+ 	send_party_tasks(); // S08-T09
+ 	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
++	kick_stalled_inventories(); // B45
+ 	park_tick(); // S10-T07 (G10, T03a-2)
+ 	send_relations(); // S10-T04d
+ 	stash_watch_tick(); // S10-T04e

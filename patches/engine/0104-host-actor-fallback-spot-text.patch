@@ -1,0 +1,83 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index ba0c1f2..c995a9d 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -846,7 +846,8 @@ static void record_presentation(u8 slot, const ParticipantRef& to, Presentation
+ 	record.kind = kind;
+ 	record.object = object;
+ 	record.frame = Device.dwFrame;
+-	xr_strcpy(record.detail, detail ? detail : "");
++	// B42: a long detail (a stash's hint) is cut to the record, not fatal
++	strncpy_s(record.detail, sizeof(record.detail), detail ? detail : "", _TRUNCATE);
+ 	record.handle = args.handle;
+ 	record.position = args.position;
+ 	record.value = args.value;
+@@ -1435,6 +1436,28 @@ LPCSTR const compat_source =
+ 	"      S.host_reads[site] = (S.host_reads[site] or 0) + 1\n"
+ 	"      S.host_read_total = S.host_read_total + 1\n"
+ 	"    end\n"
++	// B41: the binder's actor is player 1's first actor; after its death and a
++	// respawn it is a body, and the installed actor update (bind_stalker:
++	// tasks' targets, the weather manager, every actor_on_update) stops at its
++	// `db.actor:alive()` check: outside a context the actor is then a living
++	// player's (player 1's current one first), looked up once a second
++	"    if host and not host:alive() then\n"
++	"      local tg = time_global()\n"
++	"      if not S.host_live_tg or tg - S.host_live_tg > 1000 or (S.host_live and not S.host_live:alive()) then\n"
++	"        S.host_live_tg = tg\n"
++	"        S.host_live = nil\n"
++	"        for s = 0, 1 do\n"
++	"          local id = campaign.slot_actor_id(s)\n"
++	"          local o = id >= 0 and level.object_by_id(id)\n"
++	"          if o and o:alive() then S.host_live = o break end\n"
++	"        end\n"
++	"        if S.host_live and S.host_live_id ~= S.host_live:id() then\n"
++	"          S.host_live_id = S.host_live:id()\n"
++	"          printf('coop host-actor-fallback dead=%s live=%s', tostring(host:id()), tostring(S.host_live_id))\n"
++	"        end\n"
++	"      end\n"
++	"      if S.host_live then return S.host_live end\n"
++	"    end\n"
+ 	"    return host\n"
+ 	"  end\n"
+ 	"  if type(base_index) == 'function' then return base_index(t, k) end\n"
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index 802658f..4a7d3f7 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -450,20 +450,31 @@ static void present_map_spot(campaign::Presentation kind, u16 id, LPCSTR spot_ty
+ {
+ 	if (campaign::process_role() != campaign::Role::Server)
+ 		return;
++	// B42: a long hint (a stash's) is cut, not fatal (xr_sprintf asserts on
++	// overflow); the place suffix below is kept whole within the record's 128
+ 	string128 detail;
+-	xr_sprintf(detail, "%s|%s", spot_type ? spot_type : "", text ? text : "");
++	_snprintf_s(detail, sizeof(detail), _TRUNCATE, "%s|%s", spot_type ? spot_type : "", text ? text : "");
+ 	campaign::PresentationArgs args;
+ 	args.flags = flags;
+ 	// S10-T07 (B2): the object's place, for a client that does not hold it
+ 	// ("<spot>|<hint>\t<level>\t<graph>"); the stored state keeps "<spot>|<hint>"
+-	string256 sent;
+-	xr_strcpy(sent, detail);
++	string128 sent;
++	strncpy_s(sent, sizeof(sent), detail, _TRUNCATE);
+ 	if (kind == campaign::Presentation::MapSpotAdd)
+ 	{
+ 		xr_string level;
+ 		u16 graph;
+ 		if (campaign::object_map_place(id, args.position, level, graph))
+-			xr_sprintf(sent, "%s\t%s\t%u", detail, level.c_str(), u32(graph));
++		{
++			string64 suffix;
++			_snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "\t%s\t%u", level.c_str(), u32(graph));
++			const size_t room = sizeof(sent) - 1 - xr_strlen(suffix);
++			string128 head;
++			strncpy_s(head, sizeof(head), detail, _TRUNCATE);
++			if (xr_strlen(head) > room)
++				head[room] = 0;
++			_snprintf_s(sent, sizeof(sent), _TRUNCATE, "%s%s", head, suffix);
++		}
+ 	}
+ 	campaign::present_broadcast(kind, id, sent, args);
+ 	campaign::note_map_spot(kind, id, spot_type ? spot_type : "", detail, flags);

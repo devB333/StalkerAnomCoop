@@ -1,0 +1,92 @@
+diff --git a/src/xrGame/CampaignScriptContext.cpp b/src/xrGame/CampaignScriptContext.cpp
+index c995a9d..fefb757 100644
+--- a/src/xrGame/CampaignScriptContext.cpp
++++ b/src/xrGame/CampaignScriptContext.cpp
+@@ -1420,6 +1420,7 @@ LPCSTR const compat_source =
+ 	"if not mt then mt = {} setmetatable(db_ns, mt) end\n"
+ 	"local base_index, base_newindex = mt.__index, mt.__newindex\n"
+ 	"local host = rawget(db_ns, 'actor')\n"
++	"local host_id = host and host:id()\n" // B43: the fallback looks objects up by id (a level reload destroys them)
+ 	"rawset(db_ns, 'actor', nil)\n"
+ 	"mt.__index = function(t, k)\n"
+ 	"  if k == 'actor' then\n"
+@@ -1441,22 +1442,27 @@ LPCSTR const compat_source =
+ 	// tasks' targets, the weather manager, every actor_on_update) stops at its
+ 	// `db.actor:alive()` check: outside a context the actor is then a living
+ 	// player's (player 1's current one first), looked up once a second
+-	"    if host and not host:alive() then\n"
++	// B43: no object is held across frames (demo-15: the travel's level reload
++	// destroyed the held actor and the next read crashed the server): the
++	// binder's actor and the living one are looked up by id, only on a level
++	"    local h = host_id and level.present() and level.object_by_id(host_id)\n"
++	"    if h and h:is_actor() and not h:alive() then\n"
+ 	"      local tg = time_global()\n"
+-	"      if not S.host_live_tg or tg - S.host_live_tg > 1000 or (S.host_live and not S.host_live:alive()) then\n"
++	"      if not S.host_live_tg or tg - S.host_live_tg > 1000 then\n"
+ 	"        S.host_live_tg = tg\n"
+-	"        S.host_live = nil\n"
++	"        local live = nil\n"
+ 	"        for s = 0, 1 do\n"
+ 	"          local id = campaign.slot_actor_id(s)\n"
+ 	"          local o = id >= 0 and level.object_by_id(id)\n"
+-	"          if o and o:alive() then S.host_live = o break end\n"
++	"          if o and o:is_actor() and o:alive() then live = id break end\n"
+ 	"        end\n"
+-	"        if S.host_live and S.host_live_id ~= S.host_live:id() then\n"
+-	"          S.host_live_id = S.host_live:id()\n"
+-	"          printf('coop host-actor-fallback dead=%s live=%s', tostring(host:id()), tostring(S.host_live_id))\n"
++	"        if live and live ~= S.host_live_id then\n"
++	"          printf('coop host-actor-fallback dead=%s live=%s', tostring(host_id), tostring(live))\n"
+ 	"        end\n"
++	"        S.host_live_id = live\n"
+ 	"      end\n"
+-	"      if S.host_live then return S.host_live end\n"
++	"      local o = S.host_live_id and level.object_by_id(S.host_live_id)\n"
++	"      if o and o:is_actor() and o:alive() then return o end\n"
+ 	"    end\n"
+ 	"    return host\n"
+ 	"  end\n"
+@@ -1465,7 +1471,13 @@ LPCSTR const compat_source =
+ 	"  return nil\n"
+ 	"end\n"
+ 	"mt.__newindex = function(t, k, v)\n"
+-	"  if k == 'actor' then host = v return end\n"
++	"  if k == 'actor' then\n"
++	"    host = v\n"
++	"    host_id = v and v:id() or nil\n" // B43
++	"    S.host_live_id = nil\n"
++	"    S.host_live_tg = nil\n"
++	"    return\n"
++	"  end\n"
+ 	"  if type(base_newindex) == 'function' then return base_newindex(t, k, v) end\n"
+ 	"  rawset(t, k, v)\n"
+ 	"end\n"
+@@ -1916,7 +1928,9 @@ LPCSTR const compat_source =
+ 	"  local AE_STATE = { Update_Impact = { 'prev_health', 'impact_snd', 'impact_cam', 'impact_removed' },\n"
+ 	"    Update_Bleeding = { 'bleed_set', 'bleed_rad_eff', 'bleed_1_tg', 'bleed_2', 'bleed_removed' },\n"
+ 	"    Update_Blood = { 'actor_last_health', 'blood_tg', 'blood_tg_b', 'blood_state', 'blood_count' },\n"
+-	"    Update_Rad = { 'rad_removed' } }\n"
++	"    Update_Rad = { 'rad_removed' },\n"
++	// B43: the weapon draw/holster camera nudge (effector 23232) was player 1's on both screens
++	"    Update_ItemSwap = { 'swap_last_id', 'swap_last_det_st', 'swap_last_wep_st' } }\n"
+ 	"  local n_fx = 0\n"
+ 	"  for fname, vars in pairs(AE_STATE) do\n"
+ 	"    local orig = rawget(AEX, fname)\n"
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index afbbb98..4848cba 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -15250,8 +15250,12 @@ void travel_event_to(PlayerLink& link, const coop::proto::Transition& t, u32 rem
+ 
+ void travel_event(const coop::proto::Transition& t, u32 remaining_ms)
+ {
++	// B44: every live player, inputs or not: a client just back from the
++	// travel's reload may have no input on record yet, and client_in_world
++	// (which needs one) then skipped it (bugfix-29: `travel-resumed` on the
++	// server, the resume event on neither client: both stayed held)
+ 	for (PlayerLink& link : g_host->links)
+-		if (client_in_world(link))
++		if (link.world == WorldLive && link.session)
+ 			travel_event_to(link, t, remaining_ms);
+ }
+ 

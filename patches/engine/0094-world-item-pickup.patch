@@ -1,0 +1,84 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 29acf0c..769af90 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -7568,6 +7568,15 @@ void session_menu_install()
+ 		"    if not ok then error(err, 0) end "
+ 		"  end "
+ 		"end "
++		// S10-T07 (B26): the installed game_setup's world items. Its pickup handler (actor_on_item_take) reads
++		// the spawn table that init_settings fills at the actor's first update, which a client's replica actor
++		// never runs: a picked world item crashed the client (info nil). The table is read here (ini only), and
++		// the replacement item is the server's to spawn
++		"local gs_ok, GS = pcall(function() return game_setup end) "
++		"if gs_ok and type(GS) == 'table' and GS.init_settings then "
++		"  pcall(GS.init_settings) "
++		"  GS.try_spawn_world_item = function() end "
++		"end "
+ 		// G10: a repair kit's Repair button asks the server
+ 		"local ir_ok, IR = pcall(function() return item_repair end) "
+ 		"if ir_ok and type(IR) == 'table' and IR.UIRepair and campaign.client_field_repair then "
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 86bec61..8990702 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -126,6 +126,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.churn = ini.line_exist("coop", "churn") ? ini.r_u32("coop", "churn") : 0;
+ 		out.drop = ini.line_exist("coop", "drop") ? ini.r_u32("coop", "drop") : 0;
+ 		out.arm = ini.line_exist("coop", "arm") ? ini.r_u32("coop", "arm") : 0;
++		out.demo_kit = ini.line_exist("coop", "demo_kit") ? ini.r_u32("coop", "demo_kit") : 0;
+ 		out.combat_heal = ini.line_exist("coop", "combat_heal") ? ini.r_u32("coop", "combat_heal") : 0;
+ 		out.friendly_fire = ini.line_exist("coop", "friendly_fire") ? ini.r_u32("coop", "friendly_fire") : 1;
+ 		out.encounter = ini.line_exist("coop", "encounter") ? ini.r_u32("coop", "encounter") : 0;
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 46063f0..4fe2b8b 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -95,6 +95,7 @@ struct CoopConfig
+ 	u32 churn; // S05-T02: seconds between server-controlled entity changes (fixture; 0 off)
+ 	u32 drop; // S06-T02: seconds between physics objects dropped beside participant 1 (fixture; 0 off)
+ 	u32 arm; // S06-T04 fixture: give participant actors a pistol and ammo
++	u32 demo_kit = 0; // S10-T07 (G10 hands-on): with arm, a pistol repair kit, a tent, the pistol worn and the player sleepy
+ 	u32 combat_heal; // S06-T04 fixture: heal participant actors below 40 %
+ 	u32 friendly_fire; // S06-T04: participants' hits damage each other (default 1)
+ 	u32 encounter; // S06-T05 fixture: seconds after both attach until a boar spawns (0 off)
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index e19188d..4fcc6bc 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -9249,6 +9249,7 @@ u16 find_giver()
+ }
+ 
+ bool sleep_lua(CActor* actor, LPCSTR chunk, LPCSTR label); // S10-T03c
++void needs_set(u8 slot, LPCSTR module, LPCSTR name, float value); // S10-T07 (G10 demo kit)
+ 
+ void place_beside(CActor* actor, const Fvector& at)
+ {
+@@ -14832,6 +14833,13 @@ void combat_fixtures()
+ 				give_item(alife, "wpn_pm", actor, se);
+ 			give_item(alife, "ammo_9x18_fmj", actor, se);
+ 			give_item(alife, "ammo_9x18_fmj", actor, se);
++			if (g_host->config.demo_kit)
++			{
++				// S10-T07 (G10 hands-on): what the revisions' checks need
++				give_item(alife, "cleaning_kit_p", actor, se);
++				give_item(alife, "itm_tent", actor, se);
++				g_host->log.line("demo-kit slot=%u actor=%u +cleaning_kit_p +itm_tent", u32(link.ref.slot), u32(actor->ID()));
++			}
+ 			g_host->log.line("arm slot=%u actor=%u %s +2x ammo_9x18_fmj", u32(link.ref.slot), u32(actor->ID()),
+ 				has ? actor->inventory().ItemFromSlot(INV_SLOT_2)->object().cNameSect().c_str() : "wpn_pm");
+ 		}
+@@ -14851,6 +14859,13 @@ void combat_fixtures()
+ 		if (g_host->config.arm && link.armed && !link.arm_settled && actor->inventory().ItemFromSlot(INV_SLOT_2))
+ 		{
+ 			link.arm_settled = true;
++			if (g_host->config.demo_kit)
++			{
++				// S10-T07 (G10 hands-on): a pistol the kit can repair (its range 0.75-0.99), and a sleepy player
++				actor->inventory().ItemFromSlot(INV_SLOT_2)->SetCondition(0.8f);
++				needs_set(link.ref.slot, "actor_status_sleep", "last_sleep", 5000.f);
++				g_host->log.line("demo-kit slot=%u pistol_condition=0.80 sleepy=1", u32(link.ref.slot));
++			}
+ 			if (actor->inventory().GetNextActiveSlot() != NO_ACTIVE_SLOT)
+ 			{
+ 				actor->inventory().Activate(NO_ACTIVE_SLOT);

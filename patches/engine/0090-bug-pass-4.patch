@@ -1,0 +1,282 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 799edb2..7afa24c 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -861,6 +861,22 @@ u64 utc_now_ms();
+ void prediction_begin();
+ void reconcile_own_actor(u64 snapshot_id, u64 last_input);
+ 
++// S10-T07 (B4, part 4): a motion's name for the replica-anim line (the
++// engine's LL_MotionDefName_dbg exists in debug builds only): the reverse of
++// its slot's name map
++LPCSTR motion_name(IKinematicsAnimated* ka, const MotionID& id)
++{
++	if (!ka || !id.valid() || id.slot >= ka->LL_MotionsSlotCount())
++		return "?";
++	accel_map* names = const_cast<shared_motions&>(ka->LL_MotionsSlot(id.slot)).motion_map();
++	if (!names)
++		return "?";
++	for (const auto& entry : *names)
++		if (entry.second == id.idx)
++			return entry.first.c_str();
++	return "?";
++}
++
+ void apply_spawn(const coop::proto::Spawn& s)
+ {
+ 	if (s.commit_id <= g_link->applied)
+@@ -1804,10 +1820,20 @@ void present_actors()
+ 						g_link->last_anim_log_ms = now_ms;
+ 						const CBlend* legs = stalker->animation().legs().blend();
+ 						const CBlend* torso = stalker->animation().torso().blend();
+-						g_link->log.line("replica-anim id=%u bits=%x speed=%.2f standing=%d mt=%u legs=%u torso=%u",
++						// part 4: the motion names and the heading drawn last frame
++						// against the sent one and the direction of travel
++						IKinematicsAnimated* ka = smart_cast<IKinematicsAnimated*>(stalker->Visual());
++						LPCSTR legs_name = legs ? motion_name(ka, legs->motionID) : "-";
++						LPCSTR torso_name = torso ? motion_name(ka, torso->motionID) : "-";
++						const float travel = atan2f(velocity.x, velocity.z);
++						g_link->log.line("replica-anim id=%u bits=%x speed=%.2f standing=%d mt=%u legs=%u:%s torso=%u:%s "
++							"yaw=%.2f drawn=%.2f travel=%.2f visual=%s",
+ 							u32(stalker->ID()), u32(s.state_bits), stalker->replica_speed(),
+ 							stalker->animation().standing() ? 1 : 0, u32(stalker->movement().movement_type()),
+-							legs ? u32(legs->motionID.idx) : 0u, torso ? u32(torso->motionID.idx) : 0u);
++							legs ? u32(legs->motionID.idx) : 0u, legs_name ? legs_name : "?",
++							torso ? u32(torso->motionID.idx) : 0u, torso_name ? torso_name : "?",
++							s.transform.yaw, stalker->replica_drawn_yaw(), travel,
++							stalker->cNameVisual().c_str() ? stalker->cNameVisual().c_str() : "-");
+ 					}
+ 				}
+ 				else if (CBaseMonster* monster = smart_cast<CBaseMonster*>(creature))
+@@ -6838,6 +6864,52 @@ static void trade_refresh_menu()
+ 	++g_link->trade.refreshes;
+ }
+ 
++// S10-T07 (B1, part 4): the installed Lua trade window (ui_inventory.script)
++// showed no portrait or name for Sidorovich. Its Reset shows the partner panel
++// for a stalker or a trader named esc_m_trader (the client's checkpoint has
++// that name for id 15398), and UpdateCharacter fills it on its next info
++// update, where an error would end the update without a log line. Right after
++// the window opens this shows the panel for a trading partner if it is
++// hidden, fills it under pcall, and reports what it found (the trade-open
++// line's panel=), so a still-empty panel names its cause.
++xr_string trade_panel_probe()
++{
++	LPCSTR chunk =
++		"local ok, r = pcall(function()\n"
++		"  local g = ui_inventory and ui_inventory.GUI\n"
++		"  if not (g and g:IsShown()) then return 'gui=0' end\n"
++		"  local o = g:GetPartner()\n"
++		"  if not o then return 'gui=1 partner=0' end\n"
++		"  local shown = g.npc_name:IsShown()\n"
++		"  local fixed = 0\n"
++		"  if g.mode == 'trade' and not shown and not g.npc_is_box then\n"
++		"    g.npc_name:Show(true) g.npc_community:Show(true) g.npc_icon:Show(true) fixed = 1\n"
++		"  end\n"
++		"  local uok, uerr = pcall(function() g:UpdateCharacter() end)\n"
++		"  return string.format('gui=1 mode=%s obj=%s clsid=%s stalker=%s not_npc=%s shown=%s fixed=%d update=%s "
++		"icon=%s cname=%s', tostring(g.mode), tostring(o:name()), tostring(o:clsid()), tostring(IsStalker(o)), "
++		"tostring(g.npc_is_not_npc), tostring(shown), fixed, uok and 'ok' or tostring(uerr), "
++		"tostring(o:character_icon()), tostring(o:character_name()))\n"
++		"end)\n"
++		"return ok and r or ('error ' .. tostring(r))";
++	xr_string result = "lua=0";
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return result;
++	if (luaL_loadbuffer(L, chunk, xr_strlen(chunk), "coop_trade_panel") != 0)
++	{
++		result = "load-failed";
++		lua_pop(L, 1);
++		return result;
++	}
++	if (lua_pcall(L, 0, 1, 0) != 0)
++		result = "call-failed";
++	else if (LPCSTR text = lua_tostring(L, -1))
++		result = text;
++	lua_pop(L, 1);
++	return result;
++}
++
+ void on_trade_prices(const coop::proto::CampaignEvent& event)
+ {
+ 	const std::vector<u8>& b = event.payload;
+@@ -6915,7 +6987,9 @@ void on_trade_prices(const coop::proto::CampaignEvent& event)
+ 	t.opened_ms = g_link->wall.GetElapsed_ms();
+ 	++t.opens;
+ 	ui->StartTrade(smart_cast<CInventoryOwner*>(g_actor), partner);
+-	g_link->log.line("trade-open npc=%u name=%s mode=%d", u32(npc_id), partner->Name(), int(ui->GetActorMenu().GetMenuMode()));
++	const xr_string panel = trade_panel_probe(); // S10-T07 (B1, part 4)
++	g_link->log.line("trade-open npc=%u name=%s mode=%d panel=%s", u32(npc_id), partner->Name(),
++		int(ui->GetActorMenu().GetMenuMode()), panel.c_str());
+ }
+ 
+ // ------------------------------------------------------------ S10-T04f
+diff --git a/src/xrGame/CustomMonster.cpp b/src/xrGame/CustomMonster.cpp
+index 0cda9ac..cc4ebf4 100644
+--- a/src/xrGame/CustomMonster.cpp
++++ b/src/xrGame/CustomMonster.cpp
+@@ -425,6 +425,13 @@ void CCustomMonster::replica_present(const Fvector& position, float yaw, const F
+ 	if (!_valid(position) || !_valid(yaw))
+ 		return;
+ 	m_replica_speed = _valid(velocity) ? _sqrt(velocity.x * velocity.x + velocity.z * velocity.z) : 0.f; // S10-T07 (B4)
++	// S10-T07 (B4, part 4): the heading drawn last frame (for the replica-anim
++	// line), then the body's own yaw. Later in the frame UpdateCL rebuilds the
++	// rotation from m_body (a stalker's CSightManager::Exec_Look, a monster's
++	// CControlDirection::update_frame); left at its spawn value, it turned the
++	// body away from its motion ("walking backwards").
++	m_replica_drawn_yaw = atan2f(XFORM().k.x, XFORM().k.z);
++	movement().m_body.current.yaw = movement().m_body.target.yaw = yaw;
+ 	net_update N;
+ 	N.dwTimeStamp = Level().timeServer();
+ 	N.o_model = yaw;
+diff --git a/src/xrGame/CustomMonster.h b/src/xrGame/CustomMonster.h
+index 49f16af..f2f51bd 100644
+--- a/src/xrGame/CustomMonster.h
++++ b/src/xrGame/CustomMonster.h
+@@ -165,8 +165,11 @@ public:
+ 	// snapshot's (m/s in the ground plane); -1 until the first sample
+ 	bool replica_presented() const { return m_replica_speed >= 0.f; }
+ 	float replica_speed() const { return m_replica_speed; }
++	// the heading drawn in the frame before the newest sample (part 4 check)
++	float replica_drawn_yaw() const { return m_replica_drawn_yaw; }
+ private:
+ 	float m_replica_speed = -1.f;
++	float m_replica_drawn_yaw = 0.f;
+ public:
+ 
+ 	// Network
+diff --git a/src/xrGame/CustomZone.cpp b/src/xrGame/CustomZone.cpp
+index 72d5d30..f75d392 100644
+--- a/src/xrGame/CustomZone.cpp
++++ b/src/xrGame/CustomZone.cpp
+@@ -398,7 +398,9 @@ BOOL CCustomZone::net_Spawn(CSE_Abstract* DC)
+ 	if (m_zone_flags.test(eIdleLight) && render_ver_allowed)
+ 	{
+ 		m_pIdleLight = ::Render->light_create();
+-		m_pIdleLight->set_shadow(!!m_zone_flags.test(eIdleLightShadow));
++		// S10-T07 (B23, part 4): a near-only shadow starts off (UpdateIdleLight)
++		m_idle_light_shadow_cast = m_zone_flags.test(eIdleLightShadow) && m_idle_light_shadow_near <= 0.f;
++		m_pIdleLight->set_shadow(m_idle_light_shadow_cast);
+ 
+ 		if (m_zone_flags.test(eIdleLightVolumetric))
+ 		{
+@@ -874,6 +876,23 @@ void CCustomZone::UpdateIdleLight()
+ 	Fvector pos = Position();
+ 	pos.y += m_fIdleLightHeight;
+ 	m_pIdleLight->set_position(pos);
++
++	// S10-T07 (B23, part 4): a far campfire still burns and lights its
++	// surroundings, but only a near one renders a shadow map (a point light's
++	// shadow is six renders of the scene: 46 of them on Cordon cost the frame
++	// rate). The off distance is a little farther than the on distance so a
++	// player standing at the edge does not make the shadow flicker.
++	if (m_idle_light_shadow_near > 0.f && m_zone_flags.test(eIdleLightShadow))
++	{
++		const float dist = Device.vCameraPosition.distance_to(pos);
++		const float limit = m_idle_light_shadow_cast ? m_idle_light_shadow_near * 1.25f : m_idle_light_shadow_near;
++		const bool cast = dist < limit;
++		if (cast != m_idle_light_shadow_cast)
++		{
++			m_idle_light_shadow_cast = cast;
++			m_pIdleLight->set_shadow(cast);
++		}
++	}
+ }
+ 
+ 
+diff --git a/src/xrGame/CustomZone.h b/src/xrGame/CustomZone.h
+index 62af67c..acd5a39 100644
+--- a/src/xrGame/CustomZone.h
++++ b/src/xrGame/CustomZone.h
+@@ -301,6 +301,10 @@ protected:
+ 	void StartIdleLight();
+ 	void StopIdleLight();
+ 	void UpdateIdleLight();
++	// S10-T07 (B23, part 4): above 0, a shadowed idle light casts its shadow
++	// only while the camera is this close (metres; a co-op client's campfires)
++	float m_idle_light_shadow_near = 0.f;
++	bool m_idle_light_shadow_cast = true; // what the light was last told
+ 
+ 
+ 	//подсветка выброса
+diff --git a/src/xrGame/ZoneCampfire.cpp b/src/xrGame/ZoneCampfire.cpp
+index a14a27a..1784ac5 100644
+--- a/src/xrGame/ZoneCampfire.cpp
++++ b/src/xrGame/ZoneCampfire.cpp
+@@ -4,17 +4,28 @@
+ #include "GamePersistent.h"
+ #include "../xrEngine/LightAnimLibrary.h"
+ #include "CampaignActorAccess.h" // S10-T07 (B23)
++#include "CoopClientLink.h" // S10-T07 (B23, part 4)
+ 
+ // S10-T07 (B23): the campaign server sets no renderer flag (no user.ltx, no
+ // `renderer` command, no device), so its campfires never turned: the scripts'
+ // turn-off at spawn and the NPCs' turn-on were no-ops and every campfire stayed
+ // at its constructor's lit state, which the join batch then lit on every
+-// client (46 shadowed lights on Cordon). The turn is gameplay on the server.
++// client (46 shadowed lights on Cordon).
++// Part 4 (decision T07-10): that is what the players want. Letting the server
++// turn them as single-player does left only the NPC-lit fires burning (10-11
++// of 46 in demo-3), so the server never turns a campfire and every one burns.
++// A co-op client keeps the frame rate by casting a campfire's shadow only
++// near the camera (CCustomZone::UpdateIdleLight, m_idle_light_shadow_near).
+ static bool campfire_turn_allowed()
+ {
+-	return psDeviceFlags.test(rsR2 | rsR3 | rsR4) || campaign::process_role() == campaign::Role::Server;
++	if (campaign::process_role() == campaign::Role::Server)
++		return false;
++	return !!psDeviceFlags.test(rsR2 | rsR3 | rsR4);
+ }
+ 
++// S10-T07 (B23, part 4): the shadow distance of a co-op client's campfire (m)
++static const float kCoopCampfireShadowNear = 20.f;
++
+ /*
+ CZoneCampfire* g_zone = NULL;
+ void turn_zone()
+@@ -42,6 +53,8 @@ CZoneCampfire::~CZoneCampfire()
+ void CZoneCampfire::Load(LPCSTR section)
+ {
+ 	inherited::Load(section);
++	if (campaign::coop_client_active())
++		m_idle_light_shadow_near = kCoopCampfireShadowNear;
+ }
+ 
+ void CZoneCampfire::GoEnabledState()
+diff --git a/src/xrGame/ai/monsters/control_direction.cpp b/src/xrGame/ai/monsters/control_direction.cpp
+index 03c9da4..8cc4c55 100644
+--- a/src/xrGame/ai/monsters/control_direction.cpp
++++ b/src/xrGame/ai/monsters/control_direction.cpp
+@@ -31,6 +31,15 @@ void CControlDirection::reinit()
+ 
+ void CControlDirection::update_frame()
+ {
++	// S10-T07 (B4, part 4): a co-op client's replica faces where the server's
++	// snapshots turn it (CCustomMonster::replica_present sets m_body), not
++	// where its own, idle direction control last aimed
++	if (m_object->replica_presented())
++	{
++		m_heading.current_angle = m_man->path_builder().m_body.current.yaw;
++		m_data.heading.target_angle = m_heading.current_angle;
++	}
++
+ 	pitch_correction();
+ 
+ 	SRotationEventData event_data;
+diff --git a/src/xrGame/sight_manager.cpp b/src/xrGame/sight_manager.cpp
+index 96ca304..8ed5066 100644
+--- a/src/xrGame/sight_manager.cpp
++++ b/src/xrGame/sight_manager.cpp
+@@ -154,6 +154,11 @@ void CSightManager::Exec_Look(float time_delta)
+ 		Msg							( "%6d [%s] before body[%f]->[%f], head[%f]->[%f]", Device.dwTimeGlobal, object().cName().c_str(), body.current.yaw, body.target.yaw, head.current.yaw, head.target.yaw );
+ #endif // #ifdef DEBUG
+ 		vfValidateAngleDependency(body.current.yaw, body.target.yaw, head.current.yaw);
++		// S10-T07 (B4, part 4): a co-op client's replica turns only as the
++		// server's snapshots do (CCustomMonster::replica_present sets m_body);
++		// its own sight and leg pickers must not turn it here
++		if (m_object->replica_presented())
++			body.target = body.current;
+ #ifdef DEBUG
+ 	if ( g_ai_dbg_sight )
+ 		Msg							( "%6d [%s] after  body[%f]->[%f], head[%f]->[%f]", Device.dwTimeGlobal, object().cName().c_str(), body.current.yaw, body.target.yaw, head.current.yaw, head.target.yaw );

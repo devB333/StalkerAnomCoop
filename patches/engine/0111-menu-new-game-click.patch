@@ -1,0 +1,65 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 7811427..974c9f2 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -9187,8 +9187,19 @@ static void coop_menu_test()
+ 			"c:w_value('character_creation','new_game_map','skadovsk_shipwreck') "
+ 			"c:w_value('character_creation','new_game_loadout','%s') "
+ 			"c:w_value('character_creation','new_game_money',99999) "
+-			"__coop_menu_host = 1 "
+-			"ui_main_menu.main_menu.StartGame(nil)", kSessionOwnerLoadout);
++			// B49: as a player does it: New game on the live menu (its button's own handler), the choice
++			// box, "Host co-op: a new campaign" (what its double-click runs), then the creation screen's Start
++			"local m = __coop_main_menu "
++			"if not m then error('no live main menu') end "
++			"__coop_menu_box = nil "
++			"m:OnButton_new_game() "
++			"if not (__coop_menu_box and __coop_menu_acts and __coop_menu_acts[2]) then error('no co-op choice box') end "
++			"printf('S11-T00 co-op menu test: the New game button showed the choice box') "
++			"__coop_menu_acts[2]() "
++			"if __coop_menu_box:IsShown() then __coop_menu_box:HideDialog() end "
++			"if not (m.new_game_dlg and __coop_menu_host == 1) then error('no creation screen for the host') end "
++			"if m.new_game_dlg:IsShown() then m.new_game_dlg:HideDialog() end "
++			"m:StartGame()", kSessionOwnerLoadout);
+ 	else if (!xr_strcmp(s_menu.test, "host_continue"))
+ 		xr_strcpy(chunk, "local r = campaign.menu_host(2, '') printf('S11-T00 co-op menu test host_continue: %s', "
+ 			"string.match(r or '', '^[^|]*'))"); // not the code
+@@ -9275,22 +9286,32 @@ static void coop_menu_frame()
+ 		"      function(box) answer(campaign.menu_join(box.message_box:GetHost(), box.message_box:GetPassword()), 'join') end)\n"
+ 		"  end)\n"
+ 		"end\n"
+-		"local new_game = mm.OnButton_new_game\n"
++		// B49: the installed menu bound its New game button to OnButton_new_game when it was built, before this
++		// runs (ui_main_menu.script:73, AddCallback with the function itself), so a click never reached a
++		// replaced OnButton_new_game. Its handler calls self:ShowFactionUI(), looked up at the call: the choice
++		// goes there. Update records the live menu (the test driver clicks New game through it)
++		"local show_faction = mm.ShowFactionUI\n"
+ 		"local start_game = mm.StartGame\n"
+-		"mm.OnButton_new_game = function(self, ...)\n"
+-		"  if not campaign.menu_available() then return new_game(self, ...) end\n"
++		"local update = mm.Update\n"
++		"mm.Update = function(self, ...) __coop_main_menu = self return update(self, ...) end\n"
++		"mm.ShowFactionUI = function(self, ...)\n"
++		"  if __coop_menu_pass or not campaign.menu_available() then __coop_menu_pass = nil return show_faction(self, ...) end\n"
+ 		"  local me, args = self, {...}\n"
+-		"  local acts = { function() __coop_menu_host = nil new_game(me, unpack(args)) end }\n"
++		"  local function creation(host) return function()\n"
++		"    __coop_menu_host = host __coop_menu_pass = true me:ShowFactionUI(unpack(args)) end end\n"
++		"  local acts = { creation(nil) }\n"
+ 		"  local names = { 'Single player (story)' }\n"
+ 		"  if campaign.menu_can_host() then\n"
+-		"    acts[#acts + 1] = function() __coop_menu_host = 1 new_game(me, unpack(args)) end\n"
++		"    acts[#acts + 1] = creation(1)\n"
+ 		"    names[#names + 1] = 'Host co-op: a new campaign'\n"
+ 		"    acts[#acts + 1] = function() answer(campaign.menu_host(2, ''), 'host') end\n"
+ 		"    names[#names + 1] = 'Host co-op: continue the last campaign'\n"
+ 		"  end\n"
+ 		"  acts[#acts + 1] = join_box\n"
+ 		"  names[#names + 1] = 'Join co-op (address and join code)'\n"
+-		"  ui_dyn_msg_box.multi_choice(acts, unpack(names))\n"
++		"  __coop_menu_acts = acts\n"
++		"  __coop_menu_box = ui_dyn_msg_box.multi_choice(acts, unpack(names))\n"
++		"  printf('S11-T00 co-op menu choice shown (%d choices)', #acts)\n"
+ 		"end\n"
+ 		"mm.StartGame = function(self, ...)\n"
+ 		"  if __coop_menu_host == 1 and campaign.menu_available() then\n"

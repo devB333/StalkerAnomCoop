@@ -1,0 +1,102 @@
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index a4c5ece..fe79fb9 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -150,6 +150,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.talk_variant = ini.line_exist("coop", "talk_variant") ? ini.r_u32("coop", "talk_variant") : 0;
+ 		out.info_party = ini.line_exist("coop", "info_party") ? ini.r_u32("coop", "info_party") : 0; // S10-T04b
+ 		out.task_party = ini.line_exist("coop", "task_party") ? ini.r_u32("coop", "task_party") : 0; // S10-T05b
++		out.place_giver = ini.line_exist("coop", "place_giver") ? ini.r_u32("coop", "place_giver") : 0; // demo aid
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index d236331..899fb60 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -119,6 +119,7 @@ struct CoopConfig
+ 	u32 talk_variant; // S10-T04a fixture: round 4's turn-in by talking: 0 participant 1 (the accepter), 1 participant 2
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
++	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+ 	u32 failpoint_count; // ...on its count-th hit (default 1)
+ 	u32 failpoint_fail; // 1: the hit fails the store call ("disk full") instead of terminating the process
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index bb72fa7..f411d61 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -629,6 +629,9 @@ struct Host
+ 		u64 completed_before = 0;
+ 		u32 failures = 0;
+ 	} task_fixture;
++	// the hands-on aid place_giver (start-coop-demo.sh)
++	u64 demo_place_since = 0;
++	bool demo_placed = false;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -9434,6 +9437,55 @@ void info_fixtures()
+ 	}
+ }
+ 
++// A hands-on aid (start-coop-demo.sh, profile place_giver = N): N seconds
++// after both players are in the world, both actors are placed in front of
++// Sidorovich, once, so the talk window can be tried by hand while a door's
++// USE has no co-op path yet (the bunker door stays shut; S10-T04c).
++void demo_place_tick()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.place_giver || g_host->demo_placed || !ai().get_alife())
++		return;
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (attached < 2)
++	{
++		g_host->demo_place_since = 0;
++		return;
++	}
++	if (!g_host->demo_place_since)
++		g_host->demo_place_since = g_host->tick;
++	if (g_host->tick < g_host->demo_place_since + u64(config.place_giver) * 50)
++		return;
++	g_host->demo_placed = true;
++	const u16 giver_id = find_giver();
++	CObject* giver = giver_id != 0xffff ? Level().Objects.net_Find(giver_id) : nullptr;
++	if (!giver)
++	{
++		g_host->log.line("demo-place giver-missing");
++		return;
++	}
++	// the talk fixture's spots, 1.2 m to either side of him (demo-3/4: a spot
++	// 1.5 m in front of him is inside his desk; the physics ejected the actor
++	// when the partner brushed it and the contact damage killed it)
++	const Fvector g = giver->Position();
++	for (u32 k = 0; k < 2; ++k)
++	{
++		Fvector at = g;
++		at.x += k ? -1.2f : 1.2f;
++		place_beside(actors[k], at);
++		g_host->log.line("demo-place slot=%u actor=%u giver=%u at=%.2f,%.2f,%.2f", k, u32(actors[k]->ID()), u32(giver_id),
++			VPUSH(at));
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -12532,6 +12584,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	actor_state_tick(); // S10-T04b: the script state of an actor without the installed binder
+ 	info_fixtures();
+ 	task_fixtures(); // S10-T05b
++	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+ 	travel_hold_tick(); // S09-T03: the resume once both clients are ready

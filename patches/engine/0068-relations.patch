@@ -1,0 +1,697 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index 24dd991..586d29b 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -1,6 +1,8 @@
+ #include "pch_script.h"
+ #include "CoopClientLink.h"
+ #include "inventory_upgrade_manager.h" // S10-T04f
++#include "relation_registry.h" // S10-T04d
++#include "character_community.h"
+ 
+ // S05-T01: see CoopClientLink.h.
+ 
+@@ -945,6 +947,7 @@ void apply_reparent(const coop::proto::Reparent& r, bool retry = false); // S08-
+ void on_trade_prices(const coop::proto::CampaignEvent& event); // S10-T04c
+ void on_upgrade_table(const coop::proto::CampaignEvent& event); // S10-T04f
+ void on_upgrade_installed(const coop::proto::CampaignEvent& event); // S10-T04f
++void on_relations(const coop::proto::CampaignEvent& event); // S10-T04d
+ static void trade_refresh_menu();
+ static void lua_ui_refresh(); // S10-T04f
+ static bool lua_ui_shown(); // S10-T04f
+@@ -3404,6 +3407,7 @@ void on_message(const coop::session::ClientEvent& e)
+ 			case 15: on_trade_prices(*event); break; // S10-T04c
+ 			case 16: on_upgrade_table(*event); break; // S10-T04f
+ 			case 17: on_upgrade_installed(*event); break; // S10-T04f
++			case 18: on_relations(*event); break; // S10-T04d
+ 			default: break;
+ 			}
+ 		}
+@@ -6201,24 +6205,95 @@ void on_upgrade_installed(const coop::proto::CampaignEvent& event)
+ 	}
+ }
+ 
++// S10-T04d: CampaignEvent 18: this client's own actor's community goodwill
++// (kind 1), faction-vs-faction relations (kind 2) and its actor's reputation
++// (kind 3), into this client's own relation registry, which the PDA's
++// relations tab and the HUD's attitude colours read (decision T01-6).
++void on_relations(const coop::proto::CampaignEvent& event)
++{
++	PayloadReader r(event.payload);
++	const u8 kind = r.get<u8>();
++	if (!r.ok || !g_actor)
++		return;
++	const u32 communities = u32(CHARACTER_COMMUNITY::GetMaxIndex()) + 1;
++	if (kind == 1)
++	{
++		const u8 n = r.get<u8>();
++		u32 applied = 0;
++		string1024 nonzero = "";
++		for (u8 i = 0; i < n && r.ok; ++i)
++		{
++			const u8 idx = r.get<u8>();
++			const s32 gw = s32(r.get<u32>());
++			if (!r.ok || idx >= communities)
++				continue;
++			RELATION_REGISTRY().SetCommunityGoodwill(idx, u16(g_actor->ID()), gw);
++			++applied;
++			if (gw && xr_strlen(nonzero) < 900)
++			{
++				string128 one;
++				xr_sprintf(one, "%s%s=%d", nonzero[0] ? "," : "", *CHARACTER_COMMUNITY::IndexToId(idx), gw);
++				xr_strcat(nonzero, one);
++			}
++		}
++		g_link->log.line("relations-applied kind=1 actor=%u n=%u applied=%u nonzero=[%s]", u32(g_actor->ID()), u32(n), applied, nonzero);
++	}
++	else if (kind == 2)
++	{
++		const u8 n = r.get<u8>();
++		u32 applied = 0;
++		for (u8 k = 0; k < n && r.ok; ++k)
++		{
++			const u8 i = r.get<u8>(), j = r.get<u8>();
++			const s32 value = s32(r.get<u32>());
++			if (!r.ok || i >= communities || j >= communities)
++				continue;
++			RELATION_REGISTRY().SetCommunityRelation(i, j, value);
++			++applied;
++			if (n <= 8)
++				g_link->log.line("relations-applied kind=2 from=%s to=%s value=%d", *CHARACTER_COMMUNITY::IndexToId(i),
++					*CHARACTER_COMMUNITY::IndexToId(j), value);
++		}
++		if (n > 8)
++			g_link->log.line("relations-applied kind=2 pairs=%u applied=%u", u32(n), applied);
++	}
++	else if (kind == 3)
++	{
++		const s32 reputation = s32(r.get<u32>());
++		CInventoryOwner* me = smart_cast<CInventoryOwner*>(g_actor);
++		if (!r.ok || !me)
++			return;
++		const s32 before = me->Reputation();
++		me->SetReputation(reputation);
++		g_link->log.line("relations-applied kind=3 reputation=%d->%d applied=%d", before, reputation,
++			me->Reputation() == reputation ? 1 : 0);
++	}
++}
++
+ // S10-T04f: Anomaly's inventory, trade and repair windows are the installed
+ // Lua UI (ui_inventory.script, opened through the engine's StartTrade /
+ // StartUpgrade script hooks), not the engine's CUIActorMenu. Its item lists are
+ // nudged after a server-made change, and its presence tells when a session's
+ // window is gone (it never reaches the engine menu's deinit).
+-static luabind::object lua_ui_object()
++// true with the window object in `out` (a default-constructed luabind::object
++// has no Lua state: never call type() on one)
++static bool lua_ui_object(luabind::object& out)
+ {
+ 	luabind::object globals = luabind::get_globals(ai().script_engine().lua());
+ 	luabind::object module = globals["ui_inventory"];
+ 	if (module.type() != LUA_TTABLE)
+-		return luabind::object();
+-	return module["GUI"];
++		return false;
++	luabind::object gui = module["GUI"];
++	if (gui.type() == LUA_TNIL)
++		return false;
++	out = gui;
++	return true;
+ }
+ 
+ static void lua_ui_refresh()
+ {
+-	luabind::object gui = lua_ui_object();
+-	if (gui.type() == LUA_TNIL)
++	luabind::object gui;
++	if (!lua_ui_object(gui))
+ 		return;
+ 	luabind::object update = gui["On_Item_Update"];
+ 	if (update.type() == LUA_TFUNCTION)
+@@ -6227,8 +6302,8 @@ static void lua_ui_refresh()
+ 
+ static bool lua_ui_shown()
+ {
+-	luabind::object gui = lua_ui_object();
+-	if (gui.type() == LUA_TNIL)
++	luabind::object gui;
++	if (!lua_ui_object(gui))
+ 		return false;
+ 	luabind::object shown = gui["IsShown"];
+ 	return shown.type() == LUA_TFUNCTION && luabind::call_function<bool>(shown, gui);
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 8ac7fe4..502419f 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -153,6 +153,7 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.place_giver = ini.line_exist("coop", "place_giver") ? ini.r_u32("coop", "place_giver") : 0; // demo aid
+ 		out.trade_party = ini.line_exist("coop", "trade_party") ? ini.r_u32("coop", "trade_party") : 0; // S10-T04c
+ 		out.upgrade_party = ini.line_exist("coop", "upgrade_party") ? ini.r_u32("coop", "upgrade_party") : 0; // S10-T04f
++		out.relations_party = ini.line_exist("coop", "relations_party") ? ini.r_u32("coop", "relations_party") : 0; // S10-T04d
+ 		out.failpoint[0] = 0;
+ 		if (ini.line_exist("coop", "failpoint"))
+ 			read_string(ini, "failpoint", out.failpoint, sizeof(out.failpoint), false);
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index 73af397..fa169cc 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -120,6 +120,7 @@ struct CoopConfig
+ 	u32 info_party; // S10-T04b fixture: seconds after both attach until the info-portion and actor-state checks (0 off)
+ 	u32 task_party; // S10-T05b fixture: seconds after both attach until the general party-task rounds (bounty) start (0 off)
+ 	u32 place_giver; // hands-on aid: seconds after both attach until both actors are placed in front of Sidorovich (0 off)
++	u32 relations_party; // S10-T04d fixture: seconds after both attach until the goodwill, relation and reputation rounds
+ 	u32 upgrade_party; // S10-T04f fixture: seconds after both attach until the upgrade and repair rounds at the mechanic
+ 	u32 trade_party; // S10-T04c fixture: seconds after both attach until the door and trade rounds at Sidorovich (0 off)
+ 	string64 failpoint; // S07-T06 harness: the store failpoint at which the process terminates itself (empty off)
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 509e559..c31bdd3 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -55,6 +55,8 @@
+ #include "inventory_upgrade_manager.h" // S10-T04f
+ #include "inventory_upgrade_root.h"
+ #include "inventory_upgrade.h"
++#include "relation_registry.h" // S10-T04d
++#include "character_community.h"
+ #include "xrServer_Objects_ALife_Monsters.h" // S10-T04f fixture: an offline mechanic
+ #include "specific_character.h"
+ #include "Missile.h"
+@@ -172,6 +174,7 @@ struct PlayerLink
+ 	u16 talk_npc = 0xffff; // the partner (0xffff: no talk)
+ 	u16 trade_npc = 0xffff; // S10-T04c: the open trade, inside the talk (0xffff: none)
+ 	u16 upgrade_npc = 0xffff; // S10-T04f: the open upgrade session, inside the talk (0xffff: none)
++	bool relations_joined = false, relations_dirty = false, reputation_dirty = false; // S10-T04d: CampaignEvent 18
+ 	DIALOG_SHARED_PTR talk_dialog; // the current dialog (empty: topic mode)
+ 	u64 talk_since = 0;
+ 	u64 talk_says_now = 0; // says in the open talk
+@@ -604,6 +607,9 @@ struct Host
+ 	u64 uses_object = 0, uses_object_refused = 0; // S10-T04c
+ 	u64 trades_opened = 0, trades_committed = 0, trades_refused = 0, trades_replayed = 0, trade_prices_sent = 0;
+ 	u64 upgrades_opened = 0, upgrades_committed = 0, upgrades_refused = 0, upgrades_replayed = 0, upgrade_tables_sent = 0; // S10-T04f
++	xr_vector<std::pair<u8, u8>> relation_changes; // S10-T04d: faction pairs changed since the last broadcast
++	u64 relations_sent = 0;
++	bool relations_restored = false; // S10-T04d: the faction table read back from the checkpoint's state once
+ 	struct TalkFixture
+ 	{
+ 		u64 both_since = 0;
+@@ -670,6 +676,15 @@ struct Host
+ 		u64 ops = 0;
+ 		u32 failures = 0, moves = 0;
+ 	} upgrade_fixture;
++	// S10-T04d: the goodwill, relation and reputation fixture (profile relations_party)
++	struct RelationsFixture
++	{
++		u64 both_since = 0;
++		u32 phase = 0;
++		u64 phase_tick = 0;
++		bool recovered = false;
++		u32 failures = 0;
++	} relations_fixture;
+ };
+ 
+ Host* g_host = nullptr;
+@@ -5340,6 +5355,198 @@ void drive_needs()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T04d
++// Relations to the clients (CampaignEvent 18; decision T01-6). The engine's
++// relation registry keeps community goodwill per character, so two actors
++// already have their own on the server (the scripts' AC_ID is remapped in a
++// participant context; a literal 0 is mapped in the Lua exports). A client's
++// own registry is fed from here: kind 1 its actor's goodwill with every
++// community (u8 count x (u8 community index, s32 goodwill)), sent when a
++// value changed (RELATION_REGISTRY::SetCommunityGoodwill) and when the client
++// enters the world; kind 2 faction-vs-faction relations (u8 count x (u8 from,
++// u8 to, s32 value)), the whole table on entering in parts of 150 pairs and
++// the changed pairs to every client afterwards; kind 3 its actor's reputation
++// (s32), on change and on entering.
++// The faction-vs-faction table is not part of the engine's saved game (the
++// installed game_relations.script keeps its own changes in db.actor's pstor
++// and re-applies them on load, which inside a participant context would be
++// one player's pstor): the server keeps every pair it is told about in the
++// storage manager's state (m_data.coop_relations, saved with the
++// checkpoint) and applies the table once after a start (relations-1: a
++// relation set through the registry reverted after the restart).
++// true with the table in `out` (a default-constructed luabind::object has no
++// Lua state: never call type() on one, relations-2 crashed there)
++static bool relations_state_table(bool create, luabind::object& out)
++{
++	luabind::functor<luabind::object> get_state;
++	if (!ai().script_engine().functor("alife_storage_manager.get_state", get_state))
++		return false;
++	luabind::object state = get_state();
++	if (state.type() != LUA_TTABLE)
++		return false;
++	luabind::object table = state["coop_relations"];
++	if (table.type() != LUA_TTABLE && create)
++	{
++		table = luabind::newtable(ai().script_engine().lua());
++		state["coop_relations"] = table;
++	}
++	if (table.type() != LUA_TTABLE)
++		return false;
++	out = table;
++	return true;
++}
++
++static void relations_store(u8 from, u8 to, s32 value)
++{
++	luabind::object table;
++	if (relations_state_table(true, table))
++		table[int(from) * 256 + int(to)] = value;
++}
++
++static void relations_restore_once()
++{
++	if (g_host->relations_restored)
++		return;
++	g_host->relations_restored = true;
++	luabind::object table;
++	if (!relations_state_table(false, table))
++	{
++		g_host->log.line("relations-restore none");
++		return;
++	}
++	const u32 communities = u32(CHARACTER_COMMUNITY::GetMaxIndex()) + 1;
++	u32 applied = 0, differed = 0;
++	for (u32 from = 0; from < communities; ++from)
++		for (u32 to = 0; to < communities; ++to)
++		{
++			luabind::object entry = table[int(from) * 256 + int(to)];
++			if (entry.type() != LUA_TNUMBER)
++				continue;
++			const s32 value = luabind::object_cast<int>(entry);
++			if (RELATION_REGISTRY().GetCommunityRelation(u8(from), u8(to)) != value)
++				++differed;
++			RELATION_REGISTRY().SetCommunityRelation(u8(from), u8(to), value);
++			++applied;
++		}
++	g_host->relation_changes.clear(); // the joining clients get the whole table
++	g_host->log.line("relations-restore pairs=%u differed=%u", applied, differed);
++}
++
++void send_relations()
++{
++	relations_restore_once();
++	const u32 communities = u32(CHARACTER_COMMUNITY::GetMaxIndex()) + 1;
++	for (PlayerLink& link : g_host->links)
++	{
++		if (!client_in_world(link))
++		{
++			link.relations_joined = false;
++			continue;
++		}
++		CActor* actor = participant_actor(link.ref);
++		CInventoryOwner* owner = actor ? smart_cast<CInventoryOwner*>(actor) : nullptr;
++		if (!owner)
++			continue;
++		if (!link.relations_joined)
++		{
++			link.relations_joined = true;
++			link.relations_dirty = true;
++			link.reputation_dirty = true;
++			std::vector<u8> p;
++			u32 count = 0, parts = 0;
++			for (u32 i = 0; i < communities; ++i)
++				for (u32 j = 0; j < communities; ++j)
++				{
++					if (p.empty())
++					{
++						put_u8(p, 2);
++						put_u8(p, 0);
++					}
++					put_u8(p, u8(i));
++					put_u8(p, u8(j));
++					put_u32(p, u32(RELATION_REGISTRY().GetCommunityRelation(u8(i), u8(j))));
++					if (++count == 150)
++					{
++						p[1] = u8(count);
++						queue_event(link, 18, p);
++						p.clear();
++						count = 0;
++						++parts;
++					}
++				}
++			if (count)
++			{
++				p[1] = u8(count);
++				queue_event(link, 18, p);
++				++parts;
++			}
++			g_host->log.line("relations-joined slot=%u communities=%u parts=%u", u32(link.ref.slot), communities, parts);
++		}
++		if (link.relations_dirty)
++		{
++			link.relations_dirty = false;
++			std::vector<u8> p;
++			put_u8(p, 1);
++			put_u8(p, u8(communities));
++			string1024 nonzero = "";
++			for (u32 i = 0; i < communities; ++i)
++			{
++				const s32 gw = RELATION_REGISTRY().GetCommunityGoodwill(u8(i), u16(actor->ID()));
++				put_u8(p, u8(i));
++				put_u32(p, u32(gw));
++				if (gw && xr_strlen(nonzero) < 900)
++				{
++					string128 one;
++					xr_sprintf(one, "%s%s=%d", nonzero[0] ? "," : "", *CHARACTER_COMMUNITY::IndexToId(u8(i)), gw);
++					xr_strcat(nonzero, one);
++				}
++			}
++			queue_event(link, 18, p);
++			++g_host->relations_sent;
++			g_host->log.line("relations-goodwill slot=%u actor=%u communities=%u nonzero=[%s]", u32(link.ref.slot), u32(actor->ID()),
++				communities, nonzero);
++		}
++		if (link.reputation_dirty)
++		{
++			link.reputation_dirty = false;
++			std::vector<u8> p;
++			put_u8(p, 3);
++			put_u32(p, u32(owner->Reputation()));
++			queue_event(link, 18, p);
++			++g_host->relations_sent;
++			g_host->log.line("relations-reputation slot=%u actor=%u reputation=%d", u32(link.ref.slot), u32(actor->ID()),
++				int(owner->Reputation()));
++		}
++	}
++	if (!g_host->relation_changes.empty())
++	{
++		const u32 n = _min<u32>(u32(g_host->relation_changes.size()), 150u);
++		std::vector<u8> p;
++		put_u8(p, 2);
++		put_u8(p, u8(n));
++		string512 pairs = "";
++		for (u32 k = 0; k < n; ++k)
++		{
++			const std::pair<u8, u8>& pr = g_host->relation_changes[k];
++			const s32 value = RELATION_REGISTRY().GetCommunityRelation(pr.first, pr.second);
++			put_u8(p, pr.first);
++			put_u8(p, pr.second);
++			put_u32(p, u32(value));
++			if (xr_strlen(pairs) < 400)
++			{
++				string128 one;
++				xr_sprintf(one, "%s%s/%s=%d", pairs[0] ? "," : "", *CHARACTER_COMMUNITY::IndexToId(pr.first),
++					*CHARACTER_COMMUNITY::IndexToId(pr.second), value);
++				xr_strcat(pairs, one);
++			}
++		}
++		g_host->relation_changes.erase(g_host->relation_changes.begin(), g_host->relation_changes.begin() + n);
++		broadcast_event(18, p);
++		++g_host->relations_sent;
++		g_host->log.line("relations-world pairs=%u [%s]", n, pairs);
++	}
++}
++
+ int item_fx_suppressed()
+ {
+ 	lua_State* L = ai().script_engine().lua();
+@@ -11134,6 +11341,121 @@ void upgrade_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ S10-T04d
++// The relations fixture (profile relations_party, server-driven): once both
++// players are in the world,
++//   goodwill    in p2's context the installed Lua export changes the stalker
++//               goodwill of character 0 by -1000: p2's goodwill falls, p1's stays
++//   relation    the stalker/bandit relation set to 2000 (world: both clients)
++//   reputation  p1's reputation +100 (p1's client)
++//   published   a checkpoint, so the restart recovers the registry
++//   recovered   (the restarted server) the three values as the checkpoint kept them
++void relations_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.relations_party || !ai().get_alife())
++		return;
++	Host::RelationsFixture& f = g_host->relations_fixture;
++	CActor* actors[2] = {nullptr, nullptr};
++	u8 slots[2] = {0, 0};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && attached < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				slots[attached] = link.ref.slot;
++				actors[attached++] = actor;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		f.recovered = g_host->persistence && g_host->persistence->recovered();
++		g_host->log.line("fixture-relations both-attached tick=%I64u recovered=%d", g_host->tick, f.recovered ? 1 : 0);
++	}
++	if (attached < 2 || f.phase >= 9 || g_host->tick < f.both_since + u64(config.relations_party) * 50)
++		return;
++	if (slots[0] != 0)
++		std::swap(actors[0], actors[1]);
++	CHARACTER_COMMUNITY stalker, bandit;
++	stalker.set("stalker");
++	bandit.set("bandit");
++	const s32 gw1 = RELATION_REGISTRY().GetCommunityGoodwill(stalker.index(), u16(actors[0]->ID()));
++	const s32 gw2 = RELATION_REGISTRY().GetCommunityGoodwill(stalker.index(), u16(actors[1]->ID()));
++	const s32 relation = RELATION_REGISTRY().GetCommunityRelation(stalker.index(), bandit.index());
++	const s32 rep1 = smart_cast<CInventoryOwner*>(actors[0])->Reputation();
++	if (f.recovered)
++	{
++		g_host->log.line("fixture-relations recovered goodwill_p1=%d goodwill_p2=%d relation=%d reputation_p1=%d", gw1, gw2,
++			relation, rep1);
++		g_host->log.line("fixture-relations done phase=recovered failures=%u", f.failures);
++		f.phase = 9;
++		return;
++	}
++	if (f.phase == 0)
++	{
++		luabind::functor<void> change;
++		if (ai().script_engine().functor("relation_registry.change_community_goodwill", change))
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actors[1]), "fixture-relations");
++			change("stalker", 0, -1000); // character 0: the context's player
++		}
++		else
++			++f.failures;
++		const s32 after1 = RELATION_REGISTRY().GetCommunityGoodwill(stalker.index(), u16(actors[0]->ID()));
++		const s32 after2 = RELATION_REGISTRY().GetCommunityGoodwill(stalker.index(), u16(actors[1]->ID()));
++		g_host->log.line("fixture-relations goodwill p1=%d->%d p2=%d->%d", gw1, after1, gw2, after2);
++		if (after1 != gw1 || after2 != gw2 - 1000)
++			++f.failures;
++		f.phase = 1;
++		f.phase_tick = g_host->tick + 1 * 50;
++		return;
++	}
++	if (f.phase == 1)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		luabind::functor<void> set;
++		if (ai().script_engine().functor("relation_registry.set_community_relation", set))
++			set("stalker", "bandit", 2000);
++		else
++			++f.failures;
++		const s32 after = RELATION_REGISTRY().GetCommunityRelation(stalker.index(), bandit.index());
++		g_host->log.line("fixture-relations relation stalker/bandit=%d->%d", relation, after);
++		if (after != 2000)
++			++f.failures;
++		f.phase = 2;
++		f.phase_tick = g_host->tick + 1 * 50;
++		return;
++	}
++	if (f.phase == 2)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(actors[0]), "fixture-relations");
++			smart_cast<CInventoryOwner*>(actors[0])->ChangeReputation(100);
++		}
++		const s32 after = smart_cast<CInventoryOwner*>(actors[0])->Reputation();
++		g_host->log.line("fixture-relations reputation p1=%d->%d", rep1, after);
++		if (after != rep1 + 100)
++			++f.failures;
++		f.phase = 3;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	if (f.phase == 3)
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		const bool published = request_publication("relations-fixture");
++		g_host->log.line("fixture-relations done phase=changed failures=%u published=%d goodwill_p1=%d goodwill_p2=%d relation=%d "
++			"reputation_p1=%d", f.failures, published ? 1 : 0, gw1, gw2, relation, rep1);
++		f.phase = 9;
++	}
++}
++
+ // ------------------------------------------------------------ S10-T05b
+ // The general party-task fixture (profile task_party; a server kill and
+ // restart between its two halves, -ServerKill / -ServerRestartAfter):
+@@ -13642,6 +13964,34 @@ bool coop_server_dialogue_answer(CInventoryOwner* speaker, LPCSTR text)
+ 	return true; // the server has no talk window
+ }
+ 
++// S10-T04d: see send_relations.
++void coop_server_relation_changed(u8 kind, u16 character, s32 a, s32 b, s32 value)
++{
++	if (!g_host || !g_host->started)
++		return;
++	if (kind == 2)
++	{
++		if (a < 0 || a > 255 || b < 0 || b > 255)
++			return;
++		const std::pair<u8, u8> changed = std::make_pair(u8(a), u8(b)); // not changed(u8(a), u8(b)): a function declaration to the compiler
++		if (std::find(g_host->relation_changes.begin(), g_host->relation_changes.end(), changed) == g_host->relation_changes.end())
++			g_host->relation_changes.push_back(changed);
++		if (g_pGameLevel && ai().get_alife())
++			relations_store(u8(a), u8(b), value);
++		return;
++	}
++	for (PlayerLink& link : g_host->links)
++	{
++		CActor* actor = link.bound ? participant_actor(link.ref) : nullptr;
++		if (!actor || u16(actor->ID()) != character)
++			continue;
++		if (kind == 1)
++			link.relations_dirty = true;
++		else if (kind == 3)
++			link.reputation_dirty = true;
++	}
++}
++
+ // S10-T04b: see the party info portions section.
+ void coop_server_info_changed(const CActor* actor, LPCSTR info_id, bool add)
+ {
+@@ -14316,6 +14666,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	quest_tick(); // S08-T04
+ 	send_party_tasks(); // S08-T09
+ 	drive_needs(); // S08-T09: per-player thirst, sleep, psy health
++	send_relations(); // S10-T04d
+ 	quest_fixtures(); // S08-T04
+ 	talk_tick(); // S10-T04a: a talk ends with its actor, its NPC or its reach
+ 	talk_fixtures();
+@@ -14324,6 +14675,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	task_fixtures(); // S10-T05b
+ 	trade_fixtures(); // S10-T04c
+ 	upgrade_fixtures(); // S10-T04f
++	relations_fixtures(); // S10-T04d
+ 	demo_place_tick(); // the hands-on aid
+ 	travel_tick(); // S09-T01: the proposal's deadline and the world's conditions
+ 	travel_execute_tick(); // S09-T02: the barrier, the take, the commit
+diff --git a/src/xrGame/CoopServerHost.h b/src/xrGame/CoopServerHost.h
+index 951d02f..79e16ae 100644
+--- a/src/xrGame/CoopServerHost.h
++++ b/src/xrGame/CoopServerHost.h
+@@ -59,4 +59,11 @@ bool coop_server_dialogue_answer(::CInventoryOwner* speaker, LPCSTR text);
+ // the other participant actors (decision T01-4); personal portions stay
+ // with the actor. No-op off the campaign server.
+ void coop_server_info_changed(const ::CActor* actor, LPCSTR info_id, bool add);
++// S10-T04d: a relation changed on the campaign server: kind 1 a character's
++// community goodwill (character, a = community index, value), 2 a
++// faction-vs-faction relation (a, b = community indices, value), 3 a
++// character's reputation (character, value). The affected player's client
++// (kinds 1, 3) or every client (kind 2) gets CampaignEvent 18. No-op off
++// the campaign server.
++void coop_server_relation_changed(u8 kind, u16 character, s32 a, s32 b, s32 value);
+ } // namespace campaign
+diff --git a/src/xrGame/InventoryOwner.cpp b/src/xrGame/InventoryOwner.cpp
+index 6355ea5..056858f 100644
+--- a/src/xrGame/InventoryOwner.cpp
++++ b/src/xrGame/InventoryOwner.cpp
+@@ -1,4 +1,5 @@
+ #include "pch_script.h"
++#include "CoopServerHost.h" // S10-T04d
+ #include "InventoryOwner.h"
+ #include "entity_alive.h"
+ #include "pda.h"
+@@ -488,7 +489,10 @@ void CInventoryOwner::SetReputation(CHARACTER_REPUTATION_VALUE reputation)
+ 	trader->m_reputation = reputation;
+ 
+ 	if (CActor* self = smart_cast<CActor*>(EA)) // S03-T02
++	{
++		campaign::coop_server_relation_changed(3, u16(EA->ID()), 0, 0, reputation); // S10-T04d
+ 		self->RPC_UpdateReputation();
++	}
+ }
+ 
+ void CInventoryOwner::ChangeReputation(CHARACTER_REPUTATION_VALUE delta)
+diff --git a/src/xrGame/level_script.cpp b/src/xrGame/level_script.cpp
+index f42b53f..7d13b97 100644
+--- a/src/xrGame/level_script.cpp
++++ b/src/xrGame/level_script.cpp
+@@ -1305,26 +1305,42 @@ float get_pp_effector_length(int id)
+ 
+ #include "relation_registry.h"
+ 
++// S10-T04d: the installed scripts name the player's character as id 0 (AC_ID,
++// which a participant context already remaps, or a literal 0): on the
++// campaign server inside a context it means the context's player, on a co-op
++// client the client's own actor (decision T01-6: goodwill per player)
++static u16 goodwill_character(int _entity_id)
++{
++	u16 id = u16(_entity_id);
++	if (id != 0)
++		return id;
++	id = campaign::info_actor_id(0);
++	if (id == 0)
++		if (CActor* view = campaign::local_view_actor())
++			id = u16(view->ID());
++	return id;
++}
++
+ int g_community_goodwill(LPCSTR _community, int _entity_id)
+ {
+ 	CHARACTER_COMMUNITY c;
+ 	c.set(_community);
+ 
+-	return RELATION_REGISTRY().GetCommunityGoodwill(c.index(), u16(_entity_id));
++	return RELATION_REGISTRY().GetCommunityGoodwill(c.index(), goodwill_character(_entity_id));
+ }
+ 
+ void g_set_community_goodwill(LPCSTR _community, int _entity_id, int val)
+ {
+ 	CHARACTER_COMMUNITY c;
+ 	c.set(_community);
+-	RELATION_REGISTRY().SetCommunityGoodwill(c.index(), u16(_entity_id), val);
++	RELATION_REGISTRY().SetCommunityGoodwill(c.index(), goodwill_character(_entity_id), val);
+ }
+ 
+ void g_change_community_goodwill(LPCSTR _community, int _entity_id, int val)
+ {
+ 	CHARACTER_COMMUNITY c;
+ 	c.set(_community);
+-	RELATION_REGISTRY().ChangeCommunityGoodwill(c.index(), u16(_entity_id), val);
++	RELATION_REGISTRY().ChangeCommunityGoodwill(c.index(), goodwill_character(_entity_id), val);
+ }
+ 
+ int g_get_community_relation(LPCSTR comm_from, LPCSTR comm_to)
+diff --git a/src/xrGame/relation_registry.cpp b/src/xrGame/relation_registry.cpp
+index 516330e..941d2d6 100644
+--- a/src/xrGame/relation_registry.cpp
++++ b/src/xrGame/relation_registry.cpp
+@@ -4,6 +4,7 @@
+ //////////////////////////////////////////////////////////////////////////
+ 
+ #include "stdafx.h"
++#include "CoopServerHost.h" // S10-T04d: goodwill and relation changes to the clients
+ #include "relation_registry.h"
+ #include "alife_registry_wrappers.h"
+ 
+@@ -212,6 +213,7 @@ void RELATION_REGISTRY::SetCommunityGoodwill(CHARACTER_COMMUNITY_INDEX from_comm
+ 	RELATION_DATA& relation_data = relation_registry().registry().objects(to_character);
+ 
+ 	relation_data.communities[from_community].SetGoodwill(goodwill);
++	campaign::coop_server_relation_changed(1, to_character, s32(from_community), 0, goodwill); // S10-T04d
+ }
+ 
+ void RELATION_REGISTRY::ChangeCommunityGoodwill(CHARACTER_COMMUNITY_INDEX from_community, u16 to_character,
+@@ -252,4 +254,5 @@ void RELATION_REGISTRY::SetCommunityRelation(CHARACTER_COMMUNITY_INDEX index1, C
+                                              CHARACTER_GOODWILL goodwill)
+ {
+ 	CHARACTER_COMMUNITY::set_relation(index1, index2, goodwill);
++	campaign::coop_server_relation_changed(2, 0, s32(index1), s32(index2), goodwill); // S10-T04d
+ }

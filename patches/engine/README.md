@@ -906,6 +906,29 @@ stopped the client's clock and left held items' motions unfinished. Fixture
 `flashlight_kit = 1` and client driver `flashlight_test = N`
 (`--flashlight-test c1:N`). Single player: unchanged.
 
+`0117-quest-sweep.patch` (S10-T07, 2026-11-10): B57-B63 and the quest sweep.
+B57 (the user: Wolf's turn-in froze the server and released player 1's ALife
+actor): luabind keeps a reference to nil as the shared registry slot
+`LUA_REFNIL`, and assigning to such an object wrote that slot
+(`lua_reference::replace`), so every later nil read returned the written
+value; `replace` now takes a new slot (`3rd party/luabind/detail/ref.hpp`), the
+server checks the slot every tick (`lua-refnil-cleared`), and
+`apply_party_effects` reads the effect lists with the plain Lua API up to
+`lua_objlen`, releasing only inventory items held by a party actor. B58/B59: a
+random stalker's task (`simulation_task_*`) is offered and finished through
+the sim dialogue's functions and the sim finish is taken over by the talk
+window. B60: each fetch item is credited to the actor that holds it (G08).
+B62: a party task that completes by itself runs as a turn-in (its effects
+captured in `task_manager.task_callback`, applied to both by `quest_tick`).
+B63: the turn-in compares with the task's own `stage_complete`. B64
+diagnosis: `outbox-stall` / `outbox-flowing` lines when the lifecycle outbox
+stops draining. Fixture `quest_sweep` (`quest_sweep_list`, `_first`,
+`_count`; `--quest-sweep`, tools/make-quest-sweep-list.py,
+compare-coop-quest-sweep.py): each listed task accepted by talking (or given
+directly), its goal met or forced, turned in by the other player by talking,
+checked. Single player: the luabind fix applies (no behaviour depends on the
+old write); the rest is co-op only.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.

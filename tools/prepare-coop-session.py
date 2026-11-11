@@ -288,6 +288,18 @@ def main():
                              "the party travels every passage it can reach; fixture sweep_party)")
     parser.add_argument("--sweep-start", type=int, default=20,
                         help="with --sweep: seconds after both players are in the world until the sweep starts")
+    parser.add_argument("--quest-sweep", default="",
+                        help="comma-separated client names present for the B57 quest sweep (server-driven: every task "
+                             "of --quest-sweep-list is accepted, its goal met, turned in and checked, one at a time; "
+                             "fixture quest_sweep; compare-coop-quest-sweep.py)")
+    parser.add_argument("--quest-sweep-start", type=int, default=20,
+                        help="with --quest-sweep: seconds after both players are in the world until the sweep starts")
+    parser.add_argument("--quest-sweep-list", default="",
+                        help="with --quest-sweep: the list (tools/make-quest-sweep-list.py <out>: <out>.txt)")
+    parser.add_argument("--quest-sweep-first", type=int, default=0,
+                        help="with --quest-sweep: the list's first task to run (0-based, comments not counted)")
+    parser.add_argument("--quest-sweep-count", type=int, default=0,
+                        help="with --quest-sweep: how many tasks to run (0: to the end)")
     parser.add_argument("--emission", default="",
                         help="comma-separated client names present for the S10-T05a emission fixture (server-driven: "
                              "variant 0 places player 1 in the nearest emission cover and starts a surge, variant 1 "
@@ -435,6 +447,9 @@ def main():
     sleep_fix = {n for n in args.sleep.split(",") if n}
     relocate_fix = {n for n in args.relocate.split(",") if n}
     sweep_fix = {n for n in args.sweep.split(",") if n}
+    quest_sweep_fix = {n for n in args.quest_sweep.split(",") if n}
+    if quest_sweep_fix and not args.quest_sweep_list:
+        raise SystemExit("--quest-sweep needs --quest-sweep-list")
     emission_fix = {n for n in args.emission.split(",") if n}
     story_fix = {n for n in args.story.split(",") if n}
     music_fix = {n for n in args.music.split(",") if n}
@@ -450,7 +465,7 @@ def main():
     drivers = (inject | script | movement | weather | ledger | pickup | transfer | quest | use | stack | travel | talk
                | info | party_task | trade_fix | upgrade_fix | relations_fix | stash_fix | npc_fix | loot_fix | psy_fix
                | mutant_fix | fauna_fix | companion_fix | alife_fix | squad_fix | sleep_fix | relocate_fix | sweep_fix
-               | emission_fix | story_fix | music_fix)
+               | emission_fix | story_fix | music_fix | quest_sweep_fix)
     if drivers - set(names[1:]):
         raise SystemExit("--inject/--script/--movement name clients that do not exist")
     if script & movement:
@@ -582,6 +597,10 @@ def main():
                       f"emission_party = {args.emission_start if emission_fix else 0}",
                       f"emission_variant = {args.emission_variant}",
                       f"story_party = {args.story_start if story_fix else 0}",
+                      f"quest_sweep = {args.quest_sweep_start if quest_sweep_fix else 0}",
+                      f"quest_sweep_list = {winpath(Path(args.quest_sweep_list).resolve()) if quest_sweep_fix else ''}",
+                      f"quest_sweep_first = {args.quest_sweep_first}",
+                      f"quest_sweep_count = {args.quest_sweep_count}",
                       f"music_party = {args.music_start if music_fix else 0}",
                       f"place_giver = {args.place_giver}"]
             if args.new_game:
@@ -603,7 +622,7 @@ def main():
                                 "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                                 "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                                 "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                                "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party",
+                                "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party", "quest_sweep",
                             "music_party")
                     restart_lines = [ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"
                                      for ln in restart_lines]
@@ -617,7 +636,7 @@ def main():
                             "talk_party", "info_party", "task_party", "trade_party", "upgrade_party",
                             "relations_party", "stash_party", "npc_party", "loot_party", "psy_party",
                             "mutant_party", "fauna_party", "companion_party", "alife_party", "squad_party",
-                            "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party",
+                            "sleep_party", "relocate_party", "sweep_party", "emission_party", "story_party", "quest_sweep",
                             "music_party")
                 restart = runtime / "coop-restart.ltx"
                 restart.write_text("\n".join(ln if ln.split(" = ")[0] not in fixtures else ln.split(" = ")[0] + " = 0"

@@ -475,6 +475,11 @@
       "path": "patches/engine/0116-corpse-bones-flashlight.patch",
       "sha256": "5608a5da7589312f832756a01ec7527b33c24c295e1915c9174d30838952dc75"
     }
+,
+    {
+      "path": "patches/engine/0117-quest-sweep.patch",
+      "sha256": "889ee3270119210fe104202079090787f9094320ae280cf36906567727b3be51"
+    }
   ],
   "submodules": [
     {

@@ -50,8 +50,10 @@ def apply_series(path, names):
 
 
 def changed_files():
-    tracked = git(work, "diff", "--name-only", capture=True).split()
-    untracked = git(work, "ls-files", "--others", "--exclude-standard", capture=True).split()
+    # -z: NUL-separated and unquoted (a path may hold a space: "src/3rd party/...")
+    tracked = [p for p in git(work, "diff", "--name-only", "-z", capture=True).split("\0") if p]
+    others = git(work, "ls-files", "--others", "--exclude-standard", "-z", capture=True)
+    untracked = [p for p in others.split("\0") if p]
     return sorted(set(tracked) | set(untracked))
 
 

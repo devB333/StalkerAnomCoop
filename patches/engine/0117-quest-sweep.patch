@@ -1,0 +1,1340 @@
+diff --git a/src/3rd party/luabind/detail/ref.hpp b/src/3rd party/luabind/detail/ref.hpp
+index 7c5f074..8630584 100644
+--- a/src/3rd party/luabind/detail/ref.hpp	
++++ b/src/3rd party/luabind/detail/ref.hpp	
+@@ -80,6 +80,13 @@ namespace luabind { namespace detail
+ 
+ 		void replace(lua_State* L_)
+ 		{
++			// B57: a reference to nil is the shared slot LUA_REFNIL; writing into it
++			// would make every later nil read return this value. Take a new slot.
++			if (m_ref == LUA_REFNIL || m_ref == LUA_NOREF)
++			{
++				set(L_);
++				return;
++			}
+ 			lua_rawseti(L_, LUA_REGISTRYINDEX, m_ref);
+ 		}
+ 
+diff --git a/src/xrGame/CoopConfig.cpp b/src/xrGame/CoopConfig.cpp
+index 0fa004d..4b16976 100644
+--- a/src/xrGame/CoopConfig.cpp
++++ b/src/xrGame/CoopConfig.cpp
+@@ -183,6 +183,12 @@ bool coop_config_load(LPCSTR path, CoopConfig& out)
+ 		out.emission_party = ini.line_exist("coop", "emission_party") ? ini.r_u32("coop", "emission_party") : 0; // S10-T05a
+ 		out.emission_variant = ini.line_exist("coop", "emission_variant") ? ini.r_u32("coop", "emission_variant") : 0;
+ 		out.story_party = ini.line_exist("coop", "story_party") ? ini.r_u32("coop", "story_party") : 0; // S10-T05c
++		out.quest_sweep = ini.line_exist("coop", "quest_sweep") ? ini.r_u32("coop", "quest_sweep") : 0; // B57
++		out.quest_sweep_list[0] = 0;
++		if (ini.line_exist("coop", "quest_sweep_list"))
++			read_string(ini, "quest_sweep_list", out.quest_sweep_list, sizeof(out.quest_sweep_list), false);
++		out.quest_sweep_first = ini.line_exist("coop", "quest_sweep_first") ? ini.r_u32("coop", "quest_sweep_first") : 0;
++		out.quest_sweep_count = ini.line_exist("coop", "quest_sweep_count") ? ini.r_u32("coop", "quest_sweep_count") : 0;
+ 		out.music_party = ini.line_exist("coop", "music_party") ? ini.r_u32("coop", "music_party") : 0; // S10-T07
+ 		// S10-T03f
+ 		out.new_game = ini.line_exist("coop", "new_game") && ini.r_u32("coop", "new_game") != 0;
+diff --git a/src/xrGame/CoopConfig.h b/src/xrGame/CoopConfig.h
+index b8e4918..b25cb83 100644
+--- a/src/xrGame/CoopConfig.h
++++ b/src/xrGame/CoopConfig.h
+@@ -139,6 +139,12 @@ struct CoopConfig
+ 	u32 sweep_party; // S10-T03e fixture: seconds after both attach until the passage sweep starts
+ 	u32 emission_party; // S10-T05a fixture: seconds after both attach until player 1 is placed for an emission
+ 	u32 story_party; // S10-T05c fixture: seconds after both attach until the story chains' steps (and on each level)
++	// B57 quest sweep fixture: seconds after both attach until the listed tasks are run one by one (0 off);
++	// the list (tools/make-quest-sweep-list.py), its first line (0-based) and how many lines to run
++	u32 quest_sweep;
++	string_path quest_sweep_list;
++	u32 quest_sweep_first;
++	u32 quest_sweep_count;
+ 	u32 emission_variant; // 0 a surge (player 1 in cover, player 2 out), 1 a psi-storm (the players 350+ m apart)
+ 	// S10-T03f: a new game (all.spawn) instead of the save when the campaign has no generation yet; the
+ 	// creator's choices are in the server's axr_options.ltx [character_creation] (the installed new-game
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index f6ba62f..60006c7 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -134,6 +134,8 @@ struct PlayerLink
+ 	xr_deque<coop::proto::Message> outbox; // lifecycle messages, commit order
+ 	u64 events_sent;
+ 	u64 outbox_peak;
++	u32 outbox_stall_why = 0; // B64: why flush_outbox last stopped (0 flowing, 1 backlog query, 2 limit, 3 send)
++	u64 outbox_stall_logged_ms = 0;
+ 	// S06-T08: the last presentation record serial sent from this player's outbox and from the broadcast outbox
+ 	u32 presentation_cursor = 0, presentation_cursor_all = 0;
+ 	bool presentation_started = false; // ...from the client's first input (it is in the world, not loading)
+@@ -458,6 +460,7 @@ struct Host
+ 	u64 news_replayed = 0;
+ 	u16 party_actor_ids[2] = {0xffff, 0xffff};
+ 	u64 quests_accepted = 0, quests_completed = 0, quest_money_paid = 0, quest_items_taken = 0, quest_items_given = 0;
++	u32 refnil_cleared = 0; // B57
+ 	struct QuestFixture
+ 	{
+ 		u64 both_since = 0;
+@@ -730,6 +733,28 @@ struct Host
+ 		u64 completed_before = 0;
+ 		u32 failures = 0;
+ 	} task_fixture;
++	// B57: the quest sweep fixture (quest_sweep_fixtures)
++	struct QuestSweepTask
++	{
++		xr_string id, kind, giver;
++	};
++	struct QuestSweep
++	{
++		u64 both_since = 0;
++		bool loaded = false, finished = false;
++		xr_vector<QuestSweepTask> tasks;
++		u32 first = 0, next = 0, phase = 0;
++		u64 phase_tick = 0, task_tick = 0, operation = 0;
++		u16 giver = 0xffff;
++		bool spawned_giver = false;
++		u8 acceptor = 0;
++		s32 target = -1;
++		xr_string accept, goal, turnin;
++		u32 money_before[2] = {0, 0};
++		u64 completed_before = 0, taken_before = 0, given_before = 0, paid_before = 0;
++		u32 refnil_before = 0;
++		u32 passed = 0, failed = 0, skipped = 0;
++	} quest_sweep;
+ 	// the hands-on aid place_giver (start-coop-demo.sh)
+ 	u64 demo_place_since = 0;
+ 	bool demo_placed = false;
+@@ -1539,17 +1564,36 @@ void track_lifecycle()
+ 	}
+ }
+ 
++// B64: a lifecycle outbox that stops draining is logged with its reason (on a change, then every 5 s)
++static void outbox_stall(PlayerLink& link, u32 why, const coop::net::ChannelBacklog& backlog)
++{
++	const u64 now = g_host->wall.GetElapsed_ms();
++	if (why == link.outbox_stall_why && now - link.outbox_stall_logged_ms < 5000)
++		return;
++	link.outbox_stall_why = why;
++	link.outbox_stall_logged_ms = now;
++	g_host->log.line("outbox-stall slot=%u why=%s queued=%u unacked=%u queue_ms=%u outbox=%u sent=%I64u", u32(link.ref.slot),
++		why == 1 ? "backlog-query" : why == 2 ? "limit" : "send", backlog.queued_bytes, backlog.unacked_bytes,
++		backlog.queue_ms, u32(link.outbox.size()), link.events_sent);
++}
++
+ void flush_outbox(PlayerLink& link)
+ {
+ 	while (!link.outbox.empty())
+ 	{
+ 		coop::net::ChannelBacklog backlog;
+ 		if (!g_host->server->backlog(link.player, coop::proto::kLifecycle, backlog))
+-			return;
++			return outbox_stall(link, 1, backlog);
+ 		if (backlog.queued_bytes + backlog.unacked_bytes > kLifecycleBacklogLimit)
+-			return;
++			return outbox_stall(link, 2, backlog);
+ 		if (!g_host->server->send(link.player, link.outbox.front()))
+-			return;
++			return outbox_stall(link, 3, backlog);
++		if (link.outbox_stall_why)
++		{
++			g_host->log.line("outbox-flowing slot=%u outbox=%u sent=%I64u", u32(link.ref.slot), u32(link.outbox.size()),
++				link.events_sent);
++			link.outbox_stall_why = 0;
++		}
+ 		if (const auto* spawn = std::get_if<coop::proto::Spawn>(&link.outbox.front()))
+ 			link.sent_commit = _max(link.sent_commit, spawn->commit_id);
+ 		else if (const auto* despawn = std::get_if<coop::proto::Despawn>(&link.outbox.front()))
+@@ -6969,6 +7013,9 @@ LPCSTR const party_source =
+ 	"function campaign_party_count(id) local t, n = pooled(id) return t or -1 end\n"
+ 	"function campaign_party_need(id) local t, n = pooled(id) return n or -1 end\n"
+ 	"function campaign_party_section(id) local t, n, s = pooled(id) return s or '' end\n"
++	"function campaign_party_stage_complete(id)\n"
++	"  return task_manager.task_ini:r_float_ex(id, 'stage_complete') or 1\n"
++	"end\n"
+ 	"function campaign_party_check(id)\n"
+ 	"  local tm = task_manager.get_task_manager()\n"
+ 	"  local t = tm and tm.task_info and tm.task_info[id]\n"
+@@ -7002,24 +7049,36 @@ LPCSTR const party_source =
+ 	"    local cost = ini_sys:r_float_ex(sec, 'cost') or 0\n"
+ 	"    local order = { holder }\n"
+ 	"    for _, aid in ipairs(P.actors) do if aid ~= holder then order[#order + 1] = aid end end\n"
++	// B60: the task scope's party inventory view lists both players' items under the
++	// holder; each item is credited to the actor that holds it (G08: money per own items)
++	"    local seen, per = {}, {}\n"
+ 	"    for _, aid in ipairs(order) do\n"
+ 	"      local a = obj(aid)\n"
+ 	"      if a and need > 0 then\n"
+-	"        local total, n = 0, 0\n"
+ 	"        a:iterate_inventory(function(_, o)\n"
+-	"          if need > 0 and o:section() == sec then\n"
++	"          if need > 0 and o:section() == sec and not seen[o:id()] then\n"
++	"            seen[o:id()] = true\n"
++	"            local owner = o:parent()\n"
++	"            local who = owner and owner:id() or aid\n"
+ 	"            local c = o:condition()\n"
+-	"            total = total + cost * c * c * mult\n"
+-	"            P.effects.items[#P.effects.items + 1] = { actor = aid, item = o:id() }\n"
+-	"            need = need - 1 n = n + 1\n"
++	"            local r = per[who] or { total = 0, n = 0 }\n"
++	"            per[who] = r\n"
++	"            r.total = r.total + cost * c * c * mult\n"
++	"            r.n = r.n + 1\n"
++	"            P.effects.items[#P.effects.items + 1] = { actor = who, item = o:id() }\n"
++	"            need = need - 1\n"
+ 	"          end\n"
+ 	"        end, nil)\n"
+-	"        if n > 0 then\n"
+-	"          if total < 50 then total = 50 end\n"
+-	"          local d = math.floor(total * 0.1)\n"
+-	"          local lo, hi = math.floor(total - d), math.floor(total + d)\n"
+-	"          P.effects.money[#P.effects.money + 1] = { actor = aid, amount = math.random(lo, hi), count = n }\n"
+-	"        end\n"
++	"      end\n"
++	"    end\n"
++	"    for _, aid in ipairs(order) do\n"
++	"      local r = per[aid]\n"
++	"      if r and r.n > 0 then\n"
++	"        local total = r.total\n"
++	"        if total < 50 then total = 50 end\n"
++	"        local d = math.floor(total * 0.1)\n"
++	"        local lo, hi = math.floor(total - d), math.floor(total + d)\n"
++	"        P.effects.money[#P.effects.money + 1] = { actor = aid, amount = math.random(lo, hi), count = r.n }\n"
+ 	"      end\n"
+ 	"    end\n"
+ 	"    P.effects.section = sec\n"
+@@ -7203,6 +7262,37 @@ LPCSTR const g10_source =
+ 	"  end\n"
+ 	"  P.wrapped = P.wrapped + 1\n"
+ 	"end\n"
++	// B62: a party task that completes by itself (its condlist or status functor, no
++	// giver's turn-in) is the party's: its on_complete and reward run as a turn-in's
++	// (captured effects), queued for quest_tick to apply to both players
++	"P.auto = P.auto or {}\n"
++	"if tm and tm.task_callback and task and task.completed then\n"
++	"  local orig = tm.task_callback\n"
++	"  tm.task_callback = function(tsk, state, ...)\n"
++	"    local id = tsk and tsk:get_id()\n"
++	"    if state ~= task.completed or not id or not P.tasks[id] or P.effects then return orig(tsk, state, ...) end\n"
++	"    P.turnin = id\n"
++	"    P.effects = { items = {}, money = {}, goodwill = {}, done = false }\n"
++	"    local ok, err = pcall(orig, tsk, state, ...)\n"
++	"    local fx = P.effects\n"
++	"    P.turnin = nil\n"
++	"    P.effects = nil\n"
++	"    if fx then\n"
++	"      fx.done = true\n"
++	"      P.auto[#P.auto + 1] = { id = id, effects = fx }\n"
++	"      say(string.format('quest-auto-captured task=%s money=%d goodwill=%d give=%d', id, #fx.money, #fx.goodwill, fx.give and #fx.give or 0))\n"
++	"    end\n"
++	"    if not ok then error(err, 0) end\n"
++	"  end\n"
++	"  P.wrapped = P.wrapped + 1\n"
++	"end\n"
++	"function campaign_party_take_auto()\n"
++	"  local a = P.auto and table.remove(P.auto, 1)\n"
++	"  if not a then return '' end\n"
++	"  P.turnin = a.id\n"
++	"  P.effects = a.effects\n"
++	"  return a.id\n"
++	"end\n"
+ 	"local cls = task_objects and task_objects.CGeneralTask\n"
+ 	"if cls and cls.deactivate_task then\n"
+ 	"  local orig = cls.deactivate_task\n"
+@@ -7728,7 +7818,10 @@ bool quest_accept_phrases(CActor* actor, CGameObject* npc, LPCSTR task)
+ 	luabind::functor<void> generate, skip, give;
+ 	luabind::functor<bool> has_task;
+ 	luabind::functor<luabind::object> text;
+-	if (!ai().script_engine().functor("dialogs.generate_available_tasks", generate) ||
++	// B58: a random stalker's task (simulation_task_*) is offered by the sim dialogue's generator
++	const bool sim = strstr(task, "simulation_task_") == task;
++	if (!ai().script_engine().functor(sim ? "dialogs.sim_generate_available_tasks" : "dialogs.generate_available_tasks",
++			generate) ||
+ 		!ai().script_engine().functor("dialogs.npc_has_task", has_task) ||
+ 		!ai().script_engine().functor("dialogs.npc_skip_task", skip) ||
+ 		!ai().script_engine().functor("dialogs.text_npc_has_task", text) ||
+@@ -7764,16 +7857,20 @@ bool quest_accept_phrases(CActor* actor, CGameObject* npc, LPCSTR task)
+ 	return false;
+ }
+ 
+-bool quest_turnin_phrases(CActor* actor, CGameObject* npc)
++bool quest_turnin_phrases(CActor* actor, CGameObject* npc, LPCSTR task)
+ {
+ 	CScriptGameObject* actor_go = actor->lua_game_object();
+ 	CScriptGameObject* npc_go = npc->lua_game_object();
+ 	luabind::functor<bool> finished;
+ 	luabind::functor<luabind::object> text;
+ 	luabind::functor<void> complete;
+-	if (!ai().script_engine().functor("dialogs.actor_has_finished_task", finished) ||
+-		!ai().script_engine().functor("dialogs.text_npc_task_finish", text) ||
+-		!ai().script_engine().functor("dialogs.npc_set_finished_task_complete", complete))
++	// B59: a random stalker's task (simulation_task_*) is finished by the sim dialogue's functions
++	const bool sim = task && strstr(task, "simulation_task_") == task;
++	if (!ai().script_engine().functor(sim ? "dialogs.actor_sim_has_finished_ordered_task" :
++			"dialogs.actor_has_finished_task", finished) ||
++		!ai().script_engine().functor(sim ? "dialogs.text_sim_task_finish" : "dialogs.text_npc_task_finish", text) ||
++		!ai().script_engine().functor(sim ? "dialogs.npc_sim_set_finished_task_complete" :
++			"dialogs.npc_set_finished_task_complete", complete))
+ 		return false;
+ 	if (!finished(actor_go, npc_go))
+ 		return false;
+@@ -7959,10 +8056,12 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
+ 		lua_call_ok("campaign_party_check", stage, (LPCSTR)task);
+ 	}
+-	if (stage != 1)
++	s32 stage_complete = 1; // B63: the task's own finishing stage
++	lua_call_ok("campaign_party_stage_complete", stage_complete, (LPCSTR)task);
++	if (stage != stage_complete)
+ 	{
+-		g_host->log.line("quest-not-finished slot=%u task=%s stage=%d count=%d need=%d", u32(link.ref.slot), task, stage,
+-			t->count, t->need);
++		g_host->log.line("quest-not-finished slot=%u task=%s stage=%d/%d count=%d need=%d", u32(link.ref.slot), task, stage,
++			stage_complete, t->count, t->need);
+ 		return coop::proto::kReasonQuestNotFinished;
+ 	}
+ 	luabind::functor<void> begin;
+@@ -7973,7 +8072,7 @@ u16 take_quest(PlayerLink& link, const coop::proto::ActionIntent& intent, coop::
+ 	{
+ 		campaign::PartyPurseScope purse(u16(holder->ID()), u16(actor->ID()), true); // G10 (T05b-4)
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-turnin");
+-		ok = opened == campaign::Refusal::None && quest_turnin_phrases(holder, npc);
++		ok = opened == campaign::Refusal::None && quest_turnin_phrases(holder, npc, task);
+ 	}
+ 	campaign::dialogue_close(holder, owner);
+ 	g_host->log.line("quest-turnin slot=%u task=%s holder=%u dialogue=%s ok=%d", u32(link.ref.slot), task,
+@@ -8011,44 +8110,145 @@ void party_purse_pending(LPCSTR task, CActor* holder, CActor* clicker)
+ // the patches leave their owners' inventories, each player is paid for his
+ // own (dialogs.relocate_money in that player's context: the money and its
+ // news), and every party actor gets the same goodwill changes.
++//
++// B57: the lists are copied out with the plain Lua API, up to their length
++// (lua_objlen). A nil read through luabind is the shared registry slot
++// LUA_REFNIL, which can hold another value (see lua_reference::replace), so
++// "read until nil" never ended for an empty list and released object 0.
++namespace
++{
++struct PartyFxItem { u16 item, from; };
++struct PartyFxMoney { u16 to; int amount, count; };
++struct PartyFxGoodwill { xr_string community; int delta; };
++struct PartyFxGive { u16 to; xr_string section; int amount; };
++
++int fx_int(lua_State* L, int t, LPCSTR key, int fallback)
++{
++	lua_getfield(L, t, key);
++	const int v = lua_type(L, -1) == LUA_TNUMBER ? int(lua_tonumber(L, -1)) : fallback;
++	lua_pop(L, 1);
++	return v;
++}
++
++bool fx_str(lua_State* L, int t, LPCSTR key, xr_string& out)
++{
++	lua_getfield(L, t, key);
++	const bool ok = lua_type(L, -1) == LUA_TSTRING;
++	if (ok)
++		out = lua_tostring(L, -1);
++	lua_pop(L, 1);
++	return ok;
++}
++
++// calls row(L, index of the row table) for each table row of effects[key]
++template <typename Row>
++void fx_rows(lua_State* L, int fx, LPCSTR key, Row row)
++{
++	lua_getfield(L, fx, key);
++	if (lua_type(L, -1) == LUA_TTABLE)
++	{
++		const int list = lua_gettop(L);
++		const int n = int(lua_objlen(L, list));
++		for (int i = 1; i <= n; ++i)
++		{
++			lua_rawgeti(L, list, i);
++			if (lua_type(L, -1) == LUA_TTABLE)
++				row(L, lua_gettop(L));
++			lua_pop(L, 1);
++		}
++	}
++	lua_pop(L, 1);
++}
++
++bool party_actor_id(u16 id)
++{
++	if (id == 0xffff)
++		return false;
++	for (u16 a : g_host->party_actor_ids)
++		if (a == id)
++			return true;
++	return false;
++}
++} // namespace
++
+ bool apply_party_effects(const Host::PendingTurnIn& p, u64 revision)
+ {
+ 	lua_State* L = ai().script_engine().lua();
+-	luabind::functor<luabind::object> effects_of;
+-	if (!ai().script_engine().functor("campaign_party_effects", effects_of))
+-		return false;
+-	luabind::object e = effects_of();
+-	if (e.type() != LUA_TTABLE || luabind::object(e["done"]).type() != LUA_TBOOLEAN ||
+-		!luabind::object_cast<bool>(e["done"]))
+-		return false;
++	xr_vector<PartyFxItem> taken;
++	xr_vector<PartyFxMoney> paid;
++	xr_vector<PartyFxGoodwill> changes;
++	xr_vector<PartyFxGive> gifts;
++	{
++		const int top = lua_gettop(L);
++		lua_getglobal(L, "__campaign_party");
++		bool done = false;
++		if (lua_type(L, -1) == LUA_TTABLE)
++		{
++			lua_getfield(L, -1, "effects");
++			const int fx = lua_gettop(L);
++			if (lua_type(L, fx) == LUA_TTABLE)
++			{
++				lua_getfield(L, fx, "done");
++				done = lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1);
++				lua_pop(L, 1);
++			}
++			if (done)
++			{
++				fx_rows(L, fx, "items", [&](lua_State* S, int r) {
++					taken.push_back({u16(fx_int(S, r, "item", 0xffff)), u16(fx_int(S, r, "actor", 0xffff))});
++				});
++				fx_rows(L, fx, "money", [&](lua_State* S, int r) {
++					paid.push_back({u16(fx_int(S, r, "actor", 0xffff)), fx_int(S, r, "amount", 0), fx_int(S, r, "count", 0)});
++				});
++				fx_rows(L, fx, "goodwill", [&](lua_State* S, int r) {
++					PartyFxGoodwill g;
++					if (fx_str(S, r, "community", g.community))
++					{
++						g.delta = fx_int(S, r, "delta", 0);
++						changes.push_back(g);
++					}
++				});
++				fx_rows(L, fx, "give", [&](lua_State* S, int r) {
++					PartyFxGive g;
++					if (fx_str(S, r, "section", g.section))
++					{
++						g.to = u16(fx_int(S, r, "actor", 0xffff));
++						g.amount = fx_int(S, r, "amount", 1);
++						gifts.push_back(g);
++					}
++				});
++			}
++		}
++		lua_settop(L, top);
++		if (!done)
++			return false;
++	}
+ 	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
+ 	u32 items = 0, payments = 0, goodwill = 0;
+-	luabind::object list = e["items"];
+-	for (int i = 1; list.type() == LUA_TTABLE; ++i)
+-	{
+-		luabind::object one = list[i];
+-		if (one.type() != LUA_TTABLE)
+-			break;
+-		const u16 item = u16(luabind::object_cast<int>(one["item"]));
+-		const u16 from = u16(luabind::object_cast<int>(one["actor"]));
+-		CSE_ALifeDynamicObject* se = ai().alife().objects().object(item, true);
++	for (const PartyFxItem& one : taken)
++	{
++		// only an inventory item held by a party actor leaves (never an actor, never object 0); the
++		// pooled fetch lists both players' items under the holder (the party inventory view), so the
++		// holder is any party actor, not necessarily the one named
++		CSE_ALifeDynamicObject* se = one.item == 0xffff ? nullptr : ai().alife().objects().object(one.item, true);
++		const bool ok = se && one.item != 0 && smart_cast<CSE_ALifeInventoryItem*>(se) &&
++			!smart_cast<CSE_ALifeCreatureActor*>(se) && party_actor_id(se->ID_Parent);
+ 		g_host->log.line("quest-item-taken revision=%I64u task=%s item=%u item_entity=%I64u from=%u ok=%d", revision,
+-			p.task.c_str(), u32(item), entity_of(item), u32(from), se ? 1 : 0);
+-		if (se)
++			p.task.c_str(), u32(one.item), entity_of(one.item), u32(one.from), ok ? 1 : 0);
++		if (!ok)
+ 		{
+-			alife->release(se, true);
+-			++items;
++			g_host->log.line("quest-item-refused revision=%I64u task=%s item=%u from=%u exists=%d parent=%u", revision,
++				p.task.c_str(), u32(one.item), u32(one.from), se ? 1 : 0, se ? u32(se->ID_Parent) : 0xffffu);
++			continue;
+ 		}
++		alife->release(se, true);
++		++items;
+ 	}
+-	luabind::object money = e["money"];
+-	for (int i = 1; money.type() == LUA_TTABLE; ++i)
++	for (const PartyFxMoney& one : paid)
+ 	{
+-		luabind::object one = money[i];
+-		if (one.type() != LUA_TTABLE)
+-			break;
+-		const u16 to = u16(luabind::object_cast<int>(one["actor"]));
+-		const int amount = luabind::object_cast<int>(one["amount"]);
+-		const int count = luabind::object_cast<int>(one["count"]);
++		const u16 to = one.to;
++		const int amount = one.amount;
++		const int count = one.count;
+ 		CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(to));
+ 		const u32 before = a ? a->get_money() : 0;
+ 		if (a && amount > 0)
+@@ -8070,14 +8270,10 @@ bool apply_party_effects(const Host::PendingTurnIn& p, u64 revision)
+ 	}
+ 	luabind::functor<void> change;
+ 	const bool have_change = ai().script_engine().functor("game_relations.change_factions_community_num", change);
+-	luabind::object gw = e["goodwill"];
+-	for (int i = 1; gw.type() == LUA_TTABLE; ++i)
++	for (const PartyFxGoodwill& one : changes)
+ 	{
+-		luabind::object one = gw[i];
+-		if (one.type() != LUA_TTABLE)
+-			break;
+-		LPCSTR community = luabind::object_cast<LPCSTR>(one["community"]);
+-		const int delta = int(luabind::object_cast<float>(one["delta"]));
++		LPCSTR community = one.community.c_str();
++		const int delta = one.delta;
+ 		for (u16 id : g_host->party_actor_ids)
+ 			if (id != 0xffff && have_change)
+ 			{
+@@ -8089,15 +8285,11 @@ bool apply_party_effects(const Host::PendingTurnIn& p, u64 revision)
+ 	}
+ 	// S10-T05b (T05b-2): an item reward goes to every participant actor
+ 	u32 given = 0;
+-	luabind::object gives = e["give"];
+-	for (int i = 1; gives.type() == LUA_TTABLE; ++i)
++	for (const PartyFxGive& one : gifts)
+ 	{
+-		luabind::object one = gives[i];
+-		if (one.type() != LUA_TTABLE)
+-			break;
+-		const u16 to = u16(luabind::object_cast<int>(one["actor"]));
+-		LPCSTR section = luabind::object_cast<LPCSTR>(one["section"]);
+-		const int amount = _max(1, _min(luabind::object_cast<int>(one["amount"]), 16));
++		const u16 to = one.to;
++		LPCSTR section = one.section.c_str();
++		const int amount = _max(1, _min(one.amount, 16));
+ 		CActor* a = smart_cast<CActor*>(Level().Objects.net_Find(to));
+ 		u32 ok = 0;
+ 		for (int n = 0; a && n < amount; ++n)
+@@ -8117,7 +8309,6 @@ bool apply_party_effects(const Host::PendingTurnIn& p, u64 revision)
+ 	g_host->quest_items_given += given;
+ 	g_host->log.line("quest-effects revision=%I64u task=%s items=%u payments=%u goodwill=%u given=%u", revision,
+ 		p.task.c_str(), items, payments, goodwill, given);
+-	(void)L;
+ 	return true;
+ }
+ 
+@@ -8125,8 +8316,28 @@ bool apply_party_effects(const Host::PendingTurnIn& p, u64 revision)
+ // players, and the pending turn-ins: once the task completed (the native task
+ // manager's next update runs its on_complete, which the adapter resolved),
+ // apply the effects and answer the turn-in.
++// B57: the registry's LUA_REFNIL slot must stay nil (luabind reads every nil
++// reference from there); log and clear it if anything wrote it
++void refnil_guard()
++{
++	lua_State* L = ai().script_engine().lua();
++	if (!L)
++		return;
++	lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_REFNIL);
++	const int type = lua_type(L, -1);
++	lua_pop(L, 1);
++	if (type == LUA_TNIL)
++		return;
++	++g_host->refnil_cleared;
++	g_host->log.line("lua-refnil-cleared tick=%I64u type=%s count=%u", g_host->tick, lua_typename(L, type),
++		g_host->refnil_cleared);
++	lua_pushnil(L);
++	lua_rawseti(L, LUA_REGISTRYINDEX, LUA_REFNIL);
++}
++
+ void quest_tick()
+ {
++	refnil_guard();
+ 	if (!g_host->party_adapter || !ai().get_alife())
+ 		return;
+ 	if (g_host->tick % 25 == 0)
+@@ -8155,6 +8366,26 @@ void quest_tick()
+ 				party_news(news);
+ 			}
+ 		}
++	// B62: a party task that completed by itself: its captured effects as a turn-in's
++	if (g_host->turn_ins.empty())
++	{
++		xr_string id;
++		luabind::functor<LPCSTR> take;
++		if (ai().script_engine().functor("campaign_party_take_auto", take))
++		{
++			LPCSTR r = take();
++			id = r ? r : "";
++		}
++		if (!id.empty())
++		{
++			Host::PendingTurnIn auto_done;
++			auto_done.task = id;
++			auto_done.since_tick = g_host->tick;
++			auto_done.slot = 0;
++			g_host->turn_ins.push_back(auto_done);
++			g_host->log.line("quest-auto-complete task=%s", id.c_str());
++		}
++	}
+ 	for (size_t i = 0; i < g_host->turn_ins.size();)
+ 	{
+ 		Host::PendingTurnIn& p = g_host->turn_ins[i];
+@@ -11133,10 +11364,12 @@ static u16 party_turn_in_task(PlayerLink& link, CGameObject* npc, LPCSTR task, L
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-check");
+ 		lua_call_ok("campaign_party_check", stage, (LPCSTR)task);
+ 	}
+-	if (stage != 1)
++	s32 stage_complete = 1; // B63: the task's own finishing stage
++	lua_call_ok("campaign_party_stage_complete", stage_complete, (LPCSTR)task);
++	if (stage != stage_complete)
+ 	{
+-		g_host->log.line("quest-not-finished slot=%u task=%s stage=%d count=%d need=%d source=%s", u32(link.ref.slot), task,
+-			stage, t->count, t->need, source);
++		g_host->log.line("quest-not-finished slot=%u task=%s stage=%d/%d count=%d need=%d source=%s", u32(link.ref.slot),
++			task, stage, stage_complete, t->count, t->need, source);
+ 		return coop::proto::kReasonQuestNotFinished;
+ 	}
+ 	luabind::functor<void> begin;
+@@ -11146,7 +11379,7 @@ static u16 party_turn_in_task(PlayerLink& link, CGameObject* npc, LPCSTR task, L
+ 	{
+ 		campaign::PartyPurseScope purse(u16(holder->ID()), payer, true);
+ 		campaign::ScriptContextScope scope(static_cast<const CObject*>(holder), "party-quest-turnin-talk");
+-		ok = scope.entered() && quest_turnin_phrases(holder, npc);
++		ok = scope.entered() && quest_turnin_phrases(holder, npc, task);
+ 	}
+ 	g_host->log.line("quest-turnin slot=%u task=%s holder=%u dialogue=%s ok=%d", u32(link.ref.slot), task,
+ 		u32(t->holder), source, ok ? 1 : 0);
+@@ -11168,7 +11401,7 @@ static u16 party_turn_in_task(PlayerLink& link, CGameObject* npc, LPCSTR task, L
+ // The finish phrase's action (dialogs.npc_set_finished_task_complete) of a
+ // talk: the S08 party turn-in in the holder's context (take_quest op 2
+ // without the intent); the completion is applied by quest_tick.
+-static u16 talk_quest_turn_in(PlayerLink& link, CGameObject* npc)
++static u16 talk_quest_turn_in(PlayerLink& link, CGameObject* npc, bool sim)
+ {
+ 	// the ordered dialog's finish (dm_init_dynamic_task_completed_dialog) names
+ 	// its task through axr_task_manager.get_first_finished_task(npc), computed
+@@ -11185,7 +11418,9 @@ static u16 talk_quest_turn_in(PlayerLink& link, CGameObject* npc)
+ 		luabind::functor<luabind::object> first;
+ 		if (scope.entered() && ai().script_engine().functor("axr_task_manager.get_first_finished_task", first))
+ 		{
+-			luabind::object r = first(npc->lua_game_object());
++			// B59: a random stalker's finished task is looked up as the sim dialogue does (is_sim)
++			const luabind::object r = sim ? luabind::object(first(npc->lua_game_object(), true)) :
++				luabind::object(first(npc->lua_game_object()));
+ 			if (r.type() == LUA_TSTRING)
+ 				xr_strcpy(task, sizeof(task), luabind::object_cast<LPCSTR>(r));
+ 		}
+@@ -11205,7 +11440,8 @@ static bool talk_quest_action(PlayerLink& link, LPCSTR action, const CGameObject
+ 	LPCSTR dialog_id, LPCSTR phrase_id)
+ {
+ 	const bool accept = !xr_strcmp(action, "dialogs.npc_give_task");
+-	const bool finish = !xr_strcmp(action, "dialogs.npc_set_finished_task_complete");
++	const bool sim_finish = !xr_strcmp(action, "dialogs.npc_sim_set_finished_task_complete"); // B59
++	const bool finish = sim_finish || !xr_strcmp(action, "dialogs.npc_set_finished_task_complete");
+ 	const bool tech = !xr_strcmp(action, "dialogs.npc_is_tech"); // S10-T04f
+ 	const bool trader = !xr_strcmp(action, "dialogs.npc_is_trader"); // S10-T04f
+ 	if (!accept && !finish && !tech && !trader)
+@@ -11229,7 +11465,7 @@ static bool talk_quest_action(PlayerLink& link, LPCSTR action, const CGameObject
+ 		return true;
+ 	}
+ 	++g_host->talk_quest_routed;
+-	const u16 reason = accept ? talk_quest_accept(link, npc) : talk_quest_turn_in(link, npc);
++	const u16 reason = accept ? talk_quest_accept(link, npc) : talk_quest_turn_in(link, npc, sim_finish);
+ 	g_host->log.line("talk-quest slot=%u op=%s npc=%u dialog=%s phrase=%s reason=%u", u32(link.ref.slot),
+ 		accept ? "accept" : "finish", u32(npc->ID()), dialog_id, phrase_id, u32(reason));
+ 	if (reason)
+@@ -14808,6 +15044,691 @@ void task_fixtures()
+ 	}
+ }
+ 
++// ------------------------------------------------------------ B57 quest sweep
++// The quest sweep fixture (profile quest_sweep; tools/make-quest-sweep-list.py
++// writes the list, compare-coop-quest-sweep.py reads the result lines). For
++// each listed task, one at a time, as players would:
++//   giver    a named giver on this level (found online, or the players are
++//            placed at its ALife position until it comes online), a random
++//            stalker of the task's faction spawned beside the players (its
++//            roll set to the task, made friendly), or none (story tasks)
++//   accept   one player (alternating) talks to the giver: the task dialogue
++//            topic, "next" until the task is offered, then accept; a task
++//            the talk does not give is given directly to the party
++//   goal     fetch: the items appear in both players' pockets (split);
++//            bounty: the target is killed by the other player; any other:
++//            forced (the check reports the giver's stage, or completes)
++//   turn-in  the other player talks to the giver (the completed-task topic);
++//            without a giver or that topic, the fixture's turn-in path
++//   verify   completed (the party's or the native task), both players' money,
++//            items taken and given, both actors and their ALife objects
++// One fixture-qsweep result line per task; failures never stop the sweep.
++namespace
++{
++LPCSTR const qsweep_source =
++	"local P = rawget(_G, '__campaign_party')\n"
++	"if type(P) ~= 'table' or P.qsweep then return end\n"
++	"P.qsweep = true\n"
++	"P.qs_force = {}\n"
++	"local cls = task_objects and task_objects.CGeneralTask\n"
++	"if cls and cls.check_task then\n"
++	"  local orig = cls.check_task\n"
++	"  cls.check_task = function(self, tm)\n"
++	"    local f = P.qs_force[self.id]\n"
++	"    if not f then return orig(self, tm) end\n"
++	"    if f == 'stage' then\n"
++	"      self.stage = task_manager.task_ini:r_float_ex(self.id, 'stage_complete') or 1\n"
++	"      self.last_check_task = nil\n"
++	"    else\n"
++	"      self.last_check_task = 'complete'\n"
++	"    end\n"
++	"  end\n"
++	"end\n"
++	"function campaign_qsweep_force(id, mode) P.qs_force[id] = mode end\n"
++	"function campaign_qsweep_unforce(id) P.qs_force[id] = nil end\n"
++	"function campaign_qsweep_offered(npc) local t = axr_task_manager.available_tasks[npc] return t and t[1] or '' end\n"
++	"function campaign_qsweep_status(id)\n"
++	"  local t = task_manager.get_task_manager().task_info[id]\n"
++	"  if not t then return 'none' end\n"
++	"  return tostring(t.status or 'active') .. ':' .. tostring(t.stage or -1)\n"
++	"end\n"
++	"function campaign_qsweep_stage_complete(id)\n"
++	"  return task_manager.task_ini:r_float_ex(id, 'stage_complete') or -1\n"
++	"end\n"
++	"function campaign_qsweep_prepare_giver(npc, id)\n"
++	"  local st = db.storage[npc]\n"
++	"  if st and id ~= '' then st.dyn_quest_rand = id end\n"
++	"  local n = level.object_by_id(npc)\n"
++	"  if n then\n"
++	"    for _, aid in ipairs(P.actors) do\n"
++	"      local a = level.object_by_id(aid)\n"
++	"      if a then n:force_set_goodwill(1000, a) end\n"
++	"    end\n"
++	"  end\n"
++	"  return st and 1 or 0\n"
++	"end\n"
++	"function campaign_qsweep_give(id, giver)\n"
++	"  task_manager.get_task_manager():give_task(id, giver >= 0 and giver or nil)\n"
++	"  return task_manager.get_task_manager().task_info[id] and 1 or 0\n"
++	"end\n"
++	"function campaign_qsweep_drop(id)\n"
++	"  P.qs_force[id] = nil\n"
++	"  local tm = task_manager.get_task_manager()\n"
++	"  local t = tm.task_info[id]\n"
++	"  if t and t.status ~= 'completed' and t.status ~= 'fail' then tm:set_task_cancelled(id) return 1 end\n"
++	"  return 0\n"
++	"end\n";
++
++bool qsweep_lua_string(CActor* actor, LPCSTR fn, LPCSTR arg, xr_string& out)
++{
++	luabind::functor<LPCSTR> f;
++	if (!ai().script_engine().functor(fn, f))
++		return false;
++	if (actor)
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "qsweep");
++		if (!scope.entered())
++			return false;
++		LPCSTR r = f(arg);
++		out = r ? r : "";
++	}
++	else
++	{
++		LPCSTR r = f(arg);
++		out = r ? r : "";
++	}
++	return true;
++}
++
++xr_string qsweep_offered(u16 npc)
++{
++	luabind::functor<LPCSTR> f;
++	if (!ai().script_engine().functor("campaign_qsweep_offered", f))
++		return "";
++	LPCSTR r = f(int(npc));
++	return r ? r : "";
++}
++
++u16 qsweep_talk_start(PlayerLink& link, u16 npc)
++{
++	coop::proto::ActionIntent intent;
++	intent.operation_id = ++g_host->quest_sweep.operation;
++	intent.kind = coop::proto::kActionTalkStart;
++	coop::proto::EntityRef ref;
++	if (!entity_ref_of(npc, ref))
++		return coop::proto::kReasonNoTalk;
++	intent.target = ref;
++	coop::proto::ActionResult result;
++	return take_talk_start(link, intent, result);
++}
++
++u16 qsweep_say(PlayerLink& link, LPCSTR id)
++{
++	coop::proto::ActionIntent intent;
++	intent.operation_id = ++g_host->quest_sweep.operation;
++	intent.kind = coop::proto::kActionTalkSay;
++	const u32 n = xr_strlen(id);
++	intent.params.push_back(u8(n));
++	for (u32 i = 0; i < n; ++i)
++		intent.params.push_back(u8(id[i]));
++	coop::proto::ActionResult result;
++	return take_talk_say(link, intent, result);
++}
++
++void qsweep_talk_end(PlayerLink& link)
++{
++	if (link.talk_npc == 0xffff)
++		return;
++	coop::proto::ActionIntent intent;
++	intent.operation_id = ++g_host->quest_sweep.operation;
++	intent.kind = coop::proto::kActionTalkEnd;
++	coop::proto::ActionResult result;
++	take_talk_end(link, intent, result);
++}
++
++// the topic (dialog id) of the open talk whose id contains want and not avoid
++bool qsweep_topic(CActor* actor, CGameObject* npc, LPCSTR want, LPCSTR avoid, xr_string& out, xr_string& all)
++{
++	CPhraseDialogManager* ours = smart_cast<CPhraseDialogManager*>(actor);
++	CPhraseDialogManager* theirs = smart_cast<CPhraseDialogManager*>(npc);
++	if (!ours || !theirs)
++		return false;
++	campaign::ScriptContextScope scope(static_cast<const CObject*>(actor), "qsweep-topics");
++	ours->UpdateAvailableDialogs(theirs);
++	bool found = false;
++	for (const DIALOG_SHARED_PTR& d : ours->AvailableDialogs())
++	{
++		LPCSTR id = *d->GetDialogID();
++		all += id;
++		all += ' ';
++		if (!found && strstr(id, want) && (!avoid || !strstr(id, avoid)))
++		{
++			out = id;
++			found = true;
++		}
++	}
++	return found;
++}
++
++void qsweep_forget(LPCSTR task)
++{
++	luabind::functor<void> set_task;
++	if (ai().script_engine().functor("campaign_party_set_task", set_task))
++		set_task(task, -1);
++	if (Host::PartyTask* t = party_task(task))
++		g_host->party_tasks.erase(g_host->party_tasks.begin() + (t - g_host->party_tasks.data()));
++}
++
++u16 qsweep_find_online(const xr_string& giver)
++{
++	// npc:<x>: an NPC whose section or object name is x (Sidorovich's is his name)
++	const xr_string want = giver.substr(giver.find(':') + 1);
++	for (u32 i = 0; i < Level().Objects.o_count(); ++i)
++	{
++		CObject* o = Level().Objects.o_get_by_iterator(i);
++		CEntityAlive* alive = smart_cast<CEntityAlive*>(o);
++		if (!alive || !alive->g_Alive() || smart_cast<CActor*>(o) || !smart_cast<CInventoryOwner*>(o))
++			continue;
++		if (!xr_strcmp(*o->cName(), want.c_str()) || !xr_strcmp(*o->cNameSect(), want.c_str()))
++			return u16(o->ID());
++	}
++	return 0xffff;
++}
++
++// a named giver's ALife record on this level (offline: the players go there)
++const CSE_ALifeDynamicObject* qsweep_find_offline(const xr_string& giver)
++{
++	const xr_string want = giver.substr(giver.find(':') + 1);
++	const CALifeObjectRegistry::OBJECT_REGISTRY& objects = ai().alife().objects().objects();
++	for (CALifeObjectRegistry::OBJECT_REGISTRY::const_iterator it = objects.begin(); it != objects.end(); ++it)
++	{
++		const CSE_ALifeHumanAbstract* h = smart_cast<const CSE_ALifeHumanAbstract*>(it->second);
++		if (!h || !h->g_Alive() || smart_cast<const CSE_ALifeCreatureActor*>(it->second))
++			continue;
++		if (!ai().game_graph().valid_vertex_id(h->m_tGraphID) ||
++			ai().game_graph().vertex(h->m_tGraphID)->level_id() != ai().level_graph().level_id())
++			continue;
++		if (!xr_strcmp(h->name_replace(), want.c_str()) || !xr_strcmp(h->s_name.c_str(), want.c_str()))
++			return h;
++	}
++	return nullptr;
++}
++
++void qsweep_heal(CActor* a)
++{
++	if (a && a->g_Alive() && a->GetfHealth() < 0.6f)
++		a->SetfHealth(1.f);
++}
++} // namespace
++
++void quest_sweep_result(Host::QuestSweep& f, LPCSTR verdict, LPCSTR why)
++{
++	const Host::QuestSweepTask& t = f.tasks[f.next];
++	CActor* a0 = nullptr;
++	CActor* a1 = nullptr;
++	for (PlayerLink& l : g_host->links)
++		if (l.bound && l.ref.slot < 2)
++			(l.ref.slot ? a1 : a0) = participant_actor(l.ref);
++	const bool alife_ok = a0 && a1 && ai().alife().objects().object(u16(a0->ID()), true) &&
++		ai().alife().objects().object(u16(a1->ID()), true);
++	xr_string native;
++	qsweep_lua_string(nullptr, "campaign_qsweep_status", t.id.c_str(), native);
++	const bool pass = !xr_strcmp(verdict, "pass") && alife_ok && g_host->refnil_cleared == f.refnil_before;
++	if (!xr_strcmp(verdict, "pass") && !pass)
++		why = !alife_ok ? "actor-missing" : "lua-refnil";
++	pass ? ++f.passed : !xr_strcmp(verdict, "skip") ? ++f.skipped : ++f.failed;
++	g_host->log.line("fixture-qsweep result n=%u task=%s kind=%s giver=%s giver_id=%u acceptor=%u accept=%s goal=%s "
++		"turnin=%s native=%s completed=%u money=%u->%u,%u->%u items_taken=%I64u items_given=%I64u paid=%I64u refnil=%u "
++		"actors_ok=%d verdict=%s why=%s ticks=%I64u",
++		f.first + f.next, t.id.c_str(), t.kind.c_str(), t.giver.c_str(), u32(f.giver), u32(f.acceptor), f.accept.c_str(),
++		f.goal.c_str(), f.turnin.c_str(), native.c_str(), u32(g_host->quests_completed - f.completed_before),
++		f.money_before[0], a0 ? a0->get_money() : 0, f.money_before[1], a1 ? a1->get_money() : 0,
++		g_host->quest_items_taken - f.taken_before, g_host->quest_items_given - f.given_before,
++		g_host->quest_money_paid - f.paid_before, g_host->refnil_cleared - f.refnil_before, alife_ok ? 1 : 0,
++		pass ? "pass" : !xr_strcmp(verdict, "pass") ? "fail" : verdict, why, g_host->tick - f.task_tick);
++	f.phase = 8;
++	f.phase_tick = g_host->tick;
++}
++
++void quest_sweep_fixtures()
++{
++	const CoopConfig& config = g_host->config;
++	if (!config.quest_sweep || !ai().get_alife() || !g_host->party_adapter)
++		return;
++	Host::QuestSweep& f = g_host->quest_sweep;
++	if (f.finished)
++		return;
++	PlayerLink* links[2] = {nullptr, nullptr};
++	CActor* actors[2] = {nullptr, nullptr};
++	u32 attached = 0;
++	for (PlayerLink& link : g_host->links)
++		if (link.bound && client_in_world(link) && link.ref.slot < 2)
++			if (CActor* actor = participant_actor(link.ref))
++			{
++				links[link.ref.slot] = &link;
++				actors[link.ref.slot] = actor;
++				++attached;
++			}
++	if (!f.both_since)
++	{
++		if (attached < 2)
++			return;
++		f.both_since = g_host->tick;
++		g_host->log.line("fixture-qsweep both-attached tick=%I64u", g_host->tick);
++	}
++	if (attached < 2 || g_host->tick < f.both_since + u64(config.quest_sweep) * 50)
++		return;
++	CALifeSimulator* alife = const_cast<CALifeSimulator*>(ai().get_alife());
++	if (!f.loaded)
++	{
++		f.loaded = true;
++		f.first = config.quest_sweep_first;
++		FILE* r = config.quest_sweep_list[0] ? fopen(config.quest_sweep_list, "rb") : nullptr;
++		u32 line_no = 0;
++		string1024 line;
++		while (r && fgets(line, sizeof(line), r))
++		{
++			if (!line[0] || line[0] == '#' || line[0] == '\r' || line[0] == '\n')
++				continue;
++			const u32 n = line_no++;
++			if (n < config.quest_sweep_first ||
++				(config.quest_sweep_count && n >= config.quest_sweep_first + config.quest_sweep_count))
++				continue;
++			string256 id, kind, giver;
++			if (sscanf(line, "%255s %255s %255s", id, kind, giver) != 3)
++				continue;
++			f.tasks.push_back({id, kind, giver});
++		}
++		if (r)
++			fclose(r);
++		const bool installed = sleep_lua(nullptr, qsweep_source, "qsweep-install");
++		g_host->log.line("fixture-qsweep loaded list=%s tasks=%u first=%u count=%u installed=%d level=%s",
++			config.quest_sweep_list, u32(f.tasks.size()), config.quest_sweep_first, config.quest_sweep_count,
++			installed ? 1 : 0, *Level().name());
++		if (f.tasks.empty() || !installed)
++		{
++			f.finished = true;
++			g_host->log.line("fixture-qsweep done passed=0 failed=0 skipped=0 tasks=0 why=%s",
++				f.tasks.empty() ? "empty-list" : "not-installed");
++			return;
++		}
++	}
++	for (CActor* a : actors)
++		qsweep_heal(a);
++	if (f.next >= f.tasks.size())
++	{
++		f.finished = true;
++		g_host->log.line("fixture-qsweep done passed=%u failed=%u skipped=%u tasks=%u refnil=%u", f.passed, f.failed,
++			f.skipped, u32(f.tasks.size()), g_host->refnil_cleared);
++		return;
++	}
++	const Host::QuestSweepTask& t = f.tasks[f.next];
++	LPCSTR task = t.id.c_str();
++	CActor* anchor = actors[0];
++	const u8 other = u8(1 - f.acceptor);
++	CGameObject* giver = f.giver != 0xffff ? smart_cast<CGameObject*>(Level().Objects.net_Find(f.giver)) : nullptr;
++	switch (f.phase)
++	{
++	case 0: // begin: the giver
++	{
++		f.task_tick = g_host->tick;
++		f.giver = 0xffff;
++		f.spawned_giver = false;
++		f.acceptor = u8(f.next % 2);
++		f.accept = "-";
++		f.goal = "-";
++		f.turnin = "-";
++		f.target = -1;
++		f.money_before[0] = actors[0]->get_money();
++		f.money_before[1] = actors[1]->get_money();
++		f.completed_before = g_host->quests_completed;
++		f.taken_before = g_host->quest_items_taken;
++		f.given_before = g_host->quest_items_given;
++		f.paid_before = g_host->quest_money_paid;
++		f.refnil_before = g_host->refnil_cleared;
++		if (party_task(task) || Level().GameTaskManager().HasGameTask(shared_str(task), true))
++		{
++			quest_sweep_result(f, "skip", "already-active");
++			return;
++		}
++		if (t.kind == "scripted")
++		{
++			quest_sweep_result(f, "skip", "scripted-event"); // its reward needs the event played out
++			return;
++		}
++		if (t.giver == "none")
++		{
++			f.phase = 3; // given directly
++			return;
++		}
++		if (t.giver.compare(0, 4, "sim:") == 0)
++		{
++			xr_string community = t.giver.substr(4);
++			if (community == "army")
++				community = "military"; // the sim sections' names (sim_default_military_*)
++			else if (community == "dolg")
++				community = "duty";
++			string128 section = "";
++			for (int rank : {1, 0, 2, 3})
++			{
++				string128 s;
++				xr_sprintf(s, "sim_default_%s_%d", community.c_str(), rank);
++				if (pSettings->section_exist(s))
++				{
++					xr_strcpy(section, s);
++					break;
++				}
++			}
++			Fvector at = actors[0]->Position();
++			at.z += 2.f;
++			const CSE_ALifeDynamicObject* anchor_se = ai().alife().objects().object(u16(actors[0]->ID()), true);
++			CSE_Abstract* npc = section[0] && anchor_se ? alife->spawn_item(section, at,
++				actors[0]->ai_location().level_vertex_id(), actors[0]->ai_location().game_vertex_id(), u16(-1)) : nullptr;
++			if (!npc)
++			{
++				quest_sweep_result(f, "fail", "giver-spawn");
++				return;
++			}
++			f.giver = npc->ID;
++			f.spawned_giver = true;
++			g_host->log.line("fixture-qsweep giver-spawned task=%s section=%s id=%u", task, section, u32(f.giver));
++			f.phase = 1;
++			f.phase_tick = g_host->tick;
++			return;
++		}
++		f.giver = qsweep_find_online(t.giver);
++		if (f.giver == 0xffff)
++		{
++			const CSE_ALifeDynamicObject* se = qsweep_find_offline(t.giver);
++			if (!se)
++			{
++				quest_sweep_result(f, "skip", "giver-not-on-level");
++				return;
++			}
++			f.giver = se->ID;
++			Fvector at = se->o_Position;
++			at.x += 3.f;
++			place_beside(actors[0], at);
++			at.x += 1.5f;
++			place_beside(actors[1], at);
++			g_host->log.line("fixture-qsweep giver-offline task=%s id=%u placed=%.1f,%.1f,%.1f", task, u32(f.giver),
++				at.x, at.y, at.z);
++		}
++		f.phase = 1;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	case 1: // the giver online: both players beside it, the roll and the goodwill
++	{
++		CEntityAlive* alive = giver ? smart_cast<CEntityAlive*>(giver) : nullptr;
++		if (!alive || !alive->g_Alive() || !delivered(f.giver))
++		{
++			if (g_host->tick - f.phase_tick > 25 * 50)
++				quest_sweep_result(f, f.spawned_giver ? "fail" : "skip", "giver-offline");
++			return;
++		}
++		const Fvector g = giver->Position();
++		for (u32 k = 0; k < 2; ++k)
++		{
++			Fvector at = g;
++			at.x += k == f.acceptor ? 1.2f : -1.2f;
++			place_beside(actors[k], at);
++		}
++		luabind::functor<int> prepare;
++		if (ai().script_engine().functor("campaign_qsweep_prepare_giver", prepare))
++			prepare(int(f.giver), f.spawned_giver ? task : "");
++		f.phase = 2;
++		f.phase_tick = g_host->tick + 2 * 50;
++		return;
++	}
++	case 2: // accept by talking
++	{
++		if (g_host->tick < f.phase_tick)
++			return;
++		if (!giver)
++		{
++			quest_sweep_result(f, "fail", "giver-gone");
++			return;
++		}
++		PlayerLink& acceptor = *links[f.acceptor];
++		const u16 started = qsweep_talk_start(acceptor, f.giver);
++		xr_string topic, all;
++		const bool has = !started && qsweep_topic(actors[f.acceptor], giver, "ordered_task_dialog", "cancel", topic, all);
++		u32 skips = 0;
++		bool said = false;
++		if (has && !qsweep_say(acceptor, topic.c_str()))
++		{
++			u32 base = 0;
++			for (; skips < 12 && acceptor.talk_npc != 0xffff; ++skips)
++			{
++				const xr_string offered = qsweep_offered(f.giver);
++				if (offered.empty())
++					break;
++				string16 phrase;
++				if (offered == t.id)
++				{
++					xr_sprintf(phrase, "%u", base + 2);
++					said = qsweep_say(acceptor, phrase) == 0;
++					break;
++				}
++				xr_sprintf(phrase, "%u", base + 10);
++				if (qsweep_say(acceptor, phrase))
++					break;
++				base += 10;
++			}
++		}
++		qsweep_talk_end(acceptor);
++		if (party_task(task))
++			f.accept = "talk";
++		else
++		{
++			g_host->log.line("fixture-qsweep talk-accept-failed task=%s start=%u topic=%s said=%d skips=%u topics=[ %s]",
++				task, u32(started), has ? topic.c_str() : "-", said ? 1 : 0, skips, all.c_str());
++			f.accept = has ? (said ? "talk-refused" : "talk-not-offered") : "talk-no-topic";
++		}
++		f.phase = 3;
++		return;
++	}
++	case 3: // a task the talk did not give: given directly to the party
++	{
++		if (!party_task(task))
++		{
++			s32 given = 0;
++			{
++				campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "qsweep-give");
++				if (scope.entered())
++					lua_call_ok("campaign_qsweep_give", given, task, int(f.giver == 0xffff ? -1 : f.giver));
++			}
++			CGameTask* native = Level().GameTaskManager().HasGameTask(shared_str(task), true);
++			if (!given || !native)
++			{
++				quest_sweep_result(f, "fail", "not-given");
++				return;
++			}
++			party_task_accepted(*links[f.acceptor], task, f.giver, anchor, 0);
++			f.accept = f.accept == "-" ? xr_string("direct") : f.accept + "+direct";
++		}
++		// the goal
++		xr_string section;
++		qsweep_lua_string(nullptr, "campaign_party_section", task, section);
++		s32 need = -1;
++		lua_call_ok("campaign_party_need", need, task);
++		lua_call_ok("campaign_party_bounty_target", f.target, task);
++		if (t.kind == "fetch" && !section.empty() && need > 0)
++		{
++			u32 made = 0;
++			for (s32 n = 0; n < _min(need, 64); ++n)
++				if (give_to(alife, section.c_str(), u16(actors[n % 2]->ID())) != kNoEngineId)
++					++made;
++			string128 g;
++			xr_sprintf(g, "items:%s:%d/%d", section.c_str(), made, need);
++			f.goal = g;
++		}
++		else if (t.kind == "bounty" && f.target >= 0)
++		{
++			CEntityAlive* online = smart_cast<CEntityAlive*>(Level().Objects.net_Find(u16(f.target)));
++			if (!online)
++			{
++				const CSE_ALifeDynamicObject* anchor_se = ai().alife().objects().object(u16(actors[0]->ID()), true);
++				Fvector at = actors[0]->Position();
++				at.z += 3.f;
++				if (anchor_se && ai().alife().objects().object(u16(f.target), true))
++					alife->teleport_object(u16(f.target), actors[0]->ai_location().game_vertex_id(),
++						actors[0]->ai_location().level_vertex_id(), at);
++				f.goal = "killed-teleported";
++				f.phase = 31;
++				f.phase_tick = g_host->tick;
++				return;
++			}
++			if (online->g_Alive())
++				online->KillEntity(actors[other]->ID(), TRUE);
++			f.goal = "killed";
++		}
++		else
++		{
++			s32 stage = -1;
++			lua_call_ok("campaign_qsweep_stage_complete", stage, task);
++			luabind::functor<void> force;
++			if (ai().script_engine().functor("campaign_qsweep_force", force))
++				force(task, stage >= 0 ? "stage" : "complete");
++			f.goal = stage >= 0 ? "forced-stage" : "forced-complete";
++		}
++		f.phase = 4;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	case 31: // an offline bounty target brought beside the players, then killed
++	{
++		CEntityAlive* online = smart_cast<CEntityAlive*>(Level().Objects.net_Find(u16(f.target)));
++		const bool ready = online && online->g_Alive() && delivered(u16(f.target));
++		if (!ready && g_host->tick - f.phase_tick < 20 * 50)
++			return;
++		if (online && online->g_Alive())
++			online->KillEntity(actors[other]->ID(), TRUE);
++		f.phase = 4;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	case 4: // the goal staged (or the task completed by itself)
++	{
++		if (g_host->tick % 25)
++			return;
++		s32 stage = -1;
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "qsweep-check");
++			if (scope.entered())
++				lua_call_ok("campaign_party_check", stage, task);
++		}
++		xr_string native;
++		qsweep_lua_string(nullptr, "campaign_qsweep_status", task, native);
++		// "none": the task left the task manager (completed by itself and cleared)
++		if (native.compare(0, 9, "completed") == 0 || native == "none" || g_host->quests_completed > f.completed_before)
++		{
++			f.turnin = "auto";
++			f.phase = 6;
++			f.phase_tick = g_host->tick;
++			return;
++		}
++		if (native.compare(0, 4, "fail") == 0)
++		{
++			quest_sweep_result(f, "fail", "task-failed");
++			return;
++		}
++		s32 stage_complete = -1;
++		lua_call_ok("campaign_qsweep_stage_complete", stage_complete, task);
++		if (stage_complete >= 0 && stage == stage_complete)
++		{
++			f.phase = 5;
++			return;
++		}
++		if (g_host->tick - f.phase_tick > 30 * 50)
++			quest_sweep_result(f, "fail", "goal-not-staged");
++		return;
++	}
++	case 5: // the other player turns it in by talking
++	{
++		PlayerLink& turner = *links[other];
++		if (giver && smart_cast<CEntityAlive*>(giver) && smart_cast<CEntityAlive*>(giver)->g_Alive())
++		{
++			Fvector at = giver->Position();
++			at.x += 1.2f;
++			place_beside(actors[other], at);
++			const u16 started = qsweep_talk_start(turner, f.giver);
++			xr_string topic, all;
++			const bool has = !started && qsweep_topic(actors[other], giver, "completed", nullptr, topic, all);
++			const u16 said = has ? qsweep_say(turner, topic.c_str()) : u16(0xffff);
++			qsweep_talk_end(turner);
++			if (has && !said)
++				f.turnin = "talk";
++			else
++			{
++				g_host->log.line("fixture-qsweep talk-turnin-failed task=%s start=%u topic=%s said=%u topics=[ %s]", task,
++					u32(started), has ? topic.c_str() : "-", u32(said), all.c_str());
++				const u16 reason = party_turn_in_task(turner, giver, task, "qsweep");
++				string64 tn;
++				xr_sprintf(tn, "fixture:%u", u32(reason));
++				f.turnin = tn;
++			}
++		}
++		else
++			f.turnin = "no-giver";
++		f.phase = 6;
++		f.phase_tick = g_host->tick;
++		return;
++	}
++	case 6: // completed?
++	{
++		xr_string native;
++		qsweep_lua_string(nullptr, "campaign_qsweep_status", task, native);
++		const bool party_done = g_host->quests_completed > f.completed_before;
++		const bool native_done = native.compare(0, 9, "completed") == 0 || native == "none";
++		if (!(party_done && native_done) && g_host->tick - f.phase_tick < 15 * 50)
++			return;
++		quest_sweep_result(f, party_done && native_done ? "pass" : "fail",
++			party_done ? (native_done ? "-" : "native-not-completed") :
++			native_done ? (f.turnin == "auto" ? "auto-not-party" : "party-not-completed") : "not-completed");
++		return;
++	}
++	case 8: // clean up, then the next task
++	{
++		luabind::functor<int> drop;
++		int dropped = 0;
++		if (ai().script_engine().functor("campaign_qsweep_drop", drop))
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "qsweep-drop");
++			if (scope.entered())
++				dropped = drop(task);
++		}
++		qsweep_forget(task);
++		for (PlayerLink* l : links)
++			qsweep_talk_end(*l);
++		if (f.spawned_giver && f.giver != 0xffff)
++		{
++			// the spawned giver dies by its own hand (no player blamed, no goodwill change): a raw release
++			// left its items' parent dangling and an NPC's later weapon clone faulted on it (bugfix-70), the
++			// installed alife_release_id removes an NPC only through its squad (a lone spawn has none), and
++			// a living one of another faction fought the next giver (bugfix-77)
++			CEntityAlive* alive = smart_cast<CEntityAlive*>(Level().Objects.net_Find(f.giver));
++			if (alive && alive->g_Alive())
++				alive->KillEntity(alive->ID(), TRUE);
++			g_host->log.line("fixture-qsweep giver-dismissed id=%u online=%d", u32(f.giver), alive ? 1 : 0);
++		}
++		if (dropped)
++			g_host->log.line("fixture-qsweep dropped task=%s", task);
++		f.giver = 0xffff;
++		f.spawned_giver = false;
++		++f.next;
++		f.phase = 9;
++		f.phase_tick = g_host->tick + 50;
++		return;
++	}
++	case 9: // a second between tasks
++		if (g_host->tick >= f.phase_tick)
++			f.phase = 0;
++		return;
++	}
++}
++
+ void pickup_fixtures()
+ {
+ 	const CoopConfig& config = g_host->config;
+@@ -21275,6 +22196,7 @@ extern "C" void __cdecl xrCoopServer_Tick(u64 tick)
+ 	actor_state_tick(); // S10-T04b: the script state of an actor without the installed binder
+ 	info_fixtures();
+ 	task_fixtures(); // S10-T05b
++	quest_sweep_fixtures(); // B57
+ 	trade_fixtures(); // S10-T04c
+ 	upgrade_fixtures(); // S10-T04f
+ 	relations_fixtures(); // S10-T04d

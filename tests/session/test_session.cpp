@@ -59,6 +59,68 @@ SCENARIO("session/two-players-join")
     CHECK(srv.s->counters().joins == 2 && srv.s->counters().violations == 0);
 }
 
+// B64: a message the encoder refuses (a CampaignEvent over kMaxEventPayload)
+// is not sent and takes no sequence; the next one on its reliable channel
+// arrives without a gap (before, the retries left one and the client closed).
+SCENARIO("session/unencodable-send-leaves-no-gap")
+{
+    Cast cast = MakeCast(1);
+    Srv srv(rig, cast);
+    Cli a(rig, cast.ids[0], Copy(*cast.keys[0]));
+    REQUIRE(a.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        a.update();
+        return a.c->state() == ClientState::Active;
+    }, 8000));
+    proto::CampaignEvent big;
+    big.event_id = 1;
+    big.kind = 11;
+    big.revision = 1;
+    big.payload.assign(proto::kMaxEventPayload + 1, 7);
+    for (int i = 0; i < 3; ++i)
+        CHECK(!srv.s->send(cast.ids[0], big));
+    proto::CampaignEvent ok = big;
+    ok.event_id = 2;
+    ok.payload.assign(proto::kMaxEventPayload, 7);
+    CHECK(srv.s->send(cast.ids[0], ok));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        a.update();
+        return a.find(ClientEventType::Message) != nullptr || a.find(ClientEventType::Ended) != nullptr;
+    }, 5000));
+    const ClientEvent* got = a.find(ClientEventType::Message);
+    REQUIRE(got);
+    const auto* event = std::get_if<proto::CampaignEvent>(&got->message.body);
+    REQUIRE(event);
+    CHECK(event->event_id == 2 && event->payload.size() == proto::kMaxEventPayload);
+    CHECK(a.find(ClientEventType::Ended) == nullptr);
+    CHECK(a.c->violations() == 0 && a.c->state() == ClientState::Active);
+    // a transient channel keeps taking a sequence per attempt: a batch of 3
+    // inputs needs sequence >= 3, reached on the third try (bugfix-85: with the
+    // reliable rule there too, no input ever left a client)
+    proto::InputBatch ib;
+    for (std::uint64_t tick = 3; tick >= 1; --tick)
+    {
+        proto::Input in;
+        in.tick = tick;
+        ib.inputs.push_back(in);
+    }
+    int tries = 0;
+    while (tries < 8 && !a.c->send(ib))
+        ++tries;
+    CHECK(tries == 2);
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        a.update();
+        for (const SessionEvent& e : srv.ev)
+            if (e.type == SessionEventType::Message && std::holds_alternative<proto::InputBatch>(e.message.body))
+                return true;
+        return false;
+    }, 5000));
+    CHECK(srv.s->counters().violations == 0);
+}
+
 // S06-T06: a player is confirmed only once its client has sent inside the
 // session (it then has its Welcome); the host starts other channels after that.
 SCENARIO("session/confirmed-after-client-speaks")
@@ -506,8 +568,11 @@ SCENARIO("session/join-code")
     fresh(k3, p3, i3);
     Cli third(rig, i3, std::move(k3), Build(), {}, std::nullopt, cfg.join_code);
     REQUIRE(join(third));
-    CHECK(third.find(ClientEventType::Rejected) != nullptr);
-    CHECK(srv.s->counters().rejected_code == 2);
+    REQUIRE(third.find(ClientEventType::Rejected) != nullptr);
+    // B56: a full party says so (not a wrong code) and adds no one
+    CHECK(third.find(ClientEventType::Rejected)->reject.reason == std::uint16_t(proto::RejectReason::ServerFull));
+    CHECK(srv.s->counters().rejected_code == 1 && srv.s->counters().rejected_full == 1);
+    CHECK(srv.s->take_added_by_code().empty());
     // the friend reconnects with its key and no code: it is in the roster now
     friend1.c->close(net::close_code::kNormal, "bye");
     REQUIRE(Run(rig, [&] {
@@ -517,6 +582,48 @@ SCENARIO("session/join-code")
     Cli again(rig, in, std::move(kn2));
     REQUIRE(join(again));
     CHECK(again.c->state() == ClientState::Active && again.c->welcome().slot == friend1.c->welcome().slot);
+}
+
+// B56: a roster of two is a full party even while one of them is away (a
+// fresh server: no session slot bound yet); a new player with the right code
+// is refused as full and the roster is left as it was.
+SCENARIO("session/join-code-full-roster")
+{
+    Cast cast = MakeCast(2);
+    ServerConfig cfg = SConfig();
+    cfg.join_code = make_join_code();
+    Srv srv(rig, cast, cfg);
+    Cli host(rig, cast.ids[0], Copy(*cast.keys[0]));
+    REQUIRE(host.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        host.update();
+        return host.c->state() == ClientState::Active;
+    }, 5000));
+    PrivateKey k;
+    PublicKey pub;
+    REQUIRE(generate_key(k, pub));
+    Cli third(rig, random_uuid(), std::move(k), Build(), {}, std::nullopt, cfg.join_code);
+    REQUIRE(third.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        host.update();
+        third.update();
+        return third.c->state() == ClientState::Ended;
+    }, 5000));
+    REQUIRE(third.find(ClientEventType::Rejected));
+    CHECK(third.find(ClientEventType::Rejected)->reject.reason == std::uint16_t(proto::RejectReason::ServerFull));
+    CHECK(srv.s->take_added_by_code().empty());
+    CHECK(srv.s->counters().joined_by_code == 0 && srv.s->counters().rejected_full == 1);
+    // the away player still gets its place back with its key
+    Cli away(rig, cast.ids[1], Copy(*cast.keys[1]));
+    REQUIRE(away.c->connect(srv.address));
+    REQUIRE(Run(rig, [&] {
+        srv.update();
+        host.update();
+        away.update();
+        return away.c->state() == ClientState::Active;
+    }, 5000));
 }
 
 // S11-T00: with no join code on the server a join proof is an unknown player.

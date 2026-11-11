@@ -237,9 +237,13 @@ bool Server::sendTo(Conn& c, const proto::Message& m)
     const proto::MessageType type = proto::type_of(m);
     const std::uint64_t epoch = proto::handshake_type(std::uint16_t(type)) ? 0 : c.guard.epoch();
     std::vector<std::uint8_t> bytes;
-    if (!proto::encode(m, epoch, c.seq.next(proto::channel_of(type)), bytes))
-        return false;
-    return t_.send(c.id, proto::channel_of(type), bytes.data(), std::uint32_t(bytes.size())) == net::SendResult::Sent;
+    const net::ChannelId channel = proto::channel_of(type);
+    // B64: a reliable channel's sequence is taken only by a sent message
+    // (SequenceCounter::done)
+    const bool sent = proto::encode(m, epoch, c.seq.peek(channel), bytes) &&
+        t_.send(c.id, channel, bytes.data(), std::uint32_t(bytes.size())) == net::SendResult::Sent;
+    c.seq.done(channel, sent);
+    return sent;
 }
 
 void Server::reject(Conn& c, proto::RejectReason reason, const char* detail)
@@ -412,7 +416,16 @@ void Server::onProof(Conn& c, const proto::AuthProof& p, std::vector<SessionEven
         if (!printable)
             e.display_name = "Player";
         std::string error;
-        if (free && check_join_proof(c.hello, c.challenge, config_.join_code, p) && roster_.add(e, &error))
+        const bool proof = check_join_proof(c.hello, c.challenge, config_.join_code, p);
+        // B56: the roster is the party (its players keep their places while
+        // away): a full roster refuses a new player, with words, and adds no one
+        if (proof && roster_.size() >= slots_.size())
+        {
+            ++counters_.rejected_full;
+            note("a join code proof from " + c.address + " was refused: the party is full");
+            return reject(c, proto::RejectReason::ServerFull, "the party is full");
+        }
+        if (free && proof && roster_.add(e, &error))
         {
             ++counters_.joined_by_code;
             addedByCode_.push_back(e);

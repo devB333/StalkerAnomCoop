@@ -67,6 +67,18 @@ class SequenceCounter
 {
 public:
     std::uint64_t next(net::ChannelId channel) { return ++last_[channel]; }
+    // B64: the sequence the next send will carry, then done() with whether it
+    // was sent. A reliable channel's sequence is taken only by a sent message
+    // (its receiver refuses a gap: an unencodable message, retried, had left
+    // one). A transient channel's is taken by every attempt, as before: gaps
+    // are allowed there, and an input batch's sequence must reach its input
+    // count (decode), which the first attempts' sequences climb to.
+    std::uint64_t peek(net::ChannelId channel) const { return last_[channel] + 1; }
+    void done(net::ChannelId channel, bool sent)
+    {
+        if (sent || channel == kSnapshot || channel == kInput)
+            ++last_[channel];
+    }
 
 private:
     std::uint64_t last_[kChannelCount] = {};

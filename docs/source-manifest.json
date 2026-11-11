@@ -480,6 +480,11 @@
       "path": "patches/engine/0117-quest-sweep.patch",
       "sha256": "889ee3270119210fe104202079090787f9094320ae280cf36906567727b3be51"
     }
+,
+    {
+      "path": "patches/engine/0118-outbox-storyline-party.patch",
+      "sha256": "ae13d8ce5d438470937336155aaff5920709965c12f046e34cd2c664a467ef45"
+    }
   ],
   "submodules": [
     {

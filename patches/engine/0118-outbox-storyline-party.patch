@@ -1,0 +1,549 @@
+diff --git a/src/xrGame/CoopClientLink.cpp b/src/xrGame/CoopClientLink.cpp
+index b32935c..880a1a6 100644
+--- a/src/xrGame/CoopClientLink.cpp
++++ b/src/xrGame/CoopClientLink.cpp
+@@ -4480,13 +4480,16 @@ void on_event(const coop::session::ClientEvent& e)
+ 	case coop::session::ClientEventType::Rejected:
+ 		g_link->log.line("rejected reason=%u detail=%s", u32(e.reject.reason), e.reject.detail.c_str());
+ 		if (g_link->config.join_code[0] && g_link->welcomes == 0 &&
+-			e.reject.reason == u16(coop::proto::RejectReason::AuthFailed))
++			(e.reject.reason == u16(coop::proto::RejectReason::AuthFailed) ||
++				e.reject.reason == u16(coop::proto::RejectReason::ServerFull)))
+ 		{
+-			// S11-T00: a menu join the host refused: say so and stop trying (the menu may be used again)
++			// S11-T00: a menu join the host refused: say so and stop trying (the menu may be used again).
++			// B56: a full party says so (before, the client waited on the loading screen)
++			const bool full = e.reject.reason == u16(coop::proto::RejectReason::ServerFull);
+ 			g_link->menu_refused = true;
+-			_give_news("Co-op: the host refused the join (a wrong join code, or the game is full)", "",
+-				"ui_inGame2_Mesta_evakuatsii", 0, 10000, 0);
+-			Msg("! S11-T00 co-op menu: the host refused the join (wrong code or full)");
++			_give_news(full ? "Co-op: the host's party is full (both player places are taken)" :
++				"Co-op: the host refused the join (a wrong join code)", "", "ui_inGame2_Mesta_evakuatsii", 0, 10000, 0);
++			Msg("! S11-T00 co-op menu: the host refused the join (%s)", full ? "party full" : "wrong code");
+ 		}
+ 		break;
+ 	case coop::session::ClientEventType::Ended:
+diff --git a/src/xrGame/CoopServerHost.cpp b/src/xrGame/CoopServerHost.cpp
+index 60006c7..bf6fbff 100644
+--- a/src/xrGame/CoopServerHost.cpp
++++ b/src/xrGame/CoopServerHost.cpp
+@@ -293,6 +293,7 @@ struct Host
+ 	xr_map<u16, Published> published;
+ 	FILE* lifecycle_csv = nullptr;
+ 	u64 spawns = 0, despawns_range = 0, despawns_destroyed = 0, spawn_oversize = 0, spawn_unencodable = 0;
++	u64 outbox_unencodable = 0; // B64
+ 	u64 resyncs = 0;
+ 	// churn fixture: a server-controlled entity change every few seconds
+ 	u32 churn_next_ms = 0;
+@@ -752,6 +753,7 @@ struct Host
+ 		xr_string accept, goal, turnin;
+ 		u32 money_before[2] = {0, 0};
+ 		u64 completed_before = 0, taken_before = 0, given_before = 0, paid_before = 0;
++		u64 instance = 0; // B61: this task's party instance (another task, a storyline meet task, completes too)
+ 		u32 refnil_before = 0;
+ 		u32 passed = 0, failed = 0, skipped = 0;
+ 	} quest_sweep;
+@@ -1587,7 +1589,21 @@ void flush_outbox(PlayerLink& link)
+ 		if (backlog.queued_bytes + backlog.unacked_bytes > kLifecycleBacklogLimit)
+ 			return outbox_stall(link, 2, backlog);
+ 		if (!g_host->server->send(link.player, link.outbox.front()))
+-			return outbox_stall(link, 3, backlog);
++		{
++			// B64: a message the encoder refuses would block the outbox for good
++			// (a party task list over kMaxEventPayload did): it is dropped, loudly
++			std::vector<u8> bytes;
++			std::string error;
++			if (coop::proto::encode(link.outbox.front(), 0, 1, bytes, &error))
++				return outbox_stall(link, 3, backlog);
++			const auto* event = std::get_if<coop::proto::CampaignEvent>(&link.outbox.front());
++			++g_host->outbox_unencodable;
++			g_host->log.line("outbox-unencodable slot=%u type=%u kind=%u bytes=%u error=%s", u32(link.ref.slot),
++				u32(coop::proto::type_of(link.outbox.front())), event ? u32(event->kind) : 0u,
++				event ? u32(event->payload.size()) : 0u, error.c_str());
++			link.outbox.pop_front();
++			continue;
++		}
+ 		if (link.outbox_stall_why)
+ 		{
+ 			g_host->log.line("outbox-flowing slot=%u outbox=%u sent=%I64u", u32(link.ref.slot), u32(link.outbox.size()),
+@@ -8488,7 +8504,7 @@ void quest_tick()
+ // client entering the world; a finished task once more with its final state.
+ // A client keeps a presentation copy in its own task manager (no logic: a
+ // co-op client evaluates no task, S08-T09).
+-void put_party_task(std::vector<u8>& p, LPCSTR id, u8 state, s32 count, s32 need)
++void put_party_task(std::vector<u8>& p, LPCSTR id, u8 state, s32 count, s32 need, u32 description_max = 255)
+ {
+ 	CGameTask* t = Level().GameTaskManager().HasGameTask(shared_str(id), false);
+ 	put_str(p, id);
+@@ -8496,7 +8512,13 @@ void put_party_task(std::vector<u8>& p, LPCSTR id, u8 state, s32 count, s32 need
+ 	put_u16(p, u16(s16(_max(-1, _min(count, 30000)))));
+ 	put_u16(p, u16(s16(_max(-1, _min(need, 30000)))));
+ 	put_str(p, t ? t->m_Title.c_str() : "");
+-	put_str(p, t ? t->m_Description.c_str() : "");
++	{
++		const char* d = t ? t->m_Description.c_str() : "";
++		const u32 n = d ? _min(u32(xr_strlen(d)), _min(description_max, 255u)) : 0u;
++		p.push_back(u8(n));
++		if (n)
++			p.insert(p.end(), d, d + n);
++	}
+ 	put_str(p, t ? t->GetIconName_script() : "");
+ 	put_str(p, t ? t->GetMapLocation_script() : "");
+ 	put_u16(p, t ? t->GetMapObjectID_script() : u16(0xffff));
+@@ -8528,20 +8550,53 @@ static u64 map_place_hash(u64 hash, u16 object)
+ 	return hash;
+ }
+ 
++// B64: the party's tasks go out in as many events as their entries need
++// (u8 count, then whole entries), each inside kMaxEventPayload: one list
++// over it was refused by the encoder and blocked the lifecycle outbox. An
++// entry too long alone loses its description (a client keeps the one it has).
++struct PartyTaskChunks
++{
++	std::vector<std::vector<u8>> events;
++	u32 entries = 0, trimmed = 0, skipped = 0;
++	void add(LPCSTR id, u8 state, s32 count, s32 need)
++	{
++		const u32 limit = u32(coop::proto::kMaxEventPayload) - 1; // the count byte
++		std::vector<u8> entry;
++		put_party_task(entry, id, state, count, need);
++		if (entry.size() > limit)
++		{
++			entry.clear();
++			put_party_task(entry, id, state, count, need, 0);
++			++trimmed;
++		}
++		if (entry.size() > limit)
++		{
++			++skipped;
++			g_host->log.line("party-task-oversize id=%s bytes=%u", id, u32(entry.size()));
++			return;
++		}
++		if (events.empty() || events.back().size() + entry.size() > limit + 1 || events.back()[0] == 255)
++			events.push_back(std::vector<u8>(1, u8(0)));
++		std::vector<u8>& e = events.back();
++		e.insert(e.end(), entry.begin(), entry.end());
++		++e[0];
++		++entries;
++	}
++};
++
+ void send_party_tasks()
+ {
+ 	if (!g_host->party_adapter || !g_pGameLevel)
+ 		return;
+-	std::vector<u8> payload;
+-	u8 n = 0;
+-	payload.push_back(0);
++	PartyTaskChunks chunks;
++	u32 n = 0;
+ 	u64 hash = 14695981039346656037ull;
+ 	for (const Host::PartyTask& t : g_host->party_tasks)
+ 	{
+ 		CGameTask* gt = Level().GameTaskManager().HasGameTask(shared_str(t.id.c_str()), false);
+ 		const u8 state = gt && gt->GetTaskState() == eTaskStateCompleted ? 2 :
+ 			gt && gt->GetTaskState() == eTaskStateFail ? 0 : 1;
+-		put_party_task(payload, t.id.c_str(), state, t.count, t.need);
++		chunks.add(t.id.c_str(), state, t.count, t.need);
+ 		++n;
+ 		hash = fnv1a(fnv1a(fnv1a(hash, t.instance), u64(state) | (u64(u32(t.count)) << 8)), u64(u32(t.need)));
+ 		if (gt)
+@@ -8558,18 +8613,18 @@ void send_party_tasks()
+ 	}
+ 	for (const Host::PartyFinished& f : g_host->party_finished)
+ 	{
+-		put_party_task(payload, f.id.c_str(), f.state, f.count, f.need);
++		chunks.add(f.id.c_str(), f.state, f.count, f.need);
+ 		++n;
+ 		hash = fnv1a(fnv1a(hash, f.instance), 0x100 | f.state);
+ 	}
+-	payload[0] = n;
+ 	const bool changed = hash != g_host->party_hash;
+ 	if (changed && n)
+ 	{
+ 		g_host->party_hash = hash;
+-		broadcast_event(11, payload);
+-		g_host->log.line("party-tasks-sent tasks=%u finished=%u hash=%016I64x", u32(n),
+-			u32(g_host->party_finished.size()), hash);
++		for (const std::vector<u8>& e : chunks.events)
++			broadcast_event(11, e);
++		g_host->log.line("party-tasks-sent tasks=%u finished=%u hash=%016I64x events=%u trimmed=%u skipped=%u", n,
++			u32(g_host->party_finished.size()), hash, u32(chunks.events.size()), chunks.trimmed, chunks.skipped);
+ 	}
+ 	for (PlayerLink& link : g_host->links)
+ 	{
+@@ -8583,8 +8638,10 @@ void send_party_tasks()
+ 		link.party_sent = true;
+ 		if (n && !changed) // (a change was just broadcast to it)
+ 		{
+-			queue_event(link, 11, payload);
+-			g_host->log.line("party-tasks-joined to=%u tasks=%u", u32(link.ref.slot), u32(n));
++			for (const std::vector<u8>& e : chunks.events)
++				queue_event(link, 11, e);
++			g_host->log.line("party-tasks-joined to=%u tasks=%u events=%u", u32(link.ref.slot), n,
++				u32(chunks.events.size()));
+ 		}
+ 		// the scripts' current map spots (a spot added while this client loaded
+ 		// its world is not in its checkpoint)
+@@ -11433,6 +11490,138 @@ static u16 talk_quest_turn_in(PlayerLink& link, CGameObject* npc, bool sim)
+ 	return party_turn_in_task(link, npc, task, "talk");
+ }
+ 
++// B61: the in-progress tasks, to find the ones a storyline action gives
++static void active_task_ids(xr_vector<shared_str>& out)
++{
++	out.clear();
++	for (const SGameTaskKey& k : Level().GameTaskManager().GetGameTasks())
++		if (k.game_task && k.game_task->GetTaskState() == eTaskStateInProgress)
++			out.push_back(k.task_id);
++}
++
++// B61: the tasks a storyline action just gave in the anchor's context become
++// the party's (the honcho's task, the next meet task, "Get Next Task")
++static u32 adopt_story_tasks(PlayerLink& link, const xr_vector<shared_str>& before, u16 giver, CActor* anchor,
++	LPCSTR source)
++{
++	xr_vector<shared_str> now;
++	active_task_ids(now);
++	u32 adopted = 0;
++	for (const shared_str& id : now)
++	{
++		if (std::find(before.begin(), before.end(), id) != before.end())
++			continue;
++		if (party_task(id.c_str()))
++			continue;
++		if (!party_task_supported(id.c_str()))
++		{
++			g_host->log.line("quest-story-not-adopted slot=%u task=%s why=unknown-task source=%s", u32(link.ref.slot),
++				id.c_str(), source);
++			continue;
++		}
++		party_task_accepted(link, id.c_str(), giver, anchor, 0);
++		g_host->log.line("quest-story-adopted slot=%u task=%s source=%s", u32(link.ref.slot), id.c_str(), source);
++		++adopted;
++	}
++	return adopted;
++}
++
++// B61: the DoctorX storyline's own dialogue actions (dialogs.drx_sl_*,
++// xr_effects.drx_sl_*: its give, the meet tasks, the task count) run in the
++// party anchor's context (the storyline's variables live with the host
++// actor, T05c-1), with the talking player's arguments order; what they give
++// becomes the party's
++static bool story_action(LPCSTR action)
++{
++	return strstr(action, "dialogs.drx_sl_") == action || strstr(action, "xr_effects.drx_sl_") == action;
++}
++
++static bool story_finish_action(LPCSTR action, bool& cf)
++{
++	cf = !xr_strcmp(action, "dialogs.drx_sl_set_finished_cf_task_complete");
++	return cf || !xr_strcmp(action, "dialogs.drx_sl_set_finished_task_complete") ||
++		!xr_strcmp(action, "dialogs.drx_sl_set_finished_task_complete_endgame");
++}
++
++// B61: the storyline's finish (drx_sl_task_completed_dialog) completes its
++// task natively, which B62 turns into the party's completion (both paid) if
++// the task is the party's: a finished storyline task given before (an older
++// save, or outside the party) is taken into the party first. Found as its
++// dialogue does, in the anchor's context.
++static void adopt_story_finished(PlayerLink& link, CGameObject* npc, CActor* anchor, bool cf)
++{
++	string128 task = "";
++	{
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "party-story-finished");
++		luabind::functor<luabind::object> find;
++		if (scope.entered() && ai().script_engine().functor(cf ? "axr_task_manager.drx_sl_get_finished_cf_task" :
++				"axr_task_manager.drx_sl_get_finished_task", find))
++		{
++			const luabind::object r = luabind::object(find(npc->lua_game_object()));
++			if (r.type() == LUA_TSTRING)
++				xr_strcpy(task, sizeof(task), luabind::object_cast<LPCSTR>(r));
++		}
++	}
++	if (!task[0])
++		g_host->log.line("quest-story-finish-none slot=%u", u32(link.ref.slot));
++	else if (!party_task(task) && party_task_supported(task) &&
++		Level().GameTaskManager().HasGameTask(shared_str(task), true))
++	{
++		party_task_accepted(link, task, u16(npc->ID()), anchor, 0);
++		g_host->log.line("quest-story-adopted slot=%u task=%s source=finish", u32(link.ref.slot), task);
++	}
++}
++
++static u16 talk_story_action(PlayerLink& link, LPCSTR action, const CGameObject* speaker, CGameObject* npc,
++	LPCSTR dialog_id, LPCSTR phrase_id)
++{
++	CActor* anchor = party_anchor();
++	if (!anchor || !anchor->g_Alive())
++		return coop::proto::kReasonNoActor;
++	luabind::functor<void> f;
++	if (!ai().script_engine().functor(action, f))
++		return coop::proto::kReasonQuestNotOffered;
++	sync_party_actors();
++	bool cf = false;
++	if (story_finish_action(action, cf))
++		adopt_story_finished(link, npc, anchor, cf);
++	xr_vector<shared_str> before;
++	active_task_ids(before);
++	bool ran = false;
++	{
++		CActor* clicker = participant_actor(link.ref);
++		campaign::PartyPurseScope purse(u16(anchor->ID()), clicker ? u16(clicker->ID()) : u16(anchor->ID()), false); // G10
++		campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "party-story-action");
++		if (scope.entered())
++		{
++			CScriptGameObject* a = anchor->lua_game_object();
++			CScriptGameObject* n = npc->lua_game_object();
++			if (smart_cast<const CActor*>(speaker))
++				f(a, n, dialog_id, phrase_id);
++			else
++				f(n, a, dialog_id, phrase_id);
++			ran = true;
++		}
++	}
++	const u32 adopted = ran ? adopt_story_tasks(link, before, u16(npc->ID()), anchor, action) : 0;
++	g_host->log.line("quest-story-action slot=%u action=%s ran=%d adopted=%u", u32(link.ref.slot), action, ran ? 1 : 0,
++		adopted);
++	return ran ? 0 : u16(coop::proto::kReasonNoActor);
++}
++
++static void talk_quest_refusal_news(PlayerLink& link, u16 reason)
++{
++	if (reason)
++		if (CActor* actor = participant_actor(link.ref))
++			campaign::present_to_actor(actor, campaign::Presentation::News, 0,
++				reason == coop::proto::kReasonQuestActive ? "Co-op: the party already has this task" :
++				reason == coop::proto::kReasonQuestUnsupported ? "Co-op: this task is not supported yet" :
++				reason == coop::proto::kReasonQuestNotFinished ? "Co-op: the party's task is not finished yet" :
++				reason == coop::proto::kReasonQuestNotActive ? "Co-op: the party does not have this task" :
++				reason == coop::proto::kReasonNoActor ? "Co-op: Player 1 must be alive to take the task" :
++				"Co-op: the task was not given");
++}
++
+ // campaign::coop_server_dialogue_action for the talking player: true when the
+ // action is the party quest's accept or turn-in (taken over); the player is
+ // told a refusal as news.
+@@ -11444,7 +11633,8 @@ static bool talk_quest_action(PlayerLink& link, LPCSTR action, const CGameObject
+ 	const bool finish = sim_finish || !xr_strcmp(action, "dialogs.npc_set_finished_task_complete");
+ 	const bool tech = !xr_strcmp(action, "dialogs.npc_is_tech"); // S10-T04f
+ 	const bool trader = !xr_strcmp(action, "dialogs.npc_is_trader"); // S10-T04f
+-	if (!accept && !finish && !tech && !trader)
++	const bool story = story_action(action); // B61
++	if (!accept && !finish && !tech && !trader && !story)
+ 		return false;
+ 	const CGameObject* npc_const = smart_cast<const CActor*>(speaker) ? listener : speaker;
+ 	CGameObject* npc = const_cast<CGameObject*>(npc_const);
+@@ -11465,18 +11655,18 @@ static bool talk_quest_action(PlayerLink& link, LPCSTR action, const CGameObject
+ 		return true;
+ 	}
+ 	++g_host->talk_quest_routed;
++	if (story)
++	{
++		const u16 reason = talk_story_action(link, action, speaker, npc, dialog_id, phrase_id);
++		g_host->log.line("talk-quest slot=%u op=story npc=%u dialog=%s phrase=%s action=%s reason=%u", u32(link.ref.slot),
++			u32(npc->ID()), dialog_id, phrase_id, action, u32(reason));
++		talk_quest_refusal_news(link, reason);
++		return true;
++	}
+ 	const u16 reason = accept ? talk_quest_accept(link, npc) : talk_quest_turn_in(link, npc, sim_finish);
+ 	g_host->log.line("talk-quest slot=%u op=%s npc=%u dialog=%s phrase=%s reason=%u", u32(link.ref.slot),
+ 		accept ? "accept" : "finish", u32(npc->ID()), dialog_id, phrase_id, u32(reason));
+-	if (reason)
+-		if (CActor* actor = participant_actor(link.ref))
+-			campaign::present_to_actor(actor, campaign::Presentation::News, 0,
+-				reason == coop::proto::kReasonQuestActive ? "Co-op: the party already has this task" :
+-				reason == coop::proto::kReasonQuestUnsupported ? "Co-op: this task is not supported yet" :
+-				reason == coop::proto::kReasonQuestNotFinished ? "Co-op: the party's task is not finished yet" :
+-				reason == coop::proto::kReasonQuestNotActive ? "Co-op: the party does not have this task" :
+-				reason == coop::proto::kReasonNoActor ? "Co-op: Player 1 must be alive to take the task" :
+-				"Co-op: the task was not given");
++	talk_quest_refusal_news(link, reason);
+ 	return true;
+ }
+ 
+@@ -15111,8 +15301,43 @@ LPCSTR const qsweep_source =
+ 	"  task_manager.get_task_manager():give_task(id, giver >= 0 and giver or nil)\n"
+ 	"  return task_manager.get_task_manager().task_info[id] and 1 or 0\n"
+ 	"end\n"
++	// B61: a storyline task is accepted through the honcho's own dialogue: its
++	// random pick is set to the listed task and the meet info given (mirrored)
++	"P.qs_story = nil\n"
++	"local am = axr_task_manager\n"
++	"for _, name in ipairs({ 'drx_sl_generate_random_sl_task', 'drx_sl_generate_change_factions_task' }) do\n"
++	"  local orig = am and am[name]\n"
++	"  if type(orig) == 'function' then\n"
++	"    am[name] = function(npc, skip, ...)\n"
++	// the generator's own validity check runs first: an assault task's
++	// precondition (validate_assault_task) caches the target its job text's
++	// setup_assault_task needs (bugfix-87: forced without it, var nil, failed)
++	"      if P.qs_story and not skip then\n"
++	"        local ok = xr_conditions.has_completed_task_prerequisites(nil, nil, { P.qs_story })\n"
++	"        if not ok then printf('qsweep story pick %s: prerequisites not met', P.qs_story) end\n"
++	"        return P.qs_story\n"
++	"      end\n"
++	"      return orig(npc, skip, ...)\n"
++	"    end\n"
++	"  end\n"
++	"end\n"
++	// a task its own check refuses now (an assault task with no target in
++	// range, bugfix-88) is one the honcho would not offer: given directly
++	"function campaign_qsweep_story(id)\n"
++	"  P.qs_story = nil\n"
++	"  if id == '' then return 0 end\n"
++	"  if not xr_conditions.has_completed_task_prerequisites(nil, nil, { id }) then\n"
++	"    printf('qsweep story pick %s: not offered now (prerequisites)', id)\n"
++	"    return 0\n"
++	"  end\n"
++	"  P.qs_story = id\n"
++	"  local h = id:match('^drx_sl_(.+)_cf_task_%d+$') or id:match('^drx_sl_(.+)_task_%d+$')\n"
++	"  if h and not id:find('_cf_task_') then give_info('drx_sl_meet_honcho_' .. h) end\n"
++	"  return h and 1 or 0\n"
++	"end\n"
+ 	"function campaign_qsweep_drop(id)\n"
+ 	"  P.qs_force[id] = nil\n"
++	"  P.qs_story = nil\n"
+ 	"  local tm = task_manager.get_task_manager()\n"
+ 	"  local t = tm.task_info[id]\n"
+ 	"  if t and t.status ~= 'completed' and t.status ~= 'fail' then tm:set_task_cancelled(id) return 1 end\n"
+@@ -15210,6 +15435,16 @@ bool qsweep_topic(CActor* actor, CGameObject* npc, LPCSTR want, LPCSTR avoid, xr
+ 	return found;
+ }
+ 
++// B61: the party completed this instance of the task (not any task: an
++// adopted storyline meet task completes by itself during a storyline accept)
++bool qsweep_party_done(const Host::QuestSweep& f)
++{
++	for (const Host::PartyFinished& d : g_host->party_finished)
++		if (f.instance && d.instance == f.instance)
++			return d.state == 2;
++	return false;
++}
++
+ void qsweep_forget(LPCSTR task)
+ {
+ 	luabind::functor<void> set_task;
+@@ -15381,6 +15616,7 @@ void quest_sweep_fixtures()
+ 		f.target = -1;
+ 		f.money_before[0] = actors[0]->get_money();
+ 		f.money_before[1] = actors[1]->get_money();
++		f.instance = 0;
+ 		f.completed_before = g_host->quests_completed;
+ 		f.taken_before = g_host->quest_items_taken;
+ 		f.given_before = g_host->quest_items_given;
+@@ -15491,12 +15727,32 @@ void quest_sweep_fixtures()
+ 			return;
+ 		}
+ 		PlayerLink& acceptor = *links[f.acceptor];
++		// B61: a storyline task (drx_sl_<honcho>_task_N, _cf_task_N) through the
++		// honcho's meet or change-faction dialogue, its pick set to the task
++		const bool story = strstr(task, "drx_sl_") == task && !strstr(task, "_default_task") &&
++			!strstr(task, "_meet_task") && !strstr(task, "endgame");
++		s32 story_ready = 0;
++		if (story)
++		{
++			campaign::ScriptContextScope scope(static_cast<const CObject*>(anchor), "qsweep-story");
++			if (scope.entered())
++				lua_call_ok("campaign_qsweep_story", story_ready, task);
++		}
+ 		const u16 started = qsweep_talk_start(acceptor, f.giver);
+ 		xr_string topic, all;
+-		const bool has = !started && qsweep_topic(actors[f.acceptor], giver, "ordered_task_dialog", "cancel", topic, all);
++		const bool story_talk = story && story_ready;
++		const bool has = !started &&
++			qsweep_topic(actors[f.acceptor], giver, story_talk ? (strstr(task, "_cf_task_") ? "change_faction_dialog" :
++				"_meet_dialog") : "ordered_task_dialog", "cancel", topic, all);
+ 		u32 skips = 0;
+ 		bool said = false;
+-		if (has && !qsweep_say(acceptor, topic.c_str()))
++		if (has && story_talk)
++		{
++			// the non-fetch accept (2), else the fetch one (5: its text phrase gives the task)
++			if (!qsweep_say(acceptor, topic.c_str()))
++				said = qsweep_say(acceptor, "2") == 0 || qsweep_say(acceptor, "5") == 0;
++		}
++		else if (has && !qsweep_say(acceptor, topic.c_str()))
+ 		{
+ 			u32 base = 0;
+ 			for (; skips < 12 && acceptor.talk_npc != 0xffff; ++skips)
+@@ -15518,8 +15774,13 @@ void quest_sweep_fixtures()
+ 			}
+ 		}
+ 		qsweep_talk_end(acceptor);
++		if (story)
++		{
++			s32 none = 0;
++			lua_call_ok("campaign_qsweep_story", none, "");
++		}
+ 		if (party_task(task))
+-			f.accept = "talk";
++			f.accept = story_talk ? "story-talk" : "talk";
+ 		else
+ 		{
+ 			g_host->log.line("fixture-qsweep talk-accept-failed task=%s start=%u topic=%s said=%d skips=%u topics=[ %s]",
+@@ -15548,6 +15809,8 @@ void quest_sweep_fixtures()
+ 			party_task_accepted(*links[f.acceptor], task, f.giver, anchor, 0);
+ 			f.accept = f.accept == "-" ? xr_string("direct") : f.accept + "+direct";
+ 		}
++		if (Host::PartyTask* pt = party_task(task))
++			f.instance = pt->instance;
+ 		// the goal
+ 		xr_string section;
+ 		qsweep_lua_string(nullptr, "campaign_party_section", task, section);
+@@ -15622,7 +15885,7 @@ void quest_sweep_fixtures()
+ 		xr_string native;
+ 		qsweep_lua_string(nullptr, "campaign_qsweep_status", task, native);
+ 		// "none": the task left the task manager (completed by itself and cleared)
+-		if (native.compare(0, 9, "completed") == 0 || native == "none" || g_host->quests_completed > f.completed_before)
++		if (native.compare(0, 9, "completed") == 0 || native == "none" || qsweep_party_done(f))
+ 		{
+ 			f.turnin = "auto";
+ 			f.phase = 6;
+@@ -15680,7 +15943,7 @@ void quest_sweep_fixtures()
+ 	{
+ 		xr_string native;
+ 		qsweep_lua_string(nullptr, "campaign_qsweep_status", task, native);
+-		const bool party_done = g_host->quests_completed > f.completed_before;
++		const bool party_done = qsweep_party_done(f);
+ 		const bool native_done = native.compare(0, 9, "completed") == 0 || native == "none";
+ 		if (!(party_done && native_done) && g_host->tick - f.phase_tick < 15 * 50)
+ 			return;
+@@ -22043,15 +22306,6 @@ namespace campaign
+ // start serve it like any roster player) and bound to the free participant slot before its Joined event.
+ void roster_add_by_code(const coop::session::RosterEntry& e)
+ {
+-	std::string error;
+-	g_host->roster.add(e, &error);
+-	xr_string text;
+-	session_read(g_host->config.roster_path, text);
+-	if (!text.empty() && text.back() != '\n')
+-		text += "\n";
+-	text += coop::session::Roster::line(e).c_str();
+-	text += "\n";
+-	const bool written = session_write(g_host->config.roster_path, text);
+ 	PlayerLink link = {};
+ 	link.pending_actor = kNoEngineId;
+ 	link.player = e.player_id;
+@@ -22084,6 +22338,21 @@ void roster_add_by_code(const coop::session::RosterEntry& e)
+ 		registry.bind_participant(registry.authority(), player_of(e.player_id), party, Device.dwFrame, link.ref) :
+ 		Refusal::SlotsFull;
+ 	link.bound = bound == Refusal::None;
++	// B56: only a player who took a place joins the roster (before, a refused one was written and every later
++	// start held three players)
++	bool written = false;
++	if (link.bound)
++	{
++		std::string error;
++		g_host->roster.add(e, &error);
++		xr_string text;
++		session_read(g_host->config.roster_path, text);
++		if (!text.empty() && text.back() != '\n')
++			text += "\n";
++		text += coop::session::Roster::line(e).c_str();
++		text += "\n";
++		written = session_write(g_host->config.roster_path, text);
++	}
+ 	if (link.bound && take_actor)
+ 	{
+ 		const Refusal held = registry.bind_actor(registry.authority(), link.ref, taken_actor);

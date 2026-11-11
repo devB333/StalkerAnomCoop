@@ -23,9 +23,13 @@ bool Client::sendRaw(const proto::Message& m)
     const proto::MessageType type = proto::type_of(m);
     const std::uint64_t epoch = proto::handshake_type(std::uint16_t(type)) ? 0 : guard_.epoch();
     std::vector<std::uint8_t> bytes;
-    if (!proto::encode(m, epoch, seq_.next(proto::channel_of(type)), bytes))
-        return false;
-    return t_.send(conn_, proto::channel_of(type), bytes.data(), std::uint32_t(bytes.size())) == net::SendResult::Sent;
+    const net::ChannelId channel = proto::channel_of(type);
+    // B64: a reliable channel's sequence is taken only by a sent message
+    // (SequenceCounter::done)
+    const bool sent = proto::encode(m, epoch, seq_.peek(channel), bytes) &&
+        t_.send(conn_, channel, bytes.data(), std::uint32_t(bytes.size())) == net::SendResult::Sent;
+    seq_.done(channel, sent);
+    return sent;
 }
 
 bool Client::send(const proto::Message& m) { return state_ == ClientState::Active && sendRaw(m); }

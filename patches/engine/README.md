@@ -929,6 +929,22 @@ directly), its goal met or forced, turned in by the other player by talking,
 checked. Single player: the luabind fix applies (no behaviour depends on the
 old write); the rest is co-op only.
 
+`0118-outbox-storyline-party.patch` (S10-T07, 2026-11-11): B64, B61, B56.
+B64: the party task list (CampaignEvent 11) went over `kMaxEventPayload`
+past ~9 tasks, `encode` refused it and `flush_outbox` retried it forever;
+the list now goes out in as many events as it needs (`PartyTaskChunks`), and
+a message the encoder refuses is dropped and logged (`outbox-unencodable`).
+B61: the DoctorX storyline's dialogue actions (`dialogs.drx_sl_*`,
+`xr_effects.drx_sl_*`) run in the party anchor's context, and the tasks they
+give become party tasks (`quest-story-adopted`); a finished storyline task
+outside the party is taken in before its finish. B56: a code join is written
+to the roster only once it holds a participant slot; the client says "the
+host's party is full" on a ServerFull refusal. Quest sweep: storyline tasks
+accepted through the honcho's own dialogue (`story-talk`, when the task's
+precondition passes), completion checked per party instance. Builds with
+proto-build-69 (the protocol's B64 sequence rule and B56 full-roster
+refusal). Single player: unchanged.
+
 Root commit identity plus source manifest plus ordered patches defines project
 source identity. Root currently has no commits; these artifacts are pending
 version control, not a published or committed baseline.
